@@ -494,6 +494,11 @@ void main() {
     expect(harness.capture.phoneStarts, 1);
     expect(harness.capture.recordingState, RecordingState.record);
     expect(find.text('Recording on this iPhone'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.deviceStarts, 0, reason: 'an abandoned necklace startup must not resume after phone use');
   });
 
   testWidgets('phone capture failure stays stopped and explains the missing transcript service', (tester) async {
@@ -740,6 +745,106 @@ void main() {
     expect(harness.capture.deviceStarts, 0);
     expect(harness.capture.recordingState, RecordingState.record);
     expect(find.text('Recording on this iPhone'), findsOneWidget);
+  });
+
+  testWidgets('stuck necklace startup can switch to iPhone and starts the real phone recorder', (tester) async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = DeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(tester, conversations: const [], device: device);
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-capture-source-necklace')));
+    await tester.pump();
+    harness.capture.updateRecordingDevice(necklace);
+    harness.capture.updateRecordingState(RecordingState.initialising);
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('today-capture-source-phone')));
+    await tester.pump();
+    expect(find.text('iPhone · Ready'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.deviceStops, 1);
+    expect(harness.capture.phoneStarts, 1);
+    expect(harness.capture.recordingState, RecordingState.record);
+    expect(find.text('Recording on this iPhone'), findsOneWidget);
+  });
+
+  testWidgets('stale necklace startup is cancelled even when device presentation has disconnected', (tester) async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = DeviceProvider()..pairedDevice = necklace;
+    final harness = await _pumpHome(tester, conversations: const [], device: device);
+    addTearDown(harness.dispose);
+
+    harness.capture.updateRecordingDevice(necklace);
+    harness.capture.updateRecordingState(RecordingState.initialising);
+    await tester.pump();
+
+    expect(find.text('iPhone · Ready'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.deviceStops, 1);
+    expect(harness.capture.phoneStarts, 1);
+    expect(harness.capture.recordingState, RecordingState.record);
+  });
+
+  testWidgets('switching a paused necklace session finalizes it before iPhone capture', (tester) async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = DeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(tester, conversations: const [], device: device);
+    addTearDown(harness.dispose);
+
+    harness.capture.updateRecordingDevice(necklace);
+    harness.capture.updateRecordingState(RecordingState.pause);
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.deviceStops, 1);
+    expect(harness.capture.finalizationCalls, 1, reason: 'paused necklace content must be preserved');
+    expect(harness.capture.finishes, 1);
+    expect(harness.capture.phoneStarts, 1);
+    expect(harness.capture.recordingState, RecordingState.record);
+  });
+
+  testWidgets('failed paused necklace finalization blocks iPhone capture and remains retryable', (tester) async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = DeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      finalizationResults: const [false],
+    );
+    addTearDown(harness.dispose);
+
+    harness.capture.updateRecordingDevice(necklace);
+    harness.capture.updateRecordingState(RecordingState.pause);
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    final l10n = AppLocalizations.of(tester.element(find.byType(TodayPage)));
+    expect(harness.capture.deviceStops, 1);
+    expect(harness.capture.finalizationCalls, 1);
+    expect(harness.capture.phoneStarts, 0, reason: 'a new source must not start while prior content is unsaved');
+    expect(harness.capture.recordingState, RecordingState.stop);
+    expect(find.text(l10n.todayDockRecordingNeedsAttention), findsOneWidget);
+    expect(find.text(l10n.todayDockFinish), findsOneWidget);
   });
 
   testWidgets('failed phone start restores the ambient necklace stream', (tester) async {

@@ -22,14 +22,14 @@ void main() {
     expect(item.toJson()['source_label'], 'David');
   });
 
-  test('failed startup stays bound to its source while active necklace capture permits a phone handoff', () {
+  test('explicit source selection overrides stale startup diagnostics while active capture remains observable', () {
     expect(
       todaySelectedCaptureSource(
         state: RecordingState.error,
         diagnostics: const CaptureDiagnostics(source: CaptureDiagnosticSource.necklace),
         preferredSource: EllaCaptureSource.phone,
       ),
-      EllaCaptureSource.necklace,
+      EllaCaptureSource.phone,
     );
     expect(
       todaySelectedCaptureSource(
@@ -232,6 +232,48 @@ void main() {
     await tester.tap(find.byKey(const Key('today-capture-source-necklace')));
     await tester.pump();
     expect(selection, EllaCaptureSource.necklace);
+
+    selection = null;
+    await _pumpRecordControl(
+      tester,
+      selectedSource: EllaCaptureSource.necklace,
+      activeSource: EllaCaptureSource.necklace,
+      hasNecklace: true,
+      necklaceConnected: true,
+      recordingState: RecordingState.initialising,
+      diagnostics: const CaptureDiagnostics(source: CaptureDiagnosticSource.necklace),
+      onSourceSelected: (source) => selection = source,
+    );
+    await tester.tap(find.byKey(const Key('today-capture-source-phone')));
+    await tester.pump();
+    expect(selection, EllaCaptureSource.phone, reason: 'a stuck necklace start must never trap the source selector');
+
+    selection = null;
+    await _pumpRecordControl(
+      tester,
+      selectedSource: EllaCaptureSource.phone,
+      activeSource: EllaCaptureSource.phone,
+      starting: true,
+      hasNecklace: true,
+      onSourceSelected: (source) => selection = source,
+    );
+    await tester.tap(find.byKey(const Key('today-capture-source-necklace')));
+    await tester.pump();
+    expect(selection, isNull, reason: 'normal phone startup must not rewrite the next capture source');
+
+    selection = null;
+    await _pumpRecordControl(
+      tester,
+      selectedSource: EllaCaptureSource.necklace,
+      activeSource: EllaCaptureSource.phone,
+      starting: true,
+      hasNecklace: true,
+      onSourceSelected: (source) => selection = source,
+    );
+    expect(tester.widget<InkWell>(find.byKey(const Key('today-record-moment'))).onTap, isNull);
+    await tester.tap(find.byKey(const Key('today-capture-source-phone')));
+    await tester.pump();
+    expect(selection, isNull, reason: 'a phone startup must stay locked even when a stale preference names necklace');
 
     selection = null;
     await _pumpRecordControl(

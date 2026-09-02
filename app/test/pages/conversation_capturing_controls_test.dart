@@ -9,6 +9,7 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/models/capture_source.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/pages/conversation_capturing/page.dart';
 import 'package:omi/providers/capture_provider.dart';
@@ -105,7 +106,36 @@ void main() {
     expect(device.reconnects, 0);
   });
 
-  testWidgets('empty active capture keeps Stop Recording visible before transcript segments', (tester) async {
+  testWidgets('explicit iPhone selection abandons a stale necklace startup before Retry', (tester) async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final capture = _FakeCaptureProvider(
+      RecordingState.initialising,
+      transcriptReady: false,
+    )..updateRecordingDevice(necklace);
+    final device = _FakeDeviceProvider();
+    await _pumpCapturePage(
+      tester,
+      capture,
+      device: device,
+      preferredCaptureSource: EllaCaptureSource.phone,
+    );
+
+    expect(_captureStatus(tester), 'iPhone · Initializing...');
+    capture.setCaptureState(RecordingState.error, transcriptReady: false);
+    await tester.pump();
+    expect(_captureStatus(tester), 'iPhone · Error');
+    expect(find.byKey(const Key('conversation-capture-retry-phone')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('conversation-capture-retry-phone')));
+    await tester.pump();
+
+    expect(capture.deviceStops, 1);
+    expect(capture.phoneStarts, 1);
+    expect(device.reconnects, 0);
+    expect(_captureStatus(tester), 'iPhone · Recording Active');
+  });
+
+  testWidgets('empty active capture keeps Process Now visible before transcript segments', (tester) async {
     final capture = _FakeCaptureProvider(RecordingState.stop, transcriptReady: false);
     await _pumpCapturePage(tester, capture);
 
@@ -114,7 +144,7 @@ void main() {
     capture.setCaptureState(RecordingState.stop, transcriptReady: false, phoneOwnsMobileAudio: true);
     await tester.pump();
     expect(find.byKey(const Key('conversation-process-now')), findsOneWidget);
-    expect(find.text('Stop Recording'), findsOneWidget);
+    expect(find.text('Process Now'), findsOneWidget);
 
     capture.setCaptureState(RecordingState.stop, transcriptReady: false);
     await tester.pump();
@@ -123,14 +153,15 @@ void main() {
     capture.setCaptureState(RecordingState.deviceRecord, transcriptReady: true);
     await tester.pump();
     expect(find.byKey(const Key('conversation-process-now')), findsOneWidget);
-    expect(find.text('Stop Recording'), findsOneWidget);
+    expect(find.text('Process Now'), findsOneWidget);
   });
 
-  testWidgets('empty phone action delegates finalize-before-close to its owner once', (tester) async {
+  testWidgets('empty phone action delegates finalization once and stays open when it fails', (tester) async {
     final capture = _FakeCaptureProvider(
       RecordingState.stop,
       transcriptReady: false,
       phoneOwnsMobileAudio: true,
+      finalizationResult: false,
     );
     final ownerGate = Completer<bool>();
     var ownerCalls = 0;
@@ -159,10 +190,12 @@ void main() {
     expect(find.byType(ConversationCapturingPage), findsOneWidget);
 
     ownerGate.complete(false);
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
 
     expect(ownerCalls, 1);
-    expect(find.byType(ConversationCapturingPage), findsNothing);
+    expect(find.byType(ConversationCapturingPage), findsOneWidget);
+    expect(find.text('No words were captured, so no memory was created.'), findsOneWidget);
   });
 
   testWidgets('content Process Now remains serialized until the owner final transcript settles', (tester) async {
@@ -227,13 +260,14 @@ void main() {
     expect(capture.recordingState, RecordingState.stop);
   });
 
-  testWidgets('capture actions use explicit active and destructive colors', (tester) async {
+  testWidgets('capture processing remains a single non-destructive action with or without visible text',
+      (tester) async {
     final emptyCapture = _FakeCaptureProvider(RecordingState.record, transcriptReady: true, phoneOwnsMobileAudio: true);
     await _pumpCapturePage(tester, emptyCapture);
 
-    final stopSurface = tester.widget<Container>(find.byKey(const Key('conversation-process-now-surface')));
-    expect((stopSurface.decoration! as BoxDecoration).color, EllaColors.error);
-    expect(find.text('Stop Recording'), findsOneWidget);
+    final emptyProcessSurface = tester.widget<Container>(find.byKey(const Key('conversation-process-now-surface')));
+    expect((emptyProcessSurface.decoration! as BoxDecoration).color, EllaColors.tealDeep);
+    expect(find.text('Process Now'), findsOneWidget);
     Navigator.of(tester.element(find.byType(ConversationCapturingPage))).pop();
     await tester.pumpAndSettle();
 
@@ -249,18 +283,23 @@ void main() {
     expect(find.text('Process Now'), findsOneWidget);
   });
 
-  testWidgets('empty initializing necklace action targets necklace transport and exits', (tester) async {
+  testWidgets('empty initializing necklace process failure stays visible instead of acting as Back', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
-    final capture = _FakeCaptureProvider(RecordingState.initialising, transcriptReady: false)
-      ..updateRecordingDevice(necklace);
+    final capture = _FakeCaptureProvider(
+      RecordingState.initialising,
+      transcriptReady: false,
+      finalizationResult: false,
+    )..updateRecordingDevice(necklace);
     await _pumpCapturePage(tester, capture);
 
     await tester.tap(find.byKey(const Key('conversation-process-now')));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
 
     expect(capture.phoneStops, 0);
     expect(capture.deviceStops, 1);
-    expect(find.byType(ConversationCapturingPage), findsNothing);
+    expect(find.byType(ConversationCapturingPage), findsOneWidget);
+    expect(find.text('No words were captured, so no memory was created.'), findsOneWidget);
   });
 }
 
@@ -284,6 +323,7 @@ Future<void> _pumpCapturePage(
   _FakeCaptureProvider capture, {
   Future<bool> Function()? onProcessNow,
   DeviceProvider? device,
+  EllaCaptureSource? preferredCaptureSource,
 }) async {
   final resolvedDevice = device ?? DeviceProvider();
   addTearDown(capture.dispose);
@@ -306,7 +346,10 @@ Future<void> _pumpCapturePage(
                 key: const Key('open-capture-page'),
                 onPressed: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
-                    builder: (_) => ConversationCapturingPage(onProcessNow: onProcessNow),
+                    builder: (_) => ConversationCapturingPage(
+                      onProcessNow: onProcessNow,
+                      preferredCaptureSource: preferredCaptureSource,
+                    ),
                   ),
                 ),
                 child: const Text('Open'),
@@ -337,15 +380,18 @@ class _FakeCaptureProvider extends CaptureProvider {
     RecordingState initialState, {
     required bool transcriptReady,
     bool phoneOwnsMobileAudio = false,
+    bool finalizationResult = true,
     CaptureDiagnostics diagnostics = const CaptureDiagnostics(),
   })  : _transcriptReady = transcriptReady,
         _phoneOwnsMobileAudio = phoneOwnsMobileAudio,
+        _finalizationResult = finalizationResult,
         _diagnostics = diagnostics {
     recordingState = initialState;
   }
 
   bool _transcriptReady;
   bool _phoneOwnsMobileAudio;
+  final bool _finalizationResult;
   final CaptureDiagnostics _diagnostics;
   int phoneStops = 0;
   int phoneStarts = 0;
@@ -425,6 +471,6 @@ class _FakeCaptureProvider extends CaptureProvider {
   @override
   Future<bool> forceProcessingCurrentConversation({CaptureFinalizationOperation? operation}) async {
     processingCalls++;
-    return true;
+    return _finalizationResult;
   }
 }
