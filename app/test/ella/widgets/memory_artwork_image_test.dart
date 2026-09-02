@@ -563,7 +563,7 @@ void main() {
       artwork: const MemoryArtworkState(status: MemoryArtworkStatus.ready),
     );
     var persistentCacheLookups = 0;
-    var persistentCacheEvictions = 0;
+    expect(MemoryArtworkCache.isPersistentManagerInitializedForTesting, isFalse);
 
     Widget buildArtwork(int refreshEpoch) => MaterialApp(
           localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -576,7 +576,6 @@ void main() {
               persistentCacheLookups += 1;
               return null;
             },
-            cacheEvictor: (_) async => persistentCacheEvictions += 1,
             retryDelay: const Duration(milliseconds: 10),
             maxImageDownloadRetries: 1,
           ),
@@ -599,6 +598,7 @@ void main() {
     expect(image.image, isA<NetworkImage>());
     expect((image.image as NetworkImage).url, 'https://private-storage.example/authority-1.png');
     expect(persistentCacheLookups, 0, reason: 'overflow recovery must not read or write the persistent cache');
+    expect(MemoryArtworkCache.isPersistentManagerInitializedForTesting, isFalse);
     expect(
       MemoryArtworkCache.resolveDisplayCacheKey('authority-artwork-cache-key'),
       isEmpty,
@@ -610,7 +610,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 10));
     await tester.pump();
 
-    expect(persistentCacheEvictions, 0, reason: 'network-only retry must not initialize persistent cache recovery');
+    expect(MemoryArtworkCache.isPersistentManagerInitializedForTesting, isFalse);
     expect(api.loadCalls, 2, reason: 'network-only download recovery must remain bounded and fetch fresh authority');
     expect(find.byType(CachedNetworkImage), findsNothing);
 
@@ -622,6 +622,7 @@ void main() {
     expect(find.byType(CachedNetworkImage), findsNothing);
     expect(find.text('Illustration unavailable'), findsOneWidget);
     expect(persistentCacheLookups, 0, reason: 'terminal cleanup cannot expose a disk artifact that was never written');
+    expect(MemoryArtworkCache.isPersistentManagerInitializedForTesting, isFalse);
   });
 
   test('a new terminal tombstone remains fail-closed while older evictions are pending', () async {

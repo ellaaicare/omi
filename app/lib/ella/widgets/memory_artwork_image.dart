@@ -212,6 +212,12 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     return info?.file;
   }
 
+  Future<void> _evictCachedFile(String cacheKey) {
+    final cacheEvictor = widget.cacheEvictor;
+    if (cacheEvictor != null) return cacheEvictor(cacheKey);
+    return MemoryArtworkCache.manager.removeFile(cacheKey);
+  }
+
   Future<void> _evictThenLoadRemote(
     MemoryArtworkApi api,
     MemoryArtworkState? artwork,
@@ -219,7 +225,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     String cacheKey,
   ) async {
     try {
-      await (widget.cacheEvictor ?? MemoryArtworkCache.manager.removeFile)(cacheKey);
+      await _evictCachedFile(cacheKey);
     } catch (_) {
       // A stale local file is never authority for a replacement account.
     }
@@ -284,7 +290,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       final readyCacheKeys = {provisionalCacheKey, readyCacheKey}..removeWhere((cacheKey) => cacheKey.isEmpty);
       await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(
         readyCacheKeys,
-        widget.cacheEvictor ?? MemoryArtworkCache.manager.removeFile,
+        _evictCachedFile,
       );
       if (!mounted || generation != _requestGeneration || !result.isAuthorityCurrent) return;
       final rememberedCacheKey = await MemoryArtworkCache.rememberDisplayCacheKey(
@@ -323,8 +329,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   }
 
   Future<void> _evictSuppressedCachedArtwork(Set<String> cacheKeys) async {
-    final evict = widget.cacheEvictor ?? MemoryArtworkCache.manager.removeFile;
-    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(cacheKeys, evict);
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(cacheKeys, _evictCachedFile);
   }
 
   void _handleImageLoadFailure(MemoryArtworkApi api, MemoryArtworkState? artwork, int generation, String cacheKey) {
@@ -352,8 +357,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   ) async {
     try {
       if (cacheKey.isNotEmpty && !MemoryArtworkCache.isNetworkOnlyDisplayCacheKey(cacheKey)) {
-        final evict = widget.cacheEvictor ?? MemoryArtworkCache.manager.removeFile;
-        await evict(cacheKey);
+        await _evictCachedFile(cacheKey);
       }
     } catch (_) {
       // A cache eviction failure must not stop signed URL recovery.

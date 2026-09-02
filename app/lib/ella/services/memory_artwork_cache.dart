@@ -31,6 +31,9 @@ class MemoryArtworkCache {
     return cacheKey.contains('-network-only-v1-$_networkOnlyCacheNamespace-');
   }
 
+  @visibleForTesting
+  static bool get isPersistentManagerInitializedForTesting => _manager != null;
+
   /// Resolves stale conversation-list metadata to the authoritative cache key
   /// returned by the artwork endpoint. Sliver recycling must not make an
   /// already-downloaded image wait for that endpoint again.
