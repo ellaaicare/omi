@@ -72,6 +72,7 @@ class MemoryArtworkImage extends StatefulWidget {
 class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   MemoryArtworkResult? _remoteResult;
   File? _cachedFile;
+  String _displayCacheKey = '';
   String _cacheKey = '';
   int _requestGeneration = 0;
   Timer? _retryTimer;
@@ -133,17 +134,24 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       styleVersion: artwork?.styleVersion ?? '',
       enrichmentRevision: artwork?.enrichmentRevision ?? '',
     );
+    final previousDisplayCacheKey = _displayCacheKey;
+    if (invalidateCachedArtwork) {
+      MemoryArtworkCache.forgetDisplayCacheKey(previousDisplayCacheKey);
+      MemoryArtworkCache.forgetDisplayCacheKey(cacheKey);
+    }
+    _displayCacheKey = cacheKey;
+    final resolvedCacheKey = invalidateCachedArtwork ? cacheKey : MemoryArtworkCache.resolveDisplayCacheKey(cacheKey);
     _remoteResult = null;
-    if (_cacheKey != cacheKey || invalidateCachedArtwork) {
-      _cacheKey = cacheKey;
+    if (_cacheKey != resolvedCacheKey || invalidateCachedArtwork) {
+      _cacheKey = resolvedCacheKey;
       _cachedFile = null;
     }
-    if (invalidateCachedArtwork && cacheKey.isNotEmpty) {
-      unawaited(_evictThenLoadRemote(api, artwork, generation, cacheKey));
+    if (invalidateCachedArtwork && resolvedCacheKey.isNotEmpty) {
+      unawaited(_evictThenLoadRemote(api, artwork, generation, resolvedCacheKey));
       return;
     }
-    if (cacheKey.isNotEmpty) {
-      unawaited(_loadCachedFile(cacheKey, generation));
+    if (resolvedCacheKey.isNotEmpty) {
+      unawaited(_loadCachedFile(resolvedCacheKey, generation));
     }
     unawaited(_loadRemoteResult(api, artwork, generation));
   }
@@ -243,7 +251,25 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       return;
     }
     if (!mounted || generation != _requestGeneration) return;
+    if (_mustSuppressCachedArtwork(result)) {
+      final suppressedCacheKeys = {_displayCacheKey, _cacheKey}..removeWhere((cacheKey) => cacheKey.isEmpty);
+      MemoryArtworkCache.suppressDisplayCacheKeys(suppressedCacheKeys);
+      setState(() {
+        _remoteResult = result;
+        _cachedFile = null;
+        _cacheKey = _displayCacheKey;
+      });
+      unawaited(_evictSuppressedCachedArtwork(suppressedCacheKeys));
+      return;
+    }
     final readyCacheKey = result.isReady ? result.cacheKey : '';
+    if (readyCacheKey.isNotEmpty) {
+      final canPublishReadyArtwork = await MemoryArtworkCache.rememberDisplayCacheKey(
+        provisionalCacheKey: _displayCacheKey,
+        authoritativeCacheKey: readyCacheKey,
+      );
+      if (!mounted || generation != _requestGeneration || !canPublishReadyArtwork) return;
+    }
     setState(() {
       _remoteResult = result;
       if (readyCacheKey.isNotEmpty && readyCacheKey != _cacheKey) {
@@ -255,6 +281,11 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       unawaited(_loadCachedFile(readyCacheKey, generation));
     }
     if (_shouldRetry(result)) _scheduleRetry(api, artwork, generation, result: result);
+  }
+
+  Future<void> _evictSuppressedCachedArtwork(Set<String> cacheKeys) async {
+    final evict = widget.cacheEvictor ?? MemoryArtworkCache.manager.removeFile;
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(cacheKeys, evict);
   }
 
   void _handleImageLoadFailure(MemoryArtworkApi api, MemoryArtworkState? artwork, int generation, String cacheKey) {
