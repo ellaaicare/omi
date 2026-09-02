@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from database.ella_provisioning import EllaProvisioningRepository
 from ella.routers.canonical_events import CanonicalEventStore
@@ -37,6 +38,7 @@ HERMES_CLOUD_ENRICHMENT_CHANNEL = "omi_enrichment"
 HERMES_CLOUD_GROUNDING_CHANNEL = "omi_enrichment_grounding_verifier"
 HERMES_CLOUD_GROUNDING_POLICY_VERSION = "hermes-cloud-grounding-verifier-v1"
 JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+logger = logging.getLogger(__name__)
 
 GROUNDING_VERIFIER_INSTRUCTIONS = """You are Ella's independent summary-grounding verifier.
 
@@ -286,12 +288,14 @@ class HermesCloudEnrichmentService:
         runtime_service_factory: Optional[Callable[[bool], HermesCloudRuntimeService]] = None,
         conversation_reader: Callable[[str, str], Optional[dict[str, Any]]],
         summary_applier: Callable[..., Any],
+        terminal_enrichment_handler: Optional[Callable[[str, str], Awaitable[None]]] = None,
     ):
         self.repository = repository
         self.event_store = event_store
         self.runtime_service_factory = runtime_service_factory
         self.conversation_reader = conversation_reader
         self.summary_applier = summary_applier
+        self.terminal_enrichment_handler = terminal_enrichment_handler
 
     def _runtime_service(self, allow_shadow: bool) -> HermesCloudRuntimeService:
         if self.runtime_service_factory is not None:
@@ -500,6 +504,13 @@ class HermesCloudEnrichmentService:
                 "hermes_cloud_enrichment_writeback_unconfirmed",
                 retryable=True,
             )
+        if self.terminal_enrichment_handler is not None:
+            try:
+                await self.terminal_enrichment_handler(uid, conversation_id)
+            except Exception:
+                # Artwork is a derived view. Its queue must never roll back the
+                # canonical text enrichment that was already confirmed above.
+                logger.exception("Artwork enqueue failed after confirmed Hermes Cloud enrichment")
 
         return HermesCloudEnrichmentResult(
             conversation_id=conversation_id,
