@@ -50,6 +50,7 @@ class MemoryArtworkResult {
     this.refreshPending = false,
     this.refreshFailureCode = '',
     this.requestedStyleVersion = '',
+    this.authority,
   });
 
   final MemoryArtworkResultStatus status;
@@ -61,8 +62,10 @@ class MemoryArtworkResult {
   final bool refreshPending;
   final String refreshFailureCode;
   final String requestedStyleVersion;
+  final ExactAccountAuthorityVerifier? authority;
 
   bool get isReady => status == MemoryArtworkResultStatus.ready && url != null;
+  bool get isAuthorityCurrent => authority?.isExactCurrent() ?? true;
 }
 
 class MemoryArtworkPreferences {
@@ -314,6 +317,7 @@ class MemoryArtworkApi {
       refreshPending: payload['refresh_pending'] == true,
       refreshFailureCode: payload['refresh_failure_code']?.toString().trim() ?? '',
       requestedStyleVersion: payload['requested_style_version']?.toString().trim() ?? '',
+      authority: authority,
     );
   }
 
