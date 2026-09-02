@@ -351,8 +351,10 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     String cacheKey,
   ) async {
     try {
-      final evict = widget.cacheEvictor ?? MemoryArtworkCache.manager.removeFile;
-      if (cacheKey.isNotEmpty) await evict(cacheKey);
+      if (cacheKey.isNotEmpty && !MemoryArtworkCache.isNetworkOnlyDisplayCacheKey(cacheKey)) {
+        final evict = widget.cacheEvictor ?? MemoryArtworkCache.manager.removeFile;
+        await evict(cacheKey);
+      }
     } catch (_) {
       // A cache eviction failure must not stop signed URL recovery.
     }

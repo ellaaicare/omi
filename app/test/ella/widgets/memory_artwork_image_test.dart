@@ -563,6 +563,7 @@ void main() {
       artwork: const MemoryArtworkState(status: MemoryArtworkStatus.ready),
     );
     var persistentCacheLookups = 0;
+    var persistentCacheEvictions = 0;
 
     Widget buildArtwork(int refreshEpoch) => MaterialApp(
           localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -575,6 +576,9 @@ void main() {
               persistentCacheLookups += 1;
               return null;
             },
+            cacheEvictor: (_) async => persistentCacheEvictions += 1,
+            retryDelay: const Duration(milliseconds: 10),
+            maxImageDownloadRetries: 1,
           ),
         );
 
@@ -600,6 +604,15 @@ void main() {
       isEmpty,
       reason: 'overflow mode must keep persistent cache reads fail-closed',
     );
+
+    image.errorBuilder!(tester.element(networkImageFinder), Exception('network unavailable'), StackTrace.empty);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+
+    expect(persistentCacheEvictions, 0, reason: 'network-only retry must not initialize persistent cache recovery');
+    expect(api.loadCalls, 2, reason: 'network-only download recovery must remain bounded and fetch fresh authority');
+    expect(find.byType(CachedNetworkImage), findsNothing);
 
     api.terminal = true;
     await tester.pumpWidget(buildArtwork(1));
