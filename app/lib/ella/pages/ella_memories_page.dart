@@ -938,6 +938,7 @@ class MemoryGalleryCard extends StatelessWidget {
                   api: artworkApi,
                   refreshEpoch: artworkRefreshEpoch,
                   authorityEpoch: artworkAuthorityEpoch,
+                  allowManualGeneration: true,
                 ),
               ),
               Expanded(
@@ -955,6 +956,7 @@ class MemoryGalleryCard extends StatelessWidget {
                   api: artworkApi,
                   refreshEpoch: artworkRefreshEpoch,
                   authorityEpoch: artworkAuthorityEpoch,
+                  allowManualGeneration: true,
                 ),
               ),
               Padding(padding: const EdgeInsets.all(16), child: details),

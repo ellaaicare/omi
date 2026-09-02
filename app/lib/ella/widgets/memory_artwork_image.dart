@@ -31,6 +31,7 @@ class MemoryArtworkImage extends StatefulWidget {
     this.refreshEpoch = 0,
     this.authorityEpoch = 0,
     this.enqueueIfMissing = false,
+    this.allowManualGeneration = false,
   });
 
   final ServerConversation conversation;
@@ -65,6 +66,11 @@ class MemoryArtworkImage extends StatefulWidget {
   final int authorityEpoch;
   final bool enqueueIfMissing;
 
+  /// Offers an explicit, single-memory generation action after an
+  /// authenticated display read confirms that artwork is unavailable.
+  /// Passive list rendering remains read-only.
+  final bool allowManualGeneration;
+
   @override
   State<MemoryArtworkImage> createState() => _MemoryArtworkImageState();
 }
@@ -89,6 +95,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   int? _imageRetryBudgetAuthorityEpoch;
   int? _imageRetryBudgetRefreshEpoch;
   String? _imageRetryBudgetMemoryId;
+  bool _manualGenerationInFlight = false;
 
   @override
   void initState() {
@@ -116,6 +123,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   }
 
   void _refreshRequest({bool invalidateCachedArtwork = false}) {
+    _manualGenerationInFlight = false;
     _resetAuthorityRetryBudgetIfNeeded();
     _resetTransientRetryBudgetIfNeeded();
     _resetImageRetryBudgetIfNeeded();
@@ -238,6 +246,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     MemoryArtworkState? artwork,
     int generation, {
     bool loadCachedFile = true,
+    bool enqueueIfMissing = false,
   }) async {
     MemoryArtworkResult result;
     try {
@@ -246,7 +255,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       // doing a private 30-second poll for every visible memory.
       result = await api.loadForDisplay(
         widget.conversation.id,
-        enqueueIfMissing: widget.enqueueIfMissing,
+        enqueueIfMissing: widget.enqueueIfMissing || enqueueIfMissing,
         pollAttempts: 0,
       );
     } catch (_) {
@@ -326,6 +335,32 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       unawaited(_loadCachedFile(publishedReadyCacheKey, generation));
     }
     if (_shouldRetry(result)) _scheduleRetry(api, artwork, generation, result: result);
+  }
+
+  Future<void> _generateArtwork() async {
+    if (_manualGenerationInFlight || !_canManuallyGenerate(_remoteResult)) return;
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    _transientRetries = 0;
+    _imageDownloadRetries = 0;
+    final generation = ++_requestGeneration;
+    final api = widget.api ?? MemoryArtworkApi();
+    setState(() {
+      _manualGenerationInFlight = true;
+      _remoteResult = const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating);
+    });
+    try {
+      await _loadRemoteResult(
+        api,
+        widget.conversation.artwork,
+        generation,
+        enqueueIfMissing: true,
+      );
+    } finally {
+      if (mounted && generation == _requestGeneration) {
+        setState(() => _manualGenerationInFlight = false);
+      }
+    }
   }
 
   Future<void> _evictSuppressedCachedArtwork(Set<String> cacheKeys) async {
@@ -512,6 +547,18 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     }.contains(result.failureCode);
   }
 
+  bool _canManuallyGenerate(MemoryArtworkResult? result) {
+    if (!widget.allowManualGeneration || result?.status != MemoryArtworkResultStatus.unavailable) return false;
+    if (_mustSuppressCachedArtwork(result) || _isAuthorityUnavailable(result)) return false;
+    return !const {
+      'consent_required',
+      'disabled',
+      'sensitive_source_excluded',
+      'memory_artwork_enrichment_not_terminal',
+      'memory_artwork_style_version_invalid',
+    }.contains(result?.failureCode);
+  }
+
   Widget _cachedArtworkOrFallback(BuildContext context, {required _MemoryArtworkFallbackKind kind}) {
     final cachedFile = _cachedFile;
     if (cachedFile == null) return _fallback(context, kind: kind);
@@ -548,41 +595,71 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
 
   Widget _placeholder(_MemoryArtworkFallbackKind kind) {
     final isPreparing = kind == _MemoryArtworkFallbackKind.preparing;
+    final canGenerate = !isPreparing && !_manualGenerationInFlight && _canManuallyGenerate(_remoteResult);
     final useCompactLayout = MediaQuery.textScalerOf(context).scale(12) > 18;
-    final semanticsLabel =
-        isPreparing ? context.l10n.memoryArtworkPreparingLabel : context.l10n.memoryArtworkUnavailableLabel;
-    final visibleLabel =
-        isPreparing ? context.l10n.memoryArtworkPreparingShort : context.l10n.memoryArtworkUnavailableLabel;
+    final semanticsLabel = isPreparing
+        ? context.l10n.memoryArtworkPreparingLabel
+        : canGenerate
+            ? context.l10n.memoryArtworkRetry
+            : context.l10n.memoryArtworkUnavailableLabel;
+    final visibleLabel = isPreparing
+        ? context.l10n.memoryArtworkPreparingShort
+        : canGenerate
+            ? context.l10n.memoryArtworkRetry
+            : context.l10n.memoryArtworkUnavailableLabel;
+    const decoration = BoxDecoration(
+      gradient: LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [Color(0xFFE9E3D8), Color(0xFFDCE9E3)],
+      ),
+    );
+    final content = Center(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!useCompactLayout) ...[
+              Icon(
+                canGenerate ? Icons.auto_awesome_outlined : Icons.brush_outlined,
+                color: const Color(0xFF57736A),
+                size: 30,
+              ),
+              const SizedBox(height: 8),
+            ],
+            Text(
+              visibleLabel,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Color(0xFF57736A), fontSize: 12, fontWeight: FontWeight.w600),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!canGenerate) {
+      return Semantics(
+        label: semanticsLabel,
+        child: DecoratedBox(
+          key: Key('memory-artwork-placeholder-${widget.conversation.id}'),
+          decoration: decoration,
+          child: content,
+        ),
+      );
+    }
     return Semantics(
       label: semanticsLabel,
-      child: DecoratedBox(
-        key: Key('memory-artwork-placeholder-${widget.conversation.id}'),
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Color(0xFFE9E3D8), Color(0xFFDCE9E3)],
-          ),
-        ),
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (!useCompactLayout) ...[
-                  const Icon(Icons.brush_outlined, color: Color(0xFF57736A), size: 30),
-                  const SizedBox(height: 8),
-                ],
-                Text(
-                  visibleLabel,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Color(0xFF57736A), fontSize: 12, fontWeight: FontWeight.w600),
-                ),
-              ],
-            ),
+      button: true,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          key: Key('memory-artwork-placeholder-${widget.conversation.id}'),
+          onTap: _generateArtwork,
+          child: Ink(
+            decoration: decoration,
+            child: content,
           ),
         ),
       ),

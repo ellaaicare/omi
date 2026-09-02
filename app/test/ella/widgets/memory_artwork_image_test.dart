@@ -41,6 +41,41 @@ class _DelayedArtworkApi extends MemoryArtworkApi {
   }
 }
 
+class _ManualGenerationArtworkApi extends MemoryArtworkApi {
+  _ManualGenerationArtworkApi({this.initialFailureCode = ''}) : super(authorityProvider: () => null);
+
+  final String initialFailureCode;
+  final List<bool> enqueueRequests = [];
+  final Completer<MemoryArtworkResult> generationResult = Completer<MemoryArtworkResult>();
+
+  @override
+  String cacheKeyForDisplay({
+    required String memoryId,
+    required String styleVersion,
+    required String enrichmentRevision,
+  }) =>
+      '';
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) {
+    enqueueRequests.add(enqueueIfMissing);
+    if (!enqueueIfMissing) {
+      return Future.value(
+        MemoryArtworkResult(
+          status: MemoryArtworkResultStatus.unavailable,
+          failureCode: initialFailureCode,
+        ),
+      );
+    }
+    return generationResult.future;
+  }
+}
+
 class _RecycledArtworkApi extends MemoryArtworkApi {
   _RecycledArtworkApi() : super(authorityProvider: () => null);
 
@@ -900,6 +935,78 @@ void main() {
     await tester.pump();
 
     expect(api.lastEnqueueIfMissing, isFalse);
+  });
+
+  testWidgets('an explicit artwork action enqueues only that unavailable memory', (tester) async {
+    final api = _ManualGenerationArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-manual-generation',
+      createdAt: DateTime(2026, 9, 2),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: SizedBox(
+          width: 320,
+          height: 220,
+          child: MemoryArtworkImage(
+            conversation: conversation,
+            api: api,
+            cachedFileLookup: (_) async => null,
+            allowManualGeneration: true,
+            maxTransientRetries: 0,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(api.enqueueRequests, [isFalse], reason: 'rendering the unavailable card remains read-only');
+    expect(find.text('Try artwork again'), findsOneWidget);
+    expect(find.byIcon(Icons.auto_awesome_outlined), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('memory-artwork-placeholder-memory-manual-generation')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('memory-artwork-placeholder-memory-manual-generation')));
+    await tester.pump();
+
+    expect(api.enqueueRequests, [isFalse, isTrue], reason: 'repeated taps cannot create duplicate generation calls');
+    expect(find.text('Preparing illustration…'), findsOneWidget);
+
+    api.generationResult.complete(const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating));
+    await tester.pump();
+    expect(find.text('Preparing illustration…'), findsOneWidget);
+  });
+
+  testWidgets('manual generation stays unavailable for consent and authority failures', (tester) async {
+    final api = _ManualGenerationArtworkApi(initialFailureCode: 'memory_artwork_consent_required');
+    final conversation = ServerConversation(
+      id: 'memory-policy-blocked',
+      createdAt: DateTime(2026, 9, 2),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => null,
+          allowManualGeneration: true,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Illustration unavailable'), findsOneWidget);
+    expect(find.text('Try artwork again'), findsNothing);
+    expect(find.byIcon(Icons.auto_awesome_outlined), findsNothing);
+    expect(api.enqueueRequests, [isFalse]);
   });
 
   testWidgets('suppresses cached artwork after a terminal policy response', (tester) async {
