@@ -283,6 +283,7 @@ def test_enrichment_uses_exact_owned_transcript_and_confirmed_writeback():
             "canonical_confirmed": True,
         }
     )
+    terminal_enrichment_handler = AsyncMock()
     replayed_conversation = deepcopy(conversation)
     replayed_conversation["active_summary_version_id"] = "version-enriched"
     replayed_conversation["enrichment_state"] = {
@@ -299,6 +300,7 @@ def test_enrichment_uses_exact_owned_transcript_and_confirmed_writeback():
         runtime_service_factory=lambda allow_shadow: runtime_service,
         conversation_reader=lambda uid, conversation_id: deepcopy(next(conversation_reads)),
         summary_applier=summary_applier,
+        terminal_enrichment_handler=terminal_enrichment_handler,
     )
     service._runtime = AsyncMock(return_value=_runtime())
 
@@ -368,6 +370,31 @@ def test_enrichment_uses_exact_owned_transcript_and_confirmed_writeback():
     assert result.active_summary_version_id == "version-enriched"
     assert result.provider_response_present is True
     assert result.client_interaction_id == request.client_interaction_id
+    terminal_enrichment_handler.assert_awaited_once_with("synthetic-user", "conversation-a")
+
+
+def test_artwork_enqueue_failure_does_not_roll_back_confirmed_enrichment():
+    conversation = _conversation()
+    terminal_enrichment_handler = AsyncMock(side_effect=RuntimeError("synthetic artwork failure"))
+    service = HermesCloudEnrichmentService(
+        repository=SimpleNamespace(),
+        event_store=SimpleNamespace(),
+        runtime_service_factory=lambda allow_shadow: FakeRuntimeService(),
+        conversation_reader=lambda uid, conversation_id: deepcopy(conversation),
+        summary_applier=AsyncMock(
+            return_value={
+                "active_summary_version_id": "version-enriched",
+                "canonical_confirmed": True,
+            }
+        ),
+        terminal_enrichment_handler=terminal_enrichment_handler,
+    )
+    service._runtime = AsyncMock(return_value=_runtime())
+
+    result = asyncio.run(service.enrich(uid="synthetic-user", conversation_id="conversation-a"))
+
+    assert result.active_summary_version_id == "version-enriched"
+    terminal_enrichment_handler.assert_awaited_once_with("synthetic-user", "conversation-a")
 
 
 def test_enrichment_rejects_transcript_change_before_writeback():
@@ -555,6 +582,7 @@ def test_enrichment_ignores_self_attestation_and_requires_independent_verifier()
 
 def test_enrichment_requires_confirmed_canonical_writeback():
     conversation = _conversation()
+    terminal_enrichment_handler = AsyncMock()
     service = HermesCloudEnrichmentService(
         repository=SimpleNamespace(),
         event_store=SimpleNamespace(),
@@ -566,6 +594,7 @@ def test_enrichment_requires_confirmed_canonical_writeback():
                 "canonical_confirmed": False,
             }
         ),
+        terminal_enrichment_handler=terminal_enrichment_handler,
     )
     service._runtime = AsyncMock(return_value=_runtime())
 
@@ -579,3 +608,4 @@ def test_enrichment_requires_confirmed_canonical_writeback():
                 conversation_id="conversation-a",
             )
         )
+    terminal_enrichment_handler.assert_not_awaited()
