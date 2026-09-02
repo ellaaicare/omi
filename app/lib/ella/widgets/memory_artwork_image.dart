@@ -264,10 +264,11 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     }
     final readyCacheKey = result.isReady ? result.cacheKey : '';
     if (readyCacheKey.isNotEmpty) {
-      MemoryArtworkCache.rememberDisplayCacheKey(
+      final canPublishReadyArtwork = await MemoryArtworkCache.rememberDisplayCacheKey(
         provisionalCacheKey: _displayCacheKey,
         authoritativeCacheKey: readyCacheKey,
       );
+      if (!mounted || generation != _requestGeneration || !canPublishReadyArtwork) return;
     }
     setState(() {
       _remoteResult = result;
@@ -284,13 +285,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
 
   Future<void> _evictSuppressedCachedArtwork(Set<String> cacheKeys) async {
     final evict = widget.cacheEvictor ?? MemoryArtworkCache.manager.removeFile;
-    for (final cacheKey in cacheKeys) {
-      try {
-        await evict(cacheKey);
-      } catch (_) {
-        // Terminal policy still suppresses the bytes even if disk cleanup fails.
-      }
-    }
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(cacheKeys, evict);
   }
 
   void _handleImageLoadFailure(MemoryArtworkApi api, MemoryArtworkState? artwork, int generation, String cacheKey) {

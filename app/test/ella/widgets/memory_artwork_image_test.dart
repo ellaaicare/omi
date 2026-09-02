@@ -77,7 +77,6 @@ class _RecycledArtworkApi extends MemoryArtworkApi {
 class _ReadyThenSuppressedArtworkApi extends MemoryArtworkApi {
   _ReadyThenSuppressedArtworkApi() : super(authorityProvider: () => null);
 
-  final remountedResult = Completer<MemoryArtworkResult>();
   int loadCalls = 0;
 
   @override
@@ -106,7 +105,13 @@ class _ReadyThenSuppressedArtworkApi extends MemoryArtworkApi {
       );
     }
     if (loadCalls == 2) return Future.value(const MemoryArtworkResult(status: MemoryArtworkResultStatus.declined));
-    return remountedResult.future;
+    return Future.value(
+      MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.ready,
+        url: Uri.parse('https://private-storage.example/reconsented.png'),
+        cacheKey: 'suppressed-authoritative-cache-key',
+      ),
+    );
   }
 }
 
@@ -604,15 +609,15 @@ void main() {
     await tester.pump();
 
     expect(api.loadCalls, 3);
-    expect(api.remountedResult.isCompleted, isFalse);
     expect(requestedKeys, isEmpty, reason: 'terminal tombstones must block disk reads before async eviction finishes');
     expect(find.byKey(const Key('memory-cached-artwork-memory-recycled-suppression')), findsNothing);
+    expect(find.byKey(const Key('memory-generated-artwork-memory-recycled-suppression')), findsNothing);
 
     evictionRelease.complete();
-    api.remountedResult.complete(const MemoryArtworkResult(status: MemoryArtworkResultStatus.declined));
     await tester.pump();
     await tester.pump();
     expect(evictedKeys, containsAll({'suppressed-provisional-cache-key', 'suppressed-authoritative-cache-key'}));
+    expect(find.byKey(const Key('memory-generated-artwork-memory-recycled-suppression')), findsOneWidget);
   });
 
   testWidgets('shows a friendly preparing state while artwork is being generated', (tester) async {
