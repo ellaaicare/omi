@@ -4,7 +4,6 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:provider/provider.dart';
 
 import 'package:omi/backend/preferences.dart';
@@ -57,8 +56,14 @@ _CaptureStopTarget _captureStopTarget(CaptureProvider provider) {
 class ConversationCapturingPage extends StatefulWidget {
   final String? topConversationId;
   final Future<bool> Function()? onProcessNow;
+  final EllaCaptureSource? preferredCaptureSource;
 
-  const ConversationCapturingPage({super.key, this.topConversationId, this.onProcessNow});
+  const ConversationCapturingPage({
+    super.key,
+    this.topConversationId,
+    this.onProcessNow,
+    this.preferredCaptureSource,
+  });
 
   @override
   State<ConversationCapturingPage> createState() => _ConversationCapturingPageState();
@@ -236,10 +241,11 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
     if (_processNowInFlight != null || _isProcessDialogOpen) return;
     final hasContent = provider.segments.isNotEmpty || provider.photos.isNotEmpty;
     if (!hasContent) {
-      try {
-        await _runProcessNow(provider);
-      } finally {
-        if (mounted) Navigator.of(context).pop();
+      final processed = await _runProcessNow(provider);
+      if (processed && mounted) {
+        Navigator.of(context).pop();
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayNoWordsCaptured)));
       }
       return;
     }
@@ -324,6 +330,12 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
   }
 
   EllaCaptureSource _captureSource(CaptureProvider provider) {
+    if (provider.recordingState != RecordingState.record &&
+        provider.recordingState != RecordingState.deviceRecord &&
+        !provider.phoneCaptureOwnsMobileAudio &&
+        widget.preferredCaptureSource != null) {
+      return widget.preferredCaptureSource!;
+    }
     return conversationCaptureSource(
       state: provider.recordingState,
       phoneCaptureOwnsMobileAudio: provider.phoneCaptureOwnsMobileAudio,
@@ -338,6 +350,13 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
       if (!mounted || reconnected) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
       return;
+    }
+    if (provider.havingRecordingDevice &&
+        (provider.recordingState == RecordingState.initialising ||
+            provider.recordingState == RecordingState.pause ||
+            provider.recordingState == RecordingState.error)) {
+      await provider.stopStreamDeviceRecording();
+      if (!mounted) return;
     }
     final result = await provider.streamRecording();
     if (!mounted || result == PhoneCaptureStartResult.started) return;
@@ -497,16 +516,11 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                           key: const Key('conversation-process-now-surface'),
                           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
                           decoration: BoxDecoration(
-                            color: provider.segments.isEmpty && provider.photos.isEmpty
-                                ? EllaColors.error
-                                : EllaColors.tealDeep,
+                            color: EllaColors.tealDeep,
                             borderRadius: BorderRadius.circular(28),
                             boxShadow: [
                               BoxShadow(
-                                color: (provider.segments.isEmpty && provider.photos.isEmpty
-                                        ? EllaColors.error
-                                        : EllaColors.tealDeep)
-                                    .withValues(alpha: 0.2),
+                                color: EllaColors.tealDeep.withValues(alpha: 0.2),
                                 blurRadius: 12,
                                 offset: const Offset(0, 3),
                               ),
@@ -516,7 +530,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               if (_processNowInFlight == null)
-                                const FaIcon(FontAwesomeIcons.stop, color: EllaColors.paper, size: 16.0)
+                                const Icon(Icons.auto_awesome_rounded, color: EllaColors.paper, size: 18.0)
                               else
                                 const SizedBox(
                                   key: Key('conversation-process-now-progress'),
@@ -526,11 +540,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                                 ),
                               const SizedBox(width: 10),
                               Text(
-                                _processNowInFlight != null
-                                    ? context.l10n.processing
-                                    : provider.segments.isEmpty && provider.photos.isEmpty
-                                        ? context.l10n.stopRecording
-                                        : context.l10n.processNow,
+                                _processNowInFlight != null ? context.l10n.processing : context.l10n.processNow,
                                 style: const TextStyle(
                                   color: EllaColors.paper,
                                   fontSize: 16,

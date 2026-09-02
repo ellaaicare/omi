@@ -742,6 +742,34 @@ void main() {
     expect(find.text('Recording on this iPhone'), findsOneWidget);
   });
 
+  testWidgets('stuck necklace startup can switch to iPhone and starts the real phone recorder', (tester) async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = DeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(tester, conversations: const [], device: device);
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-capture-source-necklace')));
+    await tester.pump();
+    harness.capture.updateRecordingDevice(necklace);
+    harness.capture.updateRecordingState(RecordingState.initialising);
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('today-capture-source-phone')));
+    await tester.pump();
+    expect(find.text('iPhone · Ready'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.deviceStops, 1);
+    expect(harness.capture.phoneStarts, 1);
+    expect(harness.capture.recordingState, RecordingState.record);
+    expect(find.text('Recording on this iPhone'), findsOneWidget);
+  });
+
   testWidgets('failed phone start restores the ambient necklace stream', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final device = DeviceProvider()
