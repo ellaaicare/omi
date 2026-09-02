@@ -314,7 +314,9 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         _cachedFile = null;
       }
     });
-    if (loadCachedFile && publishedReadyCacheKey.isNotEmpty) {
+    if (loadCachedFile &&
+        publishedReadyCacheKey.isNotEmpty &&
+        !MemoryArtworkCache.isNetworkOnlyDisplayCacheKey(publishedReadyCacheKey)) {
       unawaited(_loadCachedFile(publishedReadyCacheKey, generation));
     }
     if (_shouldRetry(result)) _scheduleRetry(api, artwork, generation, result: result);

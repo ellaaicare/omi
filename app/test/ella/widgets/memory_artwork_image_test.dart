@@ -259,6 +259,7 @@ class _AuthorityRefreshArtworkApi extends MemoryArtworkApi {
   _AuthorityRefreshArtworkApi() : super(authorityProvider: () => null);
 
   int loadCalls = 0;
+  bool terminal = false;
 
   @override
   String cacheKeyForDisplay({
@@ -276,6 +277,7 @@ class _AuthorityRefreshArtworkApi extends MemoryArtworkApi {
     Duration pollInterval = const Duration(seconds: 3),
   }) async {
     loadCalls += 1;
+    if (terminal) return const MemoryArtworkResult(status: MemoryArtworkResultStatus.declined);
     return MemoryArtworkResult(
       status: MemoryArtworkResultStatus.ready,
       url: Uri.parse('https://private-storage.example/authority-$loadCalls.png'),
@@ -547,7 +549,7 @@ void main() {
     );
   });
 
-  testWidgets('verified network artwork remains publishable after suppression capacity is exceeded', (tester) async {
+  testWidgets('overflow recovery stays memory-only and disappears on a terminal response', (tester) async {
     for (var index = 0; index <= 4096; index++) {
       MemoryArtworkCache.suppressDisplayCacheKeys({'terminal-capacity-$index'});
     }
@@ -560,14 +562,23 @@ void main() {
       structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
       artwork: const MemoryArtworkState(status: MemoryArtworkStatus.ready),
     );
+    var persistentCacheLookups = 0;
 
-    await tester.pumpWidget(
-      MaterialApp(
-        localizationsDelegates: AppLocalizations.localizationsDelegates,
-        supportedLocales: AppLocalizations.supportedLocales,
-        home: MemoryArtworkImage(conversation: conversation, api: api, cachedFileLookup: (_) async => null),
-      ),
-    );
+    Widget buildArtwork(int refreshEpoch) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MemoryArtworkImage(
+            conversation: conversation,
+            api: api,
+            refreshEpoch: refreshEpoch,
+            cachedFileLookup: (_) async {
+              persistentCacheLookups += 1;
+              return null;
+            },
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(0));
     await tester.pump();
 
     expect(find.byKey(const Key('memory-generated-artwork-memory-after-suppression-capacity')), findsOneWidget);
@@ -583,11 +594,21 @@ void main() {
     final image = tester.widget<Image>(networkImageFinder);
     expect(image.image, isA<NetworkImage>());
     expect((image.image as NetworkImage).url, 'https://private-storage.example/authority-1.png');
+    expect(persistentCacheLookups, 0, reason: 'overflow recovery must not read or write the persistent cache');
     expect(
       MemoryArtworkCache.resolveDisplayCacheKey('authority-artwork-cache-key'),
       isEmpty,
       reason: 'overflow mode must keep persistent cache reads fail-closed',
     );
+
+    api.terminal = true;
+    await tester.pumpWidget(buildArtwork(1));
+    await tester.pump();
+
+    expect(find.byKey(const Key('memory-generated-artwork-memory-after-suppression-capacity')), findsNothing);
+    expect(find.byType(CachedNetworkImage), findsNothing);
+    expect(find.text('Illustration unavailable'), findsOneWidget);
+    expect(persistentCacheLookups, 0, reason: 'terminal cleanup cannot expose a disk artifact that was never written');
   });
 
   test('a new terminal tombstone remains fail-closed while older evictions are pending', () async {
