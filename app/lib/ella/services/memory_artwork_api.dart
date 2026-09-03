@@ -320,8 +320,8 @@ class MemoryArtworkApi {
     if (payload == null || payload['schema_version'] != memoryArtworkSchemaVersion) {
       return _unavailable('memory_artwork_response_invalid');
     }
-    final status = MemoryArtworkResultStatus.values.asNameMap()[payload['status']?.toString() ?? ''] ??
-        MemoryArtworkResultStatus.unavailable;
+    final status = MemoryArtworkResultStatus.values.asNameMap()[payload['status']?.toString() ?? ''];
+    if (status == null) return _unavailable('memory_artwork_response_invalid');
     final rawUrl = payload['url']?.toString().trim() ?? '';
     final url = Uri.tryParse(rawUrl);
     if (status == MemoryArtworkResultStatus.ready && (url == null || url.scheme != 'https' || url.host.isEmpty)) {
@@ -360,8 +360,8 @@ class MemoryArtworkApi {
       return _unavailable(_safeFailureCode(response?.body));
     }
     final payload = _jsonObject(response.body);
-    final status = MemoryArtworkResultStatus.values.asNameMap()[payload?['status']?.toString() ?? ''] ??
-        MemoryArtworkResultStatus.unavailable;
+    final status = MemoryArtworkResultStatus.values.asNameMap()[payload?['status']?.toString() ?? ''];
+    if (status == null) return _unavailable('memory_artwork_response_invalid');
     return MemoryArtworkResult(
       status: status,
       failureCode: status == MemoryArtworkResultStatus.unavailable

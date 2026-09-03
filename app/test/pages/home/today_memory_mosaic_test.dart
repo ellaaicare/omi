@@ -989,6 +989,25 @@ void main() {
     expect(find.text('Artwork studio'), findsOneWidget);
   });
 
+  testWidgets('Home keeps a running full-history artwork queue indeterminate', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(
+      queue: _artworkQueueStatus(ready: 527, active: 1, queued: 35, autoContinue: true, batchRemaining: 0),
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final ring = tester.widget<CircularProgressIndicator>(find.byKey(const Key('home-artwork-queue-ring')));
+    expect(ring.value, isNull, reason: 'ongoing full history has no truthful fixed denominator');
+  });
+
   testWidgets('Home leaves older artwork paused when the memory feed nears its end', (tester) async {
     final authority = await _installArtworkAuthority();
     final artwork = _FakeMemoryArtworkApi(

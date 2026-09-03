@@ -292,6 +292,41 @@ void main() {
     expect(methods, ['GET']);
   });
 
+  test('missing or unknown artwork status fails closed without a generation POST', () async {
+    for (final rawStatus in <String?>[null, 'future_server_state']) {
+      final methods = <String>[];
+      final api = MemoryArtworkApi(
+        baseUrl: 'https://api.example/',
+        authorityProvider: () => _Authority('owner-a'),
+        request: ({
+          required url,
+          required headers,
+          required body,
+          required method,
+          timeout,
+          retries,
+          requireAuthCheck,
+          expectedAuthenticatedUid,
+          exactAuthority,
+        }) async {
+          methods.add(method);
+          return http.Response(
+            jsonEncode({
+              'schema_version': memoryArtworkSchemaVersion,
+              if (rawStatus != null) 'status': rawStatus,
+            }),
+            200,
+          );
+        },
+      );
+
+      final result = await api.loadForDisplay('memory-malformed-status', enqueueIfMissing: true);
+
+      expect(result.failureCode, 'memory_artwork_response_invalid');
+      expect(methods, ['GET'], reason: '$rawStatus must not become generation-eligible');
+    }
+  });
+
   test('already-generating artwork is polled without duplicate enqueue', () async {
     final authority = _Authority('owner-a');
     final methods = <String>[];

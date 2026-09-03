@@ -2021,6 +2021,36 @@ def test_mounted_route_rejects_unauthenticated_request_before_service_work(monke
     assert response.status_code == 401
     assert fake.calls == 0
 
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    live_policy_service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        store_factory=FakeStore,
+        global_consent_checker=lambda uid: True,
+        config=_enabled_config(),
+    )
+    monkeypatch.setattr(router_module, "MemoryArtworkService", lambda: live_policy_service)
+    app.dependency_overrides[router_module.get_exact_firebase_uid] = lambda: "owner-a"
+
+    available = client.get("/v1/ella/memories/memory-1/artwork")
+    assert available.status_code == 200
+    assert available.json() == {
+        "schema_version": artwork.ARTWORK_SCHEMA_VERSION,
+        "status": "unavailable",
+        "failure_code": None,
+    }
+
+    repository.deletion_pending.add("owner-a")
+    blocked = client.get("/v1/ella/memories/memory-1/artwork")
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"] == {
+        "code": "memory_artwork_deletion_pending",
+        "retryable": False,
+    }
+    assert repository.reserve_writes == 0
+
 
 def test_mounted_internal_process_route_uses_durable_worker_job_claim(monkeypatch):
     service_module_name = "ella.services.memory_artwork"

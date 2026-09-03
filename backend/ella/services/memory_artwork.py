@@ -1114,13 +1114,8 @@ class MemoryArtworkService:
                 "failure_code": "memory_artwork_discarded",
             }
         artwork = conversation.get("artwork") or {}
-        status = str(artwork.get("status") or "unavailable") if isinstance(artwork, dict) else "unavailable"
-        if status != "ready":
-            return {
-                "schema_version": ARTWORK_SCHEMA_VERSION,
-                "status": status if status in {"generating", "unavailable", "declined"} else "unavailable",
-                "failure_code": artwork.get("failure_code") if isinstance(artwork, dict) else None,
-            }
+        if not isinstance(artwork, dict):
+            artwork = {}
         if _source_is_sensitive(conversation):
             return {
                 "schema_version": ARTWORK_SCHEMA_VERSION,
@@ -1128,8 +1123,10 @@ class MemoryArtworkService:
                 "failure_code": "memory_artwork_sensitive_source_excluded",
             }
         authority = await self.authority_resolver(uid)
-        # Re-read consent and artwork after the awaited authority lookup. There
-        # is no await between this snapshot and the synchronous signer call.
+        # Re-read policy and artwork after the awaited authority lookup. This
+        # applies to unavailable/generating states as well as ready artwork, so
+        # this GET is a side-effect-free generation preflight. There is no await
+        # between this snapshot and the return or synchronous signer call.
         preferences = self.repository.get_preferences(uid)
         conversation = self.repository.get_conversation(uid, memory_id)
         if conversation is None:
@@ -1140,7 +1137,6 @@ class MemoryArtworkService:
                 "status": "unavailable",
                 "failure_code": "memory_artwork_discarded",
             }
-        current_artwork = conversation.get("artwork") or {}
         if preferences.get(artwork_db.DELETION_PENDING_FIELD):
             raise MemoryArtworkError("memory_artwork_deletion_pending")
         if preferences.get("consent") == "declined":
@@ -1161,19 +1157,37 @@ class MemoryArtworkService:
                 "status": "unavailable",
                 "failure_code": "memory_artwork_sensitive_source_excluded",
             }
-        if (
-            not isinstance(current_artwork, dict)
-            or current_artwork.get("status") != "ready"
-            or current_artwork.get("generation_key") != artwork.get("generation_key")
-            or current_artwork.get("object_key") != artwork.get("object_key")
-            or current_artwork.get("authority_digest") != authority.authority_digest
+        current_artwork = conversation.get("artwork") or {}
+        if not isinstance(current_artwork, dict):
+            return {
+                "schema_version": ARTWORK_SCHEMA_VERSION,
+                "status": "unavailable",
+                "failure_code": "memory_artwork_state_invalid",
+            }
+        status = str(current_artwork.get("status") or "unavailable")
+        if status not in {"generating", "ready", "unavailable", "declined"}:
+            return {
+                "schema_version": ARTWORK_SCHEMA_VERSION,
+                "status": "unavailable",
+                "failure_code": "memory_artwork_state_invalid",
+            }
+        style_version = str(current_artwork.get("style_version") or preferences.get("style_version") or "")
+        if not _preferences_match_authority(preferences, authority, style_version=style_version):
+            return {
+                "schema_version": ARTWORK_SCHEMA_VERSION,
+                "status": "unavailable",
+                "failure_code": "memory_artwork_preference_authority_stale",
+            }
+        if any(
+            (
+                current_artwork.get("authority_digest"),
+                current_artwork.get("binding_id"),
+                current_artwork.get("profile_id"),
+            )
+        ) and (
+            current_artwork.get("authority_digest") != authority.authority_digest
             or current_artwork.get("binding_id") != authority.binding_id
             or current_artwork.get("profile_id") != authority.profile_id
-            or not _preferences_match_authority(
-                preferences,
-                authority,
-                style_version=str(current_artwork.get("style_version") or ""),
-            )
         ):
             return {
                 "schema_version": ARTWORK_SCHEMA_VERSION,
@@ -1181,17 +1195,46 @@ class MemoryArtworkService:
                 "failure_code": "memory_artwork_preference_authority_stale",
             }
         current_enrichment_revision = _terminal_enrichment(conversation)
-        _, current_prompt_sha256 = _prompt_for(
-            conversation,
-            str(current_artwork.get("style_version") or ""),
-        )
-        if current_enrichment_revision != current_artwork.get(
-            "enrichment_revision"
-        ) or current_prompt_sha256 != current_artwork.get("prompt_sha256"):
+        if current_enrichment_revision is None:
+            return {
+                "schema_version": ARTWORK_SCHEMA_VERSION,
+                "status": "unavailable",
+                "failure_code": "memory_artwork_enrichment_not_terminal",
+            }
+        stored_enrichment_revision = str(current_artwork.get("enrichment_revision") or "")
+        if stored_enrichment_revision and stored_enrichment_revision != current_enrichment_revision:
             return {
                 "schema_version": ARTWORK_SCHEMA_VERSION,
                 "status": "unavailable",
                 "failure_code": "memory_artwork_source_stale",
+            }
+        stored_prompt_sha256 = str(current_artwork.get("prompt_sha256") or "")
+        if stored_prompt_sha256:
+            _, current_prompt_sha256 = _prompt_for(conversation, style_version)
+            if stored_prompt_sha256 != current_prompt_sha256:
+                return {
+                    "schema_version": ARTWORK_SCHEMA_VERSION,
+                    "status": "unavailable",
+                    "failure_code": "memory_artwork_source_stale",
+                }
+        if status != "ready":
+            return {
+                "schema_version": ARTWORK_SCHEMA_VERSION,
+                "status": status,
+                "failure_code": current_artwork.get("failure_code"),
+            }
+        if (
+            current_artwork.get("status") != "ready"
+            or current_artwork.get("generation_key") != artwork.get("generation_key")
+            or current_artwork.get("object_key") != artwork.get("object_key")
+            or current_artwork.get("authority_digest") != authority.authority_digest
+            or current_artwork.get("binding_id") != authority.binding_id
+            or current_artwork.get("profile_id") != authority.profile_id
+        ):
+            return {
+                "schema_version": ARTWORK_SCHEMA_VERSION,
+                "status": "unavailable",
+                "failure_code": "memory_artwork_preference_authority_stale",
             }
         object_key = str(current_artwork.get("object_key") or "")
         if not object_key:

@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
@@ -979,6 +981,55 @@ void main() {
     api.generationResult.complete(const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating));
     await tester.pump();
     expect(find.text('Preparing illustration…'), findsOneWidget);
+  });
+
+  testWidgets('a source photo keeps artwork retry and preparing progress visible', (tester) async {
+    final api = _ManualGenerationArtworkApi();
+    final photoData = await rootBundle.load('assets/images/onboarding-bg-1.webp');
+    final conversation = ServerConversation(
+      id: 'memory-source-photo-generation',
+      createdAt: DateTime(2026, 9, 2),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      photos: [
+        ConversationPhoto(
+          id: 'photo-1',
+          base64: base64Encode(photoData.buffer.asUint8List()),
+          createdAt: DateTime(2026, 9, 2),
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: SizedBox(
+          width: 320,
+          height: 220,
+          child: MemoryArtworkImage(
+            conversation: conversation,
+            api: api,
+            cachedFileLookup: (_) async => null,
+            allowManualGeneration: true,
+            maxTransientRetries: 0,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byKey(const Key('memory-source-photo')), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-photo-retry-memory-source-photo-generation')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('memory-artwork-photo-retry-memory-source-photo-generation')));
+    await tester.pump();
+
+    expect(api.enqueueRequests, [isFalse, isTrue]);
+    expect(find.byKey(const Key('memory-source-photo')), findsOneWidget);
+    expect(
+      find.byKey(const Key('memory-artwork-generation-progress-memory-source-photo-generation')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('enabling bounded automatic recovery rechecks the same visible memory', (tester) async {
