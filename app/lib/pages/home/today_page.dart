@@ -1852,6 +1852,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                         artworkPreferences: _homeArtworkPreferences,
                         artworkBackfillState: _homeArtworkBackfillState,
                         artworkStyleSaving: _homeArtworkStyleSaving,
+                        artworkQueueStatus: _homeArtworkQueueStatus,
+                        artworkQueueLoadState: _homeArtworkQueueLoadState,
                         onLayoutSelected: _selectHomeMemoryLayout,
                         onSortSelected: (sort) => setState(() => _homeMemorySort = sort),
                         onArtworkStudio: _openHomeArtworkStudio,
@@ -1873,6 +1875,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                               artworkApi: _memoryArtworkApi,
                               artworkRefreshEpoch: _homeArtworkDisplayEpoch,
                               artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
+                              enqueueArtworkIfMissing: _homeArtworkPreferences?.releaseEnabled == true,
                               onOpen: () => _openMemoryDetail(heroMemory),
                               onDelete: () => _deleteMemory(heroMemory),
                             ),
@@ -2212,6 +2215,8 @@ class _HomeMemoryToolbar extends StatelessWidget {
     required this.artworkPreferences,
     required this.artworkBackfillState,
     required this.artworkStyleSaving,
+    required this.artworkQueueStatus,
+    required this.artworkQueueLoadState,
     required this.onLayoutSelected,
     required this.onSortSelected,
     required this.onArtworkStudio,
@@ -2223,84 +2228,208 @@ class _HomeMemoryToolbar extends StatelessWidget {
   final MemoryArtworkPreferences? artworkPreferences;
   final _ArtworkBackfillUiState artworkBackfillState;
   final bool artworkStyleSaving;
+  final MemoryArtworkQueueStatus? artworkQueueStatus;
+  final _ArtworkQueueLoadState artworkQueueLoadState;
   final ValueChanged<MemoryGalleryLayout> onLayoutSelected;
   final ValueChanged<MemoryGallerySort> onSortSelected;
   final VoidCallback onArtworkStudio;
 
   @override
   Widget build(BuildContext context) {
-    return Row(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Expanded(
-          child: Semantics(header: true, child: Text(context.l10n.memories, style: EllaTextStyles.eyebrow)),
-        ),
-        PopupMenuButton<MemoryGalleryLayout>(
-          key: const Key('home-memory-layout-menu'),
-          tooltip: context.l10n.memoryGalleryView,
-          initialValue: layout,
-          icon: const Icon(Icons.view_quilt_outlined, color: EllaColors.tealDeep),
-          onSelected: onLayoutSelected,
-          itemBuilder: (context) => [
-            PopupMenuItem(value: MemoryGalleryLayout.journal, child: Text(context.l10n.memoryGalleryJournal)),
-            PopupMenuItem(value: MemoryGalleryLayout.grid, child: Text(context.l10n.memoryGalleryGrid)),
-            PopupMenuItem(value: MemoryGalleryLayout.list, child: Text(context.l10n.memoryGalleryList)),
-            PopupMenuItem(value: MemoryGalleryLayout.days, child: Text(context.l10n.memoryGalleryDays)),
-          ],
-        ),
-        PopupMenuButton<MemoryGallerySort>(
-          key: const Key('home-memory-sort-menu'),
-          tooltip: context.l10n.sortBy,
-          initialValue: sort,
-          icon: const Icon(Icons.swap_vert_rounded, color: EllaColors.tealDeep),
-          onSelected: onSortSelected,
-          itemBuilder: (context) => [
-            PopupMenuItem(value: MemoryGallerySort.recent, child: Text(context.l10n.memorySortRecent)),
-            PopupMenuItem(
-              value: MemoryGallerySort.oldest,
-              enabled: canSortOldest,
-              child: Text(context.l10n.memorySortOldest),
+        Row(
+          children: [
+            Expanded(
+              child: Semantics(header: true, child: Text(context.l10n.memories, style: EllaTextStyles.eyebrow)),
+            ),
+            PopupMenuButton<MemoryGalleryLayout>(
+              key: const Key('home-memory-layout-menu'),
+              tooltip: context.l10n.memoryGalleryView,
+              initialValue: layout,
+              icon: const Icon(Icons.view_quilt_outlined, color: EllaColors.tealDeep),
+              onSelected: onLayoutSelected,
+              itemBuilder: (context) => [
+                PopupMenuItem(value: MemoryGalleryLayout.journal, child: Text(context.l10n.memoryGalleryJournal)),
+                PopupMenuItem(value: MemoryGalleryLayout.grid, child: Text(context.l10n.memoryGalleryGrid)),
+                PopupMenuItem(value: MemoryGalleryLayout.list, child: Text(context.l10n.memoryGalleryList)),
+                PopupMenuItem(value: MemoryGalleryLayout.days, child: Text(context.l10n.memoryGalleryDays)),
+              ],
+            ),
+            PopupMenuButton<MemoryGallerySort>(
+              key: const Key('home-memory-sort-menu'),
+              tooltip: context.l10n.sortBy,
+              initialValue: sort,
+              icon: const Icon(Icons.swap_vert_rounded, color: EllaColors.tealDeep),
+              onSelected: onSortSelected,
+              itemBuilder: (context) => [
+                PopupMenuItem(value: MemoryGallerySort.recent, child: Text(context.l10n.memorySortRecent)),
+                PopupMenuItem(
+                  value: MemoryGallerySort.oldest,
+                  enabled: canSortOldest,
+                  child: Text(context.l10n.memorySortOldest),
+                ),
+              ],
+            ),
+            IconButton(
+              key: const Key('home-memory-artwork-style-menu'),
+              tooltip: artworkPreferences?.releaseEnabled == true
+                  ? context.l10n.memoryArtworkStudio
+                  : context.l10n.memoryArtworkStyleUnavailable,
+              onPressed: artworkPreferences?.releaseEnabled == true ? onArtworkStudio : null,
+              icon: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Icon(
+                    Icons.palette_outlined,
+                    color: artworkPreferences?.releaseEnabled == true ? EllaColors.tealDeep : EllaColors.inkSoft,
+                  ),
+                  if (artworkStyleSaving || artworkBackfillState == _ArtworkBackfillUiState.running)
+                    const Positioned(
+                      right: -4,
+                      bottom: -4,
+                      child: SizedBox(
+                        key: Key('home-artwork-progress-indicator'),
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                      ),
+                    )
+                  else if (artworkBackfillState == _ArtworkBackfillUiState.needsAttention)
+                    const Positioned(
+                      right: -3,
+                      bottom: -3,
+                      child: DecoratedBox(
+                        key: Key('home-artwork-attention-indicator'),
+                        decoration: BoxDecoration(color: EllaColors.warning, shape: BoxShape.circle),
+                        child: SizedBox(width: 9, height: 9),
+                      ),
+                    ),
+                ],
+              ),
             ),
           ],
         ),
-        IconButton(
-          key: const Key('home-memory-artwork-style-menu'),
-          tooltip: artworkPreferences?.releaseEnabled == true
-              ? context.l10n.memoryArtworkStudio
-              : context.l10n.memoryArtworkStyleUnavailable,
-          onPressed: artworkPreferences?.releaseEnabled == true ? onArtworkStudio : null,
-          icon: Stack(
-            clipBehavior: Clip.none,
-            children: [
-              Icon(
-                Icons.palette_outlined,
-                color: artworkPreferences?.releaseEnabled == true ? EllaColors.tealDeep : EllaColors.inkSoft,
-              ),
-              if (artworkStyleSaving || artworkBackfillState == _ArtworkBackfillUiState.running)
-                const Positioned(
-                  right: -4,
-                  bottom: -4,
-                  child: SizedBox(
-                    key: Key('home-artwork-progress-indicator'),
-                    width: 12,
-                    height: 12,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
-                  ),
-                )
-              else if (artworkBackfillState == _ArtworkBackfillUiState.needsAttention)
-                const Positioned(
-                  right: -3,
-                  bottom: -3,
-                  child: DecoratedBox(
-                    key: Key('home-artwork-attention-indicator'),
-                    decoration: BoxDecoration(color: EllaColors.warning, shape: BoxShape.circle),
-                    child: SizedBox(width: 9, height: 9),
-                  ),
-                ),
-            ],
+        if (_showQueueSummary) ...[
+          const SizedBox(height: 8),
+          _HomeArtworkQueueSummary(
+            status: artworkQueueStatus,
+            loadState: artworkQueueLoadState,
+            onTap: onArtworkStudio,
           ),
-        ),
+        ],
       ],
     );
+  }
+
+  bool get _showQueueSummary {
+    if (artworkPreferences?.releaseEnabled != true) return false;
+    final queue = artworkQueueStatus;
+    if (queue == null) {
+      return artworkQueueLoadState == _ArtworkQueueLoadState.loading ||
+          artworkQueueLoadState == _ArtworkQueueLoadState.failed;
+    }
+    return queue.remaining > 0 ||
+        queue.failed > 0 ||
+        queue.controlState == MemoryArtworkQueueState.paused ||
+        queue.controlState == MemoryArtworkQueueState.cancelled;
+  }
+}
+
+class _HomeArtworkQueueSummary extends StatelessWidget {
+  const _HomeArtworkQueueSummary({required this.status, required this.loadState, required this.onTap});
+
+  final MemoryArtworkQueueStatus? status;
+  final _ArtworkQueueLoadState loadState;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final queue = status;
+    final failed = loadState == _ArtworkQueueLoadState.failed;
+    final headline = queue == null
+        ? failed
+            ? context.l10n.memoryArtworkQueueUnavailable
+            : context.l10n.memoryArtworkQueueChecking
+        : context.l10n.memoryArtworkQueueProgress(queue.ready, queue.total);
+    final detail = queue == null ? '' : _detail(context, queue);
+    final progress = queue == null ? (failed ? 1.0 : null) : _progress(queue);
+    return Semantics(
+      button: true,
+      label: '$headline${detail.isEmpty ? '' : '. $detail'}. ${context.l10n.memoryArtworkStudio}',
+      child: Material(
+        color: EllaColors.elevatedCard,
+        borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+        child: InkWell(
+          key: const Key('home-artwork-queue-summary'),
+          borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 34,
+                  height: 34,
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      CircularProgressIndicator(
+                        key: const Key('home-artwork-queue-ring'),
+                        value: progress,
+                        strokeWidth: 3,
+                        color: failed ? EllaColors.warning : EllaColors.tealDeep,
+                        backgroundColor: EllaColors.cardEdge,
+                      ),
+                      Icon(
+                        failed ? Icons.priority_high_rounded : Icons.auto_awesome_rounded,
+                        size: 15,
+                        color: failed ? EllaColors.warning : EllaColors.tealDeep,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(headline, style: EllaTextStyles.secondary.copyWith(color: EllaColors.ink)),
+                      if (detail.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Text(detail, style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft)),
+                      ],
+                    ],
+                  ),
+                ),
+                const Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  static double? _progress(MemoryArtworkQueueStatus queue) {
+    if (queue.state == MemoryArtworkQueueState.completed) return 1;
+    if (queue.batchSize > 0 && queue.batchRemaining <= queue.batchSize) {
+      return ((queue.batchSize - queue.batchRemaining) / queue.batchSize).clamp(0, 1);
+    }
+    return queue.progress;
+  }
+
+  static String _detail(BuildContext context, MemoryArtworkQueueStatus queue) {
+    final parts = <String>[];
+    if (queue.active > 0) parts.add(context.l10n.memoryArtworkQueueCreating(queue.active));
+    if (queue.queued > 0) parts.add(context.l10n.memoryArtworkQueueQueued(queue.queued));
+    if (queue.retrying > 0) parts.add(context.l10n.memoryArtworkQueueRetrying(queue.retrying));
+    if (queue.failed > 0) parts.add(context.l10n.memoryArtworkQueueFailed(queue.failed));
+    if (parts.isNotEmpty) return parts.join(' · ');
+    if (queue.controlState == MemoryArtworkQueueState.paused) return context.l10n.memoryArtworkQueuePaused;
+    if (queue.controlState == MemoryArtworkQueueState.cancelled) return context.l10n.memoryArtworkQueueStopped;
+    return '';
   }
 }
 

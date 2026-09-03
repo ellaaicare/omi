@@ -981,6 +981,44 @@ void main() {
     expect(find.text('Preparing illustration…'), findsOneWidget);
   });
 
+  testWidgets('enabling bounded automatic recovery rechecks the same visible memory', (tester) async {
+    final api = _ManualGenerationArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-hero-recovery',
+      createdAt: DateTime(2026, 9, 2),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+    );
+
+    Widget buildArtwork({required bool recover}) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: SizedBox(
+            width: 320,
+            height: 220,
+            child: MemoryArtworkImage(
+              conversation: conversation,
+              api: api,
+              cachedFileLookup: (_) async => null,
+              enqueueIfMissing: recover,
+              maxTransientRetries: 0,
+            ),
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(recover: false));
+    await tester.pump();
+    expect(api.enqueueRequests, [isFalse]);
+
+    await tester.pumpWidget(buildArtwork(recover: true));
+    await tester.pump();
+
+    expect(api.enqueueRequests, [isFalse, isTrue]);
+    expect(
+      find.byKey(const Key('memory-artwork-generation-progress-memory-hero-recovery')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('manual generation stays unavailable for consent and authority failures', (tester) async {
     final api = _ManualGenerationArtworkApi(initialFailureCode: 'memory_artwork_consent_required');
     final conversation = ServerConversation(
@@ -1007,6 +1045,43 @@ void main() {
     expect(find.text('Try artwork again'), findsNothing);
     expect(find.byIcon(Icons.auto_awesome_outlined), findsNothing);
     expect(api.enqueueRequests, [isFalse]);
+  });
+
+  testWidgets('manual generation fails closed for raw terminal artwork states', (tester) async {
+    const terminalCodes = {
+      'deletion_pending',
+      'authority_changed',
+      'preference_changed',
+      'source_changed',
+      'prompt_changed',
+      'job_claim_invalid',
+    };
+
+    for (final terminalCode in terminalCodes) {
+      final api = _ManualGenerationArtworkApi(initialFailureCode: terminalCode);
+      final conversation = ServerConversation(
+        id: 'memory-policy-$terminalCode',
+        createdAt: DateTime(2026, 9, 2),
+        structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MemoryArtworkImage(
+            conversation: conversation,
+            api: api,
+            cachedFileLookup: (_) async => null,
+            allowManualGeneration: true,
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Try artwork again'), findsNothing, reason: terminalCode);
+      expect(api.enqueueRequests, [isFalse], reason: terminalCode);
+    }
   });
 
   testWidgets('suppresses cached artwork after a terminal policy response', (tester) async {
@@ -1125,6 +1200,10 @@ void main() {
     await tester.pump();
 
     expect(find.text('Preparing illustration…'), findsOneWidget);
+    expect(
+      find.byKey(const Key('memory-artwork-generation-progress-memory-generating')),
+      findsOneWidget,
+    );
 
     api.remoteResult.complete(const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating));
     await tester.pump();

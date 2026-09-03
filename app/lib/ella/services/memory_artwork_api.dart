@@ -66,6 +66,23 @@ class MemoryArtworkResult {
 
   bool get isReady => status == MemoryArtworkResultStatus.ready && url != null;
   bool get isAuthorityCurrent => authority?.isExactCurrent() ?? true;
+
+  /// Generation is an explicit side effect, so unknown and policy-sensitive
+  /// states fail closed. The empty code is the server's canonical state for a
+  /// memory that has never had artwork reserved.
+  bool get canRequestGeneration =>
+      status == MemoryArtworkResultStatus.unavailable &&
+      const {
+        '',
+        'memory_artwork_dimensions_invalid',
+        'memory_artwork_finalize_conflict',
+        'memory_artwork_object_missing',
+        'memory_artwork_provider_failed',
+        'memory_artwork_provider_rejected',
+        'memory_artwork_provider_unavailable',
+        'memory_artwork_storage_failed',
+        'memory_artwork_worker_failed',
+      }.contains(failureCode);
 }
 
 class MemoryArtworkPreferences {
@@ -263,7 +280,17 @@ class MemoryArtworkApi {
     if (result.isReady || result.status == MemoryArtworkResultStatus.declined || !authority.isExactCurrent()) {
       return result;
     }
-    if (enqueueIfMissing && result.status == MemoryArtworkResultStatus.unavailable) {
+    if (enqueueIfMissing && result.canRequestGeneration) {
+      // Re-read immediately before the side effect. The tile may have rendered
+      // while consent, deletion, source, profile, or runtime authority changed.
+      final current = await _fetchWithAuthority(authority, memoryId);
+      if (current.isReady ||
+          current.status == MemoryArtworkResultStatus.generating ||
+          current.status == MemoryArtworkResultStatus.declined ||
+          !current.canRequestGeneration ||
+          !authority.isExactCurrent()) {
+        return current;
+      }
       result = await _enqueueWithAuthority(authority, memoryId);
       if (result.status != MemoryArtworkResultStatus.generating || !authority.isExactCurrent()) {
         return result;

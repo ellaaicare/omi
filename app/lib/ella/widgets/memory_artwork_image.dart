@@ -111,7 +111,8 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         oldWidget.conversation.artwork?.status != widget.conversation.artwork?.status ||
         oldWidget.conversation.artwork?.styleVersion != widget.conversation.artwork?.styleVersion ||
         oldWidget.refreshEpoch != widget.refreshEpoch ||
-        oldWidget.authorityEpoch != widget.authorityEpoch) {
+        oldWidget.authorityEpoch != widget.authorityEpoch ||
+        oldWidget.enqueueIfMissing != widget.enqueueIfMissing) {
       _refreshRequest(invalidateCachedArtwork: oldWidget.authorityEpoch != widget.authorityEpoch);
     }
   }
@@ -548,15 +549,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   }
 
   bool _canManuallyGenerate(MemoryArtworkResult? result) {
-    if (!widget.allowManualGeneration || result?.status != MemoryArtworkResultStatus.unavailable) return false;
-    if (_mustSuppressCachedArtwork(result) || _isAuthorityUnavailable(result)) return false;
-    return !const {
-      'consent_required',
-      'disabled',
-      'sensitive_source_excluded',
-      'memory_artwork_enrichment_not_terminal',
-      'memory_artwork_style_version_invalid',
-    }.contains(result?.failureCode);
+    return widget.allowManualGeneration && result?.canRequestGeneration == true;
   }
 
   Widget _cachedArtworkOrFallback(BuildContext context, {required _MemoryArtworkFallbackKind kind}) {
@@ -621,11 +614,25 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
           mainAxisSize: MainAxisSize.min,
           children: [
             if (!useCompactLayout) ...[
-              Icon(
-                canGenerate ? Icons.auto_awesome_outlined : Icons.brush_outlined,
-                color: const Color(0xFF57736A),
-                size: 30,
-              ),
+              if (isPreparing)
+                SizedBox(
+                  key: Key('memory-artwork-generation-progress-${widget.conversation.id}'),
+                  width: 38,
+                  height: 38,
+                  child: const Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      CircularProgressIndicator(strokeWidth: 2.5, color: Color(0xFF3A776A)),
+                      Icon(Icons.auto_awesome_rounded, color: Color(0xFF57736A), size: 17),
+                    ],
+                  ),
+                )
+              else
+                Icon(
+                  canGenerate ? Icons.auto_awesome_outlined : Icons.brush_outlined,
+                  color: const Color(0xFF57736A),
+                  size: 30,
+                ),
               const SizedBox(height: 8),
             ],
             Text(

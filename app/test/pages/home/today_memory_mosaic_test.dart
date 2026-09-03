@@ -964,6 +964,31 @@ void main() {
     expect(find.text('Illustration style saved. Ella will prepare the artwork in the background.'), findsOneWidget);
   });
 
+  testWidgets('Home prioritizes only the hero and exposes truthful artwork queue progress', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(queue: _artworkQueueStatus(ready: 4, active: 1, queued: 5));
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final automaticRequests = artwork.displayRequests.where((request) => request.enqueueIfMissing).toList();
+    expect(automaticRequests, [(memoryId: 'memory-1', enqueueIfMissing: true)]);
+    expect(find.byKey(const Key('home-artwork-queue-summary')), findsOneWidget);
+    expect(find.text('4 of 10 illustrations ready'), findsOneWidget);
+    final ring = tester.widget<CircularProgressIndicator>(find.byKey(const Key('home-artwork-queue-ring')));
+    expect(ring.value, closeTo(0.3, 0.0001));
+
+    await tester.tap(find.byKey(const Key('home-artwork-queue-summary')));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Artwork studio'), findsOneWidget);
+  });
+
   testWidgets('Home leaves older artwork paused when the memory feed nears its end', (tester) async {
     final authority = await _installArtworkAuthority();
     final artwork = _FakeMemoryArtworkApi(
@@ -1168,7 +1193,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(
       find.text('Artwork progress could not be loaded. Your finished illustrations are still available.'),
-      findsOneWidget,
+      findsNWidgets(2),
     );
     expect(find.text('Try loading progress again'), findsOneWidget);
     expect(find.byKey(const Key('home-artwork-continue')), findsNothing);
@@ -1203,7 +1228,7 @@ void main() {
     await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
-    expect(find.text('Checking artwork progress…'), findsOneWidget);
+    expect(find.text('Checking artwork progress…'), findsNWidgets(2));
 
     queueGate.complete();
     backfillGate.complete();
@@ -1250,7 +1275,7 @@ void main() {
 
     expect(find.text('Ella is preparing artwork. You can leave this screen.'), findsOneWidget);
     expect(find.byKey(const Key('home-artwork-queue-progress-label')), findsOneWidget);
-    expect(find.text('35 of 166 illustrations ready'), findsNothing);
+    expect(find.text('35 of 166 illustrations ready'), findsOneWidget);
     expect(find.text('35 ready · 131 left'), findsNothing);
     expect(find.text('10 ready · 10 left'), findsNothing);
     final indicator = tester.widget<LinearProgressIndicator>(find.byKey(const Key('home-artwork-queue-progress-bar')));
@@ -1974,12 +1999,27 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
   int _backfillRequests = 0;
   int _styleRequests = 0;
   int queueStatusRequests = 0;
+  final List<({String memoryId, bool enqueueIfMissing})> displayRequests = [];
 
   void failNextQueueStatus() => _failedQueueStatusRequests.add(queueStatusRequests);
 
   void gateNextQueueStatus(Completer<void> gate, {MemoryArtworkQueueStatus? result}) {
     _queueStatusGates[queueStatusRequests] = gate;
     _queueStatusResults[queueStatusRequests] = result ?? queue;
+  }
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    displayRequests.add((memoryId: memoryId, enqueueIfMissing: enqueueIfMissing));
+    return const MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.unavailable,
+      failureCode: 'memory_artwork_enrichment_not_terminal',
+    );
   }
 
   @override

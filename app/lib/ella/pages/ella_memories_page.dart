@@ -910,6 +910,7 @@ class MemoryGalleryCard extends StatelessWidget {
     this.artworkApi,
     this.artworkRefreshEpoch = 0,
     this.artworkAuthorityEpoch = 0,
+    this.enqueueArtworkIfMissing = false,
   });
 
   final ServerConversation conversation;
@@ -920,6 +921,7 @@ class MemoryGalleryCard extends StatelessWidget {
   final MemoryArtworkApi? artworkApi;
   final int artworkRefreshEpoch;
   final int artworkAuthorityEpoch;
+  final bool enqueueArtworkIfMissing;
 
   String get _title => displayTitle ?? conversation.structured.title;
 
@@ -939,6 +941,7 @@ class MemoryGalleryCard extends StatelessWidget {
                   refreshEpoch: artworkRefreshEpoch,
                   authorityEpoch: artworkAuthorityEpoch,
                   allowManualGeneration: true,
+                  enqueueIfMissing: enqueueArtworkIfMissing,
                 ),
               ),
               Expanded(
@@ -957,6 +960,7 @@ class MemoryGalleryCard extends StatelessWidget {
                   refreshEpoch: artworkRefreshEpoch,
                   authorityEpoch: artworkAuthorityEpoch,
                   allowManualGeneration: true,
+                  enqueueIfMissing: enqueueArtworkIfMissing,
                 ),
               ),
               Padding(padding: const EdgeInsets.all(16), child: details),

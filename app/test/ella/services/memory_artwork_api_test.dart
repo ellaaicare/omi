@@ -176,19 +176,20 @@ void main() {
           return http.Response(jsonEncode({'outcome': 'queued', 'status': 'generating'}), 202);
         }
         getCalls += 1;
-        if (getCalls == 1) {
+        if (getCalls <= 2) {
           return http.Response(
             jsonEncode({
-              'detail': {'code': 'memory_artwork_not_found'},
+              'schema_version': memoryArtworkSchemaVersion,
+              'status': 'unavailable',
             }),
-            404,
+            200,
           );
         }
         return http.Response(
           jsonEncode({
             'schema_version': memoryArtworkSchemaVersion,
-            'status': getCalls == 2 ? 'generating' : 'ready',
-            if (getCalls > 2) 'url': 'https://private-storage.example/lazy-ready',
+            'status': getCalls == 3 ? 'generating' : 'ready',
+            if (getCalls > 3) 'url': 'https://private-storage.example/lazy-ready',
             'style_version': memoryArtworkDefaultStyle,
             'enrichment_revision': 'summary-lazy',
           }),
@@ -205,8 +206,90 @@ void main() {
     );
 
     expect(result.isReady, isTrue);
-    expect(methods, ['GET', 'POST', 'GET', 'GET']);
+    expect(methods, ['GET', 'GET', 'POST', 'GET', 'GET']);
     expect(result.cacheKey, hasLength(64));
+  });
+
+  test('generation rechecks policy immediately before POST and blocks raw terminal states', () async {
+    const terminalCodes = {
+      'deletion_pending',
+      'authority_changed',
+      'preference_changed',
+      'source_changed',
+      'prompt_changed',
+      'job_claim_invalid',
+    };
+
+    for (final terminalCode in terminalCodes) {
+      final authority = _Authority('owner-a');
+      final methods = <String>[];
+      var reads = 0;
+      final api = MemoryArtworkApi(
+        baseUrl: 'https://api.example/',
+        authorityProvider: () => authority,
+        request: ({
+          required url,
+          required headers,
+          required body,
+          required method,
+          timeout,
+          retries,
+          requireAuthCheck,
+          expectedAuthenticatedUid,
+          exactAuthority,
+        }) async {
+          methods.add(method);
+          reads += 1;
+          return http.Response(
+            jsonEncode({
+              'schema_version': memoryArtworkSchemaVersion,
+              'status': 'unavailable',
+              if (reads > 1) 'failure_code': terminalCode,
+            }),
+            200,
+          );
+        },
+      );
+
+      final result = await api.loadForDisplay('memory-policy-race', enqueueIfMissing: true);
+
+      expect(result.failureCode, terminalCode);
+      expect(methods, ['GET', 'GET'], reason: '$terminalCode must be rejected before generation');
+    }
+  });
+
+  test('unknown unavailable state fails closed without a generation POST', () async {
+    final methods = <String>[];
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => _Authority('owner-a'),
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async {
+        methods.add(method);
+        return http.Response(
+          jsonEncode({
+            'schema_version': memoryArtworkSchemaVersion,
+            'status': 'unavailable',
+            'failure_code': 'new_server_policy_state',
+          }),
+          200,
+        );
+      },
+    );
+
+    final result = await api.loadForDisplay('memory-unknown-policy', enqueueIfMissing: true);
+
+    expect(result.failureCode, 'new_server_policy_state');
+    expect(methods, ['GET']);
   });
 
   test('already-generating artwork is polled without duplicate enqueue', () async {
