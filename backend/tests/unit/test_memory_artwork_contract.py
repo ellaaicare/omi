@@ -14,6 +14,7 @@ import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
+from utils.ella import memory_artwork_storage
 
 
 @pytest.fixture(autouse=True)
@@ -545,8 +546,6 @@ def test_objectless_ready_artwork_is_atomically_rereserved_for_generation():
 
 
 def test_gcs_signed_url_rejects_a_missing_object_before_signing():
-    from utils.ella import memory_artwork_storage
-
     class MissingBlob:
         exists_calls = 0
 
