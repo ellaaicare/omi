@@ -541,6 +541,87 @@ def test_objectless_ready_artwork_is_atomically_rereserved_for_generation():
     assert repository.reserve_writes == 2
 
 
+def test_gcs_signed_url_rejects_a_missing_object_before_signing():
+    from utils.ella import memory_artwork_storage
+
+    class MissingBlob:
+        exists_calls = 0
+
+        def exists(self):
+            self.exists_calls += 1
+            return False
+
+        def generate_signed_url(self, **kwargs):
+            raise AssertionError("a missing object must never receive a signed URL")
+
+    missing_blob = MissingBlob()
+
+    class Bucket:
+        @staticmethod
+        def blob(object_key):
+            assert object_key.endswith(".png")
+            return missing_blob
+
+    class Client:
+        @staticmethod
+        def bucket(bucket_name):
+            assert bucket_name == "private-artwork"
+            return Bucket()
+
+    object_key = memory_artwork_storage.object_key_for(
+        uid="owner-a",
+        profile_binding_id="binding-owner-a",
+        memory_id="memory-1",
+        generation_key="a" * 64,
+        content_type="image/png",
+    )
+    store = memory_artwork_storage.GCSMemoryArtworkStore(bucket_name="private-artwork", client=Client())
+
+    with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as missing:
+        store.signed_get_url(uid="owner-a", memory_id="memory-1", object_key=object_key)
+
+    assert str(missing.value) == "memory_artwork_object_missing"
+    assert missing_blob.exists_calls == 1
+
+
+def test_missing_ready_blob_is_demoted_and_can_be_rereserved():
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    initial_store = FakeStore()
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=lambda: initial_store,
+        config=_enabled_config(),
+    )
+
+    assert asyncio.run(service.enqueue("owner-a", "memory-1"))["outcome"] == "reserved"
+    assert _run_claimed_process(service, repository) == {"outcome": "ready", "status": "ready"}
+
+    class MissingObjectStore(FakeStore):
+        def signed_get_url(self, **kwargs):
+            self.signed.append(kwargs)
+            raise artwork.MemoryArtworkStorageError("memory_artwork_object_missing")
+
+    service.store_factory = MissingObjectStore
+    conversation = repository.conversations[("owner-a", "memory-1")]
+    generation_key = conversation["artwork"]["generation_key"]
+
+    with pytest.raises(artwork.MemoryArtworkError) as missing:
+        asyncio.run(service.signed_url("owner-a", "memory-1"))
+
+    assert missing.value.code == "memory_artwork_object_missing"
+    assert conversation["artwork"]["status"] == "unavailable"
+    assert conversation["artwork"]["failure_code"] == "memory_artwork_object_missing"
+
+    retry = asyncio.run(service.enqueue("owner-a", "memory-1"))
+    assert retry == {"outcome": "reserved", "status": "generating"}
+    assert conversation["artwork"]["generation_key"] == generation_key
+    assert repository.jobs[("owner-a", "memory-1", generation_key)]["status"] == "pending"
+
+
 def test_process_requires_current_durable_job_claim_before_provider():
     repository = FakeRepository()
     repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")

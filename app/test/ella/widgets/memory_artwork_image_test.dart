@@ -1077,6 +1077,54 @@ void main() {
     );
   });
 
+  testWidgets('a narrow list photo uses an unclipped icon-only artwork retry action', (tester) async {
+    final semantics = tester.ensureSemantics();
+    final api = _ManualGenerationArtworkApi();
+    final photoData = await rootBundle.load('assets/images/onboarding-bg-1.webp');
+    final conversation = ServerConversation(
+      id: 'memory-narrow-photo-generation',
+      createdAt: DateTime(2026, 9, 2),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      photos: [
+        ConversationPhoto(
+          id: 'photo-1',
+          base64: base64Encode(photoData.buffer.asUint8List()),
+          createdAt: DateTime(2026, 9, 2),
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(
+            width: 112,
+            height: 112,
+            child: MemoryArtworkImage(
+              conversation: conversation,
+              api: api,
+              cachedFileLookup: (_) async => null,
+              allowManualGeneration: true,
+              maxTransientRetries: 0,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final retry = find.byKey(const Key('memory-artwork-photo-retry-memory-narrow-photo-generation'));
+    expect(retry, findsOneWidget);
+    expect(find.text('Try artwork again'), findsNothing);
+    expect(tester.getSemantics(retry).label, contains('Try artwork again'));
+    expect(tester.getRect(retry).right, lessThanOrEqualTo(112));
+    expect(tester.getRect(retry).bottom, lessThanOrEqualTo(112));
+    semantics.dispose();
+  });
+
   testWidgets('enabling bounded automatic recovery rechecks the same visible memory', (tester) async {
     final api = _ManualGenerationArtworkApi();
     final conversation = ServerConversation(

@@ -2349,13 +2349,17 @@ class _HomeArtworkQueueSummary extends StatelessWidget {
   Widget build(BuildContext context) {
     final queue = status;
     final failed = loadState == _ArtworkQueueLoadState.failed;
-    final headline = queue == null
-        ? failed
-            ? context.l10n.memoryArtworkQueueUnavailable
-            : context.l10n.memoryArtworkQueueChecking
-        : context.l10n.memoryArtworkQueueProgress(queue.ready, queue.total);
-    final detail = queue == null ? '' : _detail(context, queue);
-    final progress = queue == null ? (failed ? 1.0 : null) : _progress(queue);
+    final headline = failed
+        ? context.l10n.memoryArtworkQueueUnavailable
+        : queue == null
+            ? context.l10n.memoryArtworkQueueChecking
+            : context.l10n.memoryArtworkQueueProgress(queue.ready, queue.total);
+    final detail = failed || queue == null ? '' : _detail(context, queue);
+    final progress = failed
+        ? 1.0
+        : queue == null
+            ? null
+            : _progress(queue);
     return Semantics(
       button: true,
       label: '$headline${detail.isEmpty ? '' : '. $detail'}. ${context.l10n.memoryArtworkStudio}',

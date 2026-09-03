@@ -608,73 +608,105 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       ),
     );
     if (!isPreparing && !canGenerate) return photo;
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        photo,
-        if (isPreparing)
-          Center(
-            child: Semantics(
-              label: context.l10n.memoryArtworkPreparingLabel,
-              child: Material(
-                color: const Color(0xE6F8F2E8),
-                shape: const CircleBorder(),
-                child: Padding(
-                  padding: const EdgeInsets.all(10),
-                  child: SizedBox(
-                    key: Key('memory-artwork-generation-progress-${widget.conversation.id}'),
-                    width: 38,
-                    height: 38,
-                    child: const Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        CircularProgressIndicator(strokeWidth: 2.5, color: Color(0xFF3A776A)),
-                        Icon(Icons.auto_awesome_rounded, color: Color(0xFF57736A), size: 17),
-                      ],
+    return LayoutBuilder(
+      builder: (context, constraints) => Stack(
+        fit: StackFit.expand,
+        children: [
+          photo,
+          if (isPreparing)
+            Center(
+              child: Semantics(
+                label: context.l10n.memoryArtworkPreparingLabel,
+                child: Material(
+                  color: const Color(0xE6F8F2E8),
+                  shape: const CircleBorder(),
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: SizedBox(
+                      key: Key('memory-artwork-generation-progress-${widget.conversation.id}'),
+                      width: 38,
+                      height: 38,
+                      child: const Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          CircularProgressIndicator(strokeWidth: 2.5, color: Color(0xFF3A776A)),
+                          Icon(Icons.auto_awesome_rounded, color: Color(0xFF57736A), size: 17),
+                        ],
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-          )
-        else if (canGenerate)
-          Positioned(
-            right: 12,
-            bottom: 12,
-            child: Semantics(
-              label: context.l10n.memoryArtworkRetry,
-              button: true,
-              child: Material(
-                color: const Color(0xF2F8F2E8),
-                borderRadius: BorderRadius.circular(24),
-                elevation: 1,
-                child: InkWell(
-                  key: Key('memory-artwork-photo-retry-${widget.conversation.id}'),
-                  borderRadius: BorderRadius.circular(24),
-                  onTap: _generateArtwork,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.auto_awesome_outlined, color: Color(0xFF3A776A), size: 18),
-                        const SizedBox(width: 6),
-                        Text(
-                          context.l10n.memoryArtworkRetry,
-                          style: const TextStyle(
-                            color: Color(0xFF315F55),
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
+            )
+          else if (canGenerate)
+            _photoRetryAction(compact: constraints.maxWidth < 180),
+        ],
+      ),
+    );
+  }
+
+  Widget _photoRetryAction({required bool compact}) {
+    final key = Key('memory-artwork-photo-retry-${widget.conversation.id}');
+    if (compact) {
+      return Positioned(
+        right: 8,
+        bottom: 8,
+        child: Semantics(
+          label: context.l10n.memoryArtworkRetry,
+          button: true,
+          child: Material(
+            color: const Color(0xF2F8F2E8),
+            shape: const CircleBorder(),
+            elevation: 1,
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              key: key,
+              onTap: _generateArtwork,
+              child: const SizedBox(
+                width: 44,
+                height: 44,
+                child: Icon(Icons.auto_awesome_outlined, color: Color(0xFF3A776A), size: 20),
               ),
             ),
           ),
-      ],
+        ),
+      );
+    }
+    return Positioned(
+      right: 12,
+      bottom: 12,
+      child: Semantics(
+        label: context.l10n.memoryArtworkRetry,
+        button: true,
+        child: Material(
+          color: const Color(0xF2F8F2E8),
+          borderRadius: BorderRadius.circular(24),
+          elevation: 1,
+          child: InkWell(
+            key: key,
+            borderRadius: BorderRadius.circular(24),
+            onTap: _generateArtwork,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.auto_awesome_outlined, color: Color(0xFF3A776A), size: 18),
+                  const SizedBox(width: 6),
+                  Text(
+                    context.l10n.memoryArtworkRetry,
+                    style: const TextStyle(
+                      color: Color(0xFF315F55),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 

@@ -124,6 +124,8 @@ class GCSMemoryArtworkStore:
     def signed_get_url(self, *, uid: str, memory_id: str, object_key: str) -> str:
         _validated_owner_key(uid, memory_id, object_key)
         blob = self.client.bucket(self.bucket_name).blob(object_key)
+        if not blob.exists():
+            raise MemoryArtworkStorageError("memory_artwork_object_missing")
         return blob.generate_signed_url(
             version="v4",
             expiration=timedelta(seconds=SIGNED_URL_TTL_SECONDS),

@@ -1258,7 +1258,18 @@ class MemoryArtworkService:
         object_key = str(current_artwork.get("object_key") or "").strip()
         if not object_key:
             raise MemoryArtworkError("memory_artwork_object_missing", retryable=True)
-        url = self.store_factory().signed_get_url(uid=uid, memory_id=memory_id, object_key=object_key)
+        try:
+            url = self.store_factory().signed_get_url(uid=uid, memory_id=memory_id, object_key=object_key)
+        except MemoryArtworkStorageError as exc:
+            if str(exc) != "memory_artwork_object_missing":
+                raise
+            self.repository.mark_generation_unavailable(
+                uid,
+                memory_id,
+                generation_key=str(current_artwork.get("generation_key") or ""),
+                failure_code="memory_artwork_object_missing",
+            )
+            raise MemoryArtworkError("memory_artwork_object_missing", retryable=True) from exc
         return {
             "schema_version": ARTWORK_SCHEMA_VERSION,
             "status": "ready",

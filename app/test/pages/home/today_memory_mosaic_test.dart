@@ -1576,6 +1576,7 @@ void main() {
   });
 
   testWidgets('a transient queue status failure keeps polling the last known running queue', (tester) async {
+    final semantics = tester.ensureSemantics();
     final authority = await _installArtworkAuthority();
     final artwork = _FakeMemoryArtworkApi(
       queue: _artworkQueueStatus(ready: 2, queued: 8),
@@ -1596,10 +1597,23 @@ void main() {
     await tester.pump(const Duration(seconds: 4));
     await tester.pump();
     expect(artwork.queueStatusRequests, initialRequests + 1);
+    expect(
+      find.text('Artwork progress could not be loaded. Your finished illustrations are still available.'),
+      findsOneWidget,
+    );
+    expect(find.text('2 of 10 illustrations ready'), findsNothing);
+    expect(
+      tester.getSemantics(find.byKey(const Key('home-artwork-queue-summary'))).label,
+      contains('Artwork progress could not be loaded'),
+    );
     await tester.pump(const Duration(seconds: 4));
     await tester.pump();
 
     expect(artwork.queueStatusRequests, initialRequests + 2);
+    expect(find.text('Artwork progress could not be loaded. Your finished illustrations are still available.'),
+        findsNothing);
+    expect(find.text('2 of 10 illustrations ready'), findsOneWidget);
+    semantics.dispose();
   });
 
   testWidgets('a slower older queue refresh cannot overwrite a newer refresh in the same generation', (tester) async {
