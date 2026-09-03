@@ -647,6 +647,7 @@ def _mark_generation_unavailable_transaction(
     generation_key: str,
     failure_code: str,
     lease_token: Optional[str] = None,
+    expected_artwork: Optional[dict[str, Any]] = None,
 ) -> bool:
     snapshot = conversation_ref.get(transaction=transaction)
     if not snapshot.exists:
@@ -657,6 +658,14 @@ def _mark_generation_unavailable_transaction(
         return False
     if lease_token is not None and current.get("lease_token") != lease_token:
         return False
+    if expected_artwork is not None:
+        if (
+            expected_artwork.get("status") != "ready"
+            or not str(expected_artwork.get("object_key") or "").strip()
+            or expected_artwork.get("generation_key") != generation_key
+            or current != expected_artwork
+        ):
+            return False
     unavailable = dict(current)
     unavailable.update(
         {
@@ -683,6 +692,7 @@ def mark_generation_unavailable(
     generation_key: str,
     failure_code: str,
     lease_token: Optional[str] = None,
+    expected_artwork: Optional[dict[str, Any]] = None,
 ) -> bool:
     return _mark_generation_unavailable(
         db.transaction(),
@@ -690,6 +700,7 @@ def mark_generation_unavailable(
         generation_key=generation_key,
         failure_code=failure_code,
         lease_token=lease_token,
+        expected_artwork=expected_artwork,
     )
 
 

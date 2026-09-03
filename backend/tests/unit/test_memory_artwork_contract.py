@@ -228,12 +228,15 @@ class FakeRepository:
         generation_key,
         failure_code,
         lease_token=None,
+        expected_artwork=None,
     ):
         conversation = self.conversations.get((uid, memory_id))
         current = (conversation or {}).get("artwork") or {}
         if current.get("generation_key") != generation_key:
             return False
         if lease_token is not None and current.get("lease_token") != lease_token:
+            return False
+        if expected_artwork is not None and current != expected_artwork:
             return False
         current.update({"status": "unavailable", "failure_code": failure_code})
         current.pop("lease_token", None)
@@ -620,6 +623,70 @@ def test_missing_ready_blob_is_demoted_and_can_be_rereserved():
     assert retry == {"outcome": "reserved", "status": "generating"}
     assert conversation["artwork"]["generation_key"] == generation_key
     assert repository.jobs[("owner-a", "memory-1", generation_key)]["status"] == "pending"
+
+
+def test_stale_missing_blob_read_cannot_demote_a_new_same_key_generation_claim():
+    class InterleavingRepository(FakeRepository):
+        def mark_generation_unavailable(
+            self,
+            uid,
+            memory_id,
+            *,
+            generation_key,
+            failure_code,
+            lease_token=None,
+            expected_artwork,
+        ):
+            assert expected_artwork["status"] == "ready"
+            assert expected_artwork["object_key"]
+            assert expected_artwork["authority_digest"]
+            assert expected_artwork["binding_id"]
+            assert expected_artwork["profile_id"]
+            current = self.conversations[(uid, memory_id)]["artwork"]
+            assert current["generation_key"] == generation_key
+            current.update(
+                {
+                    "status": "generating",
+                    "lease_token": "new-generation-lease",
+                    "lease_expires_at": datetime.now(timezone.utc) + timedelta(seconds=120),
+                }
+            )
+            current.pop("object_key", None)
+            return super().mark_generation_unavailable(
+                uid,
+                memory_id,
+                generation_key=generation_key,
+                failure_code=failure_code,
+                lease_token=lease_token,
+                expected_artwork=expected_artwork,
+            )
+
+    repository = InterleavingRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    assert asyncio.run(service.enqueue("owner-a", "memory-1"))["outcome"] == "reserved"
+    assert _run_claimed_process(service, repository) == {"outcome": "ready", "status": "ready"}
+
+    class MissingObjectStore(FakeStore):
+        def signed_get_url(self, **kwargs):
+            raise artwork.MemoryArtworkStorageError("memory_artwork_object_missing")
+
+    service.store_factory = MissingObjectStore
+    with pytest.raises(artwork.MemoryArtworkError) as missing:
+        asyncio.run(service.signed_url("owner-a", "memory-1"))
+
+    assert missing.value.code == "memory_artwork_object_missing"
+    current = repository.conversations[("owner-a", "memory-1")]["artwork"]
+    assert current["status"] == "generating"
+    assert current["lease_token"] == "new-generation-lease"
+    assert "failure_code" not in current
 
 
 def test_process_requires_current_durable_job_claim_before_provider():
@@ -1547,6 +1614,38 @@ def test_firestore_transaction_contract_rejects_source_and_lease_drift():
     )
     assert reserved["outcome"] == "reserved"
     assert transaction.updates == 1
+
+    # A signed-URL read that observed the old ready object must not demote a
+    # same-key generation that another request has already reserved or claimed.
+    reference.state["artwork"] = {
+        **generation,
+        "status": "generating",
+        "binding_id": "binding-a",
+        "profile_id": "profile-a",
+        "style_version": "soft-gouache-v1",
+        "lease_token": "new-generation-lease",
+    }
+    observed_ready_artwork = {
+        **generation,
+        "status": "ready",
+        "binding_id": "binding-a",
+        "profile_id": "profile-a",
+        "style_version": "soft-gouache-v1",
+        "object_key": "users/owner-a/old-object.png",
+    }
+    updates_before_stale_demotion = transaction.updates
+    assert (
+        artwork_database._mark_generation_unavailable_transaction(
+            transaction,
+            reference,
+            generation_key="a" * 64,
+            failure_code="memory_artwork_object_missing",
+            expected_artwork=observed_ready_artwork,
+        )
+        is False
+    )
+    assert transaction.updates == updates_before_stale_demotion
+    assert reference.state["artwork"]["lease_token"] == "new-generation-lease"
 
     reference.state["discarded"] = True
     assert (

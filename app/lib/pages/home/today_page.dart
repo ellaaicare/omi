@@ -2325,6 +2325,7 @@ class _HomeMemoryToolbar extends StatelessWidget {
 
   bool get _showQueueSummary {
     if (artworkPreferences?.releaseEnabled != true) return false;
+    if (artworkQueueLoadState == _ArtworkQueueLoadState.failed) return true;
     final queue = artworkQueueStatus;
     if (queue == null) {
       return artworkQueueLoadState == _ArtworkQueueLoadState.loading ||

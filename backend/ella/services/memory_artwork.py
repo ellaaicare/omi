@@ -1268,6 +1268,7 @@ class MemoryArtworkService:
                 memory_id,
                 generation_key=str(current_artwork.get("generation_key") or ""),
                 failure_code="memory_artwork_object_missing",
+                expected_artwork=current_artwork,
             )
             raise MemoryArtworkError("memory_artwork_object_missing", retryable=True) from exc
         return {

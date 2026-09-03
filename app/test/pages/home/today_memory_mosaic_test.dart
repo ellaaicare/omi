@@ -1616,6 +1616,43 @@ void main() {
     semantics.dispose();
   });
 
+  testWidgets('a failed refresh stays visible over a retained completed queue until recovery', (tester) async {
+    final semantics = tester.ensureSemantics();
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(queue: _artworkQueueStatus(ready: 10, batchRemaining: 0));
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byKey(const Key('home-artwork-queue-summary')), findsNothing);
+    artwork.failNextQueueStatus();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byKey(const Key('home-artwork-queue-summary')), findsOneWidget);
+    expect(
+      find.text('Artwork progress could not be loaded. Your finished illustrations are still available.'),
+      findsOneWidget,
+    );
+    expect(
+      tester.getSemantics(find.byKey(const Key('home-artwork-queue-summary'))).label,
+      contains('Artwork progress could not be loaded'),
+    );
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byKey(const Key('home-artwork-queue-summary')), findsNothing);
+    semantics.dispose();
+  });
+
   testWidgets('a slower older queue refresh cannot overwrite a newer refresh in the same generation', (tester) async {
     final authority = await _installArtworkAuthority();
     final oldRefresh = Completer<void>();
