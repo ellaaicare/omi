@@ -1034,6 +1034,8 @@ void main() {
       queue: _artworkQueueStatus(
         ready: 527,
         queued: 35,
+        retrying: 2,
+        failed: 1,
         controlState: MemoryArtworkQueueState.paused,
         autoContinue: true,
         batchRemaining: 0,
@@ -1051,6 +1053,7 @@ void main() {
 
     final ring = tester.widget<CircularProgressIndicator>(find.byKey(const Key('home-artwork-queue-ring')));
     expect(ring.value, isNull, reason: 'full-history work has no bounded denominator while paused');
+    expect(find.text('Illustration work is paused. 35 queued · 2 retrying · 1 need attention'), findsOneWidget);
   });
 
   testWidgets('Home keeps stopped full-history artwork work indeterminate', (tester) async {
@@ -1059,6 +1062,8 @@ void main() {
       queue: _artworkQueueStatus(
         ready: 527,
         queued: 35,
+        retrying: 2,
+        failed: 1,
         controlState: MemoryArtworkQueueState.cancelled,
         autoContinue: true,
         batchRemaining: 0,
@@ -1076,6 +1081,8 @@ void main() {
 
     final ring = tester.widget<CircularProgressIndicator>(find.byKey(const Key('home-artwork-queue-ring')));
     expect(ring.value, isNull, reason: 'stopped full-history work remains incomplete and resumable');
+    expect(
+        find.text('This illustration update was stopped. 35 queued · 2 retrying · 1 need attention'), findsOneWidget);
   });
 
   testWidgets('Home leaves older artwork paused when the memory feed nears its end', (tester) async {

@@ -229,6 +229,7 @@ class _RecoveringEnrichmentArtworkApi extends MemoryArtworkApi {
   _RecoveringEnrichmentArtworkApi() : super(authorityProvider: () => null);
 
   int loadCalls = 0;
+  final List<bool> enqueueRequests = [];
 
   @override
   String cacheKeyForDisplay({
@@ -246,6 +247,7 @@ class _RecoveringEnrichmentArtworkApi extends MemoryArtworkApi {
     Duration pollInterval = const Duration(seconds: 3),
   }) async {
     loadCalls += 1;
+    enqueueRequests.add(enqueueIfMissing);
     if (loadCalls == 1) {
       return const MemoryArtworkResult(
         status: MemoryArtworkResultStatus.unavailable,
@@ -1894,6 +1896,46 @@ void main() {
     await tester.pump();
     expect(api.loadCalls, 2);
     expect(find.byKey(const Key('memory-generated-artwork-memory-awaiting-enrichment')), findsOneWidget);
+  });
+
+  testWidgets('refreshes unavailable hero artwork when conversation enrichment becomes terminal', (tester) async {
+    final api = _RecoveringEnrichmentArtworkApi();
+
+    ServerConversation conversation({required bool terminal}) => ServerConversation(
+          id: 'memory-enrichment-transition',
+          createdAt: DateTime(2026, 8, 26),
+          structured: Structured('[Ella] A new memory', '[Ella] A useful generic summary.'),
+          enrichmentState: terminal
+              ? const {'status': 'completed', 'canonical_status': 'completed', 'pending': false}
+              : const {'status': 'processing', 'canonical_status': 'pending', 'pending': true},
+          activeSummaryVersionId: terminal ? 'summary-version-2' : null,
+        );
+
+    Widget buildArtwork(ServerConversation value) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MemoryArtworkImage(
+            conversation: value,
+            api: api,
+            cachedFileLookup: (_) async => null,
+            retryDelay: const Duration(milliseconds: 10),
+            enqueueIfMissing: true,
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(conversation(terminal: false)));
+    await tester.pump();
+
+    expect(find.text('Illustration unavailable'), findsOneWidget);
+    expect(api.loadCalls, 1);
+    expect(api.enqueueRequests, [isTrue]);
+
+    await tester.pumpWidget(buildArtwork(conversation(terminal: true)));
+    await tester.pump();
+
+    expect(api.loadCalls, 2);
+    expect(api.enqueueRequests, [isTrue, isTrue]);
+    expect(find.byKey(const Key('memory-generated-artwork-memory-enrichment-transition')), findsOneWidget);
   });
 
   testWidgets('compact preparing state fits at 200 percent text scale', (tester) async {

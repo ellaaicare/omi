@@ -2428,10 +2428,15 @@ class _HomeArtworkQueueSummary extends StatelessWidget {
     if (queue.queued > 0) parts.add(context.l10n.memoryArtworkQueueQueued(queue.queued));
     if (queue.retrying > 0) parts.add(context.l10n.memoryArtworkQueueRetrying(queue.retrying));
     if (queue.failed > 0) parts.add(context.l10n.memoryArtworkQueueFailed(queue.failed));
-    if (parts.isNotEmpty) return parts.join(' · ');
-    if (queue.controlState == MemoryArtworkQueueState.paused) return context.l10n.memoryArtworkQueuePaused;
-    if (queue.controlState == MemoryArtworkQueueState.cancelled) return context.l10n.memoryArtworkQueueStopped;
-    return '';
+    final workDetail = parts.join(' · ');
+    final controlDetail = switch (queue.controlState) {
+      MemoryArtworkQueueState.paused => context.l10n.memoryArtworkQueuePaused,
+      MemoryArtworkQueueState.cancelled => context.l10n.memoryArtworkQueueStopped,
+      _ => '',
+    };
+    if (controlDetail.isEmpty) return workDetail;
+    if (workDetail.isEmpty) return controlDetail;
+    return '$controlDetail $workDetail';
   }
 }
 

@@ -16,6 +16,17 @@ typedef MemoryArtworkCacheEvictor = Future<void> Function(String cacheKey);
 
 enum _MemoryArtworkFallbackKind { preparing, unavailable }
 
+bool _artworkReadinessChanged(ServerConversation previous, ServerConversation current) {
+  String? enrichmentValue(ServerConversation conversation, String key) =>
+      conversation.enrichmentState?[key]?.toString();
+
+  return previous.status != current.status ||
+      previous.activeSummaryVersionId != current.activeSummaryVersionId ||
+      enrichmentValue(previous, 'status') != enrichmentValue(current, 'status') ||
+      enrichmentValue(previous, 'canonical_status') != enrichmentValue(current, 'canonical_status') ||
+      enrichmentValue(previous, 'pending') != enrichmentValue(current, 'pending');
+}
+
 class MemoryArtworkImage extends StatefulWidget {
   const MemoryArtworkImage({
     super.key,
@@ -110,6 +121,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         oldWidget.conversation.artwork?.enrichmentRevision != widget.conversation.artwork?.enrichmentRevision ||
         oldWidget.conversation.artwork?.status != widget.conversation.artwork?.status ||
         oldWidget.conversation.artwork?.styleVersion != widget.conversation.artwork?.styleVersion ||
+        _artworkReadinessChanged(oldWidget.conversation, widget.conversation) ||
         oldWidget.refreshEpoch != widget.refreshEpoch ||
         oldWidget.authorityEpoch != widget.authorityEpoch ||
         oldWidget.enqueueIfMissing != widget.enqueueIfMissing) {
