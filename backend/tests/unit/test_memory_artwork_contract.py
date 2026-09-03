@@ -973,7 +973,14 @@ def test_signed_url_rechecks_sensitive_source_before_release():
     }
     assert store.signed == []
 
-    for drift in ("enrichment_revision", "prompt", "discarded"):
+    for drift in (
+        "enrichment_revision",
+        "prompt",
+        "missing_enrichment_revision",
+        "missing_prompt_sha256",
+        "missing_style_version",
+        "discarded",
+    ):
         repository = FakeRepository()
         repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
         repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
@@ -993,14 +1000,25 @@ def test_signed_url_rechecks_sensitive_source_before_release():
             conversation["active_summary_version_id"] = "summary-corrected"
         elif drift == "prompt":
             conversation["structured"]["title"] = "A corrected memory title"
+        elif drift == "missing_enrichment_revision":
+            conversation["artwork"].pop("enrichment_revision")
+        elif drift == "missing_prompt_sha256":
+            conversation["artwork"].pop("prompt_sha256")
+        elif drift == "missing_style_version":
+            conversation["artwork"].pop("style_version")
         else:
             conversation["discarded"] = True
 
         result = asyncio.run(service.signed_url("owner-a", "memory-1"))
+        expected_failure_code = "memory_artwork_source_stale"
+        if drift == "discarded":
+            expected_failure_code = "memory_artwork_discarded"
+        elif drift == "missing_style_version":
+            expected_failure_code = "memory_artwork_preference_authority_stale"
         assert result == {
             "schema_version": artwork.ARTWORK_SCHEMA_VERSION,
             "status": "unavailable",
-            "failure_code": "memory_artwork_discarded" if drift == "discarded" else "memory_artwork_source_stale",
+            "failure_code": expected_failure_code,
         }
         assert store.signed == []
 

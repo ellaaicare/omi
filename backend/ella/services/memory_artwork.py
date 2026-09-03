@@ -1171,7 +1171,14 @@ class MemoryArtworkService:
                 "status": "unavailable",
                 "failure_code": "memory_artwork_state_invalid",
             }
-        style_version = str(current_artwork.get("style_version") or preferences.get("style_version") or "")
+        stored_style_version = str(current_artwork.get("style_version") or "")
+        style_version = stored_style_version or str(preferences.get("style_version") or "")
+        if status == "ready" and not stored_style_version:
+            return {
+                "schema_version": ARTWORK_SCHEMA_VERSION,
+                "status": "unavailable",
+                "failure_code": "memory_artwork_preference_authority_stale",
+            }
         if not _preferences_match_authority(preferences, authority, style_version=style_version):
             return {
                 "schema_version": ARTWORK_SCHEMA_VERSION,
@@ -1202,6 +1209,12 @@ class MemoryArtworkService:
                 "failure_code": "memory_artwork_enrichment_not_terminal",
             }
         stored_enrichment_revision = str(current_artwork.get("enrichment_revision") or "")
+        if status == "ready" and not stored_enrichment_revision:
+            return {
+                "schema_version": ARTWORK_SCHEMA_VERSION,
+                "status": "unavailable",
+                "failure_code": "memory_artwork_source_stale",
+            }
         if stored_enrichment_revision and stored_enrichment_revision != current_enrichment_revision:
             return {
                 "schema_version": ARTWORK_SCHEMA_VERSION,
@@ -1209,6 +1222,12 @@ class MemoryArtworkService:
                 "failure_code": "memory_artwork_source_stale",
             }
         stored_prompt_sha256 = str(current_artwork.get("prompt_sha256") or "")
+        if status == "ready" and not stored_prompt_sha256:
+            return {
+                "schema_version": ARTWORK_SCHEMA_VERSION,
+                "status": "unavailable",
+                "failure_code": "memory_artwork_source_stale",
+            }
         if stored_prompt_sha256:
             _, current_prompt_sha256 = _prompt_for(conversation, style_version)
             if stored_prompt_sha256 != current_prompt_sha256:
