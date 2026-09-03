@@ -916,6 +916,49 @@ void main() {
     expect(find.text('Illustration unavailable'), findsNothing);
   });
 
+  testWidgets('suppresses cached artwork while corrected enrichment is nonterminal', (tester) async {
+    final api = _DelayedArtworkApi();
+    final cachedFile = File('assets/images/onboarding-bg-1.webp');
+    await trustDisplayKey('owner-profile-memory-revision-cache-key');
+    final conversation = ServerConversation(
+      id: 'memory-enrichment-pending',
+      createdAt: DateTime(2026, 8, 25),
+      structured: Structured('[Ella] An older title', '[Ella] An older enriched summary.'),
+      artwork: const MemoryArtworkState(
+        status: MemoryArtworkStatus.ready,
+        styleVersion: memoryArtworkDefaultStyle,
+        enrichmentRevision: 'summary-revision-1',
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => cachedFile,
+          cacheEvictor: (_) async {},
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.byKey(const Key('memory-cached-artwork-memory-enrichment-pending')), findsOneWidget);
+
+    api.remoteResult.complete(
+      const MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.unavailable,
+        failureCode: 'memory_artwork_enrichment_not_terminal',
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byKey(const Key('memory-cached-artwork-memory-enrichment-pending')), findsNothing);
+    expect(find.text('Illustration unavailable'), findsOneWidget);
+  });
+
   testWidgets('visible artwork never enqueues work just because the card is rendered', (tester) async {
     final api = _DelayedArtworkApi();
     final conversation = ServerConversation(

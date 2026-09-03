@@ -119,8 +119,10 @@ def _reserve_generation_transaction(
         }
     current = conversation.get(ARTWORK_FIELD) or {}
     if isinstance(current, dict) and current.get("generation_key") == generation_key:
-        if current.get("status") in {"generating", "ready"}:
-            if current.get("status") == "generating" and job_ref is not None and job_state is not None:
+        current_status = current.get("status")
+        ready_object_key = str(current.get("object_key") or "").strip()
+        if current_status == "generating" or (current_status == "ready" and ready_object_key):
+            if current_status == "generating" and job_ref is not None and job_state is not None:
                 if current_job.get("status") not in {"pending", "processing"}:
                     transaction.set(job_ref, effective_job_state)
             return {"outcome": "existing", "artwork": dict(current)}

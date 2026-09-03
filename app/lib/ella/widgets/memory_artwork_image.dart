@@ -552,6 +552,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       'memory_artwork_consent_required',
       'memory_artwork_deletion_pending',
       'memory_artwork_discarded',
+      'memory_artwork_enrichment_not_terminal',
       'memory_artwork_memory_not_found',
       'memory_artwork_preference_authority_stale',
       'memory_artwork_release_disabled',
