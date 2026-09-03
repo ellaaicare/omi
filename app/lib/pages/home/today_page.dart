@@ -2332,6 +2332,7 @@ class _HomeMemoryToolbar extends StatelessWidget {
     }
     return queue.remaining > 0 ||
         queue.failed > 0 ||
+        queue.scanStatus != 'completed' ||
         queue.controlState == MemoryArtworkQueueState.paused ||
         queue.controlState == MemoryArtworkQueueState.cancelled;
   }
@@ -2414,7 +2415,7 @@ class _HomeArtworkQueueSummary extends StatelessWidget {
 
   static double? _progress(MemoryArtworkQueueStatus queue) {
     if (queue.state == MemoryArtworkQueueState.completed) return 1;
-    if (queue.autoContinue && queue.controlState == MemoryArtworkQueueState.running) return null;
+    if (queue.autoContinue) return null;
     if (queue.batchSize > 0 && queue.batchRemaining <= queue.batchSize) {
       return ((queue.batchSize - queue.batchRemaining) / queue.batchSize).clamp(0, 1);
     }

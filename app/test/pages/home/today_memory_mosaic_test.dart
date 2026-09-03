@@ -1008,6 +1008,76 @@ void main() {
     expect(ring.value, isNull, reason: 'ongoing full history has no truthful fixed denominator');
   });
 
+  testWidgets('Home keeps a full-history scan visible between queue batches', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(
+      queue: _artworkQueueStatus(ready: 527, autoContinue: true, batchRemaining: 0, scanStatus: 'scanning'),
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byKey(const Key('home-artwork-queue-summary')), findsOneWidget);
+    final ring = tester.widget<CircularProgressIndicator>(find.byKey(const Key('home-artwork-queue-ring')));
+    expect(ring.value, isNull, reason: 'an unfinished scan remains visible without inventing progress');
+  });
+
+  testWidgets('Home keeps paused full-history artwork work indeterminate', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(
+      queue: _artworkQueueStatus(
+        ready: 527,
+        queued: 35,
+        controlState: MemoryArtworkQueueState.paused,
+        autoContinue: true,
+        batchRemaining: 0,
+      ),
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final ring = tester.widget<CircularProgressIndicator>(find.byKey(const Key('home-artwork-queue-ring')));
+    expect(ring.value, isNull, reason: 'full-history work has no bounded denominator while paused');
+  });
+
+  testWidgets('Home keeps stopped full-history artwork work indeterminate', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(
+      queue: _artworkQueueStatus(
+        ready: 527,
+        queued: 35,
+        controlState: MemoryArtworkQueueState.cancelled,
+        autoContinue: true,
+        batchRemaining: 0,
+      ),
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final ring = tester.widget<CircularProgressIndicator>(find.byKey(const Key('home-artwork-queue-ring')));
+    expect(ring.value, isNull, reason: 'stopped full-history work remains incomplete and resumable');
+  });
+
   testWidgets('Home leaves older artwork paused when the memory feed nears its end', (tester) async {
     final authority = await _installArtworkAuthority();
     final artwork = _FakeMemoryArtworkApi(
@@ -2155,6 +2225,7 @@ MemoryArtworkQueueStatus _artworkQueueStatus({
   bool autoContinue = false,
   int batchSize = 10,
   int batchRemaining = 7,
+  String scanStatus = 'completed',
   String pauseReason = '',
   List<MemoryArtworkStyleProgress>? styles,
 }) {
@@ -2162,9 +2233,11 @@ MemoryArtworkQueueStatus _artworkQueueStatus({
   return MemoryArtworkQueueStatus(
     generationId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     styleVersion: memoryArtworkDefaultStyle,
-    state: remaining == 0 ? MemoryArtworkQueueState.completed : MemoryArtworkQueueState.running,
+    state: remaining == 0 && scanStatus == 'completed'
+        ? MemoryArtworkQueueState.completed
+        : MemoryArtworkQueueState.running,
     controlState: controlState,
-    scanStatus: 'completed',
+    scanStatus: scanStatus,
     scanned: ready + remaining,
     pagesProcessed: 4,
     autoContinue: autoContinue,
