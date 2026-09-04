@@ -514,6 +514,33 @@ def test_idempotent_generation_and_owner_scoped_signed_url():
     assert len(store.signed) == 1
 
 
+@pytest.mark.parametrize(
+    ("outcome", "failure_code"),
+    (
+        ("not_found", "memory_artwork_memory_not_found"),
+        ("source_changed", "memory_artwork_source_stale"),
+    ),
+)
+def test_enqueue_never_reports_generating_when_reservation_is_refused(outcome, failure_code):
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    repository.reserve_generation = lambda *args, **kwargs: {"outcome": outcome}
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        config=_enabled_config(),
+    )
+
+    assert asyncio.run(service.enqueue("owner-a", "memory-1")) == {
+        "outcome": outcome,
+        "status": "unavailable",
+        "failure_code": failure_code,
+    }
+    assert repository.jobs == {}
+
+
 def test_objectless_ready_artwork_is_atomically_rereserved_for_generation():
     repository = FakeRepository()
     repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")

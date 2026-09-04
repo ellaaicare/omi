@@ -312,7 +312,9 @@ void main() {
     const policyOutcomes = {
       'disabled': 'memory_artwork_release_disabled',
       'consent_required': 'memory_artwork_consent_required',
+      'not_found': 'memory_artwork_memory_not_found',
       'sensitive_source_excluded': 'memory_artwork_sensitive_source_excluded',
+      'source_changed': 'memory_artwork_source_stale',
     };
 
     for (final outcome in policyOutcomes.entries) {

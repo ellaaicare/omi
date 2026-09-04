@@ -655,11 +655,29 @@ class MemoryArtworkService:
             job_state=job_state,
             preserve_job_attempts=preserve_job_attempts,
         )
-        if reservation.get("outcome") == "deletion_pending":
+        outcome = str(reservation.get("outcome") or "")
+        if outcome == "deletion_pending":
             raise MemoryArtworkError("memory_artwork_deletion_pending")
+        if outcome == "not_found":
+            return {
+                "outcome": outcome,
+                "status": "unavailable",
+                "failure_code": "memory_artwork_memory_not_found",
+            }
+        if outcome == "source_changed":
+            return {
+                "outcome": outcome,
+                "status": "unavailable",
+                "failure_code": "memory_artwork_source_stale",
+            }
+        if outcome not in {"reserved", "existing"}:
+            raise MemoryArtworkError("memory_artwork_reservation_invalid", retryable=True)
+        reserved_artwork = reservation.get("artwork")
+        if not isinstance(reserved_artwork, dict) or reserved_artwork.get("status") not in {"generating", "ready"}:
+            raise MemoryArtworkError("memory_artwork_reservation_invalid", retryable=True)
         return {
-            "outcome": reservation.get("outcome"),
-            "status": str((reservation.get("artwork") or artwork_state).get("status") or "generating"),
+            "outcome": outcome,
+            "status": str(reserved_artwork["status"]),
         }
 
     async def process(

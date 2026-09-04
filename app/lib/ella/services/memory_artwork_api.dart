@@ -370,15 +370,18 @@ class MemoryArtworkApi {
     if (status == null) return _unavailable('memory_artwork_response_invalid');
     return MemoryArtworkResult(
       status: status,
-      failureCode:
-          status == MemoryArtworkResultStatus.unavailable ? _canonicalEnqueueFailureCode(payload?['outcome']) : '',
+      failureCode: status == MemoryArtworkResultStatus.unavailable
+          ? _canonicalEnqueueFailureCode(payload?['failure_code'] ?? payload?['outcome'])
+          : '',
     );
   }
 
   static String _canonicalEnqueueFailureCode(Object? outcome) => switch (outcome?.toString().trim()) {
         'disabled' => 'memory_artwork_release_disabled',
         'consent_required' => 'memory_artwork_consent_required',
+        'not_found' => 'memory_artwork_memory_not_found',
         'sensitive_source_excluded' => 'memory_artwork_sensitive_source_excluded',
+        'source_changed' => 'memory_artwork_source_stale',
         String code when code.startsWith('memory_artwork_') => code,
         _ => 'memory_artwork_unavailable',
       };
