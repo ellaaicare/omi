@@ -123,6 +123,7 @@ def _load_service_module():
 
 
 artwork = _load_service_module()
+memory_artwork_storage = sys.modules["utils.ella.memory_artwork_storage"]
 
 
 def _load_database_module():
@@ -298,6 +299,7 @@ class FakeRepository:
         artwork_state,
         job_state,
         preserve_job_attempts=False,
+        allow_retry=True,
     ):
         if uid in self.deletion_pending:
             return {"outcome": "deletion_pending"}
@@ -316,10 +318,17 @@ class FakeRepository:
         )
         effective_job["created_at"] = existing_job.get("created_at") or effective_job.get("created_at")
         current = conversation.get("artwork") or {}
-        if current.get("generation_key") == generation_key and current.get("status") in {"generating", "ready"}:
-            if current.get("status") == "generating":
+        current_status = current.get("status")
+        ready_object_key = str(current.get("object_key") or "").strip()
+        if current.get("generation_key") == generation_key and (
+            current_status == "generating" or (current_status == "ready" and ready_object_key)
+        ):
+            if current_status == "generating":
+                existing_job_status = existing_job.get("status")
+                if not allow_retry and existing_job_status not in {"pending", "processing"}:
+                    return {"outcome": "automatic_attempt_already_used", "artwork": copy.deepcopy(current)}
                 if (
-                    existing_job.get("status") == "pending"
+                    existing_job_status == "pending"
                     and existing_job.get("origin") != artwork.TERMINAL_ENRICHMENT_ORIGIN
                     and job_state.get("origin") == artwork.TERMINAL_ENRICHMENT_ORIGIN
                 ):
@@ -329,7 +338,7 @@ class FakeRepository:
                         "updated_at": job_state.get("updated_at"),
                     }
                 elif (
-                    existing_job.get("status") == "pending"
+                    existing_job_status == "pending"
                     and existing_job.get("origin") == artwork.HISTORICAL_BACKFILL_ORIGIN
                     and job_state.get("origin") == artwork.PREVIEW_BACKFILL_ORIGIN
                 ):
@@ -338,11 +347,17 @@ class FakeRepository:
                         "origin": artwork.PREVIEW_BACKFILL_ORIGIN,
                         "updated_at": job_state.get("updated_at"),
                     }
-                elif existing_job.get("status") not in {"pending", "processing"}:
+                elif existing_job_status not in {"pending", "processing"}:
                     self.jobs[job_key] = effective_job
             return {"outcome": "existing", "artwork": copy.deepcopy(current)}
+        if not allow_retry and (current.get("generation_key") == generation_key or existing_job):
+            return {"outcome": "automatic_attempt_already_used", "artwork": copy.deepcopy(current)}
         published = conversation.get("published_artwork") or {}
-        if current.get("status") == "ready" and current.get("enrichment_revision") == enrichment_revision:
+        if (
+            current.get("status") == "ready"
+            and str(current.get("object_key") or "").strip()
+            and current.get("enrichment_revision") == enrichment_revision
+        ):
             conversation["published_artwork"] = copy.deepcopy(current)
         elif not (published.get("status") == "ready" and published.get("enrichment_revision") == enrichment_revision):
             conversation.pop("published_artwork", None)
@@ -408,6 +423,7 @@ class FakeRepository:
         generation_key,
         failure_code,
         lease_token=None,
+        expected_artwork=None,
     ):
         conversation = self.conversations.get((uid, memory_id))
         current = (conversation or {}).get("artwork") or {}
@@ -415,6 +431,14 @@ class FakeRepository:
             return False
         if lease_token is not None and current.get("lease_token") != lease_token:
             return False
+        if expected_artwork is not None:
+            if (
+                expected_artwork.get("status") != "ready"
+                or not str(expected_artwork.get("object_key") or "").strip()
+                or expected_artwork.get("generation_key") != generation_key
+                or current != expected_artwork
+            ):
+                return False
         current.update({"status": "unavailable", "failure_code": failure_code})
         current.pop("lease_token", None)
         return True
@@ -3765,6 +3789,60 @@ def test_firestore_style_refresh_keeps_published_art_until_atomic_finalize():
     assert artwork_database.PUBLISHED_ARTWORK_FIELD not in conversation_ref.state
 
 
+@pytest.mark.parametrize("terminal_job_status", ("failed", "completed"))
+def test_firestore_automatic_reservation_does_not_reopen_terminal_generating_job(terminal_job_status):
+    class Snapshot:
+        def __init__(self, state):
+            self.state = state
+            self.exists = bool(state)
+
+        def to_dict(self):
+            return copy.deepcopy(self.state)
+
+    class Reference:
+        def __init__(self, state):
+            self.state = state
+
+        def get(self, transaction=None):
+            return Snapshot(self.state)
+
+    class Transaction:
+        def __init__(self):
+            self.operations = []
+
+        def update(self, reference, payload):
+            self.operations.append(("update", reference, payload))
+
+        def set(self, reference, payload):
+            self.operations.append(("set", reference, payload))
+
+    generation_key = "a" * 64
+    conversation = _terminal_memory("memory-1")
+    conversation["artwork"] = {
+        "status": "generating",
+        "generation_key": generation_key,
+        "enrichment_revision": "summary-memory-1",
+    }
+    transaction = Transaction()
+    job = {"status": terminal_job_status, "attempt_count": 5}
+
+    result = artwork_database._reserve_generation_transaction(
+        transaction,
+        Reference({"id": "owner-a"}),
+        Reference(conversation),
+        enrichment_revision="summary-memory-1",
+        generation_key=generation_key,
+        artwork_state={"status": "generating", "generation_key": generation_key},
+        job_ref=Reference(job),
+        job_state={"status": "pending", "attempt_count": 0},
+        allow_retry=False,
+    )
+
+    assert result["outcome"] == "automatic_attempt_already_used"
+    assert job == {"status": terminal_job_status, "attempt_count": 5}
+    assert transaction.operations == []
+
+
 def test_firestore_retry_reservation_preserves_attempt_history():
     class Snapshot:
         def __init__(self, state):
@@ -4694,9 +4772,387 @@ def test_public_conversation_model_omits_private_object_metadata():
     assert "authority_digest" not in serialized["artwork"]
 
 
-def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
-    from utils.ella import memory_artwork_storage
+def test_automatic_generation_is_durably_one_shot_but_manual_retry_remains_available():
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
 
+    def service():
+        return artwork.MemoryArtworkService(
+            repository=repository,
+            authority_resolver=_resolver,
+            provider_factory=FakeProvider,
+            store_factory=FakeStore,
+            config=_enabled_config(),
+        )
+
+    first = asyncio.run(service().enqueue("owner-a", "memory-1", request_mode="automatic"))
+    assert first["outcome"] == "reserved"
+    generation_key = repository.conversations[("owner-a", "memory-1")]["artwork"]["generation_key"]
+    repository.conversations[("owner-a", "memory-1")]["artwork"].update(
+        {"status": "unavailable", "failure_code": "memory_artwork_provider_failed"}
+    )
+    repository.jobs[("owner-a", "memory-1", generation_key)].update({"status": "failed", "attempt_count": 5})
+
+    after_restart = asyncio.run(service().enqueue("owner-a", "memory-1", request_mode="automatic"))
+    assert after_restart == {
+        "outcome": "automatic_attempt_already_used",
+        "status": "unavailable",
+        "failure_code": "memory_artwork_automatic_attempt_exhausted",
+    }
+    assert repository.reserve_writes == 1
+    assert repository.jobs[("owner-a", "memory-1", generation_key)]["attempt_count"] == 5
+
+    manual = asyncio.run(service().enqueue("owner-a", "memory-1", request_mode="manual"))
+    assert manual["outcome"] == "reserved"
+    assert repository.reserve_writes == 2
+
+
+@pytest.mark.parametrize("terminal_job_status", ("failed", "completed"))
+def test_automatic_generation_does_not_reopen_terminal_job_while_artwork_is_generating(terminal_job_status):
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+
+    first = asyncio.run(service.enqueue("owner-a", "memory-1", request_mode="automatic"))
+    assert first["outcome"] == "reserved"
+    generation_key = repository.conversations[("owner-a", "memory-1")]["artwork"]["generation_key"]
+    job = repository.jobs[("owner-a", "memory-1", generation_key)]
+    job.update({"status": terminal_job_status, "attempt_count": 5})
+
+    repeated = asyncio.run(service.enqueue("owner-a", "memory-1", request_mode="automatic"))
+
+    assert repeated == {
+        "outcome": "automatic_attempt_already_used",
+        "status": "unavailable",
+        "failure_code": "memory_artwork_automatic_attempt_exhausted",
+    }
+    assert job["status"] == terminal_job_status
+    assert job["attempt_count"] == 5
+    assert repository.reserve_writes == 1
+
+
+def test_objectless_ready_artwork_is_atomically_rereserved_for_generation():
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+
+    assert asyncio.run(service.enqueue("owner-a", "memory-1"))["outcome"] == "reserved"
+    assert _run_claimed_process(service, repository) == {"outcome": "ready", "status": "ready"}
+    conversation = repository.conversations[("owner-a", "memory-1")]
+    generation_key = conversation["artwork"]["generation_key"]
+    conversation["artwork"].pop("object_key")
+
+    with pytest.raises(artwork.MemoryArtworkError) as missing:
+        asyncio.run(service.signed_url("owner-a", "memory-1"))
+    assert missing.value.code == "memory_artwork_object_missing"
+
+    retry = asyncio.run(service.enqueue("owner-a", "memory-1"))
+    assert retry == {"outcome": "reserved", "status": "generating"}
+    assert conversation["artwork"]["generation_key"] == generation_key
+    assert repository.jobs[("owner-a", "memory-1", generation_key)]["status"] == "pending"
+
+
+def test_signed_url_releases_artwork_that_finishes_during_authority_resolution():
+    repository = FakeRepository()
+    memory = _terminal_memory("memory-1")
+    _, prompt_sha256 = artwork._prompt_for(memory, artwork.DEFAULT_STYLE_VERSION)
+    memory["artwork"] = {
+        "status": "generating",
+        "generation_key": "a" * 64,
+        "style_version": artwork.DEFAULT_STYLE_VERSION,
+        "enrichment_revision": "summary-memory-1",
+        "prompt_sha256": prompt_sha256,
+        "authority_digest": "digest-a",
+        "binding_id": "binding-owner-a",
+        "profile_id": "profile-owner-a",
+    }
+    repository.conversations[("owner-a", "memory-1")] = memory
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    store = FakeStore()
+
+    async def completing_resolver(uid):
+        await asyncio.sleep(0)
+        repository.conversations[(uid, "memory-1")]["artwork"].update(
+            {
+                "status": "ready",
+                "object_key": "private/object/key",
+                "content_type": "image/webp",
+                "pixel_width": 1536,
+                "pixel_height": 1024,
+            }
+        )
+        return _authority(uid)
+
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=completing_resolver,
+        store_factory=lambda: store,
+        config=_enabled_config(),
+    )
+
+    result = asyncio.run(service.signed_url("owner-a", "memory-1"))
+
+    assert result["status"] == "ready"
+    assert store.signed == [
+        {
+            "uid": "owner-a",
+            "profile_binding_id": "binding-owner-a",
+            "memory_id": "memory-1",
+            "generation_key": "a" * 64,
+            "object_key": "private/object/key",
+        }
+    ]
+
+
+def test_missing_ready_blob_is_demoted_and_can_be_rereserved():
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    assert asyncio.run(service.enqueue("owner-a", "memory-1"))["outcome"] == "reserved"
+    assert _run_claimed_process(service, repository) == {"outcome": "ready", "status": "ready"}
+
+    class MissingObjectStore(FakeStore):
+        def signed_get_url(self, **kwargs):
+            raise artwork.MemoryArtworkStorageError("memory_artwork_object_missing")
+
+    service.store_factory = MissingObjectStore
+    conversation = repository.conversations[("owner-a", "memory-1")]
+    generation_key = conversation["artwork"]["generation_key"]
+
+    with pytest.raises(artwork.MemoryArtworkError) as missing:
+        asyncio.run(service.signed_url("owner-a", "memory-1"))
+
+    assert missing.value.code == "memory_artwork_object_missing"
+    assert conversation["artwork"]["status"] == "unavailable"
+    assert asyncio.run(service.enqueue("owner-a", "memory-1")) == {"outcome": "reserved", "status": "generating"}
+    assert repository.jobs[("owner-a", "memory-1", generation_key)]["status"] == "pending"
+
+
+def test_transient_ready_blob_lookup_failure_is_retryable_without_demoting_artwork():
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    assert asyncio.run(service.enqueue("owner-a", "memory-1"))["outcome"] == "reserved"
+    assert _run_claimed_process(service, repository) == {"outcome": "ready", "status": "ready"}
+
+    class UnavailableStore(FakeStore):
+        def signed_get_url(self, **kwargs):
+            raise artwork.MemoryArtworkStorageError("memory_artwork_storage_unavailable")
+
+    service.store_factory = UnavailableStore
+    conversation = repository.conversations[("owner-a", "memory-1")]
+    ready_artwork = copy.deepcopy(conversation["artwork"])
+
+    with pytest.raises(artwork.MemoryArtworkError) as unavailable:
+        asyncio.run(service.signed_url("owner-a", "memory-1"))
+
+    assert unavailable.value.code == "memory_artwork_storage_unavailable"
+    assert unavailable.value.retryable is True
+    assert conversation["artwork"] == ready_artwork
+
+
+@pytest.mark.parametrize(
+    "storage_error",
+    [
+        "memory_artwork_object_profile_mismatch",
+        "memory_artwork_object_generation_mismatch",
+    ],
+)
+def test_ready_blob_authority_mismatch_is_non_retryable_conflict_without_demoting_artwork(storage_error):
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    assert asyncio.run(service.enqueue("owner-a", "memory-1"))["outcome"] == "reserved"
+    assert _run_claimed_process(service, repository) == {"outcome": "ready", "status": "ready"}
+
+    class MismatchedStore(FakeStore):
+        def signed_get_url(self, **kwargs):
+            raise artwork.MemoryArtworkStorageError(storage_error)
+
+    service.store_factory = MismatchedStore
+    conversation = repository.conversations[("owner-a", "memory-1")]
+    ready_artwork = copy.deepcopy(conversation["artwork"])
+
+    with pytest.raises(artwork.MemoryArtworkError) as mismatch:
+        asyncio.run(service.signed_url("owner-a", "memory-1"))
+
+    assert mismatch.value.code == storage_error
+    assert mismatch.value.retryable is False
+    assert conversation["artwork"] == ready_artwork
+    router_module = _load_memory_artwork_router_module(f"ella_memory_artwork_{storage_error}_router_test_module")
+    response = router_module._http_error(mismatch.value)
+    assert response.status_code == 409
+    assert response.detail == {"code": storage_error, "retryable": False}
+
+
+def test_stale_missing_blob_read_cannot_demote_a_new_same_key_generation_claim():
+    class InterleavingRepository(FakeRepository):
+        def mark_generation_unavailable(self, uid, memory_id, *, expected_artwork, **kwargs):
+            current = self.conversations[(uid, memory_id)]["artwork"]
+            current.update(
+                {
+                    "status": "generating",
+                    "lease_token": "new-generation-lease",
+                    "lease_expires_at": datetime.now(timezone.utc) + timedelta(seconds=120),
+                }
+            )
+            current.pop("object_key", None)
+            return super().mark_generation_unavailable(
+                uid,
+                memory_id,
+                expected_artwork=expected_artwork,
+                **kwargs,
+            )
+
+    repository = InterleavingRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    assert asyncio.run(service.enqueue("owner-a", "memory-1"))["outcome"] == "reserved"
+    assert _run_claimed_process(service, repository) == {"outcome": "ready", "status": "ready"}
+
+    class MissingObjectStore(FakeStore):
+        def signed_get_url(self, **kwargs):
+            raise artwork.MemoryArtworkStorageError("memory_artwork_object_missing")
+
+    service.store_factory = MissingObjectStore
+    with pytest.raises(artwork.MemoryArtworkError):
+        asyncio.run(service.signed_url("owner-a", "memory-1"))
+
+    current = repository.conversations[("owner-a", "memory-1")]["artwork"]
+    assert current["status"] == "generating"
+    assert current["lease_token"] == "new-generation-lease"
+    assert "failure_code" not in current
+
+
+def test_gcs_signed_url_rejects_missing_or_wrong_authority_before_signing():
+    class MissingBlob:
+        def exists(self):
+            return False
+
+        def generate_signed_url(self, **kwargs):
+            raise AssertionError("missing artwork must not receive a signed URL")
+
+    missing_blob = MissingBlob()
+
+    class Bucket:
+        def blob(self, object_key):
+            return missing_blob
+
+    class Client:
+        def bucket(self, bucket_name):
+            return Bucket()
+
+    object_key = memory_artwork_storage.object_key_for(
+        uid="owner-a",
+        profile_binding_id="binding-owner-a",
+        memory_id="memory-1",
+        generation_key="a" * 64,
+        content_type="image/png",
+    )
+    store = memory_artwork_storage.GCSMemoryArtworkStore(bucket_name="private-artwork", client=Client())
+
+    with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as mismatch:
+        store.signed_get_url(
+            uid="owner-a",
+            profile_binding_id="binding-owner-b",
+            memory_id="memory-1",
+            generation_key="a" * 64,
+            object_key=object_key,
+        )
+    assert str(mismatch.value) == "memory_artwork_object_profile_mismatch"
+
+    with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as missing:
+        store.signed_get_url(
+            uid="owner-a",
+            profile_binding_id="binding-owner-a",
+            memory_id="memory-1",
+            generation_key="a" * 64,
+            object_key=object_key,
+        )
+    assert str(missing.value) == "memory_artwork_object_missing"
+
+
+def test_gcs_signed_url_wraps_transient_existence_failure_without_signing():
+    class UnavailableBlob:
+        def exists(self):
+            raise RuntimeError("provider detail must not escape")
+
+        def generate_signed_url(self, **kwargs):
+            raise AssertionError("unverified artwork must not receive a signed URL")
+
+    class Bucket:
+        def blob(self, object_key):
+            return UnavailableBlob()
+
+    class Client:
+        def bucket(self, bucket_name):
+            return Bucket()
+
+    object_key = memory_artwork_storage.object_key_for(
+        uid="owner-a",
+        profile_binding_id="binding-owner-a",
+        memory_id="memory-1",
+        generation_key="a" * 64,
+        content_type="image/png",
+    )
+    store = memory_artwork_storage.GCSMemoryArtworkStore(bucket_name="private-artwork", client=Client())
+
+    with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as unavailable:
+        store.signed_get_url(
+            uid="owner-a",
+            profile_binding_id="binding-owner-a",
+            memory_id="memory-1",
+            generation_key="a" * 64,
+            object_key=object_key,
+        )
+
+    assert str(unavailable.value) == "memory_artwork_storage_unavailable"
+
+
+def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
     object_key = memory_artwork_storage.object_key_for(
         uid="owner-a",
         profile_binding_id="binding-owner-a",
@@ -4815,8 +5271,6 @@ def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
 
 
 def test_account_artwork_cleanup_fails_closed_only_when_storage_was_touched(monkeypatch):
-    from utils.ella import memory_artwork_storage
-
     monkeypatch.delenv("ELLA_MEMORY_ARTWORK_BUCKET", raising=False)
     assert memory_artwork_storage.delete_all_user_artwork("owner-a", cleanup_required=False) == 0
     with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as failure:
@@ -4825,8 +5279,6 @@ def test_account_artwork_cleanup_fails_closed_only_when_storage_was_touched(monk
 
 
 def test_distributed_publication_lock_holds_postgres_session_until_release(monkeypatch):
-    from utils.ella import memory_artwork_storage
-
     calls = []
 
     class Connection:
@@ -4868,8 +5320,6 @@ def test_distributed_publication_lock_holds_postgres_session_until_release(monke
 
 
 def test_distributed_publication_lock_fails_closed_when_owner_is_busy(monkeypatch):
-    from utils.ella import memory_artwork_storage
-
     class Connection:
         closed = False
 
@@ -4902,8 +5352,6 @@ def test_distributed_publication_lock_fails_closed_when_owner_is_busy(monkeypatc
 
 
 def test_account_deletion_requires_distributed_publication_lock():
-    from utils.ella import memory_artwork_storage
-
     class Repository:
         @staticmethod
         def begin_account_deletion(uid):
@@ -4915,8 +5363,6 @@ def test_account_deletion_requires_distributed_publication_lock():
 
 
 def test_account_deletion_returns_before_cleanup_while_claimed_worker_is_active(monkeypatch):
-    from utils.ella import memory_artwork_storage
-
     monkeypatch.setattr(memory_artwork_storage, "require_memory_artwork_publication_lock", lambda uid, proof: None)
     calls = []
 
@@ -4953,8 +5399,6 @@ def test_account_deletion_returns_before_cleanup_while_claimed_worker_is_active(
 
 
 def test_account_deletion_stops_before_job_cleanup_when_storage_absence_is_unproven(monkeypatch):
-    from utils.ella import memory_artwork_storage
-
     monkeypatch.setattr(memory_artwork_storage, "require_memory_artwork_publication_lock", lambda uid, proof: None)
 
     class Repository:
@@ -5118,7 +5562,7 @@ def test_retry_route_queues_missing_terminal_enrichment_once(monkeypatch):
     recovery_calls = []
 
     class Service:
-        async def enqueue(self, uid, memory_id):
+        async def enqueue(self, uid, memory_id, **kwargs):
             raise artwork.MemoryArtworkError("memory_artwork_enrichment_not_terminal", retryable=True)
 
     async def claim(uid, memory_id):
@@ -5161,7 +5605,7 @@ def test_retry_route_observes_existing_enrichment_without_duplicate_work(monkeyp
     router_module = _load_memory_artwork_router_module("ella_memory_artwork_existing_recovery_router_test_module")
 
     class Service:
-        async def enqueue(self, uid, memory_id):
+        async def enqueue(self, uid, memory_id, **kwargs):
             raise artwork.MemoryArtworkError("memory_artwork_enrichment_not_terminal", retryable=True)
 
     async def claim(uid, memory_id):
@@ -5431,14 +5875,14 @@ def test_terminal_enrichment_hook_runs_idempotent_processor_without_raising(monk
     calls = []
 
     class Service:
-        async def enqueue(self, uid, memory_id):
-            calls.append(("enqueue", uid, memory_id))
+        async def enqueue(self, uid, memory_id, *, request_mode):
+            calls.append(("enqueue", uid, memory_id, request_mode))
             return {"outcome": "reserved", "status": "generating"}
 
     monkeypatch.setattr(artwork, "MemoryArtworkService", Service)
 
     assert asyncio.run(artwork.enqueue_after_terminal_enrichment("owner-a", "memory-1")) is None
-    assert calls == [("enqueue", "owner-a", "memory-1")]
+    assert calls == [("enqueue", "owner-a", "memory-1", "automatic")]
 
 
 def test_xai_provider_uses_fixed_base64_contract_and_normalizes_dimensions(monkeypatch):
