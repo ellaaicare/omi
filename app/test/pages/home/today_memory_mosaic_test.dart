@@ -1304,6 +1304,8 @@ void main() {
   });
 
   testWidgets('Artwork Studio keeps a close control visible while its styles scroll', (tester) async {
+    tester.view.padding = const FakeViewPadding(top: 48);
+    addTearDown(tester.view.resetPadding);
     final authority = await _installArtworkAuthority();
     final artwork = _FakeMemoryArtworkApi(queue: _artworkQueueStatus(ready: 4, queued: 2));
     final harness = await _pumpHome(
@@ -1322,13 +1324,13 @@ void main() {
 
     final close = find.byKey(const Key('home-artwork-studio-close'));
     expect(close, findsOneWidget);
-    expect(tester.getTopLeft(close).dy, greaterThanOrEqualTo(0));
+    expect(tester.getTopLeft(close).dy, greaterThanOrEqualTo(48));
 
     await tester.drag(find.byKey(const Key('home-artwork-studio-scroll')), const Offset(0, -900));
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(close, findsOneWidget);
-    expect(tester.getTopLeft(close).dy, greaterThanOrEqualTo(0));
+    expect(tester.getTopLeft(close).dy, greaterThanOrEqualTo(48));
     await tester.tap(close);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));

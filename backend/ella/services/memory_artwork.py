@@ -1113,9 +1113,6 @@ class MemoryArtworkService:
                 "status": "unavailable",
                 "failure_code": "memory_artwork_discarded",
             }
-        artwork = conversation.get("artwork") or {}
-        if not isinstance(artwork, dict):
-            artwork = {}
         if _source_is_sensitive(conversation):
             return {
                 "schema_version": ARTWORK_SCHEMA_VERSION,
@@ -1244,8 +1241,6 @@ class MemoryArtworkService:
             }
         if (
             current_artwork.get("status") != "ready"
-            or current_artwork.get("generation_key") != artwork.get("generation_key")
-            or current_artwork.get("object_key") != artwork.get("object_key")
             or current_artwork.get("authority_digest") != authority.authority_digest
             or current_artwork.get("binding_id") != authority.binding_id
             or current_artwork.get("profile_id") != authority.profile_id

@@ -308,6 +308,49 @@ void main() {
     }
   });
 
+  test('generation canonicalizes a policy change returned by the POST', () async {
+    const policyOutcomes = {
+      'disabled': 'memory_artwork_release_disabled',
+      'consent_required': 'memory_artwork_consent_required',
+      'sensitive_source_excluded': 'memory_artwork_sensitive_source_excluded',
+    };
+
+    for (final outcome in policyOutcomes.entries) {
+      final methods = <String>[];
+      final api = MemoryArtworkApi(
+        baseUrl: 'https://api.example/',
+        authorityProvider: () => _Authority('owner-a'),
+        request: ({
+          required url,
+          required headers,
+          required body,
+          required method,
+          timeout,
+          retries,
+          requireAuthCheck,
+          expectedAuthenticatedUid,
+          exactAuthority,
+        }) async {
+          methods.add(method);
+          return http.Response(
+            jsonEncode({
+              'schema_version': memoryArtworkSchemaVersion,
+              'status': 'unavailable',
+              if (method == 'POST') 'outcome': outcome.key,
+            }),
+            200,
+          );
+        },
+      );
+
+      final result = await api.loadForDisplay('memory-post-policy-race', enqueueIfMissing: true);
+
+      expect(methods, ['GET', 'GET', 'POST']);
+      expect(result.failureCode, outcome.value);
+      expect(result.canRequestGeneration, isFalse);
+    }
+  });
+
   test('unknown unavailable state fails closed without a generation POST', () async {
     final methods = <String>[];
     final api = MemoryArtworkApi(

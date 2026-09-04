@@ -952,6 +952,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       backgroundColor: EllaColors.paper,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(EllaSizes.cardRadius)),

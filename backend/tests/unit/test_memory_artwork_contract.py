@@ -1241,6 +1241,57 @@ def test_signed_url_rereads_consent_after_awaited_authority_resolution():
     assert store.signed == []
 
 
+def test_signed_url_releases_artwork_that_finishes_during_authority_resolution():
+    repository = FakeRepository()
+    memory = _terminal_memory("memory-1")
+    _, prompt_sha256 = artwork._prompt_for(memory, artwork.DEFAULT_STYLE_VERSION)
+    memory["artwork"] = {
+        "status": "generating",
+        "generation_key": "a" * 64,
+        "style_version": artwork.DEFAULT_STYLE_VERSION,
+        "enrichment_revision": "summary-memory-1",
+        "prompt_sha256": prompt_sha256,
+        "authority_digest": "digest-a",
+        "binding_id": "binding-owner-a",
+        "profile_id": "profile-owner-a",
+    }
+    repository.conversations[("owner-a", "memory-1")] = memory
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    store = FakeStore()
+
+    async def completing_resolver(uid):
+        await asyncio.sleep(0)
+        repository.conversations[(uid, "memory-1")]["artwork"].update(
+            {
+                "status": "ready",
+                "object_key": "private/object/key",
+                "content_type": "image/webp",
+                "pixel_width": 1536,
+                "pixel_height": 1024,
+            }
+        )
+        return _authority(uid)
+
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=completing_resolver,
+        store_factory=lambda: store,
+        config=_enabled_config(),
+    )
+
+    result = asyncio.run(service.signed_url("owner-a", "memory-1"))
+
+    assert result["status"] == "ready"
+    assert result["url"].startswith("https://first-party.invalid/")
+    assert store.signed == [
+        {
+            "uid": "owner-a",
+            "memory_id": "memory-1",
+            "object_key": "private/object/key",
+        }
+    ]
+
+
 def test_release_off_is_a_signed_url_kill_switch():
     repository = FakeRepository()
     memory = _terminal_memory("memory-1")

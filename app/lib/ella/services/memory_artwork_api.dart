@@ -370,11 +370,18 @@ class MemoryArtworkApi {
     if (status == null) return _unavailable('memory_artwork_response_invalid');
     return MemoryArtworkResult(
       status: status,
-      failureCode: status == MemoryArtworkResultStatus.unavailable
-          ? (payload?['outcome']?.toString().trim() ?? 'memory_artwork_unavailable')
-          : '',
+      failureCode:
+          status == MemoryArtworkResultStatus.unavailable ? _canonicalEnqueueFailureCode(payload?['outcome']) : '',
     );
   }
+
+  static String _canonicalEnqueueFailureCode(Object? outcome) => switch (outcome?.toString().trim()) {
+        'disabled' => 'memory_artwork_release_disabled',
+        'consent_required' => 'memory_artwork_consent_required',
+        'sensitive_source_excluded' => 'memory_artwork_sensitive_source_excluded',
+        String code when code.startsWith('memory_artwork_') => code,
+        _ => 'memory_artwork_unavailable',
+      };
 
   Future<MemoryArtworkPreferences?> preferences() async {
     final authority = _authorityProvider();
