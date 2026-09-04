@@ -39,6 +39,10 @@ class MemoryArtworkPreferencesUpdate(BaseModel):
     style_version: str = DEFAULT_STYLE_VERSION
 
 
+class MemoryArtworkGenerationRequest(BaseModel):
+    request_mode: Literal["manual", "automatic"] = "manual"
+
+
 class MemoryArtworkBackfillRequest(BaseModel):
     cursor: Optional[str] = Field(default=None, min_length=1, max_length=256, pattern=r"^[^/]+$")
     # A preview only queues the newest page. Full historical reconciliation is
@@ -126,17 +130,19 @@ async def get_memory_artwork(memory_id: str, uid: str = Depends(get_exact_fireba
 async def retry_memory_artwork(
     memory_id: str,
     background_tasks: BackgroundTasks,
+    payload: Optional[MemoryArtworkGenerationRequest] = None,
     uid: str = Depends(get_exact_firebase_uid),
 ):
     service = MemoryArtworkService()
     try:
-        return await service.enqueue(uid, memory_id)
+        request_mode = payload.request_mode if payload is not None else "manual"
+        return await service.enqueue(uid, memory_id, request_mode=request_mode)
     except MemoryArtworkError as exc:
         if exc.code == "memory_artwork_enrichment_not_terminal":
             claim = await claim_memory_artwork_enrichment_recovery(uid, memory_id)
             outcome = str(claim.get("outcome") or "")
             if outcome == "completed":
-                return await service.enqueue(uid, memory_id)
+                return await service.enqueue(uid, memory_id, request_mode=request_mode)
             if outcome == "claimed":
                 background_tasks.add_task(
                     recover_failed_conversation_summary,
