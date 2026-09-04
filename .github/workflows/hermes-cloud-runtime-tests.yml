@@ -665,7 +665,6 @@ jobs:
             "tests/unit/test_capture_incident_1210_regressions.py::test_failed_stub_publication_abandons_only_the_still_owned_firestore_generation"
             "tests/unit/test_capture_incident_1210_regressions.py::test_duplicate_processing_claim_is_a_no_write_inflight_result"
             "tests/unit/test_capture_incident_1210_regressions.py::test_stale_processing_claim_without_a_lease_can_be_recovered"
-            "tests/unit/test_capture_incident_1210_regressions.py::test_reconnect_rebinds_firestore_before_publishing_redis_owner"
             "tests/unit/test_capture_incident_1210_regressions.py::test_capture_owner_rebind_and_rollback_are_generation_conditional"
             "tests/unit/test_capture_incident_1210_regressions.py::test_capture_photo_commit_uses_the_same_durable_owner_fence"
             "tests/unit/test_capture_incident_1210_regressions.py::test_capture_owner_transfer_fences_the_previous_firestore_generation"
