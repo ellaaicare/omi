@@ -2508,9 +2508,12 @@ class _ArtworkStudioSheet extends StatelessWidget {
     final selectedLibrary = libraries?.forStyle(preferences.styleVersion);
 
     return SafeArea(
-      child: SingleChildScrollView(
-        padding: EdgeInsets.fromLTRB(20, 12, 20, 20 + MediaQuery.viewInsetsOf(context).bottom),
-        child: Column(
+      child: Stack(
+        children: [
+          SingleChildScrollView(
+            key: const Key('home-artwork-studio-scroll'),
+            padding: EdgeInsets.fromLTRB(20, 12, 20, 20 + MediaQuery.viewInsetsOf(context).bottom),
+            child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -2741,6 +2744,22 @@ class _ArtworkStudioSheet extends StatelessWidget {
               ),
           ],
         ),
+          ),
+          Positioned(
+            top: 8,
+            right: 8,
+            child: DecoratedBox(
+              decoration: const BoxDecoration(color: EllaColors.paper, shape: BoxShape.circle),
+              child: IconButton(
+                key: const Key('home-artwork-studio-close'),
+                tooltip: MaterialLocalizations.of(context).closeButtonTooltip,
+                color: EllaColors.ink,
+                onPressed: () => Navigator.of(context).pop(),
+                icon: const Icon(Icons.close_rounded),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

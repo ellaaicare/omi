@@ -964,7 +964,7 @@ void main() {
     expect(find.text('Illustration style saved. Ella will prepare the artwork in the background.'), findsOneWidget);
   });
 
-  testWidgets('Home prioritizes only the hero and exposes truthful artwork queue progress', (tester) async {
+  testWidgets('Home leaves a nonterminal hero read-only and exposes truthful artwork queue progress', (tester) async {
     final authority = await _installArtworkAuthority();
     final artwork = _FakeMemoryArtworkApi(queue: _artworkQueueStatus(ready: 4, active: 1, queued: 5));
     final harness = await _pumpHome(
@@ -978,7 +978,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     final automaticRequests = artwork.displayRequests.where((request) => request.enqueueIfMissing).toList();
-    expect(automaticRequests, [(memoryId: 'memory-1', enqueueIfMissing: true)]);
+    expect(automaticRequests, isEmpty, reason: 'artwork cannot start before enrichment is terminal');
     expect(find.byKey(const Key('home-artwork-queue-summary')), findsOneWidget);
     expect(find.text('4 of 10 illustrations ready'), findsOneWidget);
     final ring = tester.widget<CircularProgressIndicator>(find.byKey(const Key('home-artwork-queue-ring')));
@@ -1301,6 +1301,38 @@ void main() {
 
     expect(find.text('Ella is preparing artwork. You can leave this screen.'), findsOneWidget);
     expect(find.byKey(const Key('home-artwork-queue-progress-bar')), findsOneWidget);
+  });
+
+  testWidgets('Artwork Studio keeps a close control visible while its styles scroll', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(queue: _artworkQueueStatus(ready: 4, queued: 2));
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final close = find.byKey(const Key('home-artwork-studio-close'));
+    expect(close, findsOneWidget);
+    expect(tester.getTopLeft(close).dy, greaterThanOrEqualTo(0));
+
+    await tester.drag(find.byKey(const Key('home-artwork-studio-scroll')), const Offset(0, -900));
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(close, findsOneWidget);
+    expect(tester.getTopLeft(close).dy, greaterThanOrEqualTo(0));
+    await tester.tap(close);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Artwork studio'), findsNothing);
   });
 
   testWidgets('open Artwork Studio follows queue loading without being reopened', (tester) async {

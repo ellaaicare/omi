@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 
 import 'package:omi/backend/schema/conversation.dart';
@@ -81,6 +83,20 @@ class MemoryArtworkImage extends StatefulWidget {
   /// authenticated display read confirms that artwork is unavailable.
   /// Passive list rendering remains read-only.
   final bool allowManualGeneration;
+
+  static const _automaticGenerationBudgetCapacity = 256;
+  static final LinkedHashSet<String> _automaticGenerationAttempts = LinkedHashSet<String>();
+
+  static bool claimAutomaticGeneration(String key) {
+    if (key.isEmpty || !_automaticGenerationAttempts.add(key)) return false;
+    while (_automaticGenerationAttempts.length > _automaticGenerationBudgetCapacity) {
+      _automaticGenerationAttempts.remove(_automaticGenerationAttempts.first);
+    }
+    return true;
+  }
+
+  @visibleForTesting
+  static void resetAutomaticGenerationBudgetForTesting() => _automaticGenerationAttempts.clear();
 
   @override
   State<MemoryArtworkImage> createState() => _MemoryArtworkImageState();
@@ -268,9 +284,20 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       // doing a private 30-second poll for every visible memory.
       result = await api.loadForDisplay(
         widget.conversation.id,
-        enqueueIfMissing: widget.enqueueIfMissing || enqueueIfMissing,
+        enqueueIfMissing: enqueueIfMissing,
         pollAttempts: 0,
       );
+      if (!enqueueIfMissing &&
+          widget.enqueueIfMissing &&
+          result.isAuthorityCurrent &&
+          result.canRequestGeneration &&
+          MemoryArtworkImage.claimAutomaticGeneration(_automaticGenerationKey(api, result))) {
+        result = await api.loadForDisplay(
+          widget.conversation.id,
+          enqueueIfMissing: true,
+          pollAttempts: 0,
+        );
+      }
     } catch (_) {
       if (!mounted || generation != _requestGeneration) return;
       setState(() {
@@ -348,6 +375,35 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       unawaited(_loadCachedFile(publishedReadyCacheKey, generation));
     }
     if (_shouldRetry(result)) _scheduleRetry(api, artwork, generation, result: result);
+  }
+
+  String _automaticGenerationKey(MemoryArtworkApi api, MemoryArtworkResult result) {
+    final artwork = widget.conversation.artwork;
+    final styleVersion = result.requestedStyleVersion.isNotEmpty
+        ? result.requestedStyleVersion
+        : result.styleVersion.isNotEmpty
+            ? result.styleVersion
+            : artwork?.styleVersion ?? '';
+    final enrichmentRevision = result.enrichmentRevision.isNotEmpty
+        ? result.enrichmentRevision
+        : artwork?.enrichmentRevision ?? '';
+    final authorityMemoryKey = api.cacheKeyForDisplay(
+      memoryId: widget.conversation.id,
+      styleVersion: styleVersion,
+      enrichmentRevision: enrichmentRevision,
+    );
+    if (authorityMemoryKey.isEmpty) return '';
+    final activeSummaryVersion = widget.conversation.activeSummaryVersionId?.trim() ?? '';
+    final generationSource = [
+      'ella-memory-artwork-auto-v1',
+      authorityMemoryKey,
+      activeSummaryVersion,
+      styleVersion,
+      enrichmentRevision,
+    ].join('\n');
+    return sha256
+        .convert(utf8.encode(generationSource))
+        .toString();
   }
 
   Future<void> _generateArtwork() async {

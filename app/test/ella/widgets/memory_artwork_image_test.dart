@@ -78,6 +78,34 @@ class _ManualGenerationArtworkApi extends MemoryArtworkApi {
   }
 }
 
+class _AutomaticGenerationArtworkApi extends MemoryArtworkApi {
+  _AutomaticGenerationArtworkApi() : super(authorityProvider: () => null);
+
+  final List<bool> enqueueRequests = [];
+
+  @override
+  String cacheKeyForDisplay({
+    required String memoryId,
+    required String styleVersion,
+    required String enrichmentRevision,
+  }) =>
+      'automatic-generation-$memoryId-$styleVersion-$enrichmentRevision';
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    enqueueRequests.add(enqueueIfMissing);
+    return const MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.unavailable,
+      failureCode: 'memory_artwork_provider_failed',
+    );
+  }
+}
+
 class _RecycledArtworkApi extends MemoryArtworkApi {
   _RecycledArtworkApi() : super(authorityProvider: () => null);
 
@@ -537,8 +565,14 @@ class _AuthoritySettlesAfterFinalRetryArtworkApi extends MemoryArtworkApi {
 }
 
 void main() {
-  setUp(MemoryArtworkCache.resetRuntimeTrustForTesting);
-  tearDown(MemoryArtworkCache.resetRuntimeTrustForTesting);
+  setUp(() {
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+    MemoryArtworkImage.resetAutomaticGenerationBudgetForTesting();
+  });
+  tearDown(() {
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+    MemoryArtworkImage.resetAutomaticGenerationBudgetForTesting();
+  });
 
   Future<void> trustDisplayKey(String cacheKey) async {
     final trustedKey = await MemoryArtworkCache.rememberDisplayCacheKey(
@@ -1126,7 +1160,7 @@ void main() {
   });
 
   testWidgets('enabling bounded automatic recovery rechecks the same visible memory', (tester) async {
-    final api = _ManualGenerationArtworkApi();
+    final api = _AutomaticGenerationArtworkApi();
     final conversation = ServerConversation(
       id: 'memory-hero-recovery',
       createdAt: DateTime(2026, 9, 2),
@@ -1156,10 +1190,65 @@ void main() {
     await tester.pumpWidget(buildArtwork(recover: true));
     await tester.pump();
 
-    expect(api.enqueueRequests, [isFalse, isTrue]);
+    expect(api.enqueueRequests, [isFalse, isFalse, isTrue]);
     expect(
-      find.byKey(const Key('memory-artwork-generation-progress-memory-hero-recovery')),
+      find.byKey(const Key('memory-artwork-placeholder-memory-hero-recovery')),
       findsOneWidget,
+    );
+  });
+
+  testWidgets('hero automatic generation stays one-shot across recreation and leaves one manual retry', (tester) async {
+    final api = _AutomaticGenerationArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-hero-one-shot',
+      createdAt: DateTime(2026, 9, 4),
+      activeSummaryVersionId: 'summary-version-1',
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+    );
+
+    Widget buildArtwork(int refreshEpoch) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: SizedBox(
+            width: 320,
+            height: 220,
+            child: MemoryArtworkImage(
+              conversation: conversation,
+              api: api,
+              cachedFileLookup: (_) async => null,
+              enqueueIfMissing: true,
+              allowManualGeneration: true,
+              refreshEpoch: refreshEpoch,
+              maxTransientRetries: 0,
+            ),
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(0));
+    await tester.pump();
+    expect(api.enqueueRequests.where((enqueue) => enqueue).length, 1);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    await tester.pumpWidget(buildArtwork(1));
+    await tester.pump();
+    await tester.pumpWidget(buildArtwork(2));
+    await tester.pump();
+
+    expect(
+      api.enqueueRequests.where((enqueue) => enqueue).length,
+      1,
+      reason: 'recreation and queue epochs must not buy another automatic generation attempt',
+    );
+    expect(find.text('Try artwork again'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('memory-artwork-placeholder-memory-hero-one-shot')));
+    await tester.pump();
+
+    expect(
+      api.enqueueRequests.where((enqueue) => enqueue).length,
+      2,
+      reason: 'the explicit person-initiated retry remains available and bounded to one tap',
     );
   });
 
@@ -2019,13 +2108,13 @@ void main() {
 
     expect(find.text('Illustration unavailable'), findsOneWidget);
     expect(api.loadCalls, 1);
-    expect(api.enqueueRequests, [isTrue]);
+    expect(api.enqueueRequests, [isFalse]);
 
     await tester.pumpWidget(buildArtwork(conversation(terminal: true)));
     await tester.pump();
 
     expect(api.loadCalls, 2);
-    expect(api.enqueueRequests, [isTrue, isTrue]);
+    expect(api.enqueueRequests, [isFalse, isFalse]);
     expect(find.byKey(const Key('memory-generated-artwork-memory-enrichment-transition')), findsOneWidget);
   });
 

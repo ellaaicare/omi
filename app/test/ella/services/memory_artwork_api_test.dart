@@ -210,6 +210,56 @@ void main() {
     expect(result.cacheKey, hasLength(64));
   });
 
+  test('ready enqueue race is resolved through an authenticated signed artwork read', () async {
+    final authority = _Authority('owner-a');
+    final methods = <String>[];
+    var getCalls = 0;
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => authority,
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async {
+        methods.add(method);
+        if (method == 'POST') {
+          return http.Response(jsonEncode({'outcome': 'existing', 'status': 'ready'}), 200);
+        }
+        getCalls += 1;
+        if (getCalls <= 2) {
+          return http.Response(
+            jsonEncode({'schema_version': memoryArtworkSchemaVersion, 'status': 'unavailable'}),
+            200,
+          );
+        }
+        return http.Response(
+          jsonEncode({
+            'schema_version': memoryArtworkSchemaVersion,
+            'status': 'ready',
+            'url': 'https://private-storage.example/race-ready',
+            'style_version': memoryArtworkDefaultStyle,
+            'enrichment_revision': 'summary-race',
+          }),
+          200,
+        );
+      },
+    );
+
+    final result = await api.loadForDisplay('memory-race', enqueueIfMissing: true, pollAttempts: 0);
+
+    expect(methods, ['GET', 'GET', 'POST', 'GET']);
+    expect(result.isReady, isTrue);
+    expect(result.url, Uri.parse('https://private-storage.example/race-ready'));
+    expect(result.cacheKey, hasLength(64));
+  });
+
   test('generation rechecks policy immediately before POST and blocks raw terminal states', () async {
     const terminalCodes = {
       'deletion_pending',

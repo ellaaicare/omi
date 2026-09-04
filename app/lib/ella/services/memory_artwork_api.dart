@@ -292,6 +292,12 @@ class MemoryArtworkApi {
         return current;
       }
       result = await _enqueueWithAuthority(authority, memoryId);
+      if (result.status == MemoryArtworkResultStatus.ready) {
+        // A generation can complete between the preflight GET and the
+        // idempotent enqueue. Fetch again so ready includes a signed URL.
+        if (!authority.isExactCurrent()) return _unavailable('memory_artwork_authority_changed');
+        return _fetchWithAuthority(authority, memoryId);
+      }
       if (result.status != MemoryArtworkResultStatus.generating || !authority.isExactCurrent()) {
         return result;
       }
