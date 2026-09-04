@@ -843,7 +843,7 @@ jobs:
             "$expected_sha" "$actual_sha" "$expected_test_count" "$actual_pass_count" "${expected_test_ids[*]}"
 
   callback-summary-cas-contract:
-    name: Callback 79, artwork 63, and Firestore 6 contracts
+    name: Callback 79, artwork 67, and Firestore 6 contracts
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -948,9 +948,9 @@ jobs:
           grep -Fq 'test_pending_job_query_is_bounded_to_due_work_and_ordered' <<<"$artwork_ids"
           python -m pytest -q -rA tests/unit/test_memory_artwork_contract.py \
             | tee /tmp/memory-artwork-pytest.log
-          grep -Eq '63 passed' /tmp/memory-artwork-pytest.log
+          grep -Eq '67 passed' /tmp/memory-artwork-pytest.log
           ! grep -Eqi '(^|[[:space:]])(skipped|deselected)([[:space:]]|$)' /tmp/memory-artwork-pytest.log
-          printf 'Memory artwork execution receipt: expectedCount=63 actualCount=63 skipped=0 deselected=0\n'
+          printf 'Memory artwork execution receipt: expectedCount=67 actualCount=67 skipped=0 deselected=0\n'
 
       - name: Run real Firestore summary CAS and artwork dispatch inventory
         working-directory: backend
