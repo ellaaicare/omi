@@ -904,8 +904,8 @@ jobs:
           source "$RUNNER_TEMP/callback-cas-python/bin/activate"
           artwork_ids="$(python -m pytest --collect-only -q tests/unit/test_memory_artwork_contract.py | sed '/^$/d')"
           artwork_count="$(grep -c '::' <<<"$artwork_ids")"
-          [[ "$artwork_count" -eq 63 ]] || {
-            echo "Memory artwork collection mismatch: expectedCount=63 actualCount=$artwork_count" >&2
+          [[ "$artwork_count" -eq 67 ]] || {
+            echo "Memory artwork collection mismatch: expectedCount=67 actualCount=$artwork_count" >&2
             exit 1
           }
           grep -Fq 'test_mounted_route_rejects_unauthenticated_request_before_service_work' <<<"$artwork_ids"

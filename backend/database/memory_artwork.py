@@ -124,7 +124,10 @@ def _reserve_generation_transaction(
         ready_object_key = str(current.get("object_key") or "").strip()
         if current_status == "generating" or (current_status == "ready" and ready_object_key):
             if current_status == "generating" and job_ref is not None and job_state is not None:
-                if current_job.get("status") not in {"pending", "processing"}:
+                current_job_status = current_job.get("status")
+                if not allow_retry and current_job_status not in {"pending", "processing"}:
+                    return {"outcome": "automatic_attempt_already_used", "artwork": dict(current)}
+                if current_job_status not in {"pending", "processing"}:
                     transaction.set(job_ref, effective_job_state)
             return {"outcome": "existing", "artwork": dict(current)}
     if not allow_retry and (

@@ -177,6 +177,8 @@ class FakeRepository:
             current_status == "generating" or (current_status == "ready" and ready_object_key)
         ):
             if current_status == "generating" and existing_job.get("status") not in {"pending", "processing"}:
+                if not allow_retry:
+                    return {"outcome": "automatic_attempt_already_used", "artwork": copy.deepcopy(current)}
                 self.jobs[job_key] = effective_job
             return {"outcome": "existing", "artwork": copy.deepcopy(current)}
         if not allow_retry and (current.get("generation_key") == generation_key or existing_job):
@@ -552,6 +554,37 @@ def test_automatic_generation_is_durably_one_shot_but_manual_retry_remains_avail
     assert manual["outcome"] == "reserved"
     assert repository.reserve_writes == 2
     assert repository.jobs[("owner-a", "memory-1", generation_key)]["attempt_count"] == 0
+
+
+@pytest.mark.parametrize("terminal_job_status", ("failed", "completed"))
+def test_automatic_generation_does_not_reopen_terminal_job_while_artwork_is_generating(terminal_job_status):
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+
+    first = asyncio.run(service.enqueue("owner-a", "memory-1", request_mode="automatic"))
+    assert first["outcome"] == "reserved"
+    generation_key = repository.conversations[("owner-a", "memory-1")]["artwork"]["generation_key"]
+    job = repository.jobs[("owner-a", "memory-1", generation_key)]
+    job.update({"status": terminal_job_status, "attempt_count": 5})
+
+    repeated = asyncio.run(service.enqueue("owner-a", "memory-1", request_mode="automatic"))
+
+    assert repeated == {
+        "outcome": "automatic_attempt_already_used",
+        "status": "unavailable",
+        "failure_code": "memory_artwork_automatic_attempt_exhausted",
+    }
+    assert job["status"] == terminal_job_status
+    assert job["attempt_count"] == 5
+    assert repository.reserve_writes == 1
 
 
 @pytest.mark.parametrize(
@@ -2059,6 +2092,60 @@ def test_firestore_automatic_reservation_cannot_requeue_an_existing_generation()
     )
 
     assert result["outcome"] == "automatic_attempt_already_used"
+    assert transaction.operations == []
+
+
+@pytest.mark.parametrize("terminal_job_status", ("failed", "completed"))
+def test_firestore_automatic_reservation_does_not_reopen_terminal_generating_job(terminal_job_status):
+    class Snapshot:
+        def __init__(self, state):
+            self.state = state
+            self.exists = bool(state)
+
+        def to_dict(self):
+            return copy.deepcopy(self.state)
+
+    class Reference:
+        def __init__(self, state):
+            self.state = state
+
+        def get(self, transaction=None):
+            return Snapshot(self.state)
+
+    class Transaction:
+        def __init__(self):
+            self.operations = []
+
+        def update(self, reference, payload):
+            self.operations.append(("update", reference, payload))
+
+        def set(self, reference, payload):
+            self.operations.append(("set", reference, payload))
+
+    generation_key = "a" * 64
+    conversation = _terminal_memory("memory-1")
+    conversation["artwork"] = {
+        "status": "generating",
+        "generation_key": generation_key,
+        "enrichment_revision": "summary-memory-1",
+    }
+    transaction = Transaction()
+    job = {"status": terminal_job_status, "attempt_count": 5}
+
+    result = artwork_database._reserve_generation_transaction(
+        transaction,
+        Reference({"id": "owner-a"}),
+        Reference(conversation),
+        enrichment_revision="summary-memory-1",
+        generation_key=generation_key,
+        artwork_state={"status": "generating", "generation_key": generation_key},
+        job_ref=Reference(job),
+        job_state={"status": "pending", "attempt_count": 0},
+        allow_retry=False,
+    )
+
+    assert result["outcome"] == "automatic_attempt_already_used"
+    assert job == {"status": terminal_job_status, "attempt_count": 5}
     assert transaction.operations == []
 
 
