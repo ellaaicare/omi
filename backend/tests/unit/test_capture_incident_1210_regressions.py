@@ -64,6 +64,19 @@ def _load_conversations_module():
     return module
 
 
+@cache
+def _load_capture_protocol_module():
+    spec = importlib.util.spec_from_file_location(
+        "utils.conversations.capture_incident_1210_protocol",
+        BACKEND / "utils" / "conversations" / "capture_protocol.py",
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    with patch.dict(sys.modules, {"database._client": MagicMock(db=MagicMock())}):
+        spec.loader.exec_module(module)
+    return module
+
+
 class _InMemoryOwnershipRedis:
     def __init__(self):
         self.values = {}
@@ -611,6 +624,151 @@ def test_capture_owner_is_initialized_before_reconnect_preparation_uses_it():
     assert abandoned == [("stub-adopted", "socket-a")]
 
 
+def test_production_reconnect_path_does_not_let_overlapping_socket_steal_authority():
+    capture_protocol = _load_capture_protocol_module()
+    now = datetime.now(timezone.utc)
+
+    class Document:
+        def __init__(self, data):
+            self.data = data
+
+        def get(self, transaction=None):
+            return SimpleNamespace(exists=self.data is not None, to_dict=lambda: dict(self.data or {}))
+
+    class Transaction:
+        def __init__(self):
+            self.sets = []
+            self.updates = []
+
+        def set(self, ref, payload):
+            self.sets.append((ref, payload))
+
+        def update(self, ref, payload):
+            self.updates.append((ref, payload))
+
+        def apply(self):
+            for ref, payload in self.sets:
+                ref.data = dict(payload)
+            for ref, payload in self.updates:
+                ref.data.update(payload)
+
+    authority_ref = Document(
+        {
+            "protocol_version": 2,
+            "conversation_id": "conversation-a",
+            "generation": "generation-a",
+            "owner_token": "socket-a",
+            "state": "active",
+            "lease_expires_at": now - timedelta(seconds=1),
+        }
+    )
+    conversation_ref = Document(
+        {
+            "id": "conversation-a",
+            "status": "in_progress",
+            "capture_owner_id": "socket-a",
+            "capture_protocol_version": 2,
+            "capture_generation": "generation-a",
+            "capture_owner_token": "socket-a",
+            "capture_state": "active",
+            "capture_lease_expires_at": now - timedelta(seconds=1),
+            "finished_at": now,
+        }
+    )
+
+    def claim_capture_authority_for_reconnect(
+        _uid,
+        conversation_id,
+        generation,
+        expected_owner_token,
+        owner_token,
+    ):
+        transaction = Transaction()
+        claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+            transaction,
+            authority_ref,
+            conversation_ref,
+            conversation_id,
+            generation,
+            expected_owner_token,
+            owner_token,
+            now,
+        )
+        if claimed:
+            transaction.apply()
+        return claimed
+
+    class Redis:
+        def __init__(self):
+            self.claims = []
+
+        def get_in_progress_conversation_id(self, _uid):
+            return "conversation-a"
+
+        def claim_in_progress_conversation_id(self, _uid, conversation_id, owner_token):
+            self.claims.append((conversation_id, owner_token))
+            return True
+
+        def replace_stale_in_progress_conversation_id(self, *_args):
+            raise AssertionError("the exact active conversation must be claimed in place")
+
+    redis = Redis()
+    ready_receipts = []
+
+    def make_prepare(session_id, generation_id):
+        async def publish_capture_protocol_ready(conversation_id, **_kwargs):
+            ready_receipts.append((conversation_id, generation_id, session_id))
+            return True
+
+        return _nested_function(
+            "routers/transcribe.py",
+            "_prepare_in_progess_conversations",
+            {
+                "asyncio": asyncio,
+                "claim_capture_authority_for_reconnect": claim_capture_authority_for_reconnect,
+                "conversations_db": SimpleNamespace(),
+                "datetime": datetime,
+                "drain_capture_persistence_batches": lambda *_args: None,
+                "mark_capture_drained": lambda *_args: True,
+                "redis_db": redis,
+                "retrieve_in_progress_conversation": lambda _uid: dict(conversation_ref.data),
+                "timezone": timezone,
+            },
+            {
+                "_create_new_in_progress_conversation": lambda **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("a current conversation must not create a replacement")
+                ),
+                "_publish_capture_protocol_ready": publish_capture_protocol_ready,
+                "capture_recovery_conversation_ids": set(),
+                "conversation_creation_timeout": 120,
+                "current_conversation_id": None,
+                "generation_id": generation_id,
+                "session_id": session_id,
+                "uid": "uid-a",
+            },
+        )
+
+    first_prepare = make_prepare("socket-b", "generation-b")
+    assert asyncio.run(first_prepare()) is None
+    assert authority_ref.data["owner_token"] == "socket-b"
+    assert conversation_ref.data["capture_owner_id"] == "socket-b"
+    assert redis.claims == [("conversation-a", "socket-b")]
+    assert ready_receipts == [("conversation-a", "generation-b", "socket-b")]
+
+    overlapping_prepare = make_prepare("socket-c", "generation-c")
+    try:
+        asyncio.run(overlapping_prepare())
+    except RuntimeError as exc:
+        assert str(exc) == "active conversation ownership changed during reconnect"
+    else:
+        raise AssertionError("the overlapping production reconnect must fail closed")
+
+    assert authority_ref.data["owner_token"] == "socket-b"
+    assert conversation_ref.data["capture_owner_id"] == "socket-b"
+    assert redis.claims == [("conversation-a", "socket-b")]
+    assert ready_receipts == [("conversation-a", "generation-b", "socket-b")]
+
+
 def test_failed_stub_publication_abandons_only_the_still_owned_firestore_generation():
     conversations = _load_conversations_module()
 
@@ -694,15 +852,16 @@ def test_stale_processing_claim_without_a_lease_can_be_recovered():
     assert transaction.updates[0]["initial_processing_claim_token"] == result["claim_token"]
 
 
-def test_reconnect_rebinds_firestore_before_publishing_redis_owner():
+def test_reconnect_claims_firestore_authority_before_publishing_redis_owner():
     source = (BACKEND / "routers" / "transcribe.py").read_text()
     preparation = source.split("async def _prepare_in_progess_conversations():", maxsplit=1)[1].split(
         "timed_out_conversation_id = await _prepare_in_progess_conversations()", maxsplit=1
     )[0]
 
-    assert preparation.index("rebind_capture_conversation_owner(") < preparation.index(
+    assert preparation.index("claim_capture_authority_for_reconnect(") < preparation.index(
         "claim_in_progress_conversation_id("
     )
+    assert "rebind_capture_conversation_owner(" not in preparation
     assert "conversations_db.bind_capture_conversation_owner(" not in preparation
 
 

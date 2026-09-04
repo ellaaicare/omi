@@ -75,6 +75,7 @@ from utils.conversations.process_conversation import (
 )
 from utils.conversations.capture_protocol import (
     CAPTURE_PROTOCOL_VERSION,
+    claim_capture_authority_for_reconnect,
     complete_rotated_capture,
     flush_capture_before_drained,
     install_capture_authority,
@@ -1173,13 +1174,14 @@ async def _stream_handler(
             if candidate:
                 candidate_id = str(candidate.get('id') or '').strip()
                 candidate_owner_id = str(candidate.get('capture_owner_id') or '').strip() or None
-                rebound = bool(candidate_id) and conversations_db.rebind_capture_conversation_owner(
+                authority_claimed = bool(candidate_id) and claim_capture_authority_for_reconnect(
                     uid,
                     candidate_id,
+                    generation_id,
                     candidate_owner_id,
                     session_id,
                 )
-                if not rebound:
+                if not authority_claimed:
                     await asyncio.sleep(0)
                     continue
                 claimed = bool(candidate_id) and redis_db.claim_in_progress_conversation_id(
@@ -1193,12 +1195,7 @@ async def _stream_handler(
                         session_id,
                     )
                 if not claimed:
-                    conversations_db.rebind_capture_conversation_owner(
-                        uid,
-                        candidate_id,
-                        session_id,
-                        candidate_owner_id,
-                    )
+                    mark_capture_drained(uid, candidate_id, generation_id, session_id)
                     await asyncio.sleep(0)
                     continue
 

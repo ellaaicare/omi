@@ -160,6 +160,118 @@ def test_capture_ready_receipt_is_complete_for_each_production_codec(codec):
     }
 
 
+def test_live_authority_blocks_overlapping_reconnect_before_owner_rebind(capture_protocol):
+    now = datetime.now(timezone.utc)
+    authority_ref = _Document(_authority())
+    conversation_ref = _Document(_conversation())
+    transaction = _Transaction()
+
+    claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+        transaction,
+        authority_ref,
+        conversation_ref,
+        'capture-a',
+        'generation-b',
+        'owner-a',
+        'owner-b',
+        now,
+    )
+
+    assert claimed is False
+    assert transaction.updates == []
+    assert transaction.sets == []
+    assert conversation_ref.data['capture_owner_id'] == 'owner-a'
+
+
+def test_expired_authority_allows_only_one_reconnect_owner_claim(capture_protocol):
+    now = datetime.now(timezone.utc)
+    authority = _authority()
+    authority['lease_expires_at'] = now - timedelta(seconds=1)
+    authority_ref = _Document(authority)
+    conversation_ref = _Document(_conversation())
+
+    first_transaction = _Transaction()
+    first_claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+        first_transaction,
+        authority_ref,
+        conversation_ref,
+        'capture-a',
+        'generation-b',
+        'owner-a',
+        'owner-b',
+        now,
+    )
+
+    assert first_claimed is True
+    conversation_ref.data = _updated(conversation_ref.data, first_transaction, conversation_ref)
+    authority_ref.data = _updated(authority_ref.data, first_transaction, authority_ref)
+    assert conversation_ref.data['capture_owner_id'] == 'owner-b'
+    assert authority_ref.data['generation'] == 'generation-b'
+
+    overlapping_transaction = _Transaction()
+    overlapping_claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+        overlapping_transaction,
+        authority_ref,
+        conversation_ref,
+        'capture-a',
+        'generation-c',
+        'owner-b',
+        'owner-c',
+        now,
+    )
+
+    assert overlapping_claimed is False
+    assert overlapping_transaction.updates == []
+    assert conversation_ref.data['capture_owner_id'] == 'owner-b'
+
+
+def test_expired_authority_recovers_conversation_after_clean_drain(capture_protocol):
+    now = datetime.now(timezone.utc)
+    authority = _authority(state='drained')
+    authority['lease_expires_at'] = now - timedelta(seconds=1)
+    conversation = _conversation(state='drained')
+    conversation_ref = _Document(conversation)
+    transaction = _Transaction()
+
+    claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+        transaction,
+        _Document(authority),
+        conversation_ref,
+        'capture-a',
+        'generation-b',
+        None,
+        'owner-b',
+        now,
+    )
+
+    assert claimed is True
+    assert _updated(conversation, transaction, conversation_ref)['capture_owner_id'] == 'owner-b'
+
+
+def test_live_finalization_blocks_reconnect_after_capture_lease_expires(capture_protocol):
+    now = datetime.now(timezone.utc)
+    authority = _authority(state='finalizing')
+    authority['lease_expires_at'] = now - timedelta(seconds=1)
+    authority['finalization_lease_expires_at'] = now + timedelta(seconds=30)
+    conversation_ref = _Document(_conversation())
+    transaction = _Transaction()
+
+    claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+        transaction,
+        _Document(authority),
+        conversation_ref,
+        'capture-a',
+        'generation-b',
+        'owner-a',
+        'owner-b',
+        now,
+    )
+
+    assert claimed is False
+    assert transaction.updates == []
+    assert transaction.sets == []
+
+
 def test_rotation_installs_successor_and_drains_only_exact_predecessor(capture_protocol):
     now = datetime.now(timezone.utc)
     authority_ref = _Document(_authority())
