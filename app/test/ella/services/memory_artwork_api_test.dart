@@ -153,6 +153,67 @@ void main() {
     );
   });
 
+  test('automatic generation identity is stable by owner, memory, and source revision', () {
+    final ownerA = _Authority('owner-a');
+    final ownerAApi = MemoryArtworkApi(authorityProvider: () => ownerA);
+    final ownerBApi = MemoryArtworkApi(authorityProvider: () => _Authority('owner-b'));
+
+    final first = ownerAApi.automaticGenerationKey(memoryId: 'memory-a', sourceRevision: 'summary-a');
+    final repeated = ownerAApi.automaticGenerationKey(memoryId: 'memory-a', sourceRevision: 'summary-a');
+
+    expect(first, hasLength(64));
+    expect(repeated, first);
+    expect(
+      ownerAApi.automaticGenerationKey(memoryId: 'memory-a', sourceRevision: 'summary-b'),
+      isNot(first),
+    );
+    expect(
+      ownerBApi.automaticGenerationKey(memoryId: 'memory-a', sourceRevision: 'summary-a'),
+      isNot(first),
+    );
+    ownerA.current = false;
+    expect(ownerAApi.automaticGenerationKey(memoryId: 'memory-a', sourceRevision: 'summary-a'), isEmpty);
+  });
+
+  test('automatic visible-card generation is identified separately from manual retry', () async {
+    final requestBodies = <Map<String, dynamic>>[];
+    var reads = 0;
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => _Authority('owner-a'),
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async {
+        if (method == 'POST') {
+          requestBodies.add(jsonDecode(body) as Map<String, dynamic>);
+          return http.Response(jsonEncode({'outcome': 'automatic_attempt_already_used', 'status': 'unavailable'}), 200);
+        }
+        reads += 1;
+        return http.Response(
+          jsonEncode({'schema_version': memoryArtworkSchemaVersion, 'status': 'unavailable'}),
+          200,
+        );
+      },
+    );
+
+    await api.loadAutomaticallyForDisplay('memory-auto', pollAttempts: 0);
+    await api.loadForDisplay('memory-manual', enqueueIfMissing: true, pollAttempts: 0);
+
+    expect(reads, 4);
+    expect(requestBodies, [
+      {'request_mode': 'automatic'},
+      {'request_mode': 'manual'},
+    ]);
+  });
+
   test('visible historical memory is enqueued once and polled until artwork is ready', () async {
     final authority = _Authority('owner-a');
     final methods = <String>[];
@@ -176,19 +237,20 @@ void main() {
           return http.Response(jsonEncode({'outcome': 'queued', 'status': 'generating'}), 202);
         }
         getCalls += 1;
-        if (getCalls == 1) {
+        if (getCalls <= 2) {
           return http.Response(
             jsonEncode({
-              'detail': {'code': 'memory_artwork_not_found'},
+              'schema_version': memoryArtworkSchemaVersion,
+              'status': 'unavailable',
             }),
-            404,
+            200,
           );
         }
         return http.Response(
           jsonEncode({
             'schema_version': memoryArtworkSchemaVersion,
-            'status': getCalls == 2 ? 'generating' : 'ready',
-            if (getCalls > 2) 'url': 'https://private-storage.example/lazy-ready',
+            'status': getCalls == 3 ? 'generating' : 'ready',
+            if (getCalls > 3) 'url': 'https://private-storage.example/lazy-ready',
             'style_version': memoryArtworkDefaultStyle,
             'enrichment_revision': 'summary-lazy',
           }),
@@ -205,11 +267,223 @@ void main() {
     );
 
     expect(result.isReady, isTrue);
-    expect(methods, ['GET', 'POST', 'GET', 'GET']);
+    expect(methods, ['GET', 'GET', 'POST', 'GET', 'GET']);
     expect(result.cacheKey, hasLength(64));
   });
 
-  test('already-generating artwork is polled without duplicate enqueue', () async {
+  test('ready enqueue race is resolved through an authenticated signed artwork read', () async {
+    final authority = _Authority('owner-a');
+    final methods = <String>[];
+    var getCalls = 0;
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => authority,
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async {
+        methods.add(method);
+        if (method == 'POST') {
+          return http.Response(jsonEncode({'outcome': 'existing', 'status': 'ready'}), 200);
+        }
+        getCalls += 1;
+        if (getCalls <= 2) {
+          return http.Response(
+            jsonEncode({'schema_version': memoryArtworkSchemaVersion, 'status': 'unavailable'}),
+            200,
+          );
+        }
+        return http.Response(
+          jsonEncode({
+            'schema_version': memoryArtworkSchemaVersion,
+            'status': 'ready',
+            'url': 'https://private-storage.example/race-ready',
+            'style_version': memoryArtworkDefaultStyle,
+            'enrichment_revision': 'summary-race',
+          }),
+          200,
+        );
+      },
+    );
+
+    final result = await api.loadForDisplay('memory-race', enqueueIfMissing: true, pollAttempts: 0);
+
+    expect(methods, ['GET', 'GET', 'POST', 'GET']);
+    expect(result.isReady, isTrue);
+    expect(result.url, Uri.parse('https://private-storage.example/race-ready'));
+    expect(result.cacheKey, hasLength(64));
+  });
+
+  test('generation rechecks policy immediately before POST and blocks raw terminal states', () async {
+    const terminalCodes = {
+      'deletion_pending',
+      'authority_changed',
+      'preference_changed',
+      'source_changed',
+      'prompt_changed',
+      'job_claim_invalid',
+    };
+
+    for (final terminalCode in terminalCodes) {
+      final authority = _Authority('owner-a');
+      final methods = <String>[];
+      var reads = 0;
+      final api = MemoryArtworkApi(
+        baseUrl: 'https://api.example/',
+        authorityProvider: () => authority,
+        request: ({
+          required url,
+          required headers,
+          required body,
+          required method,
+          timeout,
+          retries,
+          requireAuthCheck,
+          expectedAuthenticatedUid,
+          exactAuthority,
+        }) async {
+          methods.add(method);
+          reads += 1;
+          return http.Response(
+            jsonEncode({
+              'schema_version': memoryArtworkSchemaVersion,
+              'status': 'unavailable',
+              if (reads > 1) 'failure_code': terminalCode,
+            }),
+            200,
+          );
+        },
+      );
+
+      final result = await api.loadForDisplay('memory-policy-race', enqueueIfMissing: true);
+
+      expect(result.failureCode, terminalCode);
+      expect(methods, ['GET', 'GET'], reason: '$terminalCode must be rejected before generation');
+    }
+  });
+
+  test('generation canonicalizes a policy change returned by the POST', () async {
+    const policyOutcomes = {
+      'disabled': 'memory_artwork_release_disabled',
+      'consent_required': 'memory_artwork_consent_required',
+      'not_found': 'memory_artwork_memory_not_found',
+      'sensitive_source_excluded': 'memory_artwork_sensitive_source_excluded',
+      'source_changed': 'memory_artwork_source_stale',
+    };
+
+    for (final outcome in policyOutcomes.entries) {
+      final methods = <String>[];
+      final api = MemoryArtworkApi(
+        baseUrl: 'https://api.example/',
+        authorityProvider: () => _Authority('owner-a'),
+        request: ({
+          required url,
+          required headers,
+          required body,
+          required method,
+          timeout,
+          retries,
+          requireAuthCheck,
+          expectedAuthenticatedUid,
+          exactAuthority,
+        }) async {
+          methods.add(method);
+          return http.Response(
+            jsonEncode({
+              'schema_version': memoryArtworkSchemaVersion,
+              'status': 'unavailable',
+              if (method == 'POST') 'outcome': outcome.key,
+            }),
+            200,
+          );
+        },
+      );
+
+      final result = await api.loadForDisplay('memory-post-policy-race', enqueueIfMissing: true);
+
+      expect(methods, ['GET', 'GET', 'POST']);
+      expect(result.failureCode, outcome.value);
+      expect(result.canRequestGeneration, isFalse);
+    }
+  });
+
+  test('unknown unavailable state fails closed without a generation POST', () async {
+    final methods = <String>[];
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => _Authority('owner-a'),
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async {
+        methods.add(method);
+        return http.Response(
+          jsonEncode({
+            'schema_version': memoryArtworkSchemaVersion,
+            'status': 'unavailable',
+            'failure_code': 'new_server_policy_state',
+          }),
+          200,
+        );
+      },
+    );
+
+    final result = await api.loadForDisplay('memory-unknown-policy', enqueueIfMissing: true);
+
+    expect(result.failureCode, 'new_server_policy_state');
+    expect(methods, ['GET']);
+  });
+
+  test('missing or unknown artwork status fails closed without a generation POST', () async {
+    for (final rawStatus in <String?>[null, 'future_server_state']) {
+      final methods = <String>[];
+      final api = MemoryArtworkApi(
+        baseUrl: 'https://api.example/',
+        authorityProvider: () => _Authority('owner-a'),
+        request: ({
+          required url,
+          required headers,
+          required body,
+          required method,
+          timeout,
+          retries,
+          requireAuthCheck,
+          expectedAuthenticatedUid,
+          exactAuthority,
+        }) async {
+          methods.add(method);
+          return http.Response(
+            jsonEncode({
+              'schema_version': memoryArtworkSchemaVersion,
+              if (rawStatus != null) 'status': rawStatus,
+            }),
+            200,
+          );
+        },
+      );
+
+      final result = await api.loadForDisplay('memory-malformed-status', enqueueIfMissing: true);
+
+      expect(result.failureCode, 'memory_artwork_response_invalid');
+      expect(methods, ['GET'], reason: '$rawStatus must not become generation-eligible');
+    }
+  });
+
+  test('automatic load polls already-generating artwork without duplicate enqueue', () async {
     final authority = _Authority('owner-a');
     final methods = <String>[];
     var getCalls = 0;
@@ -242,15 +516,69 @@ void main() {
       },
     );
 
-    final result = await api.loadForDisplay(
+    final result = await api.loadAutomaticallyForDisplay(
       'memory-new',
-      enqueueIfMissing: true,
       pollAttempts: 1,
       pollInterval: Duration.zero,
     );
 
     expect(result.isReady, isTrue);
     expect(methods, ['GET', 'GET']);
+  });
+
+  test('manual retry reconciles stale generating state through the server', () async {
+    for (final terminalJob in const ['failed', 'completed']) {
+      final methods = <String>[];
+      final requestBodies = <Map<String, dynamic>>[];
+      final api = MemoryArtworkApi(
+        baseUrl: 'https://api.example/',
+        authorityProvider: () => _Authority('owner-a'),
+        request: ({
+          required url,
+          required headers,
+          required body,
+          required method,
+          timeout,
+          retries,
+          requireAuthCheck,
+          expectedAuthenticatedUid,
+          exactAuthority,
+        }) async {
+          methods.add(method);
+          if (method == 'POST') {
+            requestBodies.add(jsonDecode(body) as Map<String, dynamic>);
+            return http.Response(
+              jsonEncode({'outcome': 'requeued_terminal_$terminalJob', 'status': 'generating'}),
+              202,
+            );
+          }
+          return http.Response(
+            jsonEncode({
+              'schema_version': memoryArtworkSchemaVersion,
+              'status': 'generating',
+              'style_version': memoryArtworkDefaultStyle,
+              'enrichment_revision': 'summary-$terminalJob',
+            }),
+            200,
+          );
+        },
+      );
+
+      final result = await api.loadForDisplay(
+        'memory-terminal-$terminalJob',
+        enqueueIfMissing: true,
+        pollAttempts: 0,
+      );
+
+      expect(result.status, MemoryArtworkResultStatus.generating, reason: terminalJob);
+      expect(methods, ['GET', 'GET', 'POST'], reason: terminalJob);
+      expect(
+          requestBodies,
+          [
+            {'request_mode': 'manual'},
+          ],
+          reason: terminalJob);
+    }
   });
 
   test('published artwork remains ready while a selected style refresh is pending', () async {

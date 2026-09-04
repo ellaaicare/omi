@@ -35,6 +35,8 @@ enum MemoryArtworkQueueState { running, paused, cancelled, completed, needsAtten
 
 enum MemoryArtworkQueueAction { pause, resume, cancel }
 
+enum MemoryArtworkGenerationMode { manual, automatic }
+
 /// Full historical regeneration is opt-in because it can consume a meaningful
 /// image allowance. A preview always targets one bounded recent page.
 enum MemoryArtworkBackfillMode { preview, all }
@@ -66,6 +68,24 @@ class MemoryArtworkResult {
 
   bool get isReady => status == MemoryArtworkResultStatus.ready && url != null;
   bool get isAuthorityCurrent => authority?.isExactCurrent() ?? true;
+
+  /// Generation is an explicit side effect, so unknown and policy-sensitive
+  /// states fail closed. The empty code is the server's canonical state for a
+  /// memory that has never had artwork reserved.
+  bool get canRequestGeneration =>
+      status == MemoryArtworkResultStatus.unavailable &&
+      const {
+        '',
+        'memory_artwork_dimensions_invalid',
+        'memory_artwork_automatic_attempt_exhausted',
+        'memory_artwork_finalize_conflict',
+        'memory_artwork_object_missing',
+        'memory_artwork_provider_failed',
+        'memory_artwork_provider_rejected',
+        'memory_artwork_provider_unavailable',
+        'memory_artwork_storage_failed',
+        'memory_artwork_worker_failed',
+      }.contains(failureCode);
 }
 
 class MemoryArtworkPreferences {
@@ -244,6 +264,17 @@ class MemoryArtworkApi {
     );
   }
 
+  String automaticGenerationKey({required String memoryId, required String sourceRevision}) {
+    final authority = _authorityProvider();
+    if (authority == null || memoryId.trim().isEmpty || !authority.isExactCurrent()) return '';
+    return _cacheKey(
+      authority: authority,
+      memoryId: memoryId,
+      styleVersion: 'automatic-visible-card',
+      enrichmentRevision: sourceRevision,
+    );
+  }
+
   Future<MemoryArtworkResult> fetch(String memoryId) async {
     final authority = _authorityProvider();
     if (authority == null || memoryId.trim().isEmpty) return _unavailable('memory_artwork_authority_unavailable');
@@ -255,6 +286,37 @@ class MemoryArtworkApi {
     bool enqueueIfMissing = false,
     int pollAttempts = 10,
     Duration pollInterval = const Duration(seconds: 3),
+  }) =>
+      _loadForDisplay(
+        memoryId,
+        enqueueIfMissing: enqueueIfMissing,
+        generationMode: MemoryArtworkGenerationMode.manual,
+        pollAttempts: pollAttempts,
+        pollInterval: pollInterval,
+      );
+
+  Future<MemoryArtworkResult> loadAutomaticallyForDisplay(
+    String memoryId, {
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+    void Function()? onEnqueueAttempt,
+  }) =>
+      _loadForDisplay(
+        memoryId,
+        enqueueIfMissing: true,
+        generationMode: MemoryArtworkGenerationMode.automatic,
+        pollAttempts: pollAttempts,
+        pollInterval: pollInterval,
+        onEnqueueAttempt: onEnqueueAttempt,
+      );
+
+  Future<MemoryArtworkResult> _loadForDisplay(
+    String memoryId, {
+    required bool enqueueIfMissing,
+    required MemoryArtworkGenerationMode generationMode,
+    required int pollAttempts,
+    required Duration pollInterval,
+    void Function()? onEnqueueAttempt,
   }) async {
     final authority = _authorityProvider();
     if (authority == null || memoryId.trim().isEmpty) return _unavailable('memory_artwork_authority_unavailable');
@@ -263,8 +325,31 @@ class MemoryArtworkApi {
     if (result.isReady || result.status == MemoryArtworkResultStatus.declined || !authority.isExactCurrent()) {
       return result;
     }
-    if (enqueueIfMissing && result.status == MemoryArtworkResultStatus.unavailable) {
-      result = await _enqueueWithAuthority(authority, memoryId);
+    final manualRetry = enqueueIfMissing && generationMode == MemoryArtworkGenerationMode.manual;
+    if (enqueueIfMissing &&
+        (result.canRequestGeneration || (manualRetry && result.status == MemoryArtworkResultStatus.generating))) {
+      // Re-read immediately before the side effect. The tile may have rendered
+      // while consent, deletion, source, profile, or runtime authority changed.
+      final current = await _fetchWithAuthority(authority, memoryId);
+      if (current.isReady ||
+          (current.status == MemoryArtworkResultStatus.generating && !manualRetry) ||
+          current.status == MemoryArtworkResultStatus.declined ||
+          (!current.canRequestGeneration && !(manualRetry && current.status == MemoryArtworkResultStatus.generating)) ||
+          !authority.isExactCurrent()) {
+        return current;
+      }
+      result = await _enqueueWithAuthority(
+        authority,
+        memoryId,
+        generationMode: generationMode,
+        onEnqueueAttempt: onEnqueueAttempt,
+      );
+      if (result.status == MemoryArtworkResultStatus.ready) {
+        // A generation can complete between the preflight GET and the
+        // idempotent enqueue. Fetch again so ready includes a signed URL.
+        if (!authority.isExactCurrent()) return _unavailable('memory_artwork_authority_changed');
+        return _fetchWithAuthority(authority, memoryId);
+      }
       if (result.status != MemoryArtworkResultStatus.generating || !authority.isExactCurrent()) {
         return result;
       }
@@ -293,8 +378,8 @@ class MemoryArtworkApi {
     if (payload == null || payload['schema_version'] != memoryArtworkSchemaVersion) {
       return _unavailable('memory_artwork_response_invalid');
     }
-    final status = MemoryArtworkResultStatus.values.asNameMap()[payload['status']?.toString() ?? ''] ??
-        MemoryArtworkResultStatus.unavailable;
+    final status = MemoryArtworkResultStatus.values.asNameMap()[payload['status']?.toString() ?? ''];
+    if (status == null) return _unavailable('memory_artwork_response_invalid');
     final rawUrl = payload['url']?.toString().trim() ?? '';
     final url = Uri.tryParse(rawUrl);
     if (status == MemoryArtworkResultStatus.ready && (url == null || url.scheme != 'https' || url.host.isEmpty)) {
@@ -321,27 +406,44 @@ class MemoryArtworkApi {
     );
   }
 
-  Future<MemoryArtworkResult> _enqueueWithAuthority(ExactAccountAuthorityVerifier authority, String memoryId) async {
+  Future<MemoryArtworkResult> _enqueueWithAuthority(
+    ExactAccountAuthorityVerifier authority,
+    String memoryId, {
+    required MemoryArtworkGenerationMode generationMode,
+    void Function()? onEnqueueAttempt,
+  }) async {
     if (!authority.isExactCurrent()) return _unavailable('memory_artwork_authority_changed');
+    onEnqueueAttempt?.call();
     final response = await _call(
       authority,
       method: 'POST',
       path: 'v1/ella/memories/${Uri.encodeComponent(memoryId)}/artwork',
+      body: jsonEncode({'request_mode': generationMode.name}),
     );
     if (!authority.isExactCurrent()) return _unavailable('memory_artwork_authority_changed');
     if (response == null || response.statusCode < 200 || response.statusCode >= 300) {
       return _unavailable(_safeFailureCode(response?.body));
     }
     final payload = _jsonObject(response.body);
-    final status = MemoryArtworkResultStatus.values.asNameMap()[payload?['status']?.toString() ?? ''] ??
-        MemoryArtworkResultStatus.unavailable;
+    final status = MemoryArtworkResultStatus.values.asNameMap()[payload?['status']?.toString() ?? ''];
+    if (status == null) return _unavailable('memory_artwork_response_invalid');
     return MemoryArtworkResult(
       status: status,
       failureCode: status == MemoryArtworkResultStatus.unavailable
-          ? (payload?['outcome']?.toString().trim() ?? 'memory_artwork_unavailable')
+          ? _canonicalEnqueueFailureCode(payload?['failure_code'] ?? payload?['outcome'])
           : '',
     );
   }
+
+  static String _canonicalEnqueueFailureCode(Object? outcome) => switch (outcome?.toString().trim()) {
+        'disabled' => 'memory_artwork_release_disabled',
+        'consent_required' => 'memory_artwork_consent_required',
+        'not_found' => 'memory_artwork_memory_not_found',
+        'sensitive_source_excluded' => 'memory_artwork_sensitive_source_excluded',
+        'source_changed' => 'memory_artwork_source_stale',
+        String code when code.startsWith('memory_artwork_') => code,
+        _ => 'memory_artwork_unavailable',
+      };
 
   Future<MemoryArtworkPreferences?> preferences() async {
     final authority = _authorityProvider();

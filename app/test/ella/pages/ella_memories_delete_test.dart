@@ -201,7 +201,12 @@ void main() {
     );
   }
 
-  Future<void> pumpPage(WidgetTester tester, ConversationProvider provider, {MemoryArtworkApi? artworkApi}) async {
+  Future<void> pumpPage(
+    WidgetTester tester,
+    ConversationProvider provider, {
+    MemoryArtworkApi? artworkApi,
+    bool settle = true,
+  }) async {
     await tester.pumpWidget(
       MultiProvider(
         providers: [
@@ -216,7 +221,12 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    if (settle) {
+      await tester.pumpAndSettle();
+    } else {
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+    }
   }
 
   testWidgets('gallery swipe-left confirms and permanently deletes the selected memory', (tester) async {
@@ -512,7 +522,7 @@ void main() {
     );
     addTearDown(provider.dispose);
 
-    await pumpPage(tester, provider, artworkApi: artworkApi);
+    await pumpPage(tester, provider, artworkApi: artworkApi, settle: false);
     // The gallery can build a visible card again while its preferences settle.
     // Capture that baseline; the assertion below is about the completed queue
     // advancing the display result, not a particular first-frame count.
@@ -520,10 +530,9 @@ void main() {
     expect(initialDisplayRequests, greaterThanOrEqualTo(1));
     expect(artworkApi.displayEnqueueRequests, everyElement(isFalse));
 
-    await tester.tap(find.byKey(const Key('memory-artwork-style-menu')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Paper collage'));
-    await tester.pumpAndSettle();
+    final styleMenu = tester.widget<PopupMenuButton<String>>(find.byKey(const Key('memory-artwork-style-menu')));
+    styleMenu.onSelected!(memoryArtworkPaperCollageStyle);
+    await tester.pump(const Duration(milliseconds: 400));
 
     expect(artworkApi.queueStatusRequests, greaterThanOrEqualTo(2));
     expect(
@@ -564,13 +573,12 @@ void main() {
     );
     addTearDown(provider.dispose);
 
-    await pumpPage(tester, provider, artworkApi: artworkApi);
+    await pumpPage(tester, provider, artworkApi: artworkApi, settle: false);
     final requestsBeforeStyleChange = artworkApi.displayRequests;
 
-    await tester.tap(find.byKey(const Key('memory-artwork-style-menu')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Paper collage'));
-    await tester.pumpAndSettle();
+    final styleMenu = tester.widget<PopupMenuButton<String>>(find.byKey(const Key('memory-artwork-style-menu')));
+    styleMenu.onSelected!(memoryArtworkPaperCollageStyle);
+    await tester.pump(const Duration(milliseconds: 400));
 
     expect(artworkApi.queueStatusRequests, greaterThanOrEqualTo(2));
     expect(

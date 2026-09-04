@@ -1,9 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:http/http.dart' as http;
 
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
@@ -38,6 +41,80 @@ class _DelayedArtworkApi extends MemoryArtworkApi {
     loadCalls += 1;
     lastEnqueueIfMissing = enqueueIfMissing;
     return remoteResult.future;
+  }
+}
+
+class _ManualGenerationArtworkApi extends MemoryArtworkApi {
+  _ManualGenerationArtworkApi({this.initialFailureCode = ''}) : super(authorityProvider: () => null);
+
+  final String initialFailureCode;
+  final List<bool> enqueueRequests = [];
+  final Completer<MemoryArtworkResult> generationResult = Completer<MemoryArtworkResult>();
+
+  @override
+  String cacheKeyForDisplay({
+    required String memoryId,
+    required String styleVersion,
+    required String enrichmentRevision,
+  }) =>
+      '';
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) {
+    enqueueRequests.add(enqueueIfMissing);
+    if (!enqueueIfMissing) {
+      return Future.value(
+        MemoryArtworkResult(
+          status: MemoryArtworkResultStatus.unavailable,
+          failureCode: initialFailureCode,
+        ),
+      );
+    }
+    return generationResult.future;
+  }
+}
+
+class _AutomaticGenerationArtworkApi extends MemoryArtworkApi {
+  _AutomaticGenerationArtworkApi() : super(authorityProvider: () => null);
+
+  final List<bool> enqueueRequests = [];
+
+  @override
+  String automaticGenerationKey({required String memoryId, required String sourceRevision}) =>
+      'automatic-generation-$memoryId-$sourceRevision';
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    enqueueRequests.add(enqueueIfMissing);
+    return const MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.unavailable,
+      failureCode: 'memory_artwork_provider_failed',
+    );
+  }
+
+  @override
+  Future<MemoryArtworkResult> loadAutomaticallyForDisplay(
+    String memoryId, {
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+    void Function()? onEnqueueAttempt,
+  }) async {
+    enqueueRequests.add(true);
+    onEnqueueAttempt?.call();
+    return const MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.unavailable,
+      failureCode: 'memory_artwork_automatic_attempt_exhausted',
+    );
   }
 }
 
@@ -192,6 +269,7 @@ class _RecoveringEnrichmentArtworkApi extends MemoryArtworkApi {
   _RecoveringEnrichmentArtworkApi() : super(authorityProvider: () => null);
 
   int loadCalls = 0;
+  final List<bool> enqueueRequests = [];
 
   @override
   String cacheKeyForDisplay({
@@ -209,6 +287,7 @@ class _RecoveringEnrichmentArtworkApi extends MemoryArtworkApi {
     Duration pollInterval = const Duration(seconds: 3),
   }) async {
     loadCalls += 1;
+    enqueueRequests.add(enqueueIfMissing);
     if (loadCalls == 1) {
       return const MemoryArtworkResult(
         status: MemoryArtworkResultStatus.unavailable,
@@ -498,8 +577,14 @@ class _AuthoritySettlesAfterFinalRetryArtworkApi extends MemoryArtworkApi {
 }
 
 void main() {
-  setUp(MemoryArtworkCache.resetRuntimeTrustForTesting);
-  tearDown(MemoryArtworkCache.resetRuntimeTrustForTesting);
+  setUp(() {
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+    MemoryArtworkImage.resetAutomaticGenerationBudgetForTesting();
+  });
+  tearDown(() {
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+    MemoryArtworkImage.resetAutomaticGenerationBudgetForTesting();
+  });
 
   Future<void> trustDisplayKey(String cacheKey) async {
     final trustedKey = await MemoryArtworkCache.rememberDisplayCacheKey(
@@ -877,6 +962,49 @@ void main() {
     expect(find.text('Illustration unavailable'), findsNothing);
   });
 
+  testWidgets('suppresses cached artwork while corrected enrichment is nonterminal', (tester) async {
+    final api = _DelayedArtworkApi();
+    final cachedFile = File('assets/images/onboarding-bg-1.webp');
+    await trustDisplayKey('owner-profile-memory-revision-cache-key');
+    final conversation = ServerConversation(
+      id: 'memory-enrichment-pending',
+      createdAt: DateTime(2026, 8, 25),
+      structured: Structured('[Ella] An older title', '[Ella] An older enriched summary.'),
+      artwork: const MemoryArtworkState(
+        status: MemoryArtworkStatus.ready,
+        styleVersion: memoryArtworkDefaultStyle,
+        enrichmentRevision: 'summary-revision-1',
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => cachedFile,
+          cacheEvictor: (_) async {},
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.byKey(const Key('memory-cached-artwork-memory-enrichment-pending')), findsOneWidget);
+
+    api.remoteResult.complete(
+      const MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.unavailable,
+        failureCode: 'memory_artwork_enrichment_not_terminal',
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byKey(const Key('memory-cached-artwork-memory-enrichment-pending')), findsNothing);
+    expect(find.text('Illustration unavailable'), findsOneWidget);
+  });
+
   testWidgets('visible artwork never enqueues work just because the card is rendered', (tester) async {
     final api = _DelayedArtworkApi();
     final conversation = ServerConversation(
@@ -900,6 +1028,415 @@ void main() {
     await tester.pump();
 
     expect(api.lastEnqueueIfMissing, isFalse);
+  });
+
+  testWidgets('an explicit artwork action enqueues only that unavailable memory', (tester) async {
+    final api = _ManualGenerationArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-manual-generation',
+      createdAt: DateTime(2026, 9, 2),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: SizedBox(
+          width: 320,
+          height: 220,
+          child: MemoryArtworkImage(
+            conversation: conversation,
+            api: api,
+            cachedFileLookup: (_) async => null,
+            allowManualGeneration: true,
+            maxTransientRetries: 0,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(api.enqueueRequests, [isFalse], reason: 'rendering the unavailable card remains read-only');
+    expect(find.text('Try artwork again'), findsOneWidget);
+    expect(find.byIcon(Icons.auto_awesome_outlined), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('memory-artwork-placeholder-memory-manual-generation')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('memory-artwork-placeholder-memory-manual-generation')));
+    await tester.pump();
+
+    expect(api.enqueueRequests, [isFalse, isTrue], reason: 'repeated taps cannot create duplicate generation calls');
+    expect(find.text('Preparing illustration…'), findsOneWidget);
+
+    api.generationResult.complete(const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating));
+    await tester.pump();
+    expect(find.text('Preparing illustration…'), findsOneWidget);
+  });
+
+  testWidgets('a source photo keeps artwork retry and preparing progress visible', (tester) async {
+    final api = _ManualGenerationArtworkApi();
+    final photoData = await rootBundle.load('assets/images/onboarding-bg-1.webp');
+    final conversation = ServerConversation(
+      id: 'memory-source-photo-generation',
+      createdAt: DateTime(2026, 9, 2),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      photos: [
+        ConversationPhoto(
+          id: 'photo-1',
+          base64: base64Encode(photoData.buffer.asUint8List()),
+          createdAt: DateTime(2026, 9, 2),
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: SizedBox(
+          width: 320,
+          height: 220,
+          child: MemoryArtworkImage(
+            conversation: conversation,
+            api: api,
+            cachedFileLookup: (_) async => null,
+            allowManualGeneration: true,
+            maxTransientRetries: 0,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byKey(const Key('memory-source-photo')), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-photo-retry-memory-source-photo-generation')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('memory-artwork-photo-retry-memory-source-photo-generation')));
+    await tester.pump();
+
+    expect(api.enqueueRequests, [isFalse, isTrue]);
+    expect(find.byKey(const Key('memory-source-photo')), findsOneWidget);
+    expect(
+      find.byKey(const Key('memory-artwork-generation-progress-memory-source-photo-generation')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a narrow list photo uses an unclipped icon-only artwork retry action', (tester) async {
+    final semantics = tester.ensureSemantics();
+    final api = _ManualGenerationArtworkApi();
+    final photoData = await rootBundle.load('assets/images/onboarding-bg-1.webp');
+    final conversation = ServerConversation(
+      id: 'memory-narrow-photo-generation',
+      createdAt: DateTime(2026, 9, 2),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      photos: [
+        ConversationPhoto(
+          id: 'photo-1',
+          base64: base64Encode(photoData.buffer.asUint8List()),
+          createdAt: DateTime(2026, 9, 2),
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(
+            width: 112,
+            height: 112,
+            child: MemoryArtworkImage(
+              conversation: conversation,
+              api: api,
+              cachedFileLookup: (_) async => null,
+              allowManualGeneration: true,
+              maxTransientRetries: 0,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final retry = find.byKey(const Key('memory-artwork-photo-retry-memory-narrow-photo-generation'));
+    expect(retry, findsOneWidget);
+    expect(find.text('Try artwork again'), findsNothing);
+    expect(tester.getSemantics(retry).label, contains('Try artwork again'));
+    expect(tester.getRect(retry).right, lessThanOrEqualTo(112));
+    expect(tester.getRect(retry).bottom, lessThanOrEqualTo(112));
+    semantics.dispose();
+  });
+
+  testWidgets('enabling bounded automatic recovery rechecks the same visible memory', (tester) async {
+    final api = _AutomaticGenerationArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-hero-recovery',
+      createdAt: DateTime(2026, 9, 2),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+    );
+
+    Widget buildArtwork({required bool recover}) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: SizedBox(
+            width: 320,
+            height: 220,
+            child: MemoryArtworkImage(
+              conversation: conversation,
+              api: api,
+              cachedFileLookup: (_) async => null,
+              enqueueIfMissing: recover,
+              maxTransientRetries: 0,
+            ),
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(recover: false));
+    await tester.pump();
+    expect(api.enqueueRequests, [isFalse]);
+
+    await tester.pumpWidget(buildArtwork(recover: true));
+    await tester.pump();
+
+    expect(api.enqueueRequests, [isFalse, isFalse, isTrue]);
+    expect(
+      find.byKey(const Key('memory-artwork-placeholder-memory-hero-recovery')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('automatic recovery releases a failed preflight claim and retries one enqueue', (tester) async {
+    final authority = _MutableArtworkAuthority();
+    var getRequests = 0;
+    var postRequests = 0;
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => authority,
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async {
+        expect(requireAuthCheck, isTrue);
+        expect(expectedAuthenticatedUid, authority.uid);
+        expect(exactAuthority, same(authority));
+        if (method == 'POST') {
+          postRequests++;
+          expect(jsonDecode(body), {'request_mode': 'automatic'});
+          return http.Response(
+            jsonEncode({'outcome': 'automatic_attempt_already_used', 'status': 'unavailable'}),
+            200,
+          );
+        }
+        getRequests++;
+        if (getRequests == 3) throw StateError('safety read unavailable');
+        return http.Response(
+          jsonEncode({'schema_version': memoryArtworkSchemaVersion, 'status': 'unavailable'}),
+          200,
+        );
+      },
+    );
+    final conversation = ServerConversation(
+      id: 'memory-hero-preflight-retry',
+      createdAt: DateTime(2026, 9, 4),
+      activeSummaryVersionId: 'summary-version-1',
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => null,
+          enqueueIfMissing: true,
+          retryDelay: const Duration(milliseconds: 1),
+          maxTransientRetries: 1,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 1));
+    await tester.pump();
+
+    expect(getRequests, 6, reason: 'the scheduled retry must repeat both safety reads after the first one fails');
+    expect(postRequests, 1, reason: 'only the retry that reaches the POST boundary consumes the automatic claim');
+  });
+
+  testWidgets('hero automatic generation stays one-shot across recreation and leaves one manual retry', (tester) async {
+    final api = _AutomaticGenerationArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-hero-one-shot',
+      createdAt: DateTime(2026, 9, 4),
+      activeSummaryVersionId: 'summary-version-1',
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+    );
+
+    Widget buildArtwork(int refreshEpoch) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: SizedBox(
+            width: 320,
+            height: 220,
+            child: MemoryArtworkImage(
+              conversation: conversation,
+              api: api,
+              cachedFileLookup: (_) async => null,
+              enqueueIfMissing: true,
+              allowManualGeneration: true,
+              refreshEpoch: refreshEpoch,
+              maxTransientRetries: 0,
+            ),
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(0));
+    await tester.pump();
+    expect(api.enqueueRequests.where((enqueue) => enqueue).length, 1);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    await tester.pumpWidget(buildArtwork(1));
+    await tester.pump();
+    await tester.pumpWidget(buildArtwork(2));
+    await tester.pump();
+
+    expect(
+      api.enqueueRequests.where((enqueue) => enqueue).length,
+      1,
+      reason: 'recreation and queue epochs must not buy another automatic generation attempt',
+    );
+    expect(find.text('Try artwork again'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('memory-artwork-placeholder-memory-hero-one-shot')));
+    await tester.pump();
+
+    expect(
+      api.enqueueRequests.where((enqueue) => enqueue).length,
+      2,
+      reason: 'the explicit person-initiated retry remains available and bounded to one tap',
+    );
+  });
+
+  testWidgets('automatic key stays stable when reservation metadata appears', (tester) async {
+    final api = _AutomaticGenerationArtworkApi();
+    ServerConversation conversation({MemoryArtworkState? artwork}) => ServerConversation(
+          id: 'memory-stable-auto-key',
+          createdAt: DateTime(2026, 9, 4),
+          activeSummaryVersionId: 'summary-version-1',
+          structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+          artwork: artwork,
+        );
+
+    Widget buildArtwork(ServerConversation value) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MemoryArtworkImage(
+            conversation: value,
+            api: api,
+            cachedFileLookup: (_) async => null,
+            enqueueIfMissing: true,
+            maxTransientRetries: 0,
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(conversation()));
+    await tester.pump();
+    await tester.pumpWidget(
+      buildArtwork(
+        conversation(
+          artwork: const MemoryArtworkState(
+            status: MemoryArtworkStatus.unavailable,
+            styleVersion: memoryArtworkAnimeStorybookStyle,
+            enrichmentRevision: 'summary-version-1',
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(
+      api.enqueueRequests.where((enqueue) => enqueue).length,
+      1,
+      reason: 'server reservation metadata must not create a second automatic generation key',
+    );
+  });
+
+  testWidgets('manual generation stays unavailable for consent and authority failures', (tester) async {
+    final api = _ManualGenerationArtworkApi(initialFailureCode: 'memory_artwork_consent_required');
+    final conversation = ServerConversation(
+      id: 'memory-policy-blocked',
+      createdAt: DateTime(2026, 9, 2),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => null,
+          allowManualGeneration: true,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Illustration unavailable'), findsOneWidget);
+    expect(find.text('Try artwork again'), findsNothing);
+    expect(find.byIcon(Icons.auto_awesome_outlined), findsNothing);
+    expect(api.enqueueRequests, [isFalse]);
+  });
+
+  testWidgets('manual generation fails closed for raw terminal artwork states', (tester) async {
+    const terminalCodes = {
+      'deletion_pending',
+      'authority_changed',
+      'preference_changed',
+      'source_changed',
+      'prompt_changed',
+      'job_claim_invalid',
+    };
+
+    for (final terminalCode in terminalCodes) {
+      final api = _ManualGenerationArtworkApi(initialFailureCode: terminalCode);
+      final conversation = ServerConversation(
+        id: 'memory-policy-$terminalCode',
+        createdAt: DateTime(2026, 9, 2),
+        structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MemoryArtworkImage(
+            conversation: conversation,
+            api: api,
+            cachedFileLookup: (_) async => null,
+            allowManualGeneration: true,
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Try artwork again'), findsNothing, reason: terminalCode);
+      expect(api.enqueueRequests, [isFalse], reason: terminalCode);
+    }
   });
 
   testWidgets('suppresses cached artwork after a terminal policy response', (tester) async {
@@ -1018,6 +1555,10 @@ void main() {
     await tester.pump();
 
     expect(find.text('Preparing illustration…'), findsOneWidget);
+    expect(
+      find.byKey(const Key('memory-artwork-generation-progress-memory-generating')),
+      findsOneWidget,
+    );
 
     api.remoteResult.complete(const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating));
     await tester.pump();
@@ -1657,6 +2198,46 @@ void main() {
     await tester.pump();
     expect(api.loadCalls, 2);
     expect(find.byKey(const Key('memory-generated-artwork-memory-awaiting-enrichment')), findsOneWidget);
+  });
+
+  testWidgets('refreshes unavailable hero artwork when conversation enrichment becomes terminal', (tester) async {
+    final api = _RecoveringEnrichmentArtworkApi();
+
+    ServerConversation conversation({required bool terminal}) => ServerConversation(
+          id: 'memory-enrichment-transition',
+          createdAt: DateTime(2026, 8, 26),
+          structured: Structured('[Ella] A new memory', '[Ella] A useful generic summary.'),
+          enrichmentState: terminal
+              ? const {'status': 'completed', 'canonical_status': 'completed', 'pending': false}
+              : const {'status': 'processing', 'canonical_status': 'pending', 'pending': true},
+          activeSummaryVersionId: terminal ? 'summary-version-2' : null,
+        );
+
+    Widget buildArtwork(ServerConversation value) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MemoryArtworkImage(
+            conversation: value,
+            api: api,
+            cachedFileLookup: (_) async => null,
+            retryDelay: const Duration(milliseconds: 10),
+            enqueueIfMissing: true,
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(conversation(terminal: false)));
+    await tester.pump();
+
+    expect(find.text('Illustration unavailable'), findsOneWidget);
+    expect(api.loadCalls, 1);
+    expect(api.enqueueRequests, [isFalse]);
+
+    await tester.pumpWidget(buildArtwork(conversation(terminal: true)));
+    await tester.pump();
+
+    expect(api.loadCalls, 2);
+    expect(api.enqueueRequests, [isFalse, isFalse]);
+    expect(find.byKey(const Key('memory-generated-artwork-memory-enrichment-transition')), findsOneWidget);
   });
 
   testWidgets('compact preparing state fits at 200 percent text scale', (tester) async {

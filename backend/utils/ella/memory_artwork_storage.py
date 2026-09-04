@@ -75,6 +75,21 @@ def _validated_owner_key(uid: str, memory_id: str, object_key: str) -> re.Match[
     return match
 
 
+def _validated_artwork_key(
+    uid: str,
+    profile_binding_id: str,
+    memory_id: str,
+    generation_key: str,
+    object_key: str,
+) -> re.Match[str]:
+    match = _validated_owner_key(uid, memory_id, object_key)
+    if match.group("profile") != _sha256(profile_binding_id):
+        raise MemoryArtworkStorageError("memory_artwork_object_profile_mismatch")
+    if match.group("generation") != generation_key:
+        raise MemoryArtworkStorageError("memory_artwork_object_generation_mismatch")
+    return match
+
+
 class GCSMemoryArtworkStore:
     """GCS-backed private store. The bucket must never be publicly readable."""
 
@@ -121,9 +136,19 @@ class GCSMemoryArtworkStore:
             byte_size=len(image_bytes),
         )
 
-    def signed_get_url(self, *, uid: str, memory_id: str, object_key: str) -> str:
-        _validated_owner_key(uid, memory_id, object_key)
+    def signed_get_url(
+        self,
+        *,
+        uid: str,
+        profile_binding_id: str,
+        memory_id: str,
+        generation_key: str,
+        object_key: str,
+    ) -> str:
+        _validated_artwork_key(uid, profile_binding_id, memory_id, generation_key, object_key)
         blob = self.client.bucket(self.bucket_name).blob(object_key)
+        if not blob.exists():
+            raise MemoryArtworkStorageError("memory_artwork_object_missing")
         return blob.generate_signed_url(
             version="v4",
             expiration=timedelta(seconds=SIGNED_URL_TTL_SECONDS),

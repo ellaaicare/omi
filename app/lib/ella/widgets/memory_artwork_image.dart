@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -16,6 +17,17 @@ typedef MemoryArtworkCacheEvictor = Future<void> Function(String cacheKey);
 
 enum _MemoryArtworkFallbackKind { preparing, unavailable }
 
+bool _artworkReadinessChanged(ServerConversation previous, ServerConversation current) {
+  String? enrichmentValue(ServerConversation conversation, String key) =>
+      conversation.enrichmentState?[key]?.toString();
+
+  return previous.status != current.status ||
+      previous.activeSummaryVersionId != current.activeSummaryVersionId ||
+      enrichmentValue(previous, 'status') != enrichmentValue(current, 'status') ||
+      enrichmentValue(previous, 'canonical_status') != enrichmentValue(current, 'canonical_status') ||
+      enrichmentValue(previous, 'pending') != enrichmentValue(current, 'pending');
+}
+
 class MemoryArtworkImage extends StatefulWidget {
   const MemoryArtworkImage({
     super.key,
@@ -31,6 +43,7 @@ class MemoryArtworkImage extends StatefulWidget {
     this.refreshEpoch = 0,
     this.authorityEpoch = 0,
     this.enqueueIfMissing = false,
+    this.allowManualGeneration = false,
   });
 
   final ServerConversation conversation;
@@ -65,6 +78,38 @@ class MemoryArtworkImage extends StatefulWidget {
   final int authorityEpoch;
   final bool enqueueIfMissing;
 
+  /// Offers an explicit, single-memory generation action after an
+  /// authenticated display read confirms that artwork is unavailable.
+  /// Passive list rendering remains read-only.
+  final bool allowManualGeneration;
+
+  static const _automaticGenerationBudgetCapacity = 256;
+  static final LinkedHashSet<String> _automaticGenerationAttempts = LinkedHashSet<String>();
+  static final Set<String> _automaticGenerationInFlight = <String>{};
+
+  static bool beginAutomaticGeneration(String key) {
+    if (key.isEmpty || _automaticGenerationAttempts.contains(key) || !_automaticGenerationInFlight.add(key)) {
+      return false;
+    }
+    return true;
+  }
+
+  static void commitAutomaticGeneration(String key) {
+    _automaticGenerationInFlight.remove(key);
+    if (key.isEmpty || !_automaticGenerationAttempts.add(key)) return;
+    while (_automaticGenerationAttempts.length > _automaticGenerationBudgetCapacity) {
+      _automaticGenerationAttempts.remove(_automaticGenerationAttempts.first);
+    }
+  }
+
+  static void releaseAutomaticGeneration(String key) => _automaticGenerationInFlight.remove(key);
+
+  @visibleForTesting
+  static void resetAutomaticGenerationBudgetForTesting() {
+    _automaticGenerationAttempts.clear();
+    _automaticGenerationInFlight.clear();
+  }
+
   @override
   State<MemoryArtworkImage> createState() => _MemoryArtworkImageState();
 }
@@ -89,6 +134,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   int? _imageRetryBudgetAuthorityEpoch;
   int? _imageRetryBudgetRefreshEpoch;
   String? _imageRetryBudgetMemoryId;
+  bool _manualGenerationInFlight = false;
 
   @override
   void initState() {
@@ -103,8 +149,10 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         oldWidget.conversation.artwork?.enrichmentRevision != widget.conversation.artwork?.enrichmentRevision ||
         oldWidget.conversation.artwork?.status != widget.conversation.artwork?.status ||
         oldWidget.conversation.artwork?.styleVersion != widget.conversation.artwork?.styleVersion ||
+        _artworkReadinessChanged(oldWidget.conversation, widget.conversation) ||
         oldWidget.refreshEpoch != widget.refreshEpoch ||
-        oldWidget.authorityEpoch != widget.authorityEpoch) {
+        oldWidget.authorityEpoch != widget.authorityEpoch ||
+        oldWidget.enqueueIfMissing != widget.enqueueIfMissing) {
       _refreshRequest(invalidateCachedArtwork: oldWidget.authorityEpoch != widget.authorityEpoch);
     }
   }
@@ -116,6 +164,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   }
 
   void _refreshRequest({bool invalidateCachedArtwork = false}) {
+    _manualGenerationInFlight = false;
     _resetAuthorityRetryBudgetIfNeeded();
     _resetTransientRetryBudgetIfNeeded();
     _resetImageRetryBudgetIfNeeded();
@@ -238,6 +287,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     MemoryArtworkState? artwork,
     int generation, {
     bool loadCachedFile = true,
+    bool enqueueIfMissing = false,
   }) async {
     MemoryArtworkResult result;
     try {
@@ -246,9 +296,27 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       // doing a private 30-second poll for every visible memory.
       result = await api.loadForDisplay(
         widget.conversation.id,
-        enqueueIfMissing: widget.enqueueIfMissing,
+        enqueueIfMissing: enqueueIfMissing,
         pollAttempts: 0,
       );
+      if (!enqueueIfMissing && widget.enqueueIfMissing && result.isAuthorityCurrent && result.canRequestGeneration) {
+        final automaticKey = _automaticGenerationKey(api);
+        if (MemoryArtworkImage.beginAutomaticGeneration(automaticKey)) {
+          var enqueueAttempted = false;
+          try {
+            result = await api.loadAutomaticallyForDisplay(
+              widget.conversation.id,
+              pollAttempts: 0,
+              onEnqueueAttempt: () {
+                enqueueAttempted = true;
+                MemoryArtworkImage.commitAutomaticGeneration(automaticKey);
+              },
+            );
+          } finally {
+            if (!enqueueAttempted) MemoryArtworkImage.releaseAutomaticGeneration(automaticKey);
+          }
+        }
+      }
     } catch (_) {
       if (!mounted || generation != _requestGeneration) return;
       setState(() {
@@ -326,6 +394,40 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       unawaited(_loadCachedFile(publishedReadyCacheKey, generation));
     }
     if (_shouldRetry(result)) _scheduleRetry(api, artwork, generation, result: result);
+  }
+
+  String _automaticGenerationKey(MemoryArtworkApi api) {
+    final sourceRevision = widget.conversation.activeSummaryVersionId?.trim() ?? '';
+    return api.automaticGenerationKey(
+      memoryId: widget.conversation.id,
+      sourceRevision: sourceRevision,
+    );
+  }
+
+  Future<void> _generateArtwork() async {
+    if (_manualGenerationInFlight || !_canManuallyGenerate(_remoteResult)) return;
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    _transientRetries = 0;
+    _imageDownloadRetries = 0;
+    final generation = ++_requestGeneration;
+    final api = widget.api ?? MemoryArtworkApi();
+    setState(() {
+      _manualGenerationInFlight = true;
+      _remoteResult = const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating);
+    });
+    try {
+      await _loadRemoteResult(
+        api,
+        widget.conversation.artwork,
+        generation,
+        enqueueIfMissing: true,
+      );
+    } finally {
+      if (mounted && generation == _requestGeneration) {
+        setState(() => _manualGenerationInFlight = false);
+      }
+    }
   }
 
   Future<void> _evictSuppressedCachedArtwork(Set<String> cacheKeys) async {
@@ -504,12 +606,17 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       'memory_artwork_consent_required',
       'memory_artwork_deletion_pending',
       'memory_artwork_discarded',
+      'memory_artwork_enrichment_not_terminal',
       'memory_artwork_memory_not_found',
       'memory_artwork_preference_authority_stale',
       'memory_artwork_release_disabled',
       'memory_artwork_sensitive_source_excluded',
       'memory_artwork_source_stale',
     }.contains(result.failureCode);
+  }
+
+  bool _canManuallyGenerate(MemoryArtworkResult? result) {
+    return widget.allowManualGeneration && result?.canRequestGeneration == true;
   }
 
   Widget _cachedArtworkOrFallback(BuildContext context, {required _MemoryArtworkFallbackKind kind}) {
@@ -531,58 +638,213 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   Widget _fallback(BuildContext context, {required _MemoryArtworkFallbackKind kind}) {
     final bytes = _sourcePhoto();
     if (bytes != null) {
-      return Semantics(
-        image: true,
-        label: context.l10n.todayMemoryPhotoLabel,
-        child: Image.memory(
-          bytes,
-          key: const Key('memory-source-photo'),
-          fit: widget.fit,
-          gaplessPlayback: true,
-          errorBuilder: (_, __, ___) => _placeholder(kind),
-        ),
-      );
+      return _sourcePhotoFallback(context, bytes, kind: kind);
     }
     return _placeholder(kind);
   }
 
-  Widget _placeholder(_MemoryArtworkFallbackKind kind) {
+  Widget _sourcePhotoFallback(
+    BuildContext context,
+    Uint8List bytes, {
+    required _MemoryArtworkFallbackKind kind,
+  }) {
     final isPreparing = kind == _MemoryArtworkFallbackKind.preparing;
-    final useCompactLayout = MediaQuery.textScalerOf(context).scale(12) > 18;
-    final semanticsLabel =
-        isPreparing ? context.l10n.memoryArtworkPreparingLabel : context.l10n.memoryArtworkUnavailableLabel;
-    final visibleLabel =
-        isPreparing ? context.l10n.memoryArtworkPreparingShort : context.l10n.memoryArtworkUnavailableLabel;
-    return Semantics(
-      label: semanticsLabel,
-      child: DecoratedBox(
-        key: Key('memory-artwork-placeholder-${widget.conversation.id}'),
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Color(0xFFE9E3D8), Color(0xFFDCE9E3)],
+    final canGenerate = !isPreparing && !_manualGenerationInFlight && _canManuallyGenerate(_remoteResult);
+    final photo = Semantics(
+      image: true,
+      label: context.l10n.todayMemoryPhotoLabel,
+      child: Image.memory(
+        bytes,
+        key: const Key('memory-source-photo'),
+        fit: widget.fit,
+        gaplessPlayback: true,
+        errorBuilder: (_, __, ___) => _placeholder(kind),
+      ),
+    );
+    if (!isPreparing && !canGenerate) return photo;
+    return LayoutBuilder(
+      builder: (context, constraints) => Stack(
+        fit: StackFit.expand,
+        children: [
+          photo,
+          if (isPreparing)
+            Center(
+              child: Semantics(
+                label: context.l10n.memoryArtworkPreparingLabel,
+                child: Material(
+                  color: const Color(0xE6F8F2E8),
+                  shape: const CircleBorder(),
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: SizedBox(
+                      key: Key('memory-artwork-generation-progress-${widget.conversation.id}'),
+                      width: 38,
+                      height: 38,
+                      child: const Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          CircularProgressIndicator(strokeWidth: 2.5, color: Color(0xFF3A776A)),
+                          Icon(Icons.auto_awesome_rounded, color: Color(0xFF57736A), size: 17),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            )
+          else if (canGenerate)
+            _photoRetryAction(compact: constraints.maxWidth < 180),
+        ],
+      ),
+    );
+  }
+
+  Widget _photoRetryAction({required bool compact}) {
+    final key = Key('memory-artwork-photo-retry-${widget.conversation.id}');
+    if (compact) {
+      return Positioned(
+        right: 8,
+        bottom: 8,
+        child: Semantics(
+          label: context.l10n.memoryArtworkRetry,
+          button: true,
+          child: Material(
+            color: const Color(0xF2F8F2E8),
+            shape: const CircleBorder(),
+            elevation: 1,
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              key: key,
+              onTap: _generateArtwork,
+              child: const SizedBox(
+                width: 44,
+                height: 44,
+                child: Icon(Icons.auto_awesome_outlined, color: Color(0xFF3A776A), size: 20),
+              ),
+            ),
           ),
         ),
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (!useCompactLayout) ...[
-                  const Icon(Icons.brush_outlined, color: Color(0xFF57736A), size: 30),
-                  const SizedBox(height: 8),
+      );
+    }
+    return Positioned(
+      right: 12,
+      bottom: 12,
+      child: Semantics(
+        label: context.l10n.memoryArtworkRetry,
+        button: true,
+        child: Material(
+          color: const Color(0xF2F8F2E8),
+          borderRadius: BorderRadius.circular(24),
+          elevation: 1,
+          child: InkWell(
+            key: key,
+            borderRadius: BorderRadius.circular(24),
+            onTap: _generateArtwork,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.auto_awesome_outlined, color: Color(0xFF3A776A), size: 18),
+                  const SizedBox(width: 6),
+                  Text(
+                    context.l10n.memoryArtworkRetry,
+                    style: const TextStyle(
+                      color: Color(0xFF315F55),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
                 ],
-                Text(
-                  visibleLabel,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Color(0xFF57736A), fontSize: 12, fontWeight: FontWeight.w600),
-                ),
-              ],
+              ),
             ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _placeholder(_MemoryArtworkFallbackKind kind) {
+    final isPreparing = kind == _MemoryArtworkFallbackKind.preparing;
+    final canGenerate = !isPreparing && !_manualGenerationInFlight && _canManuallyGenerate(_remoteResult);
+    final useCompactLayout = MediaQuery.textScalerOf(context).scale(12) > 18;
+    final semanticsLabel = isPreparing
+        ? context.l10n.memoryArtworkPreparingLabel
+        : canGenerate
+            ? context.l10n.memoryArtworkRetry
+            : context.l10n.memoryArtworkUnavailableLabel;
+    final visibleLabel = isPreparing
+        ? context.l10n.memoryArtworkPreparingShort
+        : canGenerate
+            ? context.l10n.memoryArtworkRetry
+            : context.l10n.memoryArtworkUnavailableLabel;
+    const decoration = BoxDecoration(
+      gradient: LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [Color(0xFFE9E3D8), Color(0xFFDCE9E3)],
+      ),
+    );
+    final content = Center(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!useCompactLayout) ...[
+              if (isPreparing)
+                SizedBox(
+                  key: Key('memory-artwork-generation-progress-${widget.conversation.id}'),
+                  width: 38,
+                  height: 38,
+                  child: const Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      CircularProgressIndicator(strokeWidth: 2.5, color: Color(0xFF3A776A)),
+                      Icon(Icons.auto_awesome_rounded, color: Color(0xFF57736A), size: 17),
+                    ],
+                  ),
+                )
+              else
+                Icon(
+                  canGenerate ? Icons.auto_awesome_outlined : Icons.brush_outlined,
+                  color: const Color(0xFF57736A),
+                  size: 30,
+                ),
+              const SizedBox(height: 8),
+            ],
+            Text(
+              visibleLabel,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Color(0xFF57736A), fontSize: 12, fontWeight: FontWeight.w600),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!canGenerate) {
+      return Semantics(
+        label: semanticsLabel,
+        child: DecoratedBox(
+          key: Key('memory-artwork-placeholder-${widget.conversation.id}'),
+          decoration: decoration,
+          child: content,
+        ),
+      );
+    }
+    return Semantics(
+      label: semanticsLabel,
+      button: true,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          key: Key('memory-artwork-placeholder-${widget.conversation.id}'),
+          onTap: _generateArtwork,
+          child: Ink(
+            decoration: decoration,
+            child: content,
           ),
         ),
       ),
