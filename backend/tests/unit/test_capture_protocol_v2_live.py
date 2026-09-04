@@ -188,7 +188,9 @@ def test_expired_authority_allows_only_one_reconnect_owner_claim(capture_protoco
     authority = _authority()
     authority['lease_expires_at'] = now - timedelta(seconds=1)
     authority_ref = _Document(authority)
-    conversation_ref = _Document(_conversation())
+    conversation = _conversation()
+    conversation['capture_lease_expires_at'] = now - timedelta(seconds=1)
+    conversation_ref = _Document(conversation)
 
     first_transaction = _Transaction()
     first_claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
@@ -270,6 +272,95 @@ def test_live_finalization_blocks_reconnect_after_capture_lease_expires(capture_
     assert claimed is False
     assert transaction.updates == []
     assert transaction.sets == []
+
+
+def test_reconnect_claim_rejects_live_conversation_capture_lease_when_authority_expired(capture_protocol):
+    now = datetime.now(timezone.utc)
+    authority = _authority()
+    authority['lease_expires_at'] = now - timedelta(seconds=1)
+    conversation = _conversation()
+    conversation['capture_lease_expires_at'] = now + timedelta(seconds=30)
+    transaction = _Transaction()
+
+    claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+        transaction,
+        _Document(authority),
+        _Document(conversation),
+        'capture-a',
+        'generation-b',
+        'owner-a',
+        'owner-b',
+        now,
+    )
+
+    assert claimed is False
+    assert transaction.updates == []
+    assert transaction.sets == []
+
+
+def test_reconnect_claim_rejects_live_conversation_finalizer_when_authority_finalizer_expired(capture_protocol):
+    now = datetime.now(timezone.utc)
+    authority = _authority(state='finalizing')
+    authority['lease_expires_at'] = now - timedelta(seconds=1)
+    authority['finalization_lease_expires_at'] = now - timedelta(seconds=1)
+    conversation = _conversation(state='finalizing')
+    conversation['capture_owner_id'] = 'owner-a'
+    conversation['capture_lease_expires_at'] = now - timedelta(seconds=1)
+    conversation['capture_finalization_lease_expires_at'] = now + timedelta(seconds=30)
+    transaction = _Transaction()
+
+    claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+        transaction,
+        _Document(authority),
+        _Document(conversation),
+        'capture-a',
+        'generation-b',
+        'owner-a',
+        'owner-b',
+        now,
+    )
+
+    assert claimed is False
+    assert transaction.updates == []
+    assert transaction.sets == []
+
+
+def test_reconnect_claim_rejects_missing_or_malformed_v2_lease_evidence(capture_protocol):
+    now = datetime.now(timezone.utc)
+    expired = now - timedelta(seconds=1)
+    for target, value in (
+        ('authority', None),
+        ('authority', 'invalid'),
+        ('conversation', None),
+        ('conversation', 'invalid'),
+    ):
+        authority = _authority()
+        authority['lease_expires_at'] = expired
+        conversation = _conversation()
+        conversation['capture_lease_expires_at'] = expired
+        document = authority if target == 'authority' else conversation
+        if value is None:
+            document.pop('lease_expires_at' if target == 'authority' else 'capture_lease_expires_at')
+        elif target == 'authority':
+            document['lease_expires_at'] = value
+        else:
+            document['capture_lease_expires_at'] = value
+        transaction = _Transaction()
+
+        claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+            transaction,
+            _Document(authority),
+            _Document(conversation),
+            'capture-a',
+            'generation-b',
+            'owner-a',
+            'owner-b',
+            now,
+        )
+
+        assert claimed is False
+        assert transaction.updates == []
+        assert transaction.sets == []
 
 
 def test_rotation_installs_successor_and_drains_only_exact_predecessor(capture_protocol):

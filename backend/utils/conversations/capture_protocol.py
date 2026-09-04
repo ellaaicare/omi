@@ -151,6 +151,29 @@ def _authority_live_for_reconnect(authority: Dict[str, Any], now: datetime) -> b
     return not _lease_expired(authority, now)
 
 
+def _strict_lease_expired(data: Dict[str, Any], now: datetime, field: str) -> bool:
+    expires_at = data.get(field)
+    return isinstance(expires_at, datetime) and _aware(expires_at) <= now
+
+
+def _durable_capture_side_is_quiescent(
+    data: Dict[str, Any],
+    now: datetime,
+    *,
+    state_field: str,
+    lease_field: str,
+    finalization_lease_field: str,
+) -> bool:
+    state = str(data.get(state_field) or '')
+    if state in {'drained', 'terminal'}:
+        return True
+    if state == 'active':
+        return _strict_lease_expired(data, now, lease_field)
+    if state == 'finalizing':
+        return _strict_lease_expired(data, now, finalization_lease_field)
+    return False
+
+
 def _finalization_claim_is_live(
     authority: Dict[str, Any],
     conversation: Dict[str, Any],
@@ -213,14 +236,53 @@ def _claim_reconnect_authority_transaction(
     authority = authority_snapshot.to_dict() if authority_snapshot.exists else {}
     exact_claim = bool(
         authority.get('state') == 'active'
+        and conversation.get('capture_state') == 'active'
         and _authority_tuple_matches(authority, conversation_id, generation, owner_token)
         and _conversation_tuple_matches(conversation, conversation_id, generation, owner_token)
         and str(conversation.get('capture_owner_id') or '') == owner_token
+        and isinstance(authority.get('lease_expires_at'), datetime)
+        and _aware(authority['lease_expires_at']) > now
+        and isinstance(conversation.get('capture_lease_expires_at'), datetime)
+        and _aware(conversation['capture_lease_expires_at']) > now
     )
     if exact_claim:
         return True
-    if authority and _authority_live_for_reconnect(authority, now):
-        return False
+
+    conversation_has_v2_state = any(
+        field in conversation
+        for field in (
+            'capture_protocol_version',
+            'capture_generation',
+            'capture_owner_token',
+            'capture_state',
+            'capture_lease_expires_at',
+            'capture_finalization_lease_expires_at',
+        )
+    )
+    if authority or conversation_has_v2_state:
+        prior_generation = str(authority.get('generation') or '')
+        prior_owner_token = str(authority.get('owner_token') or '')
+        if (
+            not prior_generation
+            or not prior_owner_token
+            or not _authority_tuple_matches(authority, conversation_id, prior_generation, prior_owner_token)
+            or not _conversation_tuple_matches(conversation, conversation_id, prior_generation, prior_owner_token)
+            or not _durable_capture_side_is_quiescent(
+                authority,
+                now,
+                state_field='state',
+                lease_field='lease_expires_at',
+                finalization_lease_field='finalization_lease_expires_at',
+            )
+            or not _durable_capture_side_is_quiescent(
+                conversation,
+                now,
+                state_field='capture_state',
+                lease_field='capture_lease_expires_at',
+                finalization_lease_field='capture_finalization_lease_expires_at',
+            )
+        ):
+            return False
 
     lease_expires_at = now + timedelta(seconds=CAPTURE_AUTHORITY_LEASE_SECONDS)
     transaction.set(
