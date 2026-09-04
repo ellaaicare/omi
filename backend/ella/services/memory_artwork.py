@@ -1272,10 +1272,16 @@ class MemoryArtworkService:
         if not object_key:
             raise MemoryArtworkError("memory_artwork_object_missing", retryable=True)
         try:
-            url = self.store_factory().signed_get_url(uid=uid, memory_id=memory_id, object_key=object_key)
+            url = self.store_factory().signed_get_url(
+                uid=uid,
+                profile_binding_id=authority.binding_id,
+                memory_id=memory_id,
+                generation_key=str(current_artwork.get("generation_key") or ""),
+                object_key=object_key,
+            )
         except MemoryArtworkStorageError as exc:
             if str(exc) != "memory_artwork_object_missing":
-                raise
+                raise MemoryArtworkError(str(exc)) from exc
             self.repository.mark_generation_unavailable(
                 uid,
                 memory_id,

@@ -607,10 +607,54 @@ def test_gcs_signed_url_rejects_a_missing_object_before_signing():
     store = memory_artwork_storage.GCSMemoryArtworkStore(bucket_name="private-artwork", client=Client())
 
     with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as missing:
-        store.signed_get_url(uid="owner-a", memory_id="memory-1", object_key=object_key)
+        store.signed_get_url(
+            uid="owner-a",
+            profile_binding_id="binding-owner-a",
+            memory_id="memory-1",
+            generation_key="a" * 64,
+            object_key=object_key,
+        )
 
     assert str(missing.value) == "memory_artwork_object_missing"
     assert missing_blob.exists_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("profile_binding_id", "generation_key", "failure_code"),
+    (
+        ("binding-owner-b", "a" * 64, "memory_artwork_object_profile_mismatch"),
+        ("binding-owner-a", "b" * 64, "memory_artwork_object_generation_mismatch"),
+    ),
+)
+def test_gcs_signed_url_rejects_profile_or_generation_mismatch_before_blob_lookup(
+    profile_binding_id,
+    generation_key,
+    failure_code,
+):
+    class Client:
+        @staticmethod
+        def bucket(bucket_name):
+            raise AssertionError("an authority-mismatched object must be rejected before storage access")
+
+    object_key = memory_artwork_storage.object_key_for(
+        uid="owner-a",
+        profile_binding_id="binding-owner-a",
+        memory_id="memory-1",
+        generation_key="a" * 64,
+        content_type="image/png",
+    )
+    store = memory_artwork_storage.GCSMemoryArtworkStore(bucket_name="private-artwork", client=Client())
+
+    with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as mismatch:
+        store.signed_get_url(
+            uid="owner-a",
+            profile_binding_id=profile_binding_id,
+            memory_id="memory-1",
+            generation_key=generation_key,
+            object_key=object_key,
+        )
+
+    assert str(mismatch.value) == failure_code
 
 
 def test_missing_ready_blob_is_demoted_and_can_be_rereserved():
@@ -1313,7 +1357,9 @@ def test_signed_url_releases_artwork_that_finishes_during_authority_resolution()
     assert store.signed == [
         {
             "uid": "owner-a",
+            "profile_binding_id": "binding-owner-a",
             "memory_id": "memory-1",
+            "generation_key": "a" * 64,
             "object_key": "private/object/key",
         }
     ]
