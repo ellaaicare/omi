@@ -123,6 +123,7 @@ def _load_service_module():
 
 
 artwork = _load_service_module()
+memory_artwork_storage = sys.modules["utils.ella.memory_artwork_storage"]
 
 
 def _load_database_module():
@@ -4979,6 +4980,47 @@ def test_transient_ready_blob_lookup_failure_is_retryable_without_demoting_artwo
     assert conversation["artwork"] == ready_artwork
 
 
+@pytest.mark.parametrize(
+    "storage_error",
+    [
+        "memory_artwork_object_profile_mismatch",
+        "memory_artwork_object_generation_mismatch",
+    ],
+)
+def test_ready_blob_authority_mismatch_is_non_retryable_conflict_without_demoting_artwork(storage_error):
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    assert asyncio.run(service.enqueue("owner-a", "memory-1"))["outcome"] == "reserved"
+    assert _run_claimed_process(service, repository) == {"outcome": "ready", "status": "ready"}
+
+    class MismatchedStore(FakeStore):
+        def signed_get_url(self, **kwargs):
+            raise artwork.MemoryArtworkStorageError(storage_error)
+
+    service.store_factory = MismatchedStore
+    conversation = repository.conversations[("owner-a", "memory-1")]
+    ready_artwork = copy.deepcopy(conversation["artwork"])
+
+    with pytest.raises(artwork.MemoryArtworkError) as mismatch:
+        asyncio.run(service.signed_url("owner-a", "memory-1"))
+
+    assert mismatch.value.code == storage_error
+    assert mismatch.value.retryable is False
+    assert conversation["artwork"] == ready_artwork
+    router_module = _load_memory_artwork_router_module(f"ella_memory_artwork_{storage_error}_router_test_module")
+    response = router_module._http_error(mismatch.value)
+    assert response.status_code == 409
+    assert response.detail == {"code": storage_error, "retryable": False}
+
+
 def test_stale_missing_blob_read_cannot_demote_a_new_same_key_generation_claim():
     class InterleavingRepository(FakeRepository):
         def mark_generation_unavailable(self, uid, memory_id, *, expected_artwork, **kwargs):
@@ -5026,8 +5068,6 @@ def test_stale_missing_blob_read_cannot_demote_a_new_same_key_generation_claim()
 
 
 def test_gcs_signed_url_rejects_missing_or_wrong_authority_before_signing():
-    from utils.ella import memory_artwork_storage
-
     class MissingBlob:
         def exists(self):
             return False
@@ -5076,8 +5116,6 @@ def test_gcs_signed_url_rejects_missing_or_wrong_authority_before_signing():
 
 
 def test_gcs_signed_url_wraps_transient_existence_failure_without_signing():
-    from utils.ella import memory_artwork_storage
-
     class UnavailableBlob:
         def exists(self):
             raise RuntimeError("provider detail must not escape")
@@ -5115,8 +5153,6 @@ def test_gcs_signed_url_wraps_transient_existence_failure_without_signing():
 
 
 def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
-    from utils.ella import memory_artwork_storage
-
     object_key = memory_artwork_storage.object_key_for(
         uid="owner-a",
         profile_binding_id="binding-owner-a",
@@ -5235,8 +5271,6 @@ def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
 
 
 def test_account_artwork_cleanup_fails_closed_only_when_storage_was_touched(monkeypatch):
-    from utils.ella import memory_artwork_storage
-
     monkeypatch.delenv("ELLA_MEMORY_ARTWORK_BUCKET", raising=False)
     assert memory_artwork_storage.delete_all_user_artwork("owner-a", cleanup_required=False) == 0
     with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as failure:
@@ -5245,8 +5279,6 @@ def test_account_artwork_cleanup_fails_closed_only_when_storage_was_touched(monk
 
 
 def test_distributed_publication_lock_holds_postgres_session_until_release(monkeypatch):
-    from utils.ella import memory_artwork_storage
-
     calls = []
 
     class Connection:
@@ -5288,8 +5320,6 @@ def test_distributed_publication_lock_holds_postgres_session_until_release(monke
 
 
 def test_distributed_publication_lock_fails_closed_when_owner_is_busy(monkeypatch):
-    from utils.ella import memory_artwork_storage
-
     class Connection:
         closed = False
 
@@ -5322,8 +5352,6 @@ def test_distributed_publication_lock_fails_closed_when_owner_is_busy(monkeypatc
 
 
 def test_account_deletion_requires_distributed_publication_lock():
-    from utils.ella import memory_artwork_storage
-
     class Repository:
         @staticmethod
         def begin_account_deletion(uid):
@@ -5335,8 +5363,6 @@ def test_account_deletion_requires_distributed_publication_lock():
 
 
 def test_account_deletion_returns_before_cleanup_while_claimed_worker_is_active(monkeypatch):
-    from utils.ella import memory_artwork_storage
-
     monkeypatch.setattr(memory_artwork_storage, "require_memory_artwork_publication_lock", lambda uid, proof: None)
     calls = []
 
@@ -5373,8 +5399,6 @@ def test_account_deletion_returns_before_cleanup_while_claimed_worker_is_active(
 
 
 def test_account_deletion_stops_before_job_cleanup_when_storage_absence_is_unproven(monkeypatch):
-    from utils.ella import memory_artwork_storage
-
     monkeypatch.setattr(memory_artwork_storage, "require_memory_artwork_publication_lock", lambda uid, proof: None)
 
     class Repository:

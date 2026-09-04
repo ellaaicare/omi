@@ -2018,8 +2018,12 @@ class MemoryArtworkService:
                 object_key=object_key,
             )
         except MemoryArtworkStorageError as exc:
-            if str(exc) != "memory_artwork_object_missing":
-                raise MemoryArtworkError(str(exc), retryable=True) from exc
+            storage_error = str(exc)
+            if storage_error != "memory_artwork_object_missing":
+                raise MemoryArtworkError(
+                    storage_error,
+                    retryable=storage_error == "memory_artwork_storage_unavailable",
+                ) from exc
             current_request_key = str(generation_request.get("generation_key") or "")
             served_generation_key = str(current_artwork.get("generation_key") or "")
             if current_request_key == served_generation_key:
