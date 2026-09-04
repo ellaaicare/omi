@@ -384,9 +384,8 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         : result.styleVersion.isNotEmpty
             ? result.styleVersion
             : artwork?.styleVersion ?? '';
-    final enrichmentRevision = result.enrichmentRevision.isNotEmpty
-        ? result.enrichmentRevision
-        : artwork?.enrichmentRevision ?? '';
+    final enrichmentRevision =
+        result.enrichmentRevision.isNotEmpty ? result.enrichmentRevision : artwork?.enrichmentRevision ?? '';
     final authorityMemoryKey = api.cacheKeyForDisplay(
       memoryId: widget.conversation.id,
       styleVersion: styleVersion,
@@ -401,9 +400,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       styleVersion,
       enrichmentRevision,
     ].join('\n');
-    return sha256
-        .convert(utf8.encode(generationSource))
-        .toString();
+    return sha256.convert(utf8.encode(generationSource)).toString();
   }
 
   Future<void> _generateArtwork() async {

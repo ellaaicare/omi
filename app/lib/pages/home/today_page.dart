@@ -2515,236 +2515,237 @@ class _ArtworkStudioSheet extends StatelessWidget {
             key: const Key('home-artwork-studio-scroll'),
             padding: EdgeInsets.fromLTRB(20, 12, 20, 20 + MediaQuery.viewInsetsOf(context).bottom),
             child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Center(
-              child: Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(color: EllaColors.cardEdge, borderRadius: BorderRadius.circular(2)),
-              ),
-            ),
-            const SizedBox(height: 18),
-            Text(context.l10n.memoryArtworkStudio, style: EllaTextStyles.display.copyWith(color: EllaColors.ink)),
-            const SizedBox(height: 6),
-            Text(
-              context.l10n.memoryArtworkStudioDetail,
-              style: EllaTextStyles.secondary.copyWith(color: EllaColors.inkSoft),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              libraries == null
-                  ? context.l10n.memoryArtworkLibrariesChecking
-                  : context.l10n.memoryArtworkLibrarySummary(
-                      selectedLibrary?.readyDays ?? 0,
-                      selectedLibrary?.readyMemories ?? 0,
-                    ),
-              key: const Key('home-artwork-library-summary'),
-              style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
-            ),
-            if (libraries != null) ...[
-              const SizedBox(height: 4),
-              Text(
-                context.l10n.memoryArtworkRecentFirst(
-                  libraries!.historicalBatchSize,
-                  libraries!.defaultPreviewDays,
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(color: EllaColors.cardEdge, borderRadius: BorderRadius.circular(2)),
+                  ),
                 ),
-                style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
-              ),
-            ],
-            const SizedBox(height: 16),
-            EllaCardSurface(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        if (styleSaving || queueLoadState == _ArtworkQueueLoadState.loading)
-                          const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
-                          )
-                        else
-                          Icon(
-                            queueLoadState == _ArtworkQueueLoadState.failed ||
-                                    backfillState == _ArtworkBackfillUiState.needsAttention
-                                ? Icons.info_outline_rounded
-                                : Icons.auto_awesome_rounded,
-                            color: queueLoadState == _ArtworkQueueLoadState.failed ||
-                                    backfillState == _ArtworkBackfillUiState.needsAttention
-                                ? EllaColors.warning
-                                : EllaColors.tealDeep,
-                          ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            queue == null ? status : _previewHeadline(context, queue),
-                            key: const Key('home-artwork-queue-progress-label'),
-                            style: EllaTextStyles.secondary.copyWith(color: EllaColors.ink),
-                          ),
-                        ),
-                      ],
-                    ),
-                    if (queue != null) ...[
-                      const SizedBox(height: 12),
-                      Semantics(
-                        label: _previewHeadline(context, queue),
-                        value: progress == null
-                            ? context.l10n.memoryArtworkBackfillInProgress
-                            : '${(progress * 100).round()}%',
-                        child: LinearProgressIndicator(
-                          key: const Key('home-artwork-queue-progress-bar'),
-                          value: progress,
-                          minHeight: 8,
-                          borderRadius: BorderRadius.circular(99),
-                          color: EllaColors.tealDeep,
-                          backgroundColor: EllaColors.cardEdge,
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      if (queue.state != MemoryArtworkQueueState.completed)
-                        Text(
-                          _queueDetail(context, queue),
-                          key: const Key('home-artwork-queue-detail'),
-                          style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
-                        ),
-                      if (queue.active > 0 && queue.controlState != MemoryArtworkQueueState.running) ...[
-                        const SizedBox(height: 6),
-                        Text(
-                          context.l10n.memoryArtworkQueueActiveMayFinish,
-                          style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
-                        ),
-                      ],
-                      const SizedBox(height: 12),
-                      Wrap(
-                        spacing: 10,
-                        runSpacing: 8,
-                        children: [
-                          if (queue.canPause)
-                            OutlinedButton.icon(
-                              key: const Key('home-artwork-pause'),
-                              onPressed: queueControlBusy ? null : onPause,
-                              style: OutlinedButton.styleFrom(
-                                foregroundColor: EllaColors.tealDeep,
-                                side: const BorderSide(color: EllaColors.tealDeep),
-                              ),
-                              icon: const Icon(Icons.pause_rounded),
-                              label: Text(context.l10n.memoryArtworkQueuePause),
-                            ),
-                          if (queue.canResume)
-                            FilledButton.icon(
-                              key: const Key('home-artwork-resume'),
-                              onPressed: queueControlBusy ? null : onResume,
-                              style: FilledButton.styleFrom(
-                                foregroundColor: EllaColors.paper,
-                                backgroundColor: EllaColors.tealDeep,
-                              ),
-                              icon: const Icon(Icons.play_arrow_rounded),
-                              label: Text(context.l10n.memoryArtworkQueueNextBatch(queue.batchSize)),
-                            ),
-                          if (queue.canCancel)
-                            TextButton.icon(
-                              key: const Key('home-artwork-stop'),
-                              onPressed: queueControlBusy ? null : onStop,
-                              style: TextButton.styleFrom(foregroundColor: EllaColors.tealDeep),
-                              icon: const Icon(Icons.stop_circle_outlined),
-                              label: Text(context.l10n.memoryArtworkQueueStop),
-                            ),
-                          if (queueControlBusy)
-                            const Padding(
-                              padding: EdgeInsets.all(10),
-                              child: SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
-                              ),
-                            ),
-                        ],
-                      ),
-                      if (queueLoadState == _ArtworkQueueLoadState.failed) ...[
-                        const SizedBox(height: 8),
-                        TextButton.icon(
-                          key: const Key('home-artwork-retry-status'),
-                          onPressed: queueControlBusy ? null : onRetryStatus,
-                          style: TextButton.styleFrom(foregroundColor: EllaColors.tealDeep),
-                          icon: const Icon(Icons.refresh_rounded),
-                          label: Text(context.l10n.memoryArtworkQueueRetryStatus),
-                        ),
-                      ],
-                    ],
-                  ],
+                const SizedBox(height: 18),
+                Text(context.l10n.memoryArtworkStudio, style: EllaTextStyles.display.copyWith(color: EllaColors.ink)),
+                const SizedBox(height: 6),
+                Text(
+                  context.l10n.memoryArtworkStudioDetail,
+                  style: EllaTextStyles.secondary.copyWith(color: EllaColors.inkSoft),
                 ),
-              ),
-            ),
-            const SizedBox(height: 18),
-            Text(context.l10n.memoryArtworkStyle, style: EllaTextStyles.eyebrow.copyWith(color: EllaColors.inkSoft)),
-            const SizedBox(height: 6),
-            ...styles.map((style) {
-              final selected = preferences.styleVersion == style.$1;
-              final enabled = !styleSaving && !queueControlBusy;
-              final library = libraries?.forStyle(style.$1);
-              return ListTile(
-                key: Key('home-artwork-style-${style.$1}'),
-                contentPadding: EdgeInsets.zero,
-                tileColor: EllaColors.paper,
-                selectedTileColor: EllaColors.card,
-                textColor: EllaColors.ink,
-                iconColor: EllaColors.tealDeep,
-                enabled: enabled,
-                leading: Icon(
-                  selected ? Icons.radio_button_checked_rounded : Icons.radio_button_unchecked_rounded,
-                  color: selected ? EllaColors.tealDeep : EllaColors.inkSoft,
-                ),
-                title: Text(style.$2, style: EllaTextStyles.secondary.copyWith(color: EllaColors.ink)),
-                subtitle: Text(
+                const SizedBox(height: 8),
+                Text(
                   libraries == null
                       ? context.l10n.memoryArtworkLibrariesChecking
-                      : library == null || library.readyMemories == 0
-                          ? context.l10n.memoryArtworkLibraryEmpty
-                          : context.l10n.memoryArtworkLibraryCount(library.readyDays, library.readyMemories),
+                      : context.l10n.memoryArtworkLibrarySummary(
+                          selectedLibrary?.readyDays ?? 0,
+                          selectedLibrary?.readyMemories ?? 0,
+                        ),
+                  key: const Key('home-artwork-library-summary'),
                   style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
                 ),
-                selected: selected,
-                selectedColor: EllaColors.tealDeep,
-                onTap: enabled ? () => onStyleSelected(style.$1) : null,
-              );
-            }),
-            const SizedBox(height: 10),
-            if (queue == null && queueLoadState == _ArtworkQueueLoadState.failed)
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  key: const Key('home-artwork-retry-status'),
-                  onPressed: styleSaving || queueControlBusy ? null : onRetryStatus,
-                  style: FilledButton.styleFrom(
-                    foregroundColor: EllaColors.paper,
-                    backgroundColor: EllaColors.tealDeep,
+                if (libraries != null) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    context.l10n.memoryArtworkRecentFirst(
+                      libraries!.historicalBatchSize,
+                      libraries!.defaultPreviewDays,
+                    ),
+                    style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
                   ),
-                  icon: const Icon(Icons.refresh_rounded),
-                  label: Text(context.l10n.memoryArtworkQueueRetryStatus),
-                ),
-              ),
-            if (queue == null && queueLoadState == _ArtworkQueueLoadState.idle)
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton.icon(
-                  key: const Key('home-artwork-continue'),
-                  onPressed: styleSaving || queueControlBusy ? null : onContinue,
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: EllaColors.tealDeep,
-                    backgroundColor: EllaColors.paper,
-                    side: const BorderSide(color: EllaColors.tealDeep),
+                ],
+                const SizedBox(height: 16),
+                EllaCardSurface(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            if (styleSaving || queueLoadState == _ArtworkQueueLoadState.loading)
+                              const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                              )
+                            else
+                              Icon(
+                                queueLoadState == _ArtworkQueueLoadState.failed ||
+                                        backfillState == _ArtworkBackfillUiState.needsAttention
+                                    ? Icons.info_outline_rounded
+                                    : Icons.auto_awesome_rounded,
+                                color: queueLoadState == _ArtworkQueueLoadState.failed ||
+                                        backfillState == _ArtworkBackfillUiState.needsAttention
+                                    ? EllaColors.warning
+                                    : EllaColors.tealDeep,
+                              ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                queue == null ? status : _previewHeadline(context, queue),
+                                key: const Key('home-artwork-queue-progress-label'),
+                                style: EllaTextStyles.secondary.copyWith(color: EllaColors.ink),
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (queue != null) ...[
+                          const SizedBox(height: 12),
+                          Semantics(
+                            label: _previewHeadline(context, queue),
+                            value: progress == null
+                                ? context.l10n.memoryArtworkBackfillInProgress
+                                : '${(progress * 100).round()}%',
+                            child: LinearProgressIndicator(
+                              key: const Key('home-artwork-queue-progress-bar'),
+                              value: progress,
+                              minHeight: 8,
+                              borderRadius: BorderRadius.circular(99),
+                              color: EllaColors.tealDeep,
+                              backgroundColor: EllaColors.cardEdge,
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          if (queue.state != MemoryArtworkQueueState.completed)
+                            Text(
+                              _queueDetail(context, queue),
+                              key: const Key('home-artwork-queue-detail'),
+                              style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
+                            ),
+                          if (queue.active > 0 && queue.controlState != MemoryArtworkQueueState.running) ...[
+                            const SizedBox(height: 6),
+                            Text(
+                              context.l10n.memoryArtworkQueueActiveMayFinish,
+                              style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
+                            ),
+                          ],
+                          const SizedBox(height: 12),
+                          Wrap(
+                            spacing: 10,
+                            runSpacing: 8,
+                            children: [
+                              if (queue.canPause)
+                                OutlinedButton.icon(
+                                  key: const Key('home-artwork-pause'),
+                                  onPressed: queueControlBusy ? null : onPause,
+                                  style: OutlinedButton.styleFrom(
+                                    foregroundColor: EllaColors.tealDeep,
+                                    side: const BorderSide(color: EllaColors.tealDeep),
+                                  ),
+                                  icon: const Icon(Icons.pause_rounded),
+                                  label: Text(context.l10n.memoryArtworkQueuePause),
+                                ),
+                              if (queue.canResume)
+                                FilledButton.icon(
+                                  key: const Key('home-artwork-resume'),
+                                  onPressed: queueControlBusy ? null : onResume,
+                                  style: FilledButton.styleFrom(
+                                    foregroundColor: EllaColors.paper,
+                                    backgroundColor: EllaColors.tealDeep,
+                                  ),
+                                  icon: const Icon(Icons.play_arrow_rounded),
+                                  label: Text(context.l10n.memoryArtworkQueueNextBatch(queue.batchSize)),
+                                ),
+                              if (queue.canCancel)
+                                TextButton.icon(
+                                  key: const Key('home-artwork-stop'),
+                                  onPressed: queueControlBusy ? null : onStop,
+                                  style: TextButton.styleFrom(foregroundColor: EllaColors.tealDeep),
+                                  icon: const Icon(Icons.stop_circle_outlined),
+                                  label: Text(context.l10n.memoryArtworkQueueStop),
+                                ),
+                              if (queueControlBusy)
+                                const Padding(
+                                  padding: EdgeInsets.all(10),
+                                  child: SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                                  ),
+                                ),
+                            ],
+                          ),
+                          if (queueLoadState == _ArtworkQueueLoadState.failed) ...[
+                            const SizedBox(height: 8),
+                            TextButton.icon(
+                              key: const Key('home-artwork-retry-status'),
+                              onPressed: queueControlBusy ? null : onRetryStatus,
+                              style: TextButton.styleFrom(foregroundColor: EllaColors.tealDeep),
+                              icon: const Icon(Icons.refresh_rounded),
+                              label: Text(context.l10n.memoryArtworkQueueRetryStatus),
+                            ),
+                          ],
+                        ],
+                      ],
+                    ),
                   ),
-                  icon: const Icon(Icons.history_rounded),
-                  label: Text(action),
                 ),
-              ),
-          ],
-        ),
+                const SizedBox(height: 18),
+                Text(context.l10n.memoryArtworkStyle,
+                    style: EllaTextStyles.eyebrow.copyWith(color: EllaColors.inkSoft)),
+                const SizedBox(height: 6),
+                ...styles.map((style) {
+                  final selected = preferences.styleVersion == style.$1;
+                  final enabled = !styleSaving && !queueControlBusy;
+                  final library = libraries?.forStyle(style.$1);
+                  return ListTile(
+                    key: Key('home-artwork-style-${style.$1}'),
+                    contentPadding: EdgeInsets.zero,
+                    tileColor: EllaColors.paper,
+                    selectedTileColor: EllaColors.card,
+                    textColor: EllaColors.ink,
+                    iconColor: EllaColors.tealDeep,
+                    enabled: enabled,
+                    leading: Icon(
+                      selected ? Icons.radio_button_checked_rounded : Icons.radio_button_unchecked_rounded,
+                      color: selected ? EllaColors.tealDeep : EllaColors.inkSoft,
+                    ),
+                    title: Text(style.$2, style: EllaTextStyles.secondary.copyWith(color: EllaColors.ink)),
+                    subtitle: Text(
+                      libraries == null
+                          ? context.l10n.memoryArtworkLibrariesChecking
+                          : library == null || library.readyMemories == 0
+                              ? context.l10n.memoryArtworkLibraryEmpty
+                              : context.l10n.memoryArtworkLibraryCount(library.readyDays, library.readyMemories),
+                      style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
+                    ),
+                    selected: selected,
+                    selectedColor: EllaColors.tealDeep,
+                    onTap: enabled ? () => onStyleSelected(style.$1) : null,
+                  );
+                }),
+                const SizedBox(height: 10),
+                if (queue == null && queueLoadState == _ArtworkQueueLoadState.failed)
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      key: const Key('home-artwork-retry-status'),
+                      onPressed: styleSaving || queueControlBusy ? null : onRetryStatus,
+                      style: FilledButton.styleFrom(
+                        foregroundColor: EllaColors.paper,
+                        backgroundColor: EllaColors.tealDeep,
+                      ),
+                      icon: const Icon(Icons.refresh_rounded),
+                      label: Text(context.l10n.memoryArtworkQueueRetryStatus),
+                    ),
+                  ),
+                if (queue == null && queueLoadState == _ArtworkQueueLoadState.idle)
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      key: const Key('home-artwork-continue'),
+                      onPressed: styleSaving || queueControlBusy ? null : onContinue,
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: EllaColors.tealDeep,
+                        backgroundColor: EllaColors.paper,
+                        side: const BorderSide(color: EllaColors.tealDeep),
+                      ),
+                      icon: const Icon(Icons.history_rounded),
+                      label: Text(action),
+                    ),
+                  ),
+              ],
+            ),
           ),
           Positioned(
             top: 8,
