@@ -299,6 +299,7 @@ class MemoryArtworkApi {
     String memoryId, {
     int pollAttempts = 10,
     Duration pollInterval = const Duration(seconds: 3),
+    void Function()? onEnqueueAttempt,
   }) =>
       _loadForDisplay(
         memoryId,
@@ -306,6 +307,7 @@ class MemoryArtworkApi {
         generationMode: MemoryArtworkGenerationMode.automatic,
         pollAttempts: pollAttempts,
         pollInterval: pollInterval,
+        onEnqueueAttempt: onEnqueueAttempt,
       );
 
   Future<MemoryArtworkResult> _loadForDisplay(
@@ -314,6 +316,7 @@ class MemoryArtworkApi {
     required MemoryArtworkGenerationMode generationMode,
     required int pollAttempts,
     required Duration pollInterval,
+    void Function()? onEnqueueAttempt,
   }) async {
     final authority = _authorityProvider();
     if (authority == null || memoryId.trim().isEmpty) return _unavailable('memory_artwork_authority_unavailable');
@@ -322,18 +325,25 @@ class MemoryArtworkApi {
     if (result.isReady || result.status == MemoryArtworkResultStatus.declined || !authority.isExactCurrent()) {
       return result;
     }
-    if (enqueueIfMissing && result.canRequestGeneration) {
+    final manualRetry = enqueueIfMissing && generationMode == MemoryArtworkGenerationMode.manual;
+    if (enqueueIfMissing &&
+        (result.canRequestGeneration || (manualRetry && result.status == MemoryArtworkResultStatus.generating))) {
       // Re-read immediately before the side effect. The tile may have rendered
       // while consent, deletion, source, profile, or runtime authority changed.
       final current = await _fetchWithAuthority(authority, memoryId);
       if (current.isReady ||
-          current.status == MemoryArtworkResultStatus.generating ||
+          (current.status == MemoryArtworkResultStatus.generating && !manualRetry) ||
           current.status == MemoryArtworkResultStatus.declined ||
-          !current.canRequestGeneration ||
+          (!current.canRequestGeneration && !(manualRetry && current.status == MemoryArtworkResultStatus.generating)) ||
           !authority.isExactCurrent()) {
         return current;
       }
-      result = await _enqueueWithAuthority(authority, memoryId, generationMode: generationMode);
+      result = await _enqueueWithAuthority(
+        authority,
+        memoryId,
+        generationMode: generationMode,
+        onEnqueueAttempt: onEnqueueAttempt,
+      );
       if (result.status == MemoryArtworkResultStatus.ready) {
         // A generation can complete between the preflight GET and the
         // idempotent enqueue. Fetch again so ready includes a signed URL.
@@ -400,8 +410,10 @@ class MemoryArtworkApi {
     ExactAccountAuthorityVerifier authority,
     String memoryId, {
     required MemoryArtworkGenerationMode generationMode,
+    void Function()? onEnqueueAttempt,
   }) async {
     if (!authority.isExactCurrent()) return _unavailable('memory_artwork_authority_changed');
+    onEnqueueAttempt?.call();
     final response = await _call(
       authority,
       method: 'POST',

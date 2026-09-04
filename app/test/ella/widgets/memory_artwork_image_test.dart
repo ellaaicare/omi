@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:http/http.dart' as http;
 
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
@@ -106,8 +107,10 @@ class _AutomaticGenerationArtworkApi extends MemoryArtworkApi {
     String memoryId, {
     int pollAttempts = 10,
     Duration pollInterval = const Duration(seconds: 3),
+    void Function()? onEnqueueAttempt,
   }) async {
     enqueueRequests.add(true);
+    onEnqueueAttempt?.call();
     return const MemoryArtworkResult(
       status: MemoryArtworkResultStatus.unavailable,
       failureCode: 'memory_artwork_automatic_attempt_exhausted',
@@ -1204,6 +1207,72 @@ void main() {
       find.byKey(const Key('memory-artwork-placeholder-memory-hero-recovery')),
       findsOneWidget,
     );
+  });
+
+  testWidgets('automatic recovery releases a failed preflight claim and retries one enqueue', (tester) async {
+    final authority = _MutableArtworkAuthority();
+    var getRequests = 0;
+    var postRequests = 0;
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => authority,
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async {
+        expect(requireAuthCheck, isTrue);
+        expect(expectedAuthenticatedUid, authority.uid);
+        expect(exactAuthority, same(authority));
+        if (method == 'POST') {
+          postRequests++;
+          expect(jsonDecode(body), {'request_mode': 'automatic'});
+          return http.Response(
+            jsonEncode({'outcome': 'automatic_attempt_already_used', 'status': 'unavailable'}),
+            200,
+          );
+        }
+        getRequests++;
+        if (getRequests == 3) throw StateError('safety read unavailable');
+        return http.Response(
+          jsonEncode({'schema_version': memoryArtworkSchemaVersion, 'status': 'unavailable'}),
+          200,
+        );
+      },
+    );
+    final conversation = ServerConversation(
+      id: 'memory-hero-preflight-retry',
+      createdAt: DateTime(2026, 9, 4),
+      activeSummaryVersionId: 'summary-version-1',
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => null,
+          enqueueIfMissing: true,
+          retryDelay: const Duration(milliseconds: 1),
+          maxTransientRetries: 1,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 1));
+    await tester.pump();
+
+    expect(getRequests, 6, reason: 'the scheduled retry must repeat both safety reads after the first one fails');
+    expect(postRequests, 1, reason: 'only the retry that reaches the POST boundary consumes the automatic claim');
   });
 
   testWidgets('hero automatic generation stays one-shot across recreation and leaves one manual retry', (tester) async {

@@ -483,7 +483,7 @@ void main() {
     }
   });
 
-  test('already-generating artwork is polled without duplicate enqueue', () async {
+  test('automatic load polls already-generating artwork without duplicate enqueue', () async {
     final authority = _Authority('owner-a');
     final methods = <String>[];
     var getCalls = 0;
@@ -516,15 +516,69 @@ void main() {
       },
     );
 
-    final result = await api.loadForDisplay(
+    final result = await api.loadAutomaticallyForDisplay(
       'memory-new',
-      enqueueIfMissing: true,
       pollAttempts: 1,
       pollInterval: Duration.zero,
     );
 
     expect(result.isReady, isTrue);
     expect(methods, ['GET', 'GET']);
+  });
+
+  test('manual retry reconciles stale generating state through the server', () async {
+    for (final terminalJob in const ['failed', 'completed']) {
+      final methods = <String>[];
+      final requestBodies = <Map<String, dynamic>>[];
+      final api = MemoryArtworkApi(
+        baseUrl: 'https://api.example/',
+        authorityProvider: () => _Authority('owner-a'),
+        request: ({
+          required url,
+          required headers,
+          required body,
+          required method,
+          timeout,
+          retries,
+          requireAuthCheck,
+          expectedAuthenticatedUid,
+          exactAuthority,
+        }) async {
+          methods.add(method);
+          if (method == 'POST') {
+            requestBodies.add(jsonDecode(body) as Map<String, dynamic>);
+            return http.Response(
+              jsonEncode({'outcome': 'requeued_terminal_$terminalJob', 'status': 'generating'}),
+              202,
+            );
+          }
+          return http.Response(
+            jsonEncode({
+              'schema_version': memoryArtworkSchemaVersion,
+              'status': 'generating',
+              'style_version': memoryArtworkDefaultStyle,
+              'enrichment_revision': 'summary-$terminalJob',
+            }),
+            200,
+          );
+        },
+      );
+
+      final result = await api.loadForDisplay(
+        'memory-terminal-$terminalJob',
+        enqueueIfMissing: true,
+        pollAttempts: 0,
+      );
+
+      expect(result.status, MemoryArtworkResultStatus.generating, reason: terminalJob);
+      expect(methods, ['GET', 'GET', 'POST'], reason: terminalJob);
+      expect(
+          requestBodies,
+          [
+            {'request_mode': 'manual'},
+          ],
+          reason: terminalJob);
+    }
   });
 
   test('published artwork remains ready while a selected style refresh is pending', () async {

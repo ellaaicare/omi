@@ -85,17 +85,30 @@ class MemoryArtworkImage extends StatefulWidget {
 
   static const _automaticGenerationBudgetCapacity = 256;
   static final LinkedHashSet<String> _automaticGenerationAttempts = LinkedHashSet<String>();
+  static final Set<String> _automaticGenerationInFlight = <String>{};
 
-  static bool claimAutomaticGeneration(String key) {
-    if (key.isEmpty || !_automaticGenerationAttempts.add(key)) return false;
-    while (_automaticGenerationAttempts.length > _automaticGenerationBudgetCapacity) {
-      _automaticGenerationAttempts.remove(_automaticGenerationAttempts.first);
+  static bool beginAutomaticGeneration(String key) {
+    if (key.isEmpty || _automaticGenerationAttempts.contains(key) || !_automaticGenerationInFlight.add(key)) {
+      return false;
     }
     return true;
   }
 
+  static void commitAutomaticGeneration(String key) {
+    _automaticGenerationInFlight.remove(key);
+    if (key.isEmpty || !_automaticGenerationAttempts.add(key)) return;
+    while (_automaticGenerationAttempts.length > _automaticGenerationBudgetCapacity) {
+      _automaticGenerationAttempts.remove(_automaticGenerationAttempts.first);
+    }
+  }
+
+  static void releaseAutomaticGeneration(String key) => _automaticGenerationInFlight.remove(key);
+
   @visibleForTesting
-  static void resetAutomaticGenerationBudgetForTesting() => _automaticGenerationAttempts.clear();
+  static void resetAutomaticGenerationBudgetForTesting() {
+    _automaticGenerationAttempts.clear();
+    _automaticGenerationInFlight.clear();
+  }
 
   @override
   State<MemoryArtworkImage> createState() => _MemoryArtworkImageState();
@@ -286,15 +299,23 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         enqueueIfMissing: enqueueIfMissing,
         pollAttempts: 0,
       );
-      if (!enqueueIfMissing &&
-          widget.enqueueIfMissing &&
-          result.isAuthorityCurrent &&
-          result.canRequestGeneration &&
-          MemoryArtworkImage.claimAutomaticGeneration(_automaticGenerationKey(api))) {
-        result = await api.loadAutomaticallyForDisplay(
-          widget.conversation.id,
-          pollAttempts: 0,
-        );
+      if (!enqueueIfMissing && widget.enqueueIfMissing && result.isAuthorityCurrent && result.canRequestGeneration) {
+        final automaticKey = _automaticGenerationKey(api);
+        if (MemoryArtworkImage.beginAutomaticGeneration(automaticKey)) {
+          var enqueueAttempted = false;
+          try {
+            result = await api.loadAutomaticallyForDisplay(
+              widget.conversation.id,
+              pollAttempts: 0,
+              onEnqueueAttempt: () {
+                enqueueAttempted = true;
+                MemoryArtworkImage.commitAutomaticGeneration(automaticKey);
+              },
+            );
+          } finally {
+            if (!enqueueAttempted) MemoryArtworkImage.releaseAutomaticGeneration(automaticKey);
+          }
+        }
       }
     } catch (_) {
       if (!mounted || generation != _requestGeneration) return;

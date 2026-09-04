@@ -1303,6 +1303,50 @@ void main() {
     expect(find.byKey(const Key('home-artwork-queue-progress-bar')), findsOneWidget);
   });
 
+  testWidgets('Artwork Studio hides retained queue controls after a refresh failure', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(queue: _artworkQueueStatus(ready: 4, queued: 2));
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byKey(const Key('home-artwork-queue-progress-bar')), findsOneWidget);
+    expect(find.byKey(const Key('home-artwork-pause')), findsOneWidget);
+    expect(find.byKey(const Key('home-artwork-stop')), findsOneWidget);
+
+    artwork.failNextQueueStatus();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(
+      find.text('Artwork progress could not be loaded. Your finished illustrations are still available.'),
+      findsNWidgets(2),
+    );
+    expect(find.byKey(const Key('home-artwork-queue-progress-bar')), findsNothing);
+    expect(find.byKey(const Key('home-artwork-pause')), findsNothing);
+    expect(find.byKey(const Key('home-artwork-resume')), findsNothing);
+    expect(find.byKey(const Key('home-artwork-stop')), findsNothing);
+    expect(find.byKey(const Key('home-artwork-retry-status')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('home-artwork-retry-status')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byKey(const Key('home-artwork-queue-progress-bar')), findsOneWidget);
+    expect(find.byKey(const Key('home-artwork-pause')), findsOneWidget);
+    expect(find.byKey(const Key('home-artwork-stop')), findsOneWidget);
+  });
+
   testWidgets('Artwork Studio keeps a close control visible while its styles scroll', (tester) async {
     tester.view.padding = const FakeViewPadding(top: 48);
     addTearDown(tester.view.resetPadding);

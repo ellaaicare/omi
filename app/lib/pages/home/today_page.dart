@@ -2504,7 +2504,9 @@ class _ArtworkStudioSheet extends StatelessWidget {
       _ArtworkBackfillUiState.needsAttention => context.l10n.memoryArtworkRetry,
       _ => context.l10n.memoryArtworkContinueOlder,
     };
-    final queue = queueStatus;
+    // Retain the last snapshot in state for recovery, but never present it as
+    // current or actionable while the authenticated status refresh is failed.
+    final queue = queueLoadState == _ArtworkQueueLoadState.failed ? null : queueStatus;
     final progress = queue == null ? 0.0 : _previewProgress(queue);
     final selectedLibrary = libraries?.forStyle(preferences.styleVersion);
 
@@ -2665,16 +2667,6 @@ class _ArtworkStudioSheet extends StatelessWidget {
                                 ),
                             ],
                           ),
-                          if (queueLoadState == _ArtworkQueueLoadState.failed) ...[
-                            const SizedBox(height: 8),
-                            TextButton.icon(
-                              key: const Key('home-artwork-retry-status'),
-                              onPressed: queueControlBusy ? null : onRetryStatus,
-                              style: TextButton.styleFrom(foregroundColor: EllaColors.tealDeep),
-                              icon: const Icon(Icons.refresh_rounded),
-                              label: Text(context.l10n.memoryArtworkQueueRetryStatus),
-                            ),
-                          ],
                         ],
                       ],
                     ),
