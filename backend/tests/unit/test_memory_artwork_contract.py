@@ -152,6 +152,7 @@ class FakeRepository:
         artwork_state,
         job_state,
         preserve_job_attempts=False,
+        allow_retry=True,
     ):
         if uid in self.deletion_pending:
             return {"outcome": "deletion_pending"}
@@ -178,6 +179,8 @@ class FakeRepository:
             if current_status == "generating" and existing_job.get("status") not in {"pending", "processing"}:
                 self.jobs[job_key] = effective_job
             return {"outcome": "existing", "artwork": copy.deepcopy(current)}
+        if not allow_retry and (current.get("generation_key") == generation_key or existing_job):
+            return {"outcome": "automatic_attempt_already_used", "artwork": copy.deepcopy(current)}
         conversation["artwork"] = copy.deepcopy(artwork_state)
         if not (preserve_job_attempts and existing_job.get("status") == "processing"):
             self.jobs[job_key] = effective_job
@@ -512,6 +515,43 @@ def test_idempotent_generation_and_owner_scoped_signed_url():
         asyncio.run(service.signed_url("owner-b", "memory-1"))
     assert missing.value.code == "memory_artwork_memory_not_found"
     assert len(store.signed) == 1
+
+
+def test_automatic_generation_is_durably_one_shot_but_manual_retry_remains_available():
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+
+    def service():
+        return artwork.MemoryArtworkService(
+            repository=repository,
+            authority_resolver=_resolver,
+            provider_factory=FakeProvider,
+            store_factory=FakeStore,
+            config=_enabled_config(),
+        )
+
+    first = asyncio.run(service().enqueue("owner-a", "memory-1", request_mode="automatic"))
+    assert first["outcome"] == "reserved"
+    generation_key = repository.conversations[("owner-a", "memory-1")]["artwork"]["generation_key"]
+    repository.conversations[("owner-a", "memory-1")]["artwork"].update(
+        {"status": "unavailable", "failure_code": "memory_artwork_provider_failed"}
+    )
+    repository.jobs[("owner-a", "memory-1", generation_key)].update({"status": "failed", "attempt_count": 5})
+
+    after_restart = asyncio.run(service().enqueue("owner-a", "memory-1", request_mode="automatic"))
+    assert after_restart == {
+        "outcome": "automatic_attempt_already_used",
+        "status": "unavailable",
+        "failure_code": "memory_artwork_automatic_attempt_exhausted",
+    }
+    assert repository.reserve_writes == 1
+    assert repository.jobs[("owner-a", "memory-1", generation_key)]["attempt_count"] == 5
+
+    manual = asyncio.run(service().enqueue("owner-a", "memory-1", request_mode="manual"))
+    assert manual["outcome"] == "reserved"
+    assert repository.reserve_writes == 2
+    assert repository.jobs[("owner-a", "memory-1", generation_key)]["attempt_count"] == 0
 
 
 @pytest.mark.parametrize(
@@ -1967,6 +2007,59 @@ def test_firestore_reservation_replaces_objectless_ready_state_and_completed_job
     assert conversation_ref.state["artwork"] == generating
     assert job_ref.state == pending_job
     assert [operation[0] for operation in transaction.operations] == ["update", "set"]
+
+
+def test_firestore_automatic_reservation_cannot_requeue_an_existing_generation():
+    class Snapshot:
+        def __init__(self, state):
+            self.state = state
+            self.exists = bool(state)
+
+        def to_dict(self):
+            return copy.deepcopy(self.state)
+
+    class Reference:
+        def __init__(self, state):
+            self.state = state
+
+        def get(self, transaction=None):
+            return Snapshot(self.state)
+
+    class Transaction:
+        def __init__(self):
+            self.operations = []
+
+        def update(self, reference, payload):
+            self.operations.append(("update", reference, payload))
+
+        def set(self, reference, payload):
+            self.operations.append(("set", reference, payload))
+
+    generation_key = "a" * 64
+    conversation = _terminal_memory("memory-1")
+    conversation["artwork"] = {
+        "status": "unavailable",
+        "generation_key": generation_key,
+        "enrichment_revision": "summary-memory-1",
+        "failure_code": "memory_artwork_provider_failed",
+    }
+    transaction = Transaction()
+
+    result = artwork_database._reserve_generation_transaction(
+        transaction,
+        Reference({"id": "owner-a"}),
+        Reference(conversation),
+        enrichment_revision="summary-memory-1",
+        generation_key=generation_key,
+        artwork_state={"status": "generating", "generation_key": generation_key},
+        job_ref=Reference({"status": "failed", "attempt_count": 5}),
+        job_state={"status": "pending", "attempt_count": 0},
+        preserve_job_attempts=True,
+        allow_retry=False,
+    )
+
+    assert result["outcome"] == "automatic_attempt_already_used"
+    assert transaction.operations == []
 
 
 def test_firestore_retry_reservation_preserves_attempt_history():

@@ -2754,7 +2754,7 @@ class _ArtworkStudioSheet extends StatelessWidget {
               decoration: const BoxDecoration(color: EllaColors.paper, shape: BoxShape.circle),
               child: IconButton(
                 key: const Key('home-artwork-studio-close'),
-                tooltip: MaterialLocalizations.of(context).closeButtonTooltip,
+                tooltip: context.l10n.close,
                 color: EllaColors.ink,
                 onPressed: () => Navigator.of(context).pop(),
                 icon: const Icon(Icons.close_rounded),

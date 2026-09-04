@@ -568,8 +568,11 @@ class MemoryArtworkService:
         uid: str,
         memory_id: str,
         *,
+        request_mode: str = "manual",
         preserve_job_attempts: bool = False,
     ) -> dict[str, Any]:
+        if request_mode not in {"manual", "automatic"}:
+            raise MemoryArtworkError("memory_artwork_request_mode_invalid")
         conversation = self.repository.get_conversation(uid, memory_id)
         if conversation is None:
             raise MemoryArtworkError("memory_artwork_memory_not_found")
@@ -654,6 +657,7 @@ class MemoryArtworkService:
             artwork_state=artwork_state,
             job_state=job_state,
             preserve_job_attempts=preserve_job_attempts,
+            allow_retry=request_mode != "automatic",
         )
         outcome = str(reservation.get("outcome") or "")
         if outcome == "deletion_pending":
@@ -669,6 +673,12 @@ class MemoryArtworkService:
                 "outcome": outcome,
                 "status": "unavailable",
                 "failure_code": "memory_artwork_source_stale",
+            }
+        if outcome == "automatic_attempt_already_used":
+            return {
+                "outcome": outcome,
+                "status": "unavailable",
+                "failure_code": "memory_artwork_automatic_attempt_exhausted",
             }
         if outcome not in {"reserved", "existing"}:
             raise MemoryArtworkError("memory_artwork_reservation_invalid", retryable=True)

@@ -32,6 +32,10 @@ class MemoryArtworkPreferencesUpdate(BaseModel):
     style_version: str = DEFAULT_STYLE_VERSION
 
 
+class MemoryArtworkGenerationRequest(BaseModel):
+    request_mode: Literal["manual", "automatic"] = "manual"
+
+
 def require_memory_artwork_service(
     service_key: Optional[str] = Header(default=None, alias=MEMORY_ARTWORK_SERVICE_HEADER),
     subject_uid: Optional[str] = Header(default=None, alias=ELLA_SUBJECT_UID_HEADER),
@@ -94,9 +98,17 @@ async def get_memory_artwork(memory_id: str, uid: str = Depends(get_exact_fireba
 
 
 @router.post("/memories/{memory_id}/artwork")
-async def retry_memory_artwork(memory_id: str, uid: str = Depends(get_exact_firebase_uid)):
+async def retry_memory_artwork(
+    memory_id: str,
+    payload: Optional[MemoryArtworkGenerationRequest] = None,
+    uid: str = Depends(get_exact_firebase_uid),
+):
     try:
-        return await MemoryArtworkService().enqueue(uid, memory_id)
+        return await MemoryArtworkService().enqueue(
+            uid,
+            memory_id,
+            request_mode=payload.request_mode if payload is not None else "manual",
+        )
     except MemoryArtworkError as exc:
         raise _http_error(exc) from exc
 

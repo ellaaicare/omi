@@ -84,12 +84,8 @@ class _AutomaticGenerationArtworkApi extends MemoryArtworkApi {
   final List<bool> enqueueRequests = [];
 
   @override
-  String cacheKeyForDisplay({
-    required String memoryId,
-    required String styleVersion,
-    required String enrichmentRevision,
-  }) =>
-      'automatic-generation-$memoryId-$styleVersion-$enrichmentRevision';
+  String automaticGenerationKey({required String memoryId, required String sourceRevision}) =>
+      'automatic-generation-$memoryId-$sourceRevision';
 
   @override
   Future<MemoryArtworkResult> loadForDisplay(
@@ -102,6 +98,19 @@ class _AutomaticGenerationArtworkApi extends MemoryArtworkApi {
     return const MemoryArtworkResult(
       status: MemoryArtworkResultStatus.unavailable,
       failureCode: 'memory_artwork_provider_failed',
+    );
+  }
+
+  @override
+  Future<MemoryArtworkResult> loadAutomaticallyForDisplay(
+    String memoryId, {
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    enqueueRequests.add(true);
+    return const MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.unavailable,
+      failureCode: 'memory_artwork_automatic_attempt_exhausted',
     );
   }
 }
@@ -1249,6 +1258,50 @@ void main() {
       api.enqueueRequests.where((enqueue) => enqueue).length,
       2,
       reason: 'the explicit person-initiated retry remains available and bounded to one tap',
+    );
+  });
+
+  testWidgets('automatic key stays stable when reservation metadata appears', (tester) async {
+    final api = _AutomaticGenerationArtworkApi();
+    ServerConversation conversation({MemoryArtworkState? artwork}) => ServerConversation(
+          id: 'memory-stable-auto-key',
+          createdAt: DateTime(2026, 9, 4),
+          activeSummaryVersionId: 'summary-version-1',
+          structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+          artwork: artwork,
+        );
+
+    Widget buildArtwork(ServerConversation value) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MemoryArtworkImage(
+            conversation: value,
+            api: api,
+            cachedFileLookup: (_) async => null,
+            enqueueIfMissing: true,
+            maxTransientRetries: 0,
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(conversation()));
+    await tester.pump();
+    await tester.pumpWidget(
+      buildArtwork(
+        conversation(
+          artwork: const MemoryArtworkState(
+            status: MemoryArtworkStatus.unavailable,
+            styleVersion: memoryArtworkAnimeStorybookStyle,
+            enrichmentRevision: 'summary-version-1',
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(
+      api.enqueueRequests.where((enqueue) => enqueue).length,
+      1,
+      reason: 'server reservation metadata must not create a second automatic generation key',
     );
   });
 

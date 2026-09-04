@@ -843,7 +843,7 @@ jobs:
             "$expected_sha" "$actual_sha" "$expected_test_count" "$actual_pass_count" "${expected_test_ids[*]}"
 
   callback-summary-cas-contract:
-    name: Callback 79, artwork 61, and Firestore 6 contracts
+    name: Callback 79, artwork 63, and Firestore 6 contracts
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -904,8 +904,8 @@ jobs:
           source "$RUNNER_TEMP/callback-cas-python/bin/activate"
           artwork_ids="$(python -m pytest --collect-only -q tests/unit/test_memory_artwork_contract.py | sed '/^$/d')"
           artwork_count="$(grep -c '::' <<<"$artwork_ids")"
-          [[ "$artwork_count" -eq 61 ]] || {
-            echo "Memory artwork collection mismatch: expectedCount=61 actualCount=$artwork_count" >&2
+          [[ "$artwork_count" -eq 63 ]] || {
+            echo "Memory artwork collection mismatch: expectedCount=63 actualCount=$artwork_count" >&2
             exit 1
           }
           grep -Fq 'test_mounted_route_rejects_unauthenticated_request_before_service_work' <<<"$artwork_ids"
@@ -914,6 +914,7 @@ jobs:
           grep -Fq 'test_sensitive_classification_drift_at_egress_recheck_blocks_provider' <<<"$artwork_ids"
           grep -Fq 'test_signed_url_requires_current_bound_consent' <<<"$artwork_ids"
           grep -Fq 'test_signed_url_rereads_consent_after_awaited_authority_resolution' <<<"$artwork_ids"
+          grep -Fq 'test_signed_url_releases_artwork_that_finishes_during_authority_resolution' <<<"$artwork_ids"
           grep -Fq 'test_release_off_is_a_signed_url_kill_switch' <<<"$artwork_ids"
           grep -Fq 'test_process_requires_current_durable_job_claim_before_provider' <<<"$artwork_ids"
           grep -Fq 'test_mounted_internal_process_route_uses_durable_worker_job_claim' <<<"$artwork_ids"
@@ -938,16 +939,18 @@ jobs:
           grep -Fq 'test_cleanup_marker_failure_prevents_object_upload' <<<"$artwork_ids"
           grep -Fq 'test_global_consent_revocation_at_final_egress_check_blocks_provider' <<<"$artwork_ids"
           grep -Fq 'test_objectless_ready_artwork_is_atomically_rereserved_for_generation' <<<"$artwork_ids"
+          grep -Fq 'test_automatic_generation_is_durably_one_shot_but_manual_retry_remains_available' <<<"$artwork_ids"
           grep -Fq 'test_firestore_reservation_replaces_objectless_ready_state_and_completed_job' <<<"$artwork_ids"
+          grep -Fq 'test_firestore_automatic_reservation_cannot_requeue_an_existing_generation' <<<"$artwork_ids"
           grep -Fq 'test_gcs_signed_url_rejects_a_missing_object_before_signing' <<<"$artwork_ids"
           grep -Fq 'test_missing_ready_blob_is_demoted_and_can_be_rereserved' <<<"$artwork_ids"
           grep -Fq 'test_stale_missing_blob_read_cannot_demote_a_new_same_key_generation_claim' <<<"$artwork_ids"
           grep -Fq 'test_pending_job_query_is_bounded_to_due_work_and_ordered' <<<"$artwork_ids"
           python -m pytest -q -rA tests/unit/test_memory_artwork_contract.py \
             | tee /tmp/memory-artwork-pytest.log
-          grep -Eq '61 passed' /tmp/memory-artwork-pytest.log
+          grep -Eq '63 passed' /tmp/memory-artwork-pytest.log
           ! grep -Eqi '(^|[[:space:]])(skipped|deselected)([[:space:]]|$)' /tmp/memory-artwork-pytest.log
-          printf 'Memory artwork execution receipt: expectedCount=61 actualCount=61 skipped=0 deselected=0\n'
+          printf 'Memory artwork execution receipt: expectedCount=63 actualCount=63 skipped=0 deselected=0\n'
 
       - name: Run real Firestore summary CAS and artwork dispatch inventory
         working-directory: backend

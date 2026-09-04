@@ -5,7 +5,6 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 
 import 'package:omi/backend/schema/conversation.dart';
@@ -291,10 +290,9 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
           widget.enqueueIfMissing &&
           result.isAuthorityCurrent &&
           result.canRequestGeneration &&
-          MemoryArtworkImage.claimAutomaticGeneration(_automaticGenerationKey(api, result))) {
-        result = await api.loadForDisplay(
+          MemoryArtworkImage.claimAutomaticGeneration(_automaticGenerationKey(api))) {
+        result = await api.loadAutomaticallyForDisplay(
           widget.conversation.id,
-          enqueueIfMissing: true,
           pollAttempts: 0,
         );
       }
@@ -377,30 +375,12 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     if (_shouldRetry(result)) _scheduleRetry(api, artwork, generation, result: result);
   }
 
-  String _automaticGenerationKey(MemoryArtworkApi api, MemoryArtworkResult result) {
-    final artwork = widget.conversation.artwork;
-    final styleVersion = result.requestedStyleVersion.isNotEmpty
-        ? result.requestedStyleVersion
-        : result.styleVersion.isNotEmpty
-            ? result.styleVersion
-            : artwork?.styleVersion ?? '';
-    final enrichmentRevision =
-        result.enrichmentRevision.isNotEmpty ? result.enrichmentRevision : artwork?.enrichmentRevision ?? '';
-    final authorityMemoryKey = api.cacheKeyForDisplay(
+  String _automaticGenerationKey(MemoryArtworkApi api) {
+    final sourceRevision = widget.conversation.activeSummaryVersionId?.trim() ?? '';
+    return api.automaticGenerationKey(
       memoryId: widget.conversation.id,
-      styleVersion: styleVersion,
-      enrichmentRevision: enrichmentRevision,
+      sourceRevision: sourceRevision,
     );
-    if (authorityMemoryKey.isEmpty) return '';
-    final activeSummaryVersion = widget.conversation.activeSummaryVersionId?.trim() ?? '';
-    final generationSource = [
-      'ella-memory-artwork-auto-v1',
-      authorityMemoryKey,
-      activeSummaryVersion,
-      styleVersion,
-      enrichmentRevision,
-    ].join('\n');
-    return sha256.convert(utf8.encode(generationSource)).toString();
   }
 
   Future<void> _generateArtwork() async {

@@ -35,6 +35,8 @@ enum MemoryArtworkQueueState { running, paused, cancelled, completed, needsAtten
 
 enum MemoryArtworkQueueAction { pause, resume, cancel }
 
+enum MemoryArtworkGenerationMode { manual, automatic }
+
 /// Full historical regeneration is opt-in because it can consume a meaningful
 /// image allowance. A preview always targets one bounded recent page.
 enum MemoryArtworkBackfillMode { preview, all }
@@ -75,6 +77,7 @@ class MemoryArtworkResult {
       const {
         '',
         'memory_artwork_dimensions_invalid',
+        'memory_artwork_automatic_attempt_exhausted',
         'memory_artwork_finalize_conflict',
         'memory_artwork_object_missing',
         'memory_artwork_provider_failed',
@@ -261,6 +264,17 @@ class MemoryArtworkApi {
     );
   }
 
+  String automaticGenerationKey({required String memoryId, required String sourceRevision}) {
+    final authority = _authorityProvider();
+    if (authority == null || memoryId.trim().isEmpty || !authority.isExactCurrent()) return '';
+    return _cacheKey(
+      authority: authority,
+      memoryId: memoryId,
+      styleVersion: 'automatic-visible-card',
+      enrichmentRevision: sourceRevision,
+    );
+  }
+
   Future<MemoryArtworkResult> fetch(String memoryId) async {
     final authority = _authorityProvider();
     if (authority == null || memoryId.trim().isEmpty) return _unavailable('memory_artwork_authority_unavailable');
@@ -272,6 +286,34 @@ class MemoryArtworkApi {
     bool enqueueIfMissing = false,
     int pollAttempts = 10,
     Duration pollInterval = const Duration(seconds: 3),
+  }) =>
+      _loadForDisplay(
+        memoryId,
+        enqueueIfMissing: enqueueIfMissing,
+        generationMode: MemoryArtworkGenerationMode.manual,
+        pollAttempts: pollAttempts,
+        pollInterval: pollInterval,
+      );
+
+  Future<MemoryArtworkResult> loadAutomaticallyForDisplay(
+    String memoryId, {
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) =>
+      _loadForDisplay(
+        memoryId,
+        enqueueIfMissing: true,
+        generationMode: MemoryArtworkGenerationMode.automatic,
+        pollAttempts: pollAttempts,
+        pollInterval: pollInterval,
+      );
+
+  Future<MemoryArtworkResult> _loadForDisplay(
+    String memoryId, {
+    required bool enqueueIfMissing,
+    required MemoryArtworkGenerationMode generationMode,
+    required int pollAttempts,
+    required Duration pollInterval,
   }) async {
     final authority = _authorityProvider();
     if (authority == null || memoryId.trim().isEmpty) return _unavailable('memory_artwork_authority_unavailable');
@@ -291,7 +333,7 @@ class MemoryArtworkApi {
           !authority.isExactCurrent()) {
         return current;
       }
-      result = await _enqueueWithAuthority(authority, memoryId);
+      result = await _enqueueWithAuthority(authority, memoryId, generationMode: generationMode);
       if (result.status == MemoryArtworkResultStatus.ready) {
         // A generation can complete between the preflight GET and the
         // idempotent enqueue. Fetch again so ready includes a signed URL.
@@ -354,12 +396,17 @@ class MemoryArtworkApi {
     );
   }
 
-  Future<MemoryArtworkResult> _enqueueWithAuthority(ExactAccountAuthorityVerifier authority, String memoryId) async {
+  Future<MemoryArtworkResult> _enqueueWithAuthority(
+    ExactAccountAuthorityVerifier authority,
+    String memoryId, {
+    required MemoryArtworkGenerationMode generationMode,
+  }) async {
     if (!authority.isExactCurrent()) return _unavailable('memory_artwork_authority_changed');
     final response = await _call(
       authority,
       method: 'POST',
       path: 'v1/ella/memories/${Uri.encodeComponent(memoryId)}/artwork',
+      body: jsonEncode({'request_mode': generationMode.name}),
     );
     if (!authority.isExactCurrent()) return _unavailable('memory_artwork_authority_changed');
     if (response == null || response.statusCode < 200 || response.statusCode >= 300) {

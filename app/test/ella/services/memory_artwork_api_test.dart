@@ -153,6 +153,67 @@ void main() {
     );
   });
 
+  test('automatic generation identity is stable by owner, memory, and source revision', () {
+    final ownerA = _Authority('owner-a');
+    final ownerAApi = MemoryArtworkApi(authorityProvider: () => ownerA);
+    final ownerBApi = MemoryArtworkApi(authorityProvider: () => _Authority('owner-b'));
+
+    final first = ownerAApi.automaticGenerationKey(memoryId: 'memory-a', sourceRevision: 'summary-a');
+    final repeated = ownerAApi.automaticGenerationKey(memoryId: 'memory-a', sourceRevision: 'summary-a');
+
+    expect(first, hasLength(64));
+    expect(repeated, first);
+    expect(
+      ownerAApi.automaticGenerationKey(memoryId: 'memory-a', sourceRevision: 'summary-b'),
+      isNot(first),
+    );
+    expect(
+      ownerBApi.automaticGenerationKey(memoryId: 'memory-a', sourceRevision: 'summary-a'),
+      isNot(first),
+    );
+    ownerA.current = false;
+    expect(ownerAApi.automaticGenerationKey(memoryId: 'memory-a', sourceRevision: 'summary-a'), isEmpty);
+  });
+
+  test('automatic visible-card generation is identified separately from manual retry', () async {
+    final requestBodies = <Map<String, dynamic>>[];
+    var reads = 0;
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => _Authority('owner-a'),
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async {
+        if (method == 'POST') {
+          requestBodies.add(jsonDecode(body) as Map<String, dynamic>);
+          return http.Response(jsonEncode({'outcome': 'automatic_attempt_already_used', 'status': 'unavailable'}), 200);
+        }
+        reads += 1;
+        return http.Response(
+          jsonEncode({'schema_version': memoryArtworkSchemaVersion, 'status': 'unavailable'}),
+          200,
+        );
+      },
+    );
+
+    await api.loadAutomaticallyForDisplay('memory-auto', pollAttempts: 0);
+    await api.loadForDisplay('memory-manual', enqueueIfMissing: true, pollAttempts: 0);
+
+    expect(reads, 4);
+    expect(requestBodies, [
+      {'request_mode': 'automatic'},
+      {'request_mode': 'manual'},
+    ]);
+  });
+
   test('visible historical memory is enqueued once and polled until artwork is ready', () async {
     final authority = _Authority('owner-a');
     final methods = <String>[];

@@ -92,6 +92,7 @@ def _reserve_generation_transaction(
     job_ref=None,
     job_state: Optional[dict[str, Any]] = None,
     preserve_job_attempts: bool = False,
+    allow_retry: bool = True,
 ) -> dict[str, Any]:
     user_snapshot = user_ref.get(transaction=transaction)
     user = user_snapshot.to_dict() if user_snapshot.exists else {}
@@ -126,6 +127,10 @@ def _reserve_generation_transaction(
                 if current_job.get("status") not in {"pending", "processing"}:
                     transaction.set(job_ref, effective_job_state)
             return {"outcome": "existing", "artwork": dict(current)}
+    if not allow_retry and (
+        (isinstance(current, dict) and current.get("generation_key") == generation_key) or current_job
+    ):
+        return {"outcome": "automatic_attempt_already_used", "artwork": dict(current)}
     transaction.update(conversation_ref, {ARTWORK_FIELD: artwork_state})
     if job_ref is not None and job_state is not None:
         # A worker owns a processing record before it refreshes a retry's
@@ -149,6 +154,7 @@ def reserve_generation(
     artwork_state: dict[str, Any],
     job_state: dict[str, Any],
     preserve_job_attempts: bool = False,
+    allow_retry: bool = True,
 ) -> dict[str, Any]:
     return _reserve_generation(
         db.transaction(),
@@ -160,6 +166,7 @@ def reserve_generation(
         job_ref=_job_ref(uid, memory_id, generation_key),
         job_state=job_state,
         preserve_job_attempts=preserve_job_attempts,
+        allow_retry=allow_retry,
     )
 
 
