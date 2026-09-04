@@ -4949,6 +4949,36 @@ def test_missing_ready_blob_is_demoted_and_can_be_rereserved():
     assert repository.jobs[("owner-a", "memory-1", generation_key)]["status"] == "pending"
 
 
+def test_transient_ready_blob_lookup_failure_is_retryable_without_demoting_artwork():
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=FakeProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    assert asyncio.run(service.enqueue("owner-a", "memory-1"))["outcome"] == "reserved"
+    assert _run_claimed_process(service, repository) == {"outcome": "ready", "status": "ready"}
+
+    class UnavailableStore(FakeStore):
+        def signed_get_url(self, **kwargs):
+            raise artwork.MemoryArtworkStorageError("memory_artwork_storage_unavailable")
+
+    service.store_factory = UnavailableStore
+    conversation = repository.conversations[("owner-a", "memory-1")]
+    ready_artwork = copy.deepcopy(conversation["artwork"])
+
+    with pytest.raises(artwork.MemoryArtworkError) as unavailable:
+        asyncio.run(service.signed_url("owner-a", "memory-1"))
+
+    assert unavailable.value.code == "memory_artwork_storage_unavailable"
+    assert unavailable.value.retryable is True
+    assert conversation["artwork"] == ready_artwork
+
+
 def test_stale_missing_blob_read_cannot_demote_a_new_same_key_generation_claim():
     class InterleavingRepository(FakeRepository):
         def mark_generation_unavailable(self, uid, memory_id, *, expected_artwork, **kwargs):
@@ -5043,6 +5073,45 @@ def test_gcs_signed_url_rejects_missing_or_wrong_authority_before_signing():
             object_key=object_key,
         )
     assert str(missing.value) == "memory_artwork_object_missing"
+
+
+def test_gcs_signed_url_wraps_transient_existence_failure_without_signing():
+    from utils.ella import memory_artwork_storage
+
+    class UnavailableBlob:
+        def exists(self):
+            raise RuntimeError("provider detail must not escape")
+
+        def generate_signed_url(self, **kwargs):
+            raise AssertionError("unverified artwork must not receive a signed URL")
+
+    class Bucket:
+        def blob(self, object_key):
+            return UnavailableBlob()
+
+    class Client:
+        def bucket(self, bucket_name):
+            return Bucket()
+
+    object_key = memory_artwork_storage.object_key_for(
+        uid="owner-a",
+        profile_binding_id="binding-owner-a",
+        memory_id="memory-1",
+        generation_key="a" * 64,
+        content_type="image/png",
+    )
+    store = memory_artwork_storage.GCSMemoryArtworkStore(bucket_name="private-artwork", client=Client())
+
+    with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as unavailable:
+        store.signed_get_url(
+            uid="owner-a",
+            profile_binding_id="binding-owner-a",
+            memory_id="memory-1",
+            generation_key="a" * 64,
+            object_key=object_key,
+        )
+
+    assert str(unavailable.value) == "memory_artwork_storage_unavailable"
 
 
 def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
@@ -5782,14 +5851,14 @@ def test_terminal_enrichment_hook_runs_idempotent_processor_without_raising(monk
     calls = []
 
     class Service:
-        async def enqueue(self, uid, memory_id):
-            calls.append(("enqueue", uid, memory_id))
+        async def enqueue(self, uid, memory_id, *, request_mode):
+            calls.append(("enqueue", uid, memory_id, request_mode))
             return {"outcome": "reserved", "status": "generating"}
 
     monkeypatch.setattr(artwork, "MemoryArtworkService", Service)
 
     assert asyncio.run(artwork.enqueue_after_terminal_enrichment("owner-a", "memory-1")) is None
-    assert calls == [("enqueue", "owner-a", "memory-1")]
+    assert calls == [("enqueue", "owner-a", "memory-1", "automatic")]
 
 
 def test_xai_provider_uses_fixed_base64_contract_and_normalizes_dimensions(monkeypatch):

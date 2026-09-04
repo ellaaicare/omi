@@ -2019,7 +2019,7 @@ class MemoryArtworkService:
             )
         except MemoryArtworkStorageError as exc:
             if str(exc) != "memory_artwork_object_missing":
-                raise MemoryArtworkError(str(exc)) from exc
+                raise MemoryArtworkError(str(exc), retryable=True) from exc
             current_request_key = str(generation_request.get("generation_key") or "")
             served_generation_key = str(current_artwork.get("generation_key") or "")
             if current_request_key == served_generation_key:
@@ -2585,7 +2585,7 @@ async def stop_memory_artwork_worker() -> None:
 async def enqueue_after_terminal_enrichment(uid: str, memory_id: str) -> None:
     """Durably queue work; image failures never change terminal text enrichment."""
     try:
-        await MemoryArtworkService().enqueue(uid, memory_id)
+        await MemoryArtworkService().enqueue(uid, memory_id, request_mode="automatic")
     except Exception:
         logger.exception(
             "Memory artwork reservation failed after terminal enrichment",

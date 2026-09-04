@@ -220,7 +220,13 @@ class GCSMemoryArtworkStore:
     ) -> str:
         _validated_artwork_key(uid, profile_binding_id, memory_id, generation_key, object_key)
         blob = self.client.bucket(self.bucket_name).blob(object_key)
-        if not blob.exists():
+        try:
+            exists = blob.exists()
+        except MemoryArtworkStorageError:
+            raise
+        except Exception as exc:
+            raise MemoryArtworkStorageError("memory_artwork_storage_unavailable") from exc
+        if not exists:
             raise MemoryArtworkStorageError("memory_artwork_object_missing")
         return blob.generate_signed_url(
             version="v4",
