@@ -340,8 +340,9 @@ def project_account_state(
             ],
         )
 
+    attempt_starts = [item for item in session_evidence if item.event.event_name == "capture_attempt_started"]
     latest_attempt = max(
-        session_evidence,
+        attempt_starts or session_evidence,
         key=lambda item: (
             item.event.client_monotonic_ms,
             item.event.client_utc_time,

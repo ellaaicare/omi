@@ -49,6 +49,14 @@ CREATE INDEX IF NOT EXISTS ella_diagnostic_events_session_idx
         account_user_id, diagnostic_session_id, server_received_at, client_sequence
     );
 
+CREATE INDEX IF NOT EXISTS ella_diagnostic_events_attempt_start_idx
+    ON ella_diagnostic_events (
+        account_user_id, profile_user_id, diagnostic_session_id,
+        client_monotonic_ms DESC, client_utc_time DESC,
+        client_sequence DESC, event_id DESC
+    )
+    WHERE event_name = 'capture_attempt_started';
+
 CREATE INDEX IF NOT EXISTS ella_diagnostic_events_retention_idx
     ON ella_diagnostic_events (expires_at);
 

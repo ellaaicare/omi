@@ -11,8 +11,10 @@ from database import authority_advisory_lock, managed_cloud_consent
 from database.account_diagnostics import (
     DiagnosticAccountAuthorityChanged,
     DiagnosticEventConflict,
+    DiagnosticProjectionLimitExceeded,
     DiagnosticSupportGrantInvalid,
     PostgresAccountDiagnosticsRepository,
+    MAX_EVENTS_PER_PROJECTION,
     account_binding_fingerprint,
 )
 from utils.ella.account_diagnostics import DiagnosticEventV1
@@ -213,6 +215,56 @@ def test_event_append_is_idempotent_immutable_cascading_and_support_read_is_sing
                 WHERE user_id = $1 AND role = 'user'
                 """,
                 user_id,
+            )
+
+            await pool.execute(
+                """
+                INSERT INTO ella_diagnostic_events (
+                    account_user_id, profile_user_id, event_id,
+                    diagnostic_session_id, capture_attempt_id,
+                    account_binding_fingerprint, authority_generation,
+                    layer, event_name, outcome, stable_failure_code,
+                    client_sequence, client_monotonic_ms, client_utc_time,
+                    payload, expires_at
+                )
+                SELECT $1, $1, 'event-oversized-' || series::text,
+                       'session-oversized', 'attempt-oversized',
+                       $2, 3, 'ble_transport',
+                       CASE WHEN series = 0 THEN 'capture_attempt_started' ELSE 'peripheral_connected' END,
+                       CASE WHEN series = 0 THEN 'started' ELSE 'succeeded' END,
+                       NULL, series, series,
+                       CURRENT_TIMESTAMP + series * INTERVAL '1 millisecond',
+                       $3::jsonb, CURRENT_TIMESTAMP + INTERVAL '30 days'
+                FROM generate_series(0, $4) AS series
+                """,
+                user_id,
+                fingerprint,
+                event.model_dump_json(exclude_none=True),
+                MAX_EVENTS_PER_PROJECTION,
+            )
+            with pytest.raises(DiagnosticProjectionLimitExceeded):
+                await repository.list_session_events(authority, "session-oversized", **append_authority)
+
+            oversized_now = datetime.now(timezone.utc)
+            oversized_grant_id = await repository.create_support_grant(
+                authority,
+                diagnostic_session_id="session-oversized",
+                code_hash="d" * 64,
+                evidence_not_before=oversized_now - timedelta(hours=1),
+                evidence_not_after=oversized_now + timedelta(minutes=1),
+                expires_at=oversized_now + timedelta(minutes=5),
+                **append_authority,
+            )
+            with pytest.raises(DiagnosticProjectionLimitExceeded):
+                await repository.consume_support_grant(
+                    code_hash="d" * 64,
+                    operator_id="operator@example.invalid",
+                    case_id="case-oversized",
+                    reason="customer_requested_help",
+                )
+            assert await pool.fetchval(
+                "SELECT redeemed_at IS NULL FROM ella_diagnostic_support_grants WHERE id = $1::uuid",
+                oversized_grant_id,
             )
 
             expired_event = event.model_copy(

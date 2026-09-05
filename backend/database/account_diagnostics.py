@@ -17,6 +17,7 @@ from database.ella_postgres import get_ella_postgres_pool
 
 DIAGNOSTIC_RETENTION_DAYS = 30
 MAX_EVENTS_PER_ACCOUNT_HOUR = 600
+MAX_EVENTS_PER_PROJECTION = 1_000
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,10 @@ class DiagnosticRateLimitExceeded(RuntimeError):
 
 
 class DiagnosticEventConflict(RuntimeError):
+    pass
+
+
+class DiagnosticProjectionLimitExceeded(RuntimeError):
     pass
 
 
@@ -355,20 +360,66 @@ class PostgresAccountDiagnosticsRepository:
                 consent_receipt_id=consent_receipt_id,
                 expected_fingerprint=expected_fingerprint,
             )
-            rows = await conn.fetch(
-                """
-                SELECT payload, server_received_at
-                FROM ella_diagnostic_events
-                WHERE account_user_id = $1::uuid
-                  AND profile_user_id = $2::uuid
-                  AND diagnostic_session_id = $3
-                  AND expires_at > CURRENT_TIMESTAMP
-                ORDER BY server_received_at, client_sequence
-                """,
-                authority.account_user_id,
-                authority.profile_user_id,
-                diagnostic_session_id,
+            rows = await self._list_bounded_latest_attempt_events(
+                conn,
+                account_user_id=authority.account_user_id,
+                profile_user_id=authority.profile_user_id,
+                diagnostic_session_id=diagnostic_session_id,
             )
+        return list(rows)
+
+    @staticmethod
+    async def _list_bounded_latest_attempt_events(
+        conn: asyncpg.Connection,
+        *,
+        account_user_id: str,
+        profile_user_id: str,
+        diagnostic_session_id: str,
+        evidence_not_before: datetime | None = None,
+        evidence_not_after: datetime | None = None,
+    ) -> list[Any]:
+        """Fetch only one attempt and reject rather than materialize an oversized projection."""
+        rows = await conn.fetch(
+            """
+            WITH selected_attempt AS MATERIALIZED (
+                SELECT candidate.capture_attempt_id
+                FROM ella_diagnostic_events candidate
+                WHERE candidate.account_user_id = $1::uuid
+                  AND candidate.profile_user_id = $2::uuid
+                  AND candidate.diagnostic_session_id = $3
+                  AND candidate.expires_at > CURRENT_TIMESTAMP
+                  AND ($4::timestamptz IS NULL OR candidate.server_received_at >= $4::timestamptz)
+                  AND ($5::timestamptz IS NULL OR candidate.server_received_at <= $5::timestamptz)
+                ORDER BY
+                    (candidate.event_name = 'capture_attempt_started') DESC,
+                    candidate.client_monotonic_ms DESC,
+                    candidate.client_utc_time DESC,
+                    candidate.client_sequence DESC,
+                    candidate.event_id DESC
+                LIMIT 1
+            )
+            SELECT event.payload, event.server_received_at
+            FROM ella_diagnostic_events event
+            JOIN selected_attempt selected
+              ON selected.capture_attempt_id = event.capture_attempt_id
+            WHERE event.account_user_id = $1::uuid
+              AND event.profile_user_id = $2::uuid
+              AND event.diagnostic_session_id = $3
+              AND event.expires_at > CURRENT_TIMESTAMP
+              AND ($4::timestamptz IS NULL OR event.server_received_at >= $4::timestamptz)
+              AND ($5::timestamptz IS NULL OR event.server_received_at <= $5::timestamptz)
+            ORDER BY event.client_sequence, event.client_monotonic_ms, event.server_received_at
+            LIMIT $6
+            """,
+            account_user_id,
+            profile_user_id,
+            diagnostic_session_id,
+            evidence_not_before,
+            evidence_not_after,
+            MAX_EVENTS_PER_PROJECTION + 1,
+        )
+        if len(rows) > MAX_EVENTS_PER_PROJECTION:
+            raise DiagnosticProjectionLimitExceeded
         return list(rows)
 
     async def delete_expired_events(self, *, batch_size: int = 1_000) -> int:
@@ -500,23 +551,13 @@ class PostgresAccountDiagnosticsRepository:
             )
             if grant is None:
                 raise DiagnosticSupportGrantInvalid
-            rows = await conn.fetch(
-                """
-                SELECT payload, server_received_at
-                FROM ella_diagnostic_events
-                WHERE account_user_id = $1
-                  AND profile_user_id = $2
-                  AND diagnostic_session_id = $3
-                  AND server_received_at >= $4
-                  AND server_received_at <= $5
-                  AND expires_at > CURRENT_TIMESTAMP
-                ORDER BY server_received_at, client_sequence
-                """,
-                grant["account_user_id"],
-                grant["profile_user_id"],
-                grant["diagnostic_session_id"],
-                grant["evidence_not_before"],
-                grant["evidence_not_after"],
+            rows = await self._list_bounded_latest_attempt_events(
+                conn,
+                account_user_id=str(grant["account_user_id"]),
+                profile_user_id=str(grant["profile_user_id"]),
+                diagnostic_session_id=str(grant["diagnostic_session_id"]),
+                evidence_not_before=grant["evidence_not_before"],
+                evidence_not_after=grant["evidence_not_after"],
             )
             await conn.execute(
                 """

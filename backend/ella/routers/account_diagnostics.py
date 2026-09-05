@@ -16,6 +16,7 @@ from database.account_diagnostics import (
     DiagnosticAccountAuthorityChanged,
     DiagnosticAccountNotFound,
     DiagnosticEventConflict,
+    DiagnosticProjectionLimitExceeded,
     DiagnosticRateLimitExceeded,
     DiagnosticSupportGrantInvalid,
     DiagnosticSupportGrantLimitExceeded,
@@ -206,6 +207,8 @@ def create_account_diagnostics_router(
             )
         except DiagnosticAccountAuthorityChanged as exc:
             raise HTTPException(status_code=409, detail={"code": "diagnostic_account_binding_stale"}) from exc
+        except DiagnosticProjectionLimitExceeded as exc:
+            raise HTTPException(status_code=409, detail={"code": "diagnostic_projection_evidence_limit"}) from exc
         except Exception as exc:
             raise HTTPException(status_code=503, detail={"code": "diagnostic_store_unavailable"}) from exc
         return project_account_state(
@@ -237,6 +240,8 @@ def create_account_diagnostics_router(
             )
         except DiagnosticAccountAuthorityChanged as exc:
             raise HTTPException(status_code=409, detail={"code": "diagnostic_account_binding_stale"}) from exc
+        except DiagnosticProjectionLimitExceeded as exc:
+            raise HTTPException(status_code=409, detail={"code": "diagnostic_projection_evidence_limit"}) from exc
         except Exception as exc:
             raise HTTPException(status_code=503, detail={"code": "diagnostic_store_unavailable"}) from exc
         if not records:
@@ -316,6 +321,8 @@ def create_account_diagnostics_router(
             )
         except (ValueError, DiagnosticSupportGrantInvalid) as exc:
             raise HTTPException(status_code=404, detail={"code": "diagnostic_support_code_invalid"}) from exc
+        except DiagnosticProjectionLimitExceeded as exc:
+            raise HTTPException(status_code=409, detail={"code": "diagnostic_projection_evidence_limit"}) from exc
         except Exception as exc:
             raise HTTPException(status_code=503, detail={"code": "diagnostic_store_unavailable"}) from exc
         return DiagnosticSupportProjectionV1(

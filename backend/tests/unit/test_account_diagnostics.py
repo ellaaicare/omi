@@ -14,6 +14,7 @@ from database.account_diagnostics import (
     DiagnosticAccountAuthority,
     DiagnosticAccountAuthorityChanged,
     DiagnosticEventConflict,
+    DiagnosticProjectionLimitExceeded,
     DiagnosticSupportGrantInvalid,
 )
 from ella.routers.account_diagnostics import create_account_diagnostics_router, require_diagnostic_operator
@@ -179,6 +180,72 @@ def test_projection_selects_latest_attempt_by_client_chronology_not_upload_order
     assert projection.observed_event_count == 1
 
 
+def test_projection_selects_newest_attempt_start_despite_older_late_terminal_event():
+    older_start = _event(
+        sequence=0,
+        attempt_id="attempt-old",
+        layer="ble_transport",
+        outcome="started",
+        event_name="capture_attempt_started",
+    ).model_copy(update={"event_id": "old-start", "client_monotonic_ms": 100})
+    newer_start = _event(
+        sequence=0,
+        attempt_id="attempt-new",
+        layer="ble_transport",
+        outcome="started",
+        event_name="capture_attempt_started",
+    ).model_copy(
+        update={
+            "event_id": "new-start",
+            "client_monotonic_ms": 200,
+            "client_utc_time": NOW + timedelta(milliseconds=200),
+        }
+    )
+    newer_failure = _event(
+        sequence=1,
+        attempt_id="attempt-new",
+        layer="ble_transport",
+        outcome="failed",
+        event_name="peripheral_connect_failed",
+        failure_code="peripheral_connect_timeout",
+        retry_class="bounded_automatic",
+    ).model_copy(
+        update={
+            "event_id": "new-failure",
+            "client_monotonic_ms": 210,
+            "client_utc_time": NOW + timedelta(milliseconds=210),
+        }
+    )
+    older_late_terminal = _event(
+        sequence=1,
+        attempt_id="attempt-old",
+        layer="publication",
+        event_name="conversation_published",
+    ).model_copy(
+        update={
+            "event_id": "old-late-terminal",
+            "client_monotonic_ms": 400,
+            "client_utc_time": NOW + timedelta(milliseconds=400),
+        }
+    )
+
+    projection = project_account_state(
+        "session-1",
+        [
+            _stored(older_start),
+            _stored(newer_start, 1),
+            _stored(newer_failure, 2),
+            _stored(older_late_terminal, 30),
+        ],
+        now=NOW + timedelta(seconds=31),
+    )
+
+    assert projection.capture_attempt_id == "attempt-new"
+    assert projection.status == "failed"
+    assert projection.stable_failure_code == "peripheral_connect_timeout"
+    assert projection.observed_event_count == 2
+
+
 def test_support_codes_are_random_format_and_hmac_only():
     code = generate_support_code()
     assert code.startswith("ELLA-") and len(code) == 19
@@ -223,6 +290,7 @@ class FakeRepository:
         self.support_used = False
         self.append_error: Exception | None = None
         self.list_error: Exception | None = None
+        self.consume_error: Exception | None = None
 
     async def resolve_account_authority(self, _uid):
         return self.authority
@@ -246,6 +314,8 @@ class FakeRepository:
         return True
 
     async def consume_support_grant(self, *, code_hash, **_kwargs):
+        if self.consume_error is not None:
+            raise self.consume_error
         if self.support_used or code_hash != self.support_hash:
             raise DiagnosticSupportGrantInvalid
         self.support_used = True
@@ -298,6 +368,36 @@ def test_projection_fails_closed_when_authority_changes_during_read(monkeypatch)
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "diagnostic_account_binding_stale"
+
+
+def test_projection_maps_oversized_attempt_to_typed_safe_failure(monkeypatch):
+    client, repository = _client(monkeypatch)
+    repository.list_error = DiagnosticProjectionLimitExceeded()
+
+    response = client.get("/v1/ella/diagnostics/projection/session-1")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "diagnostic_projection_evidence_limit"
+
+
+def test_support_exchange_maps_oversized_attempt_to_typed_safe_failure(monkeypatch):
+    client, repository = _client(monkeypatch)
+    event = _event()
+    client.post("/v1/ella/diagnostics/events", json={"events": [event.model_dump(mode="json")]})
+    grant = client.post("/v1/ella/diagnostics/support-grants", json={"diagnostic_session_id": "session-1"})
+    repository.consume_error = DiagnosticProjectionLimitExceeded()
+
+    response = client.post(
+        "/v1/ella/operator/diagnostics/support-code/exchange",
+        json={
+            "support_code": grant.json()["support_code"],
+            "case_id": "case-oversized",
+            "reason": "customer_requested_help",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "diagnostic_projection_evidence_limit"
 
 
 def test_account_ingest_projection_and_single_use_audited_support_exchange(monkeypatch):

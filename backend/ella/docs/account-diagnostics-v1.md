@@ -65,8 +65,11 @@ All responses use `Cache-Control: no-store` and
   payload match. Reuse of an event ID or attempt sequence for different evidence
   returns `diagnostic_event_conflict` and rolls back the whole batch.
 - `GET /v1/ella/diagnostics/projection/{diagnostic_session_id}` builds a
-  disposable projection for the authenticated account. Missing evidence remains
-  `unknown`; it is never presented as a negative fact.
+  disposable projection for the authenticated account. It selects the latest
+  attempt by the `capture_attempt_started` client chronology and loads at most
+  1,000 events for that attempt. Oversized evidence fails closed with
+  `diagnostic_projection_evidence_limit`. Missing evidence remains `unknown`; it
+  is never presented as a negative fact.
 - `POST /v1/ella/diagnostics/support-grants` issues a random, short-lived,
   session-bound, single-use support code. Only its HMAC is stored.
 - `DELETE /v1/ella/diagnostics/support-grants/{grant_id}` revokes an unused code.
