@@ -12,6 +12,33 @@ def _group(module, authority, disposition, *routes):
 
 ROUTE_GROUPS = (
     _group(
+        "account_diagnostics",
+        "firebase_exact_owner_with_consent",
+        "staged_public",
+        ("POST", "/v1/ella/diagnostics/events", "ingest_diagnostic_events"),
+        (
+            "GET",
+            "/v1/ella/diagnostics/projection/{diagnostic_session_id}",
+            "get_diagnostic_projection",
+        ),
+        ("POST", "/v1/ella/diagnostics/support-grants", "create_diagnostic_support_grant"),
+        (
+            "DELETE",
+            "/v1/ella/diagnostics/support-grants/{grant_id}",
+            "revoke_diagnostic_support_grant",
+        ),
+    ),
+    _group(
+        "account_diagnostics",
+        "diagnostic_operator_support_grant",
+        "internal_only",
+        (
+            "POST",
+            "/v1/ella/operator/diagnostics/support-code/exchange",
+            "exchange_diagnostic_support_code",
+        ),
+    ),
+    _group(
         "ai_consent",
         "public_metadata",
         "public",

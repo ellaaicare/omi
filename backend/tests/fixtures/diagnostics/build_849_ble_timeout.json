@@ -1,0 +1,57 @@
+{
+  "fixture": "build_849_ble_timeout",
+  "events": [
+    {
+      "schema_version": "ella.diagnostic_event.v1",
+      "event_id": "b849-timeout-0",
+      "diagnostic_session_id": "b849-timeout",
+      "capture_attempt_id": "b849-timeout-attempt-1",
+      "account_binding_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "authority_generation": 7,
+      "source_revision": "build-849",
+      "layer": "account_binding",
+      "event_name": "account_bound",
+      "outcome": "succeeded",
+      "retry_class": "never",
+      "client_sequence": 0,
+      "client_monotonic_ms": 0,
+      "client_utc_time": "2026-09-05T19:01:00Z"
+    },
+    {
+      "schema_version": "ella.diagnostic_event.v1",
+      "event_id": "b849-timeout-1",
+      "diagnostic_session_id": "b849-timeout",
+      "capture_attempt_id": "b849-timeout-attempt-1",
+      "account_binding_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "authority_generation": 7,
+      "source_revision": "build-849",
+      "layer": "ble_transport",
+      "event_name": "peripheral_connect_started",
+      "outcome": "started",
+      "retry_class": "bounded_automatic",
+      "client_sequence": 1,
+      "client_monotonic_ms": 100,
+      "client_utc_time": "2026-09-05T19:01:00.100Z",
+      "expected_next_event": "peripheral_connected",
+      "deadline_ms": 10000
+    },
+    {
+      "schema_version": "ella.diagnostic_event.v1",
+      "event_id": "b849-timeout-2",
+      "diagnostic_session_id": "b849-timeout",
+      "capture_attempt_id": "b849-timeout-attempt-1",
+      "account_binding_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "authority_generation": 7,
+      "source_revision": "build-849",
+      "layer": "ble_transport",
+      "event_name": "peripheral_connect_failed",
+      "outcome": "failed",
+      "retry_class": "bounded_automatic",
+      "client_sequence": 2,
+      "client_monotonic_ms": 10100,
+      "client_utc_time": "2026-09-05T19:01:10.100Z",
+      "stable_failure_code": "peripheral_connect_timeout",
+      "safe_counters": {"retry_number": 1}
+    }
+  ]
+}
