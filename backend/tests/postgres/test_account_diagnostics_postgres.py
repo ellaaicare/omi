@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -70,14 +71,15 @@ async def _pool_for_schema(schema: str) -> asyncpg.Pool:
     )
 
 
-async def _create_schema() -> tuple[asyncpg.Connection, asyncpg.Pool, str]:
+async def _create_schema(*, apply_attempt_ordinal: bool = True) -> tuple[asyncpg.Connection, asyncpg.Pool, str]:
     schema = f"account_diagnostics_{uuid.uuid4().hex}"
     admin = await asyncpg.connect(TEST_DSN)
     await admin.execute(f'CREATE SCHEMA "{schema}"')
     pool = await _pool_for_schema(schema)
     async with pool.acquire() as conn:
         await conn.execute(BASE_SCHEMA)
-        for migration_path in MIGRATIONS:
+        migration_paths = MIGRATIONS if apply_attempt_ordinal else MIGRATIONS[:1]
+        for migration_path in migration_paths:
             migration = migration_path.read_text(encoding="utf-8")
             await conn.execute(migration)
             await conn.execute(migration)
@@ -109,6 +111,52 @@ def _event() -> DiagnosticEventV1:
             "client_utc_time": "2026-09-05T19:00:00Z",
         }
     )
+
+
+def test_attempt_ordinal_migration_backfills_legacy_payload_and_restores_immutability():
+    async def scenario() -> None:
+        admin, pool, schema = await _create_schema(apply_attempt_ordinal=False)
+        try:
+            user_id = await pool.fetchval("INSERT INTO users (omi_uid) VALUES ('legacy-diagnostic') RETURNING id")
+            legacy_payload = _event().model_dump(mode="json")
+            legacy_payload.pop("capture_attempt_ordinal")
+            await pool.execute(
+                """
+                INSERT INTO ella_diagnostic_events (
+                    account_user_id, profile_user_id, event_id,
+                    diagnostic_session_id, capture_attempt_id,
+                    account_binding_fingerprint, authority_generation,
+                    layer, event_name, outcome, stable_failure_code,
+                    client_sequence, client_monotonic_ms, client_utc_time,
+                    payload, expires_at
+                ) VALUES (
+                    $1, $1, 'legacy-event', 'legacy-session', 'legacy-attempt',
+                    $2, 3, 'account_binding', 'account_bound', 'succeeded', NULL,
+                    0, 0, CURRENT_TIMESTAMP, $3::jsonb,
+                    CURRENT_TIMESTAMP + INTERVAL '30 days'
+                )
+                """,
+                user_id,
+                "a" * 64,
+                json.dumps(legacy_payload),
+            )
+
+            ordinal_migration = MIGRATIONS[1].read_text(encoding="utf-8")
+            await pool.execute(ordinal_migration)
+            await pool.execute(ordinal_migration)
+
+            record = await pool.fetchrow(
+                "SELECT payload, server_received_at FROM ella_diagnostic_events WHERE event_id = 'legacy-event'"
+            )
+            assert event_from_record(record).event.capture_attempt_ordinal == 0
+            with pytest.raises(asyncpg.RaiseError, match="immutable"):
+                await pool.execute(
+                    "UPDATE ella_diagnostic_events SET event_name = 'changed' WHERE event_id = 'legacy-event'"
+                )
+        finally:
+            await _drop_schema(admin, pool, schema)
+
+    asyncio.run(scenario())
 
 
 def test_event_append_is_idempotent_immutable_cascading_and_support_read_is_single_use():
