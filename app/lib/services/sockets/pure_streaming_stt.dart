@@ -402,8 +402,6 @@ class PureStreamingSttSocket implements IPureSocket {
 
   IPureSocketListener? _listener;
 
-  double _audioOffsetSeconds = 0;
-
   // Buffer for accumulating small frames before sending
   final List<Uint8List> _frameBuffer = [];
   int _bufferedBytes = 0;
@@ -523,10 +521,6 @@ class PureStreamingSttSocket implements IPureSocket {
       final result = SttTranscriptionResult.fromJsonWithSchema(json, config.responseSchema, audioOffsetSeconds: 0);
 
       if (result.isNotEmpty) {
-        if (result.segments.isNotEmpty) {
-          _audioOffsetSeconds = result.segments.last.end;
-        }
-
         // Aggregate words by speaker (matching backend TranscriptSegment format)
         final segments = <Map<String, dynamic>>[];
         for (final segment in result.segments) {
@@ -661,7 +655,6 @@ class PureStreamingSttSocket implements IPureSocket {
     _keepAliveTimer?.cancel();
     _frameBuffer.clear();
     _bufferedBytes = 0;
-    _audioOffsetSeconds = 0;
   }
 
   @override
