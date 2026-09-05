@@ -15,13 +15,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from database.account_diagnostics import account_binding_fingerprint
+
 DIAGNOSTIC_EVENT_SCHEMA_VERSION = "ella.diagnostic_event.v1"
 DIAGNOSTIC_PROJECTION_SCHEMA_VERSION = "ella.account_state_projection.v1"
-DIAGNOSTIC_RETENTION_DAYS = 30
 DIAGNOSTIC_STALE_AFTER = timedelta(minutes=10)
 MAX_EVENT_BYTES = 4096
 MAX_EVENTS_PER_BATCH = 100
-MAX_EVENTS_PER_ACCOUNT_HOUR = 600
 
 _OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SAFE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -282,13 +282,6 @@ class DiagnosticEventBatchV1(BaseModel):
 
 
 @dataclass(frozen=True)
-class DiagnosticAccountAuthority:
-    account_user_id: str
-    profile_user_id: str
-    binding_revision: int
-
-
-@dataclass(frozen=True)
 class StoredDiagnosticEvent:
     event: DiagnosticEventV1
     server_received_at: datetime
@@ -320,21 +313,6 @@ class AccountStateProjectionV1(BaseModel):
     layers: list[DiagnosticLayerProjection]
 
 
-def account_binding_fingerprint(
-    *,
-    uid: str,
-    profile_binding_id: str,
-    binding_revision: int,
-    consent_receipt_id: str,
-) -> str:
-    """Mirror Dart ``WalOwner.authorityFingerprint`` byte-for-byte."""
-    preimage = json.dumps(
-        ["wal-owner-authority-v1", uid, profile_binding_id, binding_revision, consent_receipt_id],
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(preimage.encode("utf-8")).hexdigest()
-
-
 def project_account_state(
     diagnostic_session_id: str,
     evidence: list[StoredDiagnosticEvent],
@@ -364,7 +342,12 @@ def project_account_state(
 
     latest_attempt = max(
         session_evidence,
-        key=lambda item: (item.server_received_at, item.event.client_sequence),
+        key=lambda item: (
+            item.event.client_sequence,
+            item.event.client_monotonic_ms,
+            item.event.client_utc_time,
+            item.event.event_id,
+        ),
     ).event.capture_attempt_id
     attempt_evidence = [item for item in session_evidence if item.event.capture_attempt_id == latest_attempt]
     ordered = sorted(
@@ -439,6 +422,8 @@ def support_code_hash(code: str, *, hmac_key: str) -> str:
 
 
 def event_from_record(record: Any) -> StoredDiagnosticEvent:
+    if isinstance(record, StoredDiagnosticEvent):
+        return record
     payload = record["payload"]
     if isinstance(payload, str):
         payload = json.loads(payload)

@@ -14,6 +14,10 @@ BLE, capture, conversation, memory, or presentation state.
   `['wal-owner-authority-v1', uid, profile_binding_id, binding_revision,
   consent_receipt_id]`.
 - A stale or cross-account fingerprint is rejected before an event is written.
+  Ingest then acquires the canonical account authority transaction lock and
+  re-reads the account owner, active binding revision, and synchronized consent
+  receipt. Revocation or binding drift while a request is in flight therefore
+  fails before the immutable insert.
 - `diagnostic_session_id`, `capture_attempt_id`, `authority_generation`, and all
   diagnostic receipts are correlation evidence only. They never grant capture,
   finalization, repair, or data-read authority.
@@ -73,7 +77,10 @@ accepted anywhere in this contract.
 ## Data handling
 
 The event table is update-immutable. Retention deletion and account-deletion
-cascade are the only deletion paths. Events expire after 30 days. The allowlist
+cascade are the only deletion paths. Events expire after 30 days. A bounded
+retention worker runs immediately when an Ella API process starts and every six
+hours while it remains live; concurrent replicas use `FOR UPDATE SKIP LOCKED`
+against the `expires_at` index. The allowlist
 contains lifecycle identifiers, revisions, firmware/codec labels, stable failure
 codes, and bounded counters; it has no transcript, audio, memory text, contact,
 location, URL, token, or raw hardware identifier field.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,11 +10,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from database.account_diagnostics import DiagnosticSupportGrantInvalid
+from database.account_diagnostics import DiagnosticAccountAuthority, DiagnosticSupportGrantInvalid
 from ella.routers.account_diagnostics import create_account_diagnostics_router, require_diagnostic_operator
 from utils.ella.account_diagnostics import (
     DIAGNOSTIC_EVENT_REGISTRY,
-    DiagnosticAccountAuthority,
     DiagnosticEventV1,
     DiagnosticFailureCode,
     FAILURE_REGISTRY,
@@ -23,6 +23,7 @@ from utils.ella.account_diagnostics import (
     project_account_state,
     support_code_hash,
 )
+from utils.ella.account_diagnostics_retention import DiagnosticRetentionWorker
 from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 
 NOW = datetime(2026, 9, 5, 19, 0, tzinfo=timezone.utc)
@@ -39,13 +40,14 @@ def _event(
     failure_code: str | None = None,
     retry_class: str = "never",
     fingerprint: str = FINGERPRINT,
+    attempt_id: str = "attempt-1",
 ) -> DiagnosticEventV1:
     return DiagnosticEventV1.model_validate(
         {
             "schema_version": "ella.diagnostic_event.v1",
             "event_id": f"event-{sequence}",
             "diagnostic_session_id": "session-1",
-            "capture_attempt_id": "attempt-1",
+            "capture_attempt_id": attempt_id,
             "account_binding_fingerprint": fingerprint,
             "authority_generation": 4,
             "source_revision": "build-849",
@@ -146,6 +148,20 @@ def test_projection_reports_first_stable_failure_without_claiming_later_layers()
     assert projection.layers[2].state == "unknown"
 
 
+def test_projection_selects_latest_attempt_by_client_chronology_not_upload_order():
+    newer_attempt = _stored(_event(sequence=11, attempt_id="attempt-new"), 1)
+    delayed_older_attempt = _stored(_event(sequence=4, attempt_id="attempt-old"), 30)
+
+    projection = project_account_state(
+        "session-1",
+        [newer_attempt, delayed_older_attempt],
+        now=NOW + timedelta(seconds=31),
+    )
+
+    assert projection.capture_attempt_id == "attempt-new"
+    assert projection.observed_event_count == 1
+
+
 def test_support_codes_are_random_format_and_hmac_only():
     code = generate_support_code()
     assert code.startswith("ELLA-") and len(code) == 19
@@ -192,7 +208,7 @@ class FakeRepository:
     async def resolve_account_authority(self, _uid):
         return self.authority
 
-    async def append_events(self, _authority, events):
+    async def append_events(self, _authority, events, **_authority_material):
         self.events.extend(_stored(event, index) for index, event in enumerate(events))
         return len(events), 0
 
@@ -271,3 +287,40 @@ def test_account_ingest_projection_and_single_use_audited_support_exchange(monke
     assert repeated.status_code == 404
     assert repeated.json()["detail"]["code"] == "diagnostic_support_code_invalid"
     assert repository.support_used is True
+
+
+def test_support_grant_revocation_returns_declared_204_with_evidence_headers(monkeypatch):
+    client, _repository = _client(monkeypatch)
+    event = _event()
+    client.post("/v1/ella/diagnostics/events", json={"events": [event.model_dump(mode="json")]})
+    grant = client.post("/v1/ella/diagnostics/support-grants", json={"diagnostic_session_id": "session-1"})
+
+    revoked = client.delete(f"/v1/ella/diagnostics/support-grants/{grant.json()['grant_id']}")
+
+    assert revoked.status_code == 204
+    assert revoked.content == b""
+    assert revoked.headers["cache-control"] == "no-store"
+    assert revoked.headers["x-ella-diagnostic-authority"] == "evidence-only"
+
+
+def test_retention_worker_drains_bounded_batches():
+    class Repository:
+        def __init__(self):
+            self.results = [2, 2, 1]
+            self.calls = 0
+
+        async def delete_expired_events(self, *, batch_size=1_000):
+            assert batch_size == 2
+            self.calls += 1
+            return self.results.pop(0)
+
+    repository = Repository()
+    worker = DiagnosticRetentionWorker(
+        repository,
+        interval_seconds=60,
+        batch_size=2,
+        max_batches_per_run=5,
+    )
+
+    assert asyncio.run(worker.run_once()) == 5
+    assert repository.calls == 3

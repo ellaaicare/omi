@@ -2,23 +2,35 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
+import uuid
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 import asyncpg
 
+from database import authority_advisory_lock, managed_cloud_consent
 from database.ella_postgres import get_ella_postgres_pool
-from utils.ella.account_diagnostics import (
-    DIAGNOSTIC_RETENTION_DAYS,
-    MAX_EVENTS_PER_ACCOUNT_HOUR,
-    DiagnosticAccountAuthority,
-    DiagnosticEventV1,
-    StoredDiagnosticEvent,
-    event_from_record,
-)
+
+DIAGNOSTIC_RETENTION_DAYS = 30
+MAX_EVENTS_PER_ACCOUNT_HOUR = 600
+
+
+@dataclass(frozen=True)
+class DiagnosticAccountAuthority:
+    account_user_id: str
+    profile_user_id: str
+    binding_revision: int
 
 
 class DiagnosticAccountNotFound(LookupError):
+    pass
+
+
+class DiagnosticAccountAuthorityChanged(RuntimeError):
     pass
 
 
@@ -32,6 +44,21 @@ class DiagnosticSupportGrantLimitExceeded(RuntimeError):
 
 class DiagnosticSupportGrantInvalid(LookupError):
     pass
+
+
+def account_binding_fingerprint(
+    *,
+    uid: str,
+    profile_binding_id: str,
+    binding_revision: int,
+    consent_receipt_id: str,
+) -> str:
+    """Mirror Dart ``WalOwner.authorityFingerprint`` byte-for-byte."""
+    preimage = json.dumps(
+        ["wal-owner-authority-v1", uid, profile_binding_id, binding_revision, consent_receipt_id],
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(preimage.encode("utf-8")).hexdigest()
 
 
 class PostgresAccountDiagnosticsRepository:
@@ -78,14 +105,80 @@ class PostgresAccountDiagnosticsRepository:
     async def append_events(
         self,
         authority: DiagnosticAccountAuthority,
-        events: list[DiagnosticEventV1],
+        events: list[Any],
+        *,
+        uid: str,
+        profile_binding_id: str,
+        consent_receipt_id: str,
+        expected_fingerprint: str,
     ) -> tuple[int, int]:
         pool = await self._pool_factory()
+        account_user_id = uuid.UUID(authority.account_user_id)
+        owner = authority_advisory_lock.AuthorityOwner.from_values(
+            account_user_id,
+            account_user_id,
+        )
         async with pool.acquire() as conn, conn.transaction():
-            await conn.execute(
-                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-                f"ella-account-diagnostics:{authority.account_user_id}",
+            owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                conn,
+                owner=owner,
             )
+            current_user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                conn,
+                uid=uid,
+                owner=owner,
+                proof=owner_lock,
+            )
+            binding = await conn.fetchrow(
+                """
+                SELECT candidate.profile_user_id, candidate.revision
+                FROM ella_runtime_bindings candidate
+                WHERE candidate.user_id = $1
+                  AND candidate.role = 'user'
+                  AND candidate.active = TRUE
+                  AND candidate.status = 'active'
+                  AND (
+                      candidate.account_user_id IS NULL
+                      OR candidate.account_user_id = $1
+                  )
+                ORDER BY candidate.revision DESC, candidate.updated_at DESC
+                LIMIT 1
+                """,
+                current_user_id,
+            )
+            current_profile_user_id = (
+                current_user_id if binding is None else binding["profile_user_id"] or current_user_id
+            )
+            current_binding_revision = 1 if binding is None else int(binding["revision"])
+            consent = await conn.fetchrow(
+                """
+                SELECT decision, consent_receipt_ref, profile_binding_id
+                FROM ella_managed_cloud_consent_authority
+                WHERE user_id = $1
+                FOR UPDATE
+                """,
+                current_user_id,
+            )
+            expected_receipt_ref = managed_cloud_consent.consent_receipt_ref(uid, consent_receipt_id)
+            current_fingerprint = account_binding_fingerprint(
+                uid=uid,
+                profile_binding_id=profile_binding_id,
+                binding_revision=current_binding_revision,
+                consent_receipt_id=consent_receipt_id,
+            )
+            authority_is_current = bool(
+                str(current_user_id) == authority.account_user_id
+                and str(current_profile_user_id) == authority.profile_user_id
+                and current_binding_revision == authority.binding_revision
+                and consent is not None
+                and consent["decision"] == "granted"
+                and hmac.compare_digest(str(consent["profile_binding_id"] or ""), profile_binding_id)
+                and hmac.compare_digest(str(consent["consent_receipt_ref"] or ""), expected_receipt_ref)
+                and hmac.compare_digest(expected_fingerprint, current_fingerprint)
+                and all(hmac.compare_digest(event.account_binding_fingerprint, current_fingerprint) for event in events)
+            )
+            if not authority_is_current:
+                raise DiagnosticAccountAuthorityChanged
             event_ids = [event.event_id for event in events]
             existing_rows = await conn.fetch(
                 """
@@ -158,7 +251,7 @@ class PostgresAccountDiagnosticsRepository:
         self,
         authority: DiagnosticAccountAuthority,
         diagnostic_session_id: str,
-    ) -> list[StoredDiagnosticEvent]:
+    ) -> list[Any]:
         pool = await self._pool_factory()
         rows = await pool.fetch(
             """
@@ -174,7 +267,30 @@ class PostgresAccountDiagnosticsRepository:
             authority.profile_user_id,
             diagnostic_session_id,
         )
-        return [event_from_record(row) for row in rows]
+        return list(rows)
+
+    async def delete_expired_events(self, *, batch_size: int = 1_000) -> int:
+        if batch_size < 1 or batch_size > 10_000:
+            raise ValueError("diagnostic retention batch size must be between 1 and 10000")
+        pool = await self._pool_factory()
+        rows = await pool.fetch(
+            """
+            WITH expired AS (
+                SELECT id
+                FROM ella_diagnostic_events
+                WHERE expires_at <= CURRENT_TIMESTAMP
+                ORDER BY expires_at
+                LIMIT $1
+                FOR UPDATE SKIP LOCKED
+            )
+            DELETE FROM ella_diagnostic_events event
+            USING expired
+            WHERE event.id = expired.id
+            RETURNING event.id
+            """,
+            batch_size,
+        )
+        return len(rows)
 
     async def create_support_grant(
         self,
@@ -256,7 +372,7 @@ class PostgresAccountDiagnosticsRepository:
         operator_id: str,
         case_id: str,
         reason: str,
-    ) -> tuple[str, list[StoredDiagnosticEvent]]:
+    ) -> tuple[str, list[Any]]:
         pool = await self._pool_factory()
         async with pool.acquire() as conn, conn.transaction():
             grant = await conn.fetchrow(
@@ -307,4 +423,4 @@ class PostgresAccountDiagnosticsRepository:
                 reason,
                 len(rows),
             )
-        return str(grant["diagnostic_session_id"]), [event_from_record(row) for row in rows]
+        return str(grant["diagnostic_session_id"]), list(rows)

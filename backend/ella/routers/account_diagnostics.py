@@ -12,6 +12,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from database.account_diagnostics import (
+    DiagnosticAccountAuthority,
+    DiagnosticAccountAuthorityChanged,
     DiagnosticAccountNotFound,
     DiagnosticRateLimitExceeded,
     DiagnosticSupportGrantInvalid,
@@ -21,9 +23,9 @@ from database.account_diagnostics import (
 from database.honcho_attestation import authority_credential
 from utils.ella.account_diagnostics import (
     AccountStateProjectionV1,
-    DiagnosticAccountAuthority,
     DiagnosticEventBatchV1,
     account_binding_fingerprint,
+    event_from_record,
     generate_support_code,
     project_account_state,
     support_code_hash,
@@ -123,7 +125,7 @@ def create_account_diagnostics_router(
     read_consent_status = consent_status or get_ai_consent_service().status
     now = clock or (lambda: datetime.now(timezone.utc))
 
-    async def current_authority(uid: str) -> tuple[DiagnosticAccountAuthority, str]:
+    async def current_authority(uid: str) -> tuple[DiagnosticAccountAuthority, str, str, str]:
         try:
             authority = await repository.resolve_account_authority(uid)
         except DiagnosticAccountNotFound as exc:
@@ -142,7 +144,7 @@ def create_account_diagnostics_router(
             binding_revision=authority.binding_revision,
             consent_receipt_id=receipt_id,
         )
-        return authority, fingerprint
+        return authority, fingerprint, profile_binding_id, receipt_id
 
     @router.post(
         "/v1/ella/diagnostics/events",
@@ -155,13 +157,22 @@ def create_account_diagnostics_router(
         uid: str = Depends(get_exact_firebase_uid),
     ) -> DiagnosticIngestReceiptV1:
         _evidence_headers(response)
-        authority, expected_fingerprint = await current_authority(uid)
+        authority, expected_fingerprint, profile_binding_id, receipt_id = await current_authority(uid)
         if any(
             not hmac.compare_digest(event.account_binding_fingerprint, expected_fingerprint) for event in payload.events
         ):
             raise HTTPException(status_code=409, detail={"code": "diagnostic_account_binding_stale"})
         try:
-            accepted, duplicates = await repository.append_events(authority, payload.events)
+            accepted, duplicates = await repository.append_events(
+                authority,
+                payload.events,
+                uid=uid,
+                profile_binding_id=profile_binding_id,
+                consent_receipt_id=receipt_id,
+                expected_fingerprint=expected_fingerprint,
+            )
+        except DiagnosticAccountAuthorityChanged as exc:
+            raise HTTPException(status_code=409, detail={"code": "diagnostic_account_binding_stale"}) from exc
         except DiagnosticRateLimitExceeded as exc:
             raise HTTPException(status_code=429, detail={"code": "diagnostic_rate_limit_exceeded"}) from exc
         except Exception as exc:
@@ -180,12 +191,16 @@ def create_account_diagnostics_router(
         _evidence_headers(response)
         if re.fullmatch(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", diagnostic_session_id) is None:
             raise HTTPException(status_code=422, detail={"code": "diagnostic_session_id_invalid"})
-        authority, _ = await current_authority(uid)
+        authority, _, _, _ = await current_authority(uid)
         try:
-            evidence = await repository.list_session_events(authority, diagnostic_session_id)
+            records = await repository.list_session_events(authority, diagnostic_session_id)
         except Exception as exc:
             raise HTTPException(status_code=503, detail={"code": "diagnostic_store_unavailable"}) from exc
-        return project_account_state(diagnostic_session_id, evidence, now=now())
+        return project_account_state(
+            diagnostic_session_id,
+            [event_from_record(record) for record in records],
+            now=now(),
+        )
 
     @router.post(
         "/v1/ella/diagnostics/support-grants",
@@ -198,12 +213,12 @@ def create_account_diagnostics_router(
         uid: str = Depends(get_exact_firebase_uid),
     ) -> DiagnosticSupportGrantReceiptV1:
         _evidence_headers(response)
-        authority, _ = await current_authority(uid)
+        authority, _, _, _ = await current_authority(uid)
         try:
-            evidence = await repository.list_session_events(authority, payload.diagnostic_session_id)
+            records = await repository.list_session_events(authority, payload.diagnostic_session_id)
         except Exception as exc:
             raise HTTPException(status_code=503, detail={"code": "diagnostic_store_unavailable"}) from exc
-        if not evidence:
+        if not records:
             raise HTTPException(status_code=404, detail={"code": "diagnostic_session_not_found"})
         hmac_key = authority_credential("ELLA_DIAGNOSTICS_SUPPORT_HMAC_KEY")
         if not hmac_key:
@@ -241,13 +256,14 @@ def create_account_diagnostics_router(
         uid: str = Depends(get_exact_firebase_uid),
     ) -> Response:
         _evidence_headers(response)
-        authority, _ = await current_authority(uid)
+        authority, _, _, _ = await current_authority(uid)
         try:
             revoked = await repository.revoke_support_grant(authority, str(grant_id))
         except Exception as exc:
             raise HTTPException(status_code=503, detail={"code": "diagnostic_store_unavailable"}) from exc
         if not revoked:
             raise HTTPException(status_code=404, detail={"code": "diagnostic_support_grant_not_found"})
+        response.status_code = status.HTTP_204_NO_CONTENT
         return response
 
     @router.post(
@@ -265,7 +281,7 @@ def create_account_diagnostics_router(
             raise HTTPException(status_code=503, detail={"code": "diagnostic_support_grants_not_configured"})
         try:
             code_hash = support_code_hash(payload.support_code, hmac_key=hmac_key)
-            diagnostic_session_id, evidence = await repository.consume_support_grant(
+            diagnostic_session_id, records = await repository.consume_support_grant(
                 code_hash=code_hash,
                 operator_id=operator_id,
                 case_id=payload.case_id,
@@ -278,7 +294,11 @@ def create_account_diagnostics_router(
         return DiagnosticSupportProjectionV1(
             case_id=payload.case_id,
             operator_id=operator_id,
-            projection=project_account_state(diagnostic_session_id, evidence, now=now()),
+            projection=project_account_state(
+                diagnostic_session_id,
+                [event_from_record(record) for record in records],
+                now=now(),
+            ),
         )
 
     return router

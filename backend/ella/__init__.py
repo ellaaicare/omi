@@ -29,6 +29,11 @@ from ella.routers.onboarding import configure_firestore_db, router as onboarding
 from ella.routers.today_cards import create_today_cards_router
 from ella.services.today_card import TodayCardMaterializer
 from ella.services.today_card_postgres import PostgresTodayCardRepository
+from utils.ella.account_diagnostics_retention import (
+    DiagnosticRetentionWorker,
+    start_diagnostic_retention_worker,
+    stop_diagnostic_retention_worker,
+)
 
 # =============================================================================
 # CONFIGURATION
@@ -306,10 +311,18 @@ def _register_routers(app) -> None:
 
     # Account-bound, content-free diagnostic evidence and support projection.
     try:
+        diagnostics_repository = PostgresAccountDiagnosticsRepository()
         app.include_router(
-            create_account_diagnostics_router(PostgresAccountDiagnosticsRepository()),
+            create_account_diagnostics_router(diagnostics_repository),
             tags=["Ella Diagnostics"],
         )
+        diagnostics_retention_worker = DiagnosticRetentionWorker(diagnostics_repository)
+
+        async def _start_diagnostics_retention_worker() -> None:
+            await start_diagnostic_retention_worker(diagnostics_retention_worker)
+
+        app.router.add_event_handler("startup", _start_diagnostics_retention_worker)
+        app.router.add_event_handler("shutdown", stop_diagnostic_retention_worker)
         print("  🌐 /v1/ella/diagnostics/* - Account-bound diagnostic evidence", flush=True)
     except ImportError as e:
         print(f"  ⚠️ Ella diagnostics not available: {e}", flush=True)

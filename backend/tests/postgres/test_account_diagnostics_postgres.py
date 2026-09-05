@@ -7,7 +7,13 @@ from pathlib import Path
 import asyncpg
 import pytest
 
-from database.account_diagnostics import DiagnosticSupportGrantInvalid, PostgresAccountDiagnosticsRepository
+from database import authority_advisory_lock, managed_cloud_consent
+from database.account_diagnostics import (
+    DiagnosticAccountAuthorityChanged,
+    DiagnosticSupportGrantInvalid,
+    PostgresAccountDiagnosticsRepository,
+    account_binding_fingerprint,
+)
 from utils.ella.account_diagnostics import DiagnosticEventV1
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
@@ -33,6 +39,12 @@ CREATE TABLE ella_runtime_bindings (
     active BOOLEAN NOT NULL DEFAULT FALSE,
     revision INTEGER NOT NULL DEFAULT 1,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE ella_managed_cloud_consent_authority (
+    user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    decision TEXT NOT NULL,
+    consent_receipt_ref TEXT,
+    profile_binding_id TEXT
 );
 """
 
@@ -103,6 +115,16 @@ def test_event_append_is_idempotent_immutable_cascading_and_support_read_is_sing
                 """,
                 user_id,
             )
+            await pool.execute(
+                """
+                INSERT INTO ella_managed_cloud_consent_authority (
+                    user_id, decision, consent_receipt_ref, profile_binding_id
+                )
+                VALUES ($1, 'granted', $2, 'aipb_test')
+                """,
+                user_id,
+                managed_cloud_consent.consent_receipt_ref(uid, "aicr_test"),
+            )
 
             async def get_pool():
                 return pool
@@ -111,10 +133,62 @@ def test_event_append_is_idempotent_immutable_cascading_and_support_read_is_sing
             authority = await repository.resolve_account_authority(uid)
             assert authority.binding_revision == 7
             assert authority.account_user_id == authority.profile_user_id == str(user_id)
+            fingerprint = account_binding_fingerprint(
+                uid=uid,
+                profile_binding_id="aipb_test",
+                binding_revision=authority.binding_revision,
+                consent_receipt_id="aicr_test",
+            )
+            event = _event().model_copy(update={"account_binding_fingerprint": fingerprint})
 
-            assert await repository.append_events(authority, [_event()]) == (1, 0)
-            assert await repository.append_events(authority, [_event()]) == (0, 1)
+            append_authority = {
+                "uid": uid,
+                "profile_binding_id": "aipb_test",
+                "consent_receipt_id": "aicr_test",
+                "expected_fingerprint": fingerprint,
+            }
+            assert await repository.append_events(authority, [event], **append_authority) == (1, 0)
+            assert await repository.append_events(authority, [event], **append_authority) == (0, 1)
             assert len(await repository.list_session_events(authority, "session-1")) == 1
+
+            expired_event = event.model_copy(
+                update={
+                    "event_id": "event-expired",
+                    "client_sequence": 1,
+                }
+            )
+            await pool.execute(
+                """
+                INSERT INTO ella_diagnostic_events (
+                    account_user_id, profile_user_id, event_id,
+                    diagnostic_session_id, capture_attempt_id,
+                    account_binding_fingerprint, authority_generation,
+                    layer, event_name, outcome, stable_failure_code,
+                    client_sequence, client_monotonic_ms, client_utc_time,
+                    payload, server_received_at, expires_at
+                ) VALUES (
+                    $1, $1, $2, $3, $4, $5, $6,
+                    $7, $8, $9, NULL, $10, $11, $12,
+                    $13::jsonb, CURRENT_TIMESTAMP - INTERVAL '31 days',
+                    CURRENT_TIMESTAMP - INTERVAL '1 day'
+                )
+                """,
+                user_id,
+                expired_event.event_id,
+                expired_event.diagnostic_session_id,
+                expired_event.capture_attempt_id,
+                expired_event.account_binding_fingerprint,
+                expired_event.authority_generation,
+                expired_event.layer.value,
+                expired_event.event_name,
+                expired_event.outcome.value,
+                expired_event.client_sequence,
+                expired_event.client_monotonic_ms,
+                expired_event.client_utc_time,
+                expired_event.model_dump_json(exclude_none=True),
+            )
+            assert await repository.delete_expired_events(batch_size=1) == 1
+            assert await repository.delete_expired_events(batch_size=1) == 0
 
             with pytest.raises(asyncpg.RaiseError, match="immutable"):
                 await pool.execute(
@@ -152,6 +226,76 @@ def test_event_append_is_idempotent_immutable_cascading_and_support_read_is_sing
             assert await pool.fetchval("SELECT COUNT(*) FROM ella_diagnostic_events") == 0
             assert await pool.fetchval("SELECT COUNT(*) FROM ella_diagnostic_support_grants") == 0
             assert await pool.fetchval("SELECT COUNT(*) FROM ella_diagnostic_support_audit") == 0
+        finally:
+            await _drop_schema(admin, pool, schema)
+
+    asyncio.run(scenario())
+
+
+def test_append_revalidates_consent_after_waiting_for_canonical_authority_lock():
+    async def scenario() -> None:
+        admin, pool, schema = await _create_schema()
+        try:
+            uid = "diagnostic-authority-race"
+            user_id = await pool.fetchval("INSERT INTO users (omi_uid) VALUES ($1) RETURNING id", uid)
+            await pool.execute(
+                """
+                INSERT INTO ella_runtime_bindings (
+                    user_id, account_user_id, profile_user_id,
+                    role, status, active, revision
+                ) VALUES ($1, $1, $1, 'user', 'active', TRUE, 7)
+                """,
+                user_id,
+            )
+            await pool.execute(
+                """
+                INSERT INTO ella_managed_cloud_consent_authority (
+                    user_id, decision, consent_receipt_ref, profile_binding_id
+                ) VALUES ($1, 'granted', $2, 'aipb_test')
+                """,
+                user_id,
+                managed_cloud_consent.consent_receipt_ref(uid, "aicr_test"),
+            )
+
+            async def get_pool():
+                return pool
+
+            repository = PostgresAccountDiagnosticsRepository(get_pool)
+            authority = await repository.resolve_account_authority(uid)
+            fingerprint = account_binding_fingerprint(
+                uid=uid,
+                profile_binding_id="aipb_test",
+                binding_revision=authority.binding_revision,
+                consent_receipt_id="aicr_test",
+            )
+            event = _event().model_copy(update={"account_binding_fingerprint": fingerprint})
+            async with pool.acquire() as writer, writer.transaction():
+                owner = authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
+                await authority_advisory_lock.acquire_authority_lock(writer, owner=owner)
+                append_task = asyncio.create_task(
+                    repository.append_events(
+                        authority,
+                        [event],
+                        uid=uid,
+                        profile_binding_id="aipb_test",
+                        consent_receipt_id="aicr_test",
+                        expected_fingerprint=fingerprint,
+                    )
+                )
+                await asyncio.sleep(0.05)
+                assert not append_task.done()
+                await writer.execute(
+                    """
+                    UPDATE ella_managed_cloud_consent_authority
+                    SET decision = 'revoked', consent_receipt_ref = NULL
+                    WHERE user_id = $1
+                    """,
+                    user_id,
+                )
+
+            with pytest.raises(DiagnosticAccountAuthorityChanged):
+                await append_task
+            assert await pool.fetchval("SELECT COUNT(*) FROM ella_diagnostic_events") == 0
         finally:
             await _drop_schema(admin, pool, schema)
 
