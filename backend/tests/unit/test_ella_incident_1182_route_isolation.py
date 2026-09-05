@@ -842,6 +842,21 @@ MOUNTED_ROUTE_CONTRACT = {
     ("debug_metadata", "GET", "/v1/ella/debug/conversations/{conversation_id}/metadata"): _contract(
         "read_conversation_metadata", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
     ),
+    ("account_diagnostics", "POST", "/v1/ella/diagnostics/events"): _contract(
+        "ingest_diagnostic_events", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("account_diagnostics", "GET", "/v1/ella/diagnostics/projection/{diagnostic_session_id}"): _contract(
+        "get_diagnostic_projection", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("account_diagnostics", "POST", "/v1/ella/diagnostics/support-grants"): _contract(
+        "create_diagnostic_support_grant", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("account_diagnostics", "DELETE", "/v1/ella/diagnostics/support-grants/{grant_id}"): _contract(
+        "revoke_diagnostic_support_grant", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("account_diagnostics", "POST", "/v1/ella/operator/diagnostics/support-code/exchange"): _contract(
+        "exchange_diagnostic_support_code", "ella.routers.account_diagnostics:require_diagnostic_operator"
+    ),
     ("canonical_events", "POST", "/v1/ella/events"): _contract(
         "write_events", "ella.routers.canonical_events:_canonical_event_authority"
     ),
@@ -934,7 +949,7 @@ def test_real_mounted_route_manifest_has_exact_paths_authorities_and_no_duplicat
                 assert dependencies, f"unclassified authority: {key}"
 
     assert set(actual) == set(MOUNTED_ROUTE_CONTRACT)
-    assert len(actual) == len(MOUNTED_ROUTE_CONTRACT) == 49
+    assert len(actual) == len(MOUNTED_ROUTE_CONTRACT) == 54
     assert len(path_methods) == len(set(path_methods)), Counter(path_methods)
 
 

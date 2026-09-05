@@ -21,6 +21,8 @@ See ella/README.md for full documentation.
 import os
 from typing import Optional, Callable, Dict
 
+from database.account_diagnostics import PostgresAccountDiagnosticsRepository
+from ella.routers.account_diagnostics import create_account_diagnostics_router
 from ella.routers.canonical_events import _get_pool
 from ella.routers.invites import router as invite_router
 from ella.routers.onboarding import configure_firestore_db, router as onboarding_router
@@ -301,6 +303,16 @@ def _register_routers(app) -> None:
         print("  🌐 /v1/ella/debug/conversations/* - Observer metadata", flush=True)
     except ImportError as e:
         print(f"  ⚠️ Ella debug metadata not available: {e}", flush=True)
+
+    # Account-bound, content-free diagnostic evidence and support projection.
+    try:
+        app.include_router(
+            create_account_diagnostics_router(PostgresAccountDiagnosticsRepository()),
+            tags=["Ella Diagnostics"],
+        )
+        print("  🌐 /v1/ella/diagnostics/* - Account-bound diagnostic evidence", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella diagnostics not available: {e}", flush=True)
 
     # App-facing conversation correction endpoint (iOS Correct Summary)
     try:

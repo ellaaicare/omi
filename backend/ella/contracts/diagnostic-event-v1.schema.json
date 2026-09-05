@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ella-ai-care.com/contracts/diagnostic-event-v1.schema.json",
+  "title": "DiagnosticEventV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "diagnostic_session_id",
+    "capture_attempt_id",
+    "account_binding_fingerprint",
+    "authority_generation",
+    "source_revision",
+    "layer",
+    "event_name",
+    "outcome",
+    "retry_class",
+    "client_sequence",
+    "client_monotonic_ms",
+    "client_utc_time"
+  ],
+  "properties": {
+    "schema_version": {"const": "ella.diagnostic_event.v1"},
+    "event_id": {"$ref": "#/$defs/opaqueId"},
+    "diagnostic_session_id": {"$ref": "#/$defs/opaqueId"},
+    "capture_attempt_id": {"$ref": "#/$defs/opaqueId"},
+    "account_binding_fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "authority_generation": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+    "source_revision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,127}$"
+    },
+    "layer": {
+      "enum": [
+        "account_binding",
+        "ble_transport",
+        "physical_audio",
+        "server_capture",
+        "publication",
+        "presentation"
+      ]
+    },
+    "event_name": {"$ref": "#/$defs/eventName"},
+    "outcome": {"enum": ["started", "succeeded", "failed", "cancelled", "unknown"]},
+    "retry_class": {"enum": ["never", "user_action", "bounded_automatic", "operator_only"]},
+    "client_sequence": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+    "client_monotonic_ms": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+    "client_utc_time": {"type": "string", "format": "date-time"},
+    "opaque_resource_id": {"$ref": "#/$defs/safeValue"},
+    "firmware": {"$ref": "#/$defs/safeValue"},
+    "codec": {"$ref": "#/$defs/safeValue"},
+    "stable_failure_code": {
+      "enum": [
+        "ble_not_powered",
+        "ble_permission_denied",
+        "remembered_device_not_resolved",
+        "peripheral_connect_timeout",
+        "required_service_missing",
+        "notification_subscription_failed",
+        "audio_first_frame_timeout",
+        "audio_frames_stalled",
+        "websocket_auth_failed",
+        "capture_authority_conflict",
+        "capture_ready_timeout",
+        "capture_first_frame_rejected",
+        "capture_drain_ambiguous",
+        "finalization_timeout",
+        "account_authority_changed",
+        "client_backend_revision_mismatch"
+      ]
+    },
+    "expected_next_event": {"$ref": "#/$defs/eventName"},
+    "deadline_ms": {"type": "integer", "minimum": 0, "maximum": 86400000},
+    "safe_counters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "frames": {"type": "integer", "minimum": 0, "maximum": 1000000000000},
+        "bytes": {"type": "integer", "minimum": 0, "maximum": 1000000000000},
+        "retry_number": {"type": "integer", "minimum": 0, "maximum": 1000000000000},
+        "rssi_bucket": {"type": "integer", "minimum": 0, "maximum": 1000000000000},
+        "queue_age_seconds": {"type": "integer", "minimum": 0, "maximum": 1000000000000}
+      }
+    },
+    "projection_revision": {"type": "integer", "minimum": 0},
+    "action_revision": {"type": "integer", "minimum": 0}
+  },
+  "$defs": {
+    "opaqueId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "eventName": {
+      "enum": [
+        "account_bound",
+        "capture_consent_current",
+        "capture_authority_current",
+        "diagnostic_session_started",
+        "capture_attempt_started",
+        "remembered_device_resolved",
+        "peripheral_connect_started",
+        "peripheral_connected",
+        "peripheral_connect_failed",
+        "notifications_subscribed",
+        "notification_subscription_failed",
+        "audio_subscription_open",
+        "audio_first_frame",
+        "audio_frames_advancing",
+        "audio_frames_stalled",
+        "websocket_authenticated",
+        "capture_protocol_ready",
+        "capture_first_frame_accepted",
+        "capture_drain_confirmed",
+        "capture_finalization_requested",
+        "capture_finalized",
+        "conversation_published",
+        "memory_visible",
+        "artwork_visible"
+      ]
+    },
+    "safeValue": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^(?!.*://)[A-Za-z0-9][A-Za-z0-9._:+/-]{0,127}$"
+    }
+  }
+}

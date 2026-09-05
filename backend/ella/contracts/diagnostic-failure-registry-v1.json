@@ -1,0 +1,53 @@
+{
+  "schema_version": "ella.diagnostic_failure_registry.v1",
+  "entries": [
+    {"code": "ble_not_powered", "layer": "ble_transport", "retry_class": "user_action"},
+    {"code": "ble_permission_denied", "layer": "ble_transport", "retry_class": "user_action"},
+    {
+      "code": "remembered_device_not_resolved",
+      "layer": "ble_transport",
+      "retry_class": "bounded_automatic"
+    },
+    {
+      "code": "peripheral_connect_timeout",
+      "layer": "ble_transport",
+      "retry_class": "bounded_automatic"
+    },
+    {"code": "required_service_missing", "layer": "ble_transport", "retry_class": "never"},
+    {
+      "code": "notification_subscription_failed",
+      "layer": "ble_transport",
+      "retry_class": "bounded_automatic"
+    },
+    {
+      "code": "audio_first_frame_timeout",
+      "layer": "physical_audio",
+      "retry_class": "bounded_automatic"
+    },
+    {"code": "audio_frames_stalled", "layer": "physical_audio", "retry_class": "bounded_automatic"},
+    {"code": "websocket_auth_failed", "layer": "server_capture", "retry_class": "user_action"},
+    {
+      "code": "capture_authority_conflict",
+      "layer": "server_capture",
+      "retry_class": "bounded_automatic"
+    },
+    {
+      "code": "capture_ready_timeout",
+      "layer": "server_capture",
+      "retry_class": "bounded_automatic"
+    },
+    {
+      "code": "capture_first_frame_rejected",
+      "layer": "server_capture",
+      "retry_class": "bounded_automatic"
+    },
+    {"code": "capture_drain_ambiguous", "layer": "publication", "retry_class": "operator_only"},
+    {"code": "finalization_timeout", "layer": "publication", "retry_class": "bounded_automatic"},
+    {"code": "account_authority_changed", "layer": "account_binding", "retry_class": "user_action"},
+    {
+      "code": "client_backend_revision_mismatch",
+      "layer": "account_binding",
+      "retry_class": "user_action"
+    }
+  ]
+}
