@@ -369,8 +369,10 @@ def test_ingest_rejects_cross_account_fingerprint_before_write(monkeypatch):
 def test_ingest_maps_semantic_identity_collision_to_typed_conflict(monkeypatch):
     client, repository = _client(monkeypatch)
     repository.append_error = DiagnosticEventConflict()
+    event = _event().model_dump(mode="json")
+    conflicting_event = {**event, "source_revision": "build-850"}
 
-    response = client.post("/v1/ella/diagnostics/events", json={"events": [_event().model_dump(mode="json")]})
+    response = client.post("/v1/ella/diagnostics/events", json={"events": [event, conflicting_event]})
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "diagnostic_event_conflict"
