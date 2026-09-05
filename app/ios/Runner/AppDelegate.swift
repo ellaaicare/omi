@@ -199,6 +199,55 @@ extension FlutterError: Error {}
     }
     print("AppDelegate: Debug Events MethodChannel registered")
 
+    let diagnosticEventsChannel = FlutterMethodChannel(
+        name: "com.ellaaicare.ella/diagnostic_events",
+        binaryMessenger: controller.binaryMessenger
+    )
+    diagnosticEventsChannel.setMethodCallHandler { (call, result) in
+        let arguments = call.arguments as? [String: Any]
+        switch call.method {
+        case "appendEvent":
+            guard let event = arguments else {
+                result(FlutterError(code: "invalid_event", message: nil, details: nil))
+                return
+            }
+            EllaDiagnosticEventStore.shared.append(event) { error in
+                if let error {
+                    result(FlutterError(code: "diagnostic_store_failed", message: error.localizedDescription, details: nil))
+                } else {
+                    result(nil)
+                }
+            }
+        case "getEvents":
+            guard let fingerprint = arguments?["account_binding_fingerprint"] as? String else {
+                result(FlutterError(code: "invalid_fingerprint", message: nil, details: nil))
+                return
+            }
+            EllaDiagnosticEventStore.shared.events(fingerprint: fingerprint) { events, error in
+                if let error {
+                    result(FlutterError(code: "diagnostic_store_failed", message: error.localizedDescription, details: nil))
+                } else {
+                    result(events ?? [])
+                }
+            }
+        case "clearEvents":
+            guard let fingerprint = arguments?["account_binding_fingerprint"] as? String else {
+                result(FlutterError(code: "invalid_fingerprint", message: nil, details: nil))
+                return
+            }
+            EllaDiagnosticEventStore.shared.clear(fingerprint: fingerprint) { error in
+                if let error {
+                    result(FlutterError(code: "diagnostic_store_failed", message: error.localizedDescription, details: nil))
+                } else {
+                    result(nil)
+                }
+            }
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
+    print("AppDelegate: Diagnostic Events MethodChannel registered")
+
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }

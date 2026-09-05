@@ -14,6 +14,7 @@ import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/services/ella_account_commit_barrier.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
+import 'package:omi/ella/services/diagnostics/ella_diagnostic_event_journal.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/people_provider.dart';
@@ -295,10 +296,7 @@ void main() {
 
     final stop = service.stop();
     await pumpEventQueue();
-    expect(
-      jsonDecode(pure.sent.last as String),
-      {'type': 'capture_drain', ...authorityTuple},
-    );
+    expect(jsonDecode(pure.sent.last as String), {'type': 'capture_drain', ...authorityTuple});
     expect(pure.stops, 0, reason: 'transport close must wait for the server-side Redis fence');
     pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_drained', ...authorityTuple}));
     await stop;
@@ -363,16 +361,18 @@ void main() {
     primary = _FakePureSocket(
       status: PureSocketStatus.notConnected,
       onStop: () {
-        primary.onMessage(jsonEncode([
-          {
-            'id': 'tail-only',
-            'text': 'Final words emitted only when the provider closes',
-            'speaker': 'SPEAKER_00',
-            'start': 0.0,
-            'end': 1.0,
-            'is_user': false,
-          }
-        ]));
+        primary.onMessage(
+          jsonEncode([
+            {
+              'id': 'tail-only',
+              'text': 'Final words emitted only when the provider closes',
+              'speaker': 'SPEAKER_00',
+              'start': 0.0,
+              'end': 1.0,
+              'is_user': false,
+            },
+          ]),
+        );
       },
     );
     final secondary = _FakePureSocket(status: PureSocketStatus.notConnected);
@@ -398,9 +398,7 @@ void main() {
 
     final start = service.start();
     await pumpEventQueue();
-    secondary.onMessage(
-      jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready', ...authorityTuple}),
-    );
+    secondary.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready', ...authorityTuple}));
     await start;
 
     final stop = service.stop();
@@ -546,25 +544,29 @@ void main() {
     );
     final staleStart = staleService.start();
     await pumpEventQueue();
-    stalePure.onMessage(jsonEncode({
-      'type': 'service_status',
-      'status': 'capture_protocol_ready',
-      'protocol_version': 2,
-      'conversation_id': 'capture-a',
-      'generation': 'generation-a',
-      'owner_token': 'owner-a',
-    }));
+    stalePure.onMessage(
+      jsonEncode({
+        'type': 'service_status',
+        'status': 'capture_protocol_ready',
+        'protocol_version': 2,
+        'conversation_id': 'capture-a',
+        'generation': 'generation-a',
+        'owner_token': 'owner-a',
+      }),
+    );
     await staleStart;
     final staleStop = staleService.stop();
     await pumpEventQueue();
-    stalePure.onMessage(jsonEncode({
-      'type': 'service_status',
-      'status': 'capture_protocol_drained',
-      'protocol_version': 2,
-      'conversation_id': 'capture-a',
-      'generation': 'generation-b',
-      'owner_token': 'owner-a',
-    }));
+    stalePure.onMessage(
+      jsonEncode({
+        'type': 'service_status',
+        'status': 'capture_protocol_drained',
+        'protocol_version': 2,
+        'conversation_id': 'capture-a',
+        'generation': 'generation-b',
+        'owner_token': 'owner-a',
+      }),
+    );
     await staleStop;
     expect(stalePure.stops, 1);
     expect(staleService.captureAuthority?.conversationId, 'capture-a');
@@ -1079,11 +1081,7 @@ void main() {
     completedPoll.complete(
       CreateConversationResponse(
         messages: const [],
-        conversation: _conversation(
-          'active-phone',
-          'Phone words before stop',
-          status: ConversationStatus.completed,
-        ),
+        conversation: _conversation('active-phone', 'Phone words before stop', status: ConversationStatus.completed),
       ),
     );
     expect(await stopping, isTrue);
@@ -1407,6 +1405,52 @@ void main() {
     expect(await homeStop, isTrue);
     expect(processCalls, 1);
     expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.completed);
+  });
+
+  test('production necklace start emits one content-free correlated diagnostic timeline', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final sink = InMemoryEllaDiagnosticEventSink();
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: _connectedDeviceSocket,
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      diagnosticEventSink: sink,
+    );
+    addTearDown(provider.dispose);
+    final device = BtDevice(
+      name: 'Ella',
+      id: 'raw-necklace-identifier',
+      type: DeviceType.omi,
+      rssi: -30,
+      firmwareRevision: '2.0.1',
+    );
+
+    final trace = provider.beginDeviceDiagnosticTrace(device);
+    expect(trace, isNotNull);
+    await provider.streamDeviceRecording(device: device, diagnosticTrace: trace);
+    await pumpEventQueue();
+
+    final events = sink.events.map((event) => event.toJson()).toList(growable: false);
+    expect(
+      events.map((event) => event['event_name']),
+      containsAllInOrder(<String>[
+        'diagnostic_session_started',
+        'capture_attempt_started',
+        'capture_authority_current',
+        'capture_protocol_ready',
+      ]),
+    );
+    expect(events.map((event) => event['diagnostic_session_id']).toSet(), hasLength(1));
+    expect(events.map((event) => event['capture_attempt_id']).toSet(), hasLength(1));
+    final encoded = events.toString();
+    expect(encoded, isNot(contains('uid-a')));
+    expect(encoded, isNot(contains('raw-necklace-identifier')));
   });
 
   test('unexpected necklace socket loss serializes finalization and restart', () async {

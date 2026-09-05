@@ -163,6 +163,15 @@ if [ "${SKIP_PULL:-0}" != "1" ]; then
   git pull origin main
 fi
 
+# Bind local diagnostic receipts to the exact source used for this artifact.
+# Release gates should reject dirty trees; the suffix prevents a dirty local
+# diagnostic build from claiming the immutable commit as its complete source.
+SOURCE_REVISION="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+if ! git -C "$REPO_ROOT" diff --quiet || ! git -C "$REPO_ROOT" diff --cached --quiet; then
+  SOURCE_REVISION="${SOURCE_REVISION}-dirty"
+fi
+DART_DEFINES+=(--dart-define=ELLA_SOURCE_REVISION="$SOURCE_REVISION")
+
 # ── Step 2: Flutter setup ─────────────────────────────────────
 log "Flutter pub get + build_runner"
 cd "$APP_DIR"

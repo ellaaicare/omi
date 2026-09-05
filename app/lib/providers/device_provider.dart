@@ -8,6 +8,7 @@ import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/main.dart';
+import 'package:omi/ella/services/diagnostics/ella_diagnostic_event.dart';
 import 'package:omi/pages/home/firmware_update.dart';
 import 'package:omi/pages/home/omiglass_ota_update.dart';
 import 'package:omi/providers/capture_provider.dart';
@@ -147,6 +148,8 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   bool _authorityReconciliationPending = false;
   String? _lastDeviceOwnerBinding;
   int? _activeDeviceConnectionSession;
+  final Map<int, EllaDiagnosticCaptureTrace> _diagnosticTraceByOperationGeneration =
+      <int, EllaDiagnosticCaptureTrace>{};
   bool _disposed = false;
 
   void Function(BtDevice device)? onDeviceConnected;
@@ -244,6 +247,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     // fresh, owner-bound reconnect started after this point can clear the fence.
     _lastDeviceOwnerBinding = settledOwnerBinding;
     _activeDeviceConnectionSession = null;
+    _diagnosticTraceByOperationGeneration.clear();
     final disconnectedDeviceId = connectedDevice?.id ?? pairedDevice?.id ?? captureProvider?.recordingDevice?.id;
     _reconnectionTimer?.cancel();
     _disconnectNotificationTimer?.cancel();
@@ -691,6 +695,12 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   Future scanAndConnectToDevice({int? operationGeneration, bool startCaptureWhenConnected = false}) async {
     final generation = operationGeneration ?? _deviceOperationGeneration;
     if (!_isDeviceOperationCurrent(generation)) return;
+    if (startCaptureWhenConnected && !_diagnosticTraceByOperationGeneration.containsKey(generation)) {
+      final rememberedDevice = _rememberedDeviceForCurrentAuthority();
+      final diagnosticTrace =
+          rememberedDevice == null ? null : captureProvider?.beginDeviceDiagnosticTrace(rememberedDevice);
+      if (diagnosticTrace != null) _diagnosticTraceByOperationGeneration[generation] = diagnosticTrace;
+    }
     updateConnectingStatus(true);
     if (isConnected) {
       if (connectedDevice == null) {
@@ -768,6 +778,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     _authorityReconciliationGeneration++;
     _authorityReconciliationPending = false;
     _activeDeviceConnectionSession = null;
+    _diagnosticTraceByOperationGeneration.clear();
     WidgetsBinding.instance.removeObserver(this);
     _accountAuthorityChanges.removeListener(_handleAccountAuthorityChanged);
     captureProvider?.removeListener(_onCaptureProviderChanged);
@@ -812,6 +823,9 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     if (!_deviceServiceReady || !_isCurrentOwnerBoundDevice(stored.id)) return false;
 
     final generation = ++_deviceOperationGeneration;
+    _diagnosticTraceByOperationGeneration.clear();
+    final diagnosticTrace = captureProvider?.beginDeviceDiagnosticTrace(stored);
+    if (diagnosticTrace != null) _diagnosticTraceByOperationGeneration[generation] = diagnosticTrace;
     pairedDevice = stored;
     _automaticReconnectCooldownUntil = null;
     _automaticReconnectExhausted = false;
@@ -821,7 +835,12 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       final activeDevice = connectedDevice;
       if (isConnected && activeDevice != null) {
         if (activeDevice.id != stored.id) return false;
-        await _onDeviceConnected(activeDevice, generation, explicitlyAuthorized: true);
+        await _onDeviceConnected(
+          activeDevice,
+          generation,
+          explicitlyAuthorized: true,
+          diagnosticTrace: diagnosticTrace,
+        );
       } else {
         await scanAndConnectToDevice(operationGeneration: generation, startCaptureWhenConnected: true);
       }
@@ -939,7 +958,12 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     return (message, hasUpdate, version, latestFirmwareDetails);
   }
 
-  Future<void> _onDeviceConnected(BtDevice device, int operationGeneration, {bool explicitlyAuthorized = false}) async {
+  Future<void> _onDeviceConnected(
+    BtDevice device,
+    int operationGeneration, {
+    bool explicitlyAuthorized = false,
+    EllaDiagnosticCaptureTrace? diagnosticTrace,
+  }) async {
     if (!_isDeviceOperationCurrent(operationGeneration)) return;
     if (_rememberedDeviceOwnerBinding() == null) return;
     if (!explicitlyAuthorized &&
@@ -966,6 +990,20 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     if (!_isDeviceOperationCurrent(operationGeneration)) return;
     final capture = captureProvider;
     capture?.updateRecordingDevice(device);
+    final activeDiagnosticTrace = diagnosticTrace ?? _diagnosticTraceByOperationGeneration[operationGeneration];
+    if (activeDiagnosticTrace != null) {
+      unawaited(
+        activeDiagnosticTrace.emit(
+          layer: EllaDiagnosticLayer.bleTransport,
+          eventName: 'peripheral_connected',
+          outcome: EllaDiagnosticOutcome.succeeded,
+          retryClass: EllaDiagnosticRetryClass.never,
+          expectedNextEvent: 'capture_authority_current',
+          deadlineMs: 8000,
+          firmware: device.firmwareRevision,
+        ),
+      );
+    }
 
     try {
       // Capture is the critical post-connect path. Metadata, storage, and
@@ -973,7 +1011,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       if (capture?.phoneCaptureOwnsMobileAudio == true) {
         _deferDeviceCaptureUntilPhoneReleases(device, operationGeneration);
       } else {
-        await _startDeviceCaptureWithRetry(device, operationGeneration);
+        await _startDeviceCaptureWithRetry(device, operationGeneration, diagnosticTrace: activeDiagnosticTrace);
       }
       if (!_isDeviceOperationCurrent(operationGeneration)) return;
 
@@ -1029,9 +1067,14 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     }
   }
 
-  Future<bool> _startDeviceCaptureWithRetry(BtDevice device, int operationGeneration) async {
+  Future<bool> _startDeviceCaptureWithRetry(
+    BtDevice device,
+    int operationGeneration, {
+    EllaDiagnosticCaptureTrace? diagnosticTrace,
+  }) async {
     final capture = captureProvider;
     if (capture == null) return false;
+    final activeDiagnosticTrace = diagnosticTrace ?? _diagnosticTraceByOperationGeneration[operationGeneration];
     for (var attempt = 1; attempt <= _maxDeviceCaptureStartAttempts; attempt++) {
       if (!_isDeviceOperationCurrent(operationGeneration)) return false;
       if (capture.phoneCaptureOwnsMobileAudio) {
@@ -1039,7 +1082,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         return false;
       }
       try {
-        await capture.streamDeviceRecording(device: device);
+        await capture.streamDeviceRecording(device: device, diagnosticTrace: activeDiagnosticTrace);
       } catch (error) {
         Logger.debug('Necklace capture start attempt $attempt failed: $error');
       }

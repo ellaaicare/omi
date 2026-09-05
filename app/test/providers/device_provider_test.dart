@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
+import 'package:omi/ella/services/diagnostics/ella_diagnostic_event.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/services/devices.dart';
@@ -90,7 +91,7 @@ class _RecordingCaptureProvider extends CaptureProvider {
   final List<String> disconnectedDeviceIds = [];
 
   @override
-  Future<void> streamDeviceRecording({BtDevice? device}) async {
+  Future<void> streamDeviceRecording({BtDevice? device, EllaDiagnosticCaptureTrace? diagnosticTrace}) async {
     deviceStarts++;
     if (deviceStarts <= failuresBeforeStart) {
       updateRecordingState(RecordingState.error);

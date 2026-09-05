@@ -68,7 +68,7 @@ class PureSocket implements IPureSocket {
       return false;
     }
 
-    Logger.debug("request wss ${url}");
+    Logger.debug('request websocket connection');
     final headers = await buildHeaders(requireAuthCheck: true);
 
     _channel = IOWebSocketChannel.connect(
@@ -87,22 +87,13 @@ class PureSocket implements IPureSocket {
       await channel.ready;
     } on TimeoutException catch (e) {
       err = e;
-      DebugLogManager.logWarning('pure_socket_connect_timeout', {
-        'url': url,
-        'error': e.toString(),
-      });
+      DebugLogManager.logWarning('pure_socket_connect_timeout', {'error': e.toString()});
     } on SocketException catch (e) {
       err = e;
-      DebugLogManager.logWarning('pure_socket_connect_socket_error', {
-        'url': url,
-        'error': e.toString(),
-      });
+      DebugLogManager.logWarning('pure_socket_connect_socket_error', {'error': e.toString()});
     } on WebSocketChannelException catch (e) {
       err = e;
-      DebugLogManager.logWarning('pure_socket_connect_websocket_error', {
-        'url': url,
-        'error': e.toString(),
-      });
+      DebugLogManager.logWarning('pure_socket_connect_websocket_error', {'error': e.toString()});
     }
     if (err != null) {
       Logger.debug("[Socket] Connect error: $err");
@@ -110,9 +101,7 @@ class PureSocket implements IPureSocket {
       return false;
     }
     _status = PureSocketStatus.connected;
-    DebugLogManager.logEvent('pure_socket_connected', {
-      'url': url,
-    });
+    DebugLogManager.logEvent('pure_socket_connected', const {});
     onConnected();
 
     final that = this;
@@ -142,10 +131,7 @@ class PureSocket implements IPureSocket {
 
   @override
   Future disconnect() async {
-    DebugLogManager.logEvent('pure_socket_disconnecting', {
-      'url': url,
-      'current_status': _status.toString(),
-    });
+    DebugLogManager.logEvent('pure_socket_disconnecting', {'current_status': _status.toString()});
     if (_status == PureSocketStatus.connected) {
       // Warn: should not use await cause dead end by socket closed.
       _channel?.sink.close(socket_channel_status.normalClosure);
@@ -157,9 +143,7 @@ class PureSocket implements IPureSocket {
 
   @override
   Future stop() async {
-    DebugLogManager.logEvent('pure_socket_stopping', {
-      'url': url,
-    });
+    DebugLogManager.logEvent('pure_socket_stopping', const {});
     await disconnect();
   }
 
@@ -169,11 +153,7 @@ class PureSocket implements IPureSocket {
     final closeReason = _getCloseCodeReason(closeCode);
     Logger.debug("Socket closed with code: $closeCode ($closeReason)");
 
-    DebugLogManager.logEvent('pure_socket_closed', {
-      'close_code': closeCode ?? -1,
-      'close_reason': closeReason,
-      'url': url,
-    });
+    DebugLogManager.logEvent('pure_socket_closed', {'close_code': closeCode ?? -1, 'close_reason': closeReason});
 
     _listener?.onClosed(closeCode);
   }
@@ -198,9 +178,7 @@ class PureSocket implements IPureSocket {
     _status = PureSocketStatus.disconnected;
     Logger.debug("[Socket] Error: $err");
 
-    DebugLogManager.logError(err, trace, 'pure_socket_error', {
-      'url': url,
-    });
+    DebugLogManager.logError(err, trace, 'pure_socket_error');
 
     _listener?.onError(err, trace);
     PlatformManager.instance.crashReporter.reportCrash(err, trace);
