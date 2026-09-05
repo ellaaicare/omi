@@ -266,6 +266,17 @@ if [ "${RUN_TESTS:-0}" = "1" ]; then
 fi
 
 # ── Step 4: Flutter build iOS (no codesign) ───────────────────
+# Stamp diagnostics only after generated release inputs and optional tests are
+# complete. A release artifact must never claim an immutable source revision
+# while tracked or untracked repository inputs have drifted.
+if [ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)" ]; then
+  echo "ERROR: Release source/config tree changed before source attribution; refusing to build."
+  git -C "$REPO_ROOT" status --short --untracked-files=all
+  exit 1
+fi
+SOURCE_REVISION="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+DART_DEFINES+=(--dart-define=ELLA_SOURCE_REVISION="$SOURCE_REVISION")
+
 log "Flutter build ios --flavor $FLAVOR --release --no-codesign ELLA_PUBLIC_BUILD=$ELLA_PUBLIC_BUILD ELLA_ENTITLEMENT_GATE=${ELLA_ENTITLEMENT_GATE:-false} ELLA_GUARDIAN_ENABLED=$ELLA_GUARDIAN_ENABLED"
 FLUTTER_BUILD_ARGS=(
   build ios

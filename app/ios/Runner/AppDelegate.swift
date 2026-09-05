@@ -199,6 +199,39 @@ extension FlutterError: Error {}
     }
     print("AppDelegate: Debug Events MethodChannel registered")
 
+    let diagnosticEventsChannel = FlutterMethodChannel(
+        name: "com.ellaaicare.ella/diagnostic_events",
+        binaryMessenger: controller.binaryMessenger
+    )
+    diagnosticEventsChannel.setMethodCallHandler { (call, result) in
+        let arguments = call.arguments as? [String: Any]
+        switch call.method {
+        case "appendEvent":
+            guard let event = arguments else {
+                result(FlutterError(code: "invalid_event", message: nil, details: nil))
+                return
+            }
+            EllaDiagnosticEventStore.shared.append(event) { error in
+                if let error {
+                    result(FlutterError(code: "diagnostic_store_failed", message: error.localizedDescription, details: nil))
+                } else {
+                    result(nil)
+                }
+            }
+        case "clearAllEvents":
+            EllaDiagnosticEventStore.shared.clearAll { error in
+                if let error {
+                    result(FlutterError(code: "diagnostic_store_failed", message: error.localizedDescription, details: nil))
+                } else {
+                    result(nil)
+                }
+            }
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
+    print("AppDelegate: Diagnostic Events MethodChannel registered")
+
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }

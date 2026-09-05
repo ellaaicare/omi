@@ -17,6 +17,7 @@ import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
+import 'package:omi/ella/services/diagnostics/ella_diagnostic_event.dart';
 import 'package:omi/ella/services/memory_artwork_api.dart';
 import 'package:omi/ella/services/today_card_repository.dart';
 import 'package:omi/l10n/app_localizations.dart';
@@ -213,9 +214,7 @@ void main() {
     expect(find.text('Record'), findsOneWidget);
   });
 
-  testWidgets('external phone capture keeps Stop and Transcript reachable after transcript navigation', (
-    tester,
-  ) async {
+  testWidgets('external phone capture keeps Stop and Transcript reachable after transcript navigation', (tester) async {
     final harness = await _pumpHome(tester, conversations: const [], initialRecordingState: RecordingState.record);
     addTearDown(harness.dispose);
 
@@ -1082,7 +1081,9 @@ void main() {
     final ring = tester.widget<CircularProgressIndicator>(find.byKey(const Key('home-artwork-queue-ring')));
     expect(ring.value, isNull, reason: 'stopped full-history work remains incomplete and resumable');
     expect(
-        find.text('This illustration update was stopped. 35 queued · 2 retrying · 1 need attention'), findsOneWidget);
+      find.text('This illustration update was stopped. 35 queued · 2 retrying · 1 need attention'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('Home leaves older artwork paused when the memory feed nears its end', (tester) async {
@@ -1602,13 +1603,7 @@ void main() {
     final authority = await _installArtworkAuthority();
     final artwork = _FakeMemoryArtworkApi(
       backfillPages: const [
-        MemoryArtworkBackfillPage(
-          queued: 10,
-          existing: 0,
-          skipped: 0,
-          hasMore: true,
-          nextCursor: 'older-artwork-page',
-        ),
+        MemoryArtworkBackfillPage(queued: 10, existing: 0, skipped: 0, hasMore: true, nextCursor: 'older-artwork-page'),
         MemoryArtworkBackfillPage(
           queued: 10,
           existing: 0,
@@ -1688,8 +1683,10 @@ void main() {
     await tester.pump();
 
     expect(artwork.queueStatusRequests, initialRequests + 2);
-    expect(find.text('Artwork progress could not be loaded. Your finished illustrations are still available.'),
-        findsNothing);
+    expect(
+      find.text('Artwork progress could not be loaded. Your finished illustrations are still available.'),
+      findsNothing,
+    );
     expect(find.text('2 of 10 illustrations ready'), findsOneWidget);
     semantics.dispose();
   });
@@ -2723,7 +2720,7 @@ class _FakeCaptureProvider extends CaptureProvider {
   }
 
   @override
-  Future<void> streamDeviceRecording({BtDevice? device}) async {
+  Future<void> streamDeviceRecording({BtDevice? device, EllaDiagnosticCaptureTrace? diagnosticTrace}) async {
     deviceStarts++;
     updateRecordingDevice(device);
     updateRecordingState(RecordingState.deviceRecord);

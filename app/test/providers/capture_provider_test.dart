@@ -14,9 +14,14 @@ import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/services/ella_account_commit_barrier.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
+import 'package:omi/ella/services/diagnostics/ella_diagnostic_event.dart';
+import 'package:omi/ella/services/diagnostics/ella_diagnostic_event_journal.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/people_provider.dart';
+import 'package:omi/services/devices/models.dart';
+import 'package:omi/services/devices/omi_connection.dart';
+import 'package:omi/services/devices/transports/device_transport.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/services/sockets/pure_socket.dart';
 import 'package:omi/services/sockets/transcription_service.dart';
@@ -132,10 +137,15 @@ class _FakeMicRecorder implements IMicRecorderService {
 }
 
 class _FakePureSocket implements IPureSocket {
-  _FakePureSocket({PureSocketStatus status = PureSocketStatus.connected, this.sendError, this.onStop})
-      : _status = status;
+  _FakePureSocket({
+    PureSocketStatus status = PureSocketStatus.connected,
+    this.connectResult = true,
+    this.sendError,
+    this.onStop,
+  }) : _status = status;
 
   PureSocketStatus _status;
+  final bool connectResult;
   final Object? sendError;
   final FutureOr<void> Function()? onStop;
   IPureSocketListener? listener;
@@ -145,8 +155,11 @@ class _FakePureSocket implements IPureSocket {
   @override
   PureSocketStatus get status => _status;
 
+  void setStatusWithoutCallback(PureSocketStatus status) => _status = status;
+
   @override
   Future<bool> connect() async {
+    if (!connectResult) return false;
     _status = PureSocketStatus.connected;
     listener?.onConnected();
     return true;
@@ -195,6 +208,75 @@ class _FakeTranscriptSocket {
 
   final _FakePureSocket pure;
   late final TranscriptSegmentSocketService service;
+}
+
+class _TestCaptureTransport implements DeviceTransport {
+  _TestCaptureTransport(this.deviceId);
+
+  @override
+  final String deviceId;
+  final StreamController<DeviceTransportState> _states = StreamController<DeviceTransportState>.broadcast();
+  final StreamController<List<int>> _audio = StreamController<List<int>>.broadcast();
+  final StreamController<List<int>> _buttons = StreamController<List<int>>.broadcast();
+  bool connected = true;
+
+  bool get hasAudioListener => _audio.hasListener;
+  void emitAudio(List<int> value) => _audio.add(value);
+
+  @override
+  Stream<DeviceTransportState> get connectionStateStream => _states.stream;
+
+  @override
+  Future<void> connect() async {
+    connected = true;
+    _states.add(DeviceTransportState.connected);
+  }
+
+  @override
+  Future<void> disconnect() async {
+    connected = false;
+    _states.add(DeviceTransportState.disconnected);
+  }
+
+  @override
+  Future<void> dispose() async {
+    await _states.close();
+    await _audio.close();
+    await _buttons.close();
+  }
+
+  @override
+  Stream<List<int>> getCharacteristicStream(String serviceUuid, String characteristicUuid) =>
+      characteristicUuid == audioDataStreamCharacteristicUuid ? _audio.stream : _buttons.stream;
+
+  @override
+  Future<bool> isConnected() async => connected;
+
+  @override
+  Future<bool> ping() async => connected;
+
+  @override
+  Future<List<int>> readCharacteristic(String serviceUuid, String characteristicUuid) async =>
+      characteristicUuid == audioCodecCharacteristicUuid ? const <int>[20] : const <int>[];
+
+  @override
+  Future<void> writeCharacteristic(String serviceUuid, String characteristicUuid, List<int> data) async {}
+}
+
+class _TestOmiConnection extends OmiDeviceConnection {
+  _TestOmiConnection(BtDevice device, this.testTransport, {this.audioSubscriptionAvailable = true})
+      : super(device, testTransport);
+
+  final _TestCaptureTransport testTransport;
+  final bool audioSubscriptionAvailable;
+
+  @override
+  Future<StreamSubscription?> getBleAudioBytesListener({
+    required void Function(List<int>) onAudioBytesReceived,
+  }) {
+    if (!audioSubscriptionAvailable) return Future<StreamSubscription?>.value();
+    return super.getBleAudioBytesListener(onAudioBytesReceived: onAudioBytesReceived);
+  }
 }
 
 Future<TranscriptSegmentSocketService?> _connectedDeviceSocket(BtDevice device, {required bool force}) async =>
@@ -295,10 +377,7 @@ void main() {
 
     final stop = service.stop();
     await pumpEventQueue();
-    expect(
-      jsonDecode(pure.sent.last as String),
-      {'type': 'capture_drain', ...authorityTuple},
-    );
+    expect(jsonDecode(pure.sent.last as String), {'type': 'capture_drain', ...authorityTuple});
     expect(pure.stops, 0, reason: 'transport close must wait for the server-side Redis fence');
     pure.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_drained', ...authorityTuple}));
     await stop;
@@ -363,16 +442,18 @@ void main() {
     primary = _FakePureSocket(
       status: PureSocketStatus.notConnected,
       onStop: () {
-        primary.onMessage(jsonEncode([
-          {
-            'id': 'tail-only',
-            'text': 'Final words emitted only when the provider closes',
-            'speaker': 'SPEAKER_00',
-            'start': 0.0,
-            'end': 1.0,
-            'is_user': false,
-          }
-        ]));
+        primary.onMessage(
+          jsonEncode([
+            {
+              'id': 'tail-only',
+              'text': 'Final words emitted only when the provider closes',
+              'speaker': 'SPEAKER_00',
+              'start': 0.0,
+              'end': 1.0,
+              'is_user': false,
+            },
+          ]),
+        );
       },
     );
     final secondary = _FakePureSocket(status: PureSocketStatus.notConnected);
@@ -398,9 +479,7 @@ void main() {
 
     final start = service.start();
     await pumpEventQueue();
-    secondary.onMessage(
-      jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready', ...authorityTuple}),
-    );
+    secondary.onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_ready', ...authorityTuple}));
     await start;
 
     final stop = service.stop();
@@ -546,25 +625,29 @@ void main() {
     );
     final staleStart = staleService.start();
     await pumpEventQueue();
-    stalePure.onMessage(jsonEncode({
-      'type': 'service_status',
-      'status': 'capture_protocol_ready',
-      'protocol_version': 2,
-      'conversation_id': 'capture-a',
-      'generation': 'generation-a',
-      'owner_token': 'owner-a',
-    }));
+    stalePure.onMessage(
+      jsonEncode({
+        'type': 'service_status',
+        'status': 'capture_protocol_ready',
+        'protocol_version': 2,
+        'conversation_id': 'capture-a',
+        'generation': 'generation-a',
+        'owner_token': 'owner-a',
+      }),
+    );
     await staleStart;
     final staleStop = staleService.stop();
     await pumpEventQueue();
-    stalePure.onMessage(jsonEncode({
-      'type': 'service_status',
-      'status': 'capture_protocol_drained',
-      'protocol_version': 2,
-      'conversation_id': 'capture-a',
-      'generation': 'generation-b',
-      'owner_token': 'owner-a',
-    }));
+    stalePure.onMessage(
+      jsonEncode({
+        'type': 'service_status',
+        'status': 'capture_protocol_drained',
+        'protocol_version': 2,
+        'conversation_id': 'capture-a',
+        'generation': 'generation-b',
+        'owner_token': 'owner-a',
+      }),
+    );
     await staleStop;
     expect(stalePure.stops, 1);
     expect(staleService.captureAuthority?.conversationId, 'capture-a');
@@ -1079,11 +1162,7 @@ void main() {
     completedPoll.complete(
       CreateConversationResponse(
         messages: const [],
-        conversation: _conversation(
-          'active-phone',
-          'Phone words before stop',
-          status: ConversationStatus.completed,
-        ),
+        conversation: _conversation('active-phone', 'Phone words before stop', status: ConversationStatus.completed),
       ),
     );
     expect(await stopping, isTrue);
@@ -1407,6 +1486,278 @@ void main() {
     expect(await homeStop, isTrue);
     expect(processCalls, 1);
     expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.completed);
+  });
+
+  test('production necklace start emits one content-free correlated diagnostic timeline', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final sink = InMemoryEllaDiagnosticEventSink();
+    final device = BtDevice(
+      name: 'Ella',
+      id: 'raw-necklace-identifier',
+      type: DeviceType.omi,
+      rssi: -30,
+      firmwareRevision: '2.0.1',
+    );
+    final transport = _TestCaptureTransport(device.id);
+    addTearDown(transport.dispose);
+    final connection = _TestOmiConnection(device, transport);
+    final pure = _FakePureSocket(status: PureSocketStatus.notConnected);
+    final socket = TranscriptSegmentSocketService.withSocket(
+      16000,
+      BleAudioCodec.opus,
+      'en',
+      pure,
+      requireCaptureProtocol: true,
+      captureProtocolTimeout: const Duration(milliseconds: 100),
+    );
+    final socketStart = socket.start();
+    await pumpEventQueue();
+    pure.onMessage(
+      jsonEncode({
+        'type': 'service_status',
+        'status': 'capture_protocol_ready',
+        'protocol_version': 2,
+        'conversation_id': 'capture-production-path',
+        'generation': 'generation-production-path',
+        'owner_token': 'owner-production-path',
+      }),
+    );
+    await socketStart;
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async => socket,
+      deviceConnectionEnsurer: (_) async => connection,
+      captureStartProofTimeout: const Duration(milliseconds: 100),
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+      diagnosticEventSink: sink,
+    );
+    addTearDown(provider.dispose);
+
+    final trace = provider.beginDeviceDiagnosticTrace(device);
+    expect(trace, isNotNull);
+    final start = provider.streamDeviceRecording(device: device, diagnosticTrace: trace);
+    for (var attempt = 0; attempt < 100 && !transport.hasAudioListener; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+    }
+    expect(transport.hasAudioListener, isTrue, reason: 'the real BLE subscription path must be active');
+    transport.emitAudio(const <int>[0, 0, 0, 1, 2, 3]);
+    await start;
+    await pumpEventQueue();
+
+    final events = sink.events.map((event) => event.toJson()).toList(growable: false);
+    expect(
+      events.map((event) => event['event_name']),
+      containsAllInOrder(<String>[
+        'diagnostic_session_started',
+        'capture_attempt_started',
+        'capture_authority_current',
+        'capture_protocol_ready',
+        'audio_subscription_open',
+        'audio_subscription_open',
+        'audio_first_frame',
+      ]),
+    );
+    expect(events.map((event) => event['diagnostic_session_id']).toSet(), hasLength(1));
+    expect(events.map((event) => event['capture_attempt_id']).toSet(), hasLength(1));
+    final encoded = events.toString();
+    expect(encoded, isNot(contains('uid-a')));
+    expect(encoded, isNot(contains('raw-necklace-identifier')));
+    expect(provider.recordingState, RecordingState.deviceRecord);
+    expect(pure.sent.whereType<List<int>>(), isNotEmpty, reason: 'physical BLE bytes must reach the authorized socket');
+  });
+
+  test('production necklace path records physical first-frame proof before reporting socket loss', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final sink = InMemoryEllaDiagnosticEventSink();
+    final device = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final transport = _TestCaptureTransport(device.id);
+    addTearDown(transport.dispose);
+    final connection = _TestOmiConnection(device, transport);
+    final pure = _FakePureSocket(status: PureSocketStatus.notConnected);
+    final socket = TranscriptSegmentSocketService.withSocket(
+      16000,
+      BleAudioCodec.opus,
+      'en',
+      pure,
+      requireCaptureProtocol: true,
+      captureProtocolTimeout: const Duration(milliseconds: 100),
+    );
+    final socketStart = socket.start();
+    await pumpEventQueue();
+    pure.onMessage(
+      jsonEncode({
+        'type': 'service_status',
+        'status': 'capture_protocol_ready',
+        'protocol_version': 2,
+        'conversation_id': 'capture-socket-loss',
+        'generation': 'generation-socket-loss',
+        'owner_token': 'owner-socket-loss',
+      }),
+    );
+    await socketStart;
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async => socket,
+      deviceConnectionEnsurer: (_) async => connection,
+      captureStartProofTimeout: const Duration(milliseconds: 100),
+      diagnosticEventSink: sink,
+    );
+    addTearDown(provider.dispose);
+
+    final start = provider.streamDeviceRecording(device: device);
+    for (var attempt = 0; attempt < 100 && !transport.hasAudioListener; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+    }
+    expect(transport.hasAudioListener, isTrue);
+    pure.setStatusWithoutCallback(PureSocketStatus.disconnected);
+    transport.emitAudio(const <int>[0, 0, 0, 1, 2, 3]);
+    await start;
+    await pumpEventQueue();
+
+    final firstFrame = sink.events.singleWhere((event) => event.eventName == 'audio_first_frame');
+    expect(firstFrame.outcome, EllaDiagnosticOutcome.succeeded);
+    expect(firstFrame.safeCounters['frames'], 1);
+    expect(firstFrame.safeCounters['bytes'], greaterThan(0));
+    expect(provider.recordingState, RecordingState.error);
+  });
+
+  test('empty and ambiguous necklace stops are never reported as finalization timeouts', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final device = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+
+    for (final hasContent in <bool>[false, true]) {
+      final sink = InMemoryEllaDiagnosticEventSink();
+      late CaptureProvider provider;
+      provider = CaptureProvider(
+        activeAccountAuthority: () => authority,
+        activeWalAuthority: () => _activeCaptureAuthority(authority),
+        captureConsentAuthorityEnsurer: () async => true,
+        deviceTranscriptionSocketPreparer: _connectedDeviceSocket,
+        deviceCaptureStarter: () async {
+          provider.updateRecordingState(RecordingState.deviceRecord);
+          return true;
+        },
+        inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async =>
+            hasContent ? <ServerConversation>[_conversation('pending', 'Durable necklace words')] : const [],
+        diagnosticEventSink: sink,
+      );
+      addTearDown(provider.dispose);
+      await provider.streamDeviceRecording(device: device);
+      if (hasContent) provider.segments = <TranscriptSegment>[_segment('local', 'Local necklace words')];
+
+      expect(await provider.stopStreamDeviceRecordingAndFinalize(), isFalse);
+      await pumpEventQueue();
+
+      final terminal = sink.events.lastWhere((event) => event.eventName == 'capture_finalized');
+      expect(
+        terminal.outcome,
+        hasContent ? EllaDiagnosticOutcome.failed : EllaDiagnosticOutcome.cancelled,
+      );
+      expect(
+        terminal.stableFailureCode,
+        hasContent ? EllaDiagnosticFailureCode.captureDrainAmbiguous : isNull,
+      );
+      expect(terminal.stableFailureCode, isNot(EllaDiagnosticFailureCode.finalizationTimeout));
+    }
+  });
+
+  test('production necklace transport terminates null connection and audio subscription diagnostics', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final device = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+
+    for (final connectionAvailable in <bool>[false, true]) {
+      final sink = InMemoryEllaDiagnosticEventSink();
+      final transport = _TestCaptureTransport(device.id);
+      addTearDown(transport.dispose);
+      final connection = _TestOmiConnection(device, transport, audioSubscriptionAvailable: false);
+      final provider = CaptureProvider(
+        activeAccountAuthority: () => authority,
+        activeWalAuthority: () => _activeCaptureAuthority(authority),
+        captureConsentAuthorityEnsurer: () async => true,
+        deviceTranscriptionSocketPreparer: _connectedDeviceSocket,
+        deviceConnectionEnsurer: (_) async => connectionAvailable ? connection : null,
+        diagnosticEventSink: sink,
+      );
+      addTearDown(provider.dispose);
+
+      await provider.streamDeviceRecording(device: device);
+      await pumpEventQueue();
+
+      final audioEvents = sink.events.where((event) => event.eventName == 'audio_subscription_open').toList();
+      expect(
+          audioEvents.map((event) => event.outcome),
+          containsAll(<EllaDiagnosticOutcome>[
+            EllaDiagnosticOutcome.started,
+            EllaDiagnosticOutcome.failed,
+          ]));
+      expect(
+        audioEvents.last.stableFailureCode,
+        connectionAvailable
+            ? EllaDiagnosticFailureCode.notificationSubscriptionFailed
+            : EllaDiagnosticFailureCode.peripheralConnectTimeout,
+      );
+      expect(provider.recordingState, RecordingState.error);
+    }
+  });
+
+  test('necklace diagnostics distinguish transport failure from capture authority timeout', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final device = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+
+    final transportPure = _FakePureSocket(status: PureSocketStatus.notConnected, connectResult: false);
+    final transportSocket = TranscriptSegmentSocketService.withSocket(
+      16000,
+      BleAudioCodec.opus,
+      'en',
+      transportPure,
+      requireCaptureProtocol: true,
+      captureProtocolTimeout: const Duration(milliseconds: 10),
+    );
+    await transportSocket.start();
+    expect(transportSocket.lastStartFailure, TranscriptSocketStartFailure.transportUnavailable);
+
+    final timeoutPure = _FakePureSocket(status: PureSocketStatus.notConnected);
+    final timeoutSocket = TranscriptSegmentSocketService.withSocket(
+      16000,
+      BleAudioCodec.opus,
+      'en',
+      timeoutPure,
+      requireCaptureProtocol: true,
+      captureProtocolTimeout: const Duration(milliseconds: 1),
+    );
+    await timeoutSocket.start();
+    expect(timeoutSocket.lastStartFailure, TranscriptSocketStartFailure.captureProtocolTimeout);
+
+    for (final entry in <(TranscriptSegmentSocketService, EllaDiagnosticFailureCode)>[
+      (transportSocket, EllaDiagnosticFailureCode.websocketUnavailable),
+      (timeoutSocket, EllaDiagnosticFailureCode.captureReadyTimeout),
+    ]) {
+      final sink = InMemoryEllaDiagnosticEventSink();
+      final provider = CaptureProvider(
+        activeAccountAuthority: () => authority,
+        activeWalAuthority: () => _activeCaptureAuthority(authority),
+        captureConsentAuthorityEnsurer: () async => true,
+        deviceTranscriptionSocketPreparer: (_, {required force}) async => entry.$1,
+        diagnosticEventSink: sink,
+      );
+      addTearDown(provider.dispose);
+
+      await provider.streamDeviceRecording(device: device);
+      await pumpEventQueue();
+
+      final terminal = sink.events.lastWhere((event) => event.eventName == 'capture_protocol_ready');
+      expect(terminal.outcome, EllaDiagnosticOutcome.failed);
+      expect(terminal.stableFailureCode, entry.$2);
+    }
   });
 
   test('unexpected necklace socket loss serializes finalization and restart', () async {

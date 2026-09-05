@@ -7,6 +7,7 @@ on:
       - feature/phase-a-testflight
       - main
       - release/1242-build-824
+      - release/testflight-844-artwork
     paths:
       - app/**
       - backend/main.py
@@ -593,7 +594,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          expected_issue_test_count=49
+          expected_issue_test_count=50
           issue_test_count="$(find test/ella test/backend test/pages/onboarding/ella -type f -name '*_test.dart' | sort | tee /tmp/ella-issue-tests.txt | wc -l | tr -d ' ')"
           if [[ "$issue_test_count" -ne "$expected_issue_test_count" ]]; then
             cat /tmp/ella-issue-tests.txt
@@ -601,7 +602,7 @@ jobs:
             exit 1
           fi
 
-          expected_app_test_count=77
+          expected_app_test_count=78
           all_app_test_count="$(find test -type f -name '*_test.dart' | sort | tee /tmp/ella-all-app-tests.txt | wc -l | tr -d ' ')"
           if [[ "$all_app_test_count" -ne "$expected_app_test_count" ]]; then
             cat /tmp/ella-all-app-tests.txt
