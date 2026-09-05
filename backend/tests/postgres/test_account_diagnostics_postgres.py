@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -23,12 +24,17 @@ from utils.ella.account_diagnostics import (
     DiagnosticOutcome,
     DiagnosticRetryClass,
     event_from_record,
+    project_account_state,
 )
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
 MIGRATIONS = tuple(
     Path(__file__).resolve().parents[2] / "migrations" / filename
-    for filename in ("017_create_account_diagnostics.sql", "018_add_diagnostic_attempt_ordinal.sql")
+    for filename in (
+        "017_create_account_diagnostics.sql",
+        "018_add_diagnostic_attempt_ordinal.sql",
+        "019_backfill_diagnostic_attempt_ordinals.sql",
+    )
 )
 
 pytestmark = pytest.mark.skipif(
@@ -70,14 +76,15 @@ async def _pool_for_schema(schema: str) -> asyncpg.Pool:
     )
 
 
-async def _create_schema() -> tuple[asyncpg.Connection, asyncpg.Pool, str]:
+async def _create_schema(*, migration_count: int | None = None) -> tuple[asyncpg.Connection, asyncpg.Pool, str]:
     schema = f"account_diagnostics_{uuid.uuid4().hex}"
     admin = await asyncpg.connect(TEST_DSN)
     await admin.execute(f'CREATE SCHEMA "{schema}"')
     pool = await _pool_for_schema(schema)
     async with pool.acquire() as conn:
         await conn.execute(BASE_SCHEMA)
-        for migration_path in MIGRATIONS:
+        migration_paths = MIGRATIONS if migration_count is None else MIGRATIONS[:migration_count]
+        for migration_path in migration_paths:
             migration = migration_path.read_text(encoding="utf-8")
             await conn.execute(migration)
             await conn.execute(migration)
@@ -109,6 +116,174 @@ def _event() -> DiagnosticEventV1:
             "client_utc_time": "2026-09-05T19:00:00Z",
         }
     )
+
+
+def test_legacy_attempt_migration_preserves_projection_support_and_append_semantics():
+    async def scenario() -> None:
+        admin, pool, schema = await _create_schema(migration_count=1)
+        try:
+            uid = "legacy-diagnostic-user"
+            user_id = await pool.fetchval("INSERT INTO users (omi_uid) VALUES ($1) RETURNING id", uid)
+            await pool.execute(
+                """
+                INSERT INTO ella_runtime_bindings (
+                    user_id, account_user_id, profile_user_id,
+                    role, status, active, revision
+                ) VALUES ($1, $1, $1, 'user', 'active', TRUE, 7)
+                """,
+                user_id,
+            )
+            await pool.execute(
+                """
+                INSERT INTO ella_managed_cloud_consent_authority (
+                    user_id, decision, consent_receipt_ref, profile_binding_id
+                ) VALUES ($1, 'granted', $2, 'aipb_test')
+                """,
+                user_id,
+                managed_cloud_consent.consent_receipt_ref(uid, "aicr_test"),
+            )
+            fingerprint = account_binding_fingerprint(
+                uid=uid,
+                profile_binding_id="aipb_test",
+                binding_revision=7,
+                consent_receipt_id="aicr_test",
+            )
+            old_attempt = _event().model_copy(
+                update={
+                    "event_id": "legacy-old-start",
+                    "diagnostic_session_id": "legacy-session",
+                    "capture_attempt_id": "legacy-attempt-old",
+                    "account_binding_fingerprint": fingerprint,
+                    "layer": DiagnosticLayer.ble_transport,
+                    "event_name": "capture_attempt_started",
+                    "outcome": DiagnosticOutcome.started,
+                    "retry_class": DiagnosticRetryClass.bounded_automatic,
+                    "client_monotonic_ms": 100,
+                    "client_utc_time": datetime(2026, 9, 5, 19, 0, tzinfo=timezone.utc),
+                }
+            )
+            new_attempt = old_attempt.model_copy(
+                update={
+                    "event_id": "legacy-new-start",
+                    "capture_attempt_id": "legacy-attempt-new",
+                    "client_monotonic_ms": 200,
+                    "client_utc_time": datetime(2026, 9, 5, 19, 1, tzinfo=timezone.utc),
+                }
+            )
+            for event in (old_attempt, new_attempt):
+                legacy_payload = event.model_dump(mode="json")
+                legacy_payload.pop("capture_attempt_ordinal")
+                await pool.execute(
+                    """
+                    INSERT INTO ella_diagnostic_events (
+                        account_user_id, profile_user_id, event_id,
+                        diagnostic_session_id, capture_attempt_id,
+                        account_binding_fingerprint, authority_generation,
+                        layer, event_name, outcome, stable_failure_code,
+                        client_sequence, client_monotonic_ms, client_utc_time,
+                        payload, expires_at
+                    ) VALUES (
+                        $1, $1, $2, $3, $4, $5, $6,
+                        $7, $8, $9, NULL, $10, $11, $12,
+                        $13::jsonb, CURRENT_TIMESTAMP + INTERVAL '30 days'
+                    )
+                    """,
+                    user_id,
+                    event.event_id,
+                    event.diagnostic_session_id,
+                    event.capture_attempt_id,
+                    event.account_binding_fingerprint,
+                    event.authority_generation,
+                    event.layer.value,
+                    event.event_name,
+                    event.outcome.value,
+                    event.client_sequence,
+                    event.client_monotonic_ms,
+                    event.client_utc_time,
+                    json.dumps(legacy_payload),
+                )
+
+            for migration_path in MIGRATIONS[1:]:
+                migration = migration_path.read_text(encoding="utf-8")
+                await pool.execute(migration)
+                await pool.execute(migration)
+
+            assert await pool.fetchval(
+                """
+                SELECT COUNT(DISTINCT capture_attempt_id) = COUNT(DISTINCT capture_attempt_ordinal)
+                FROM ella_diagnostic_events
+                WHERE account_user_id = $1 AND diagnostic_session_id = 'legacy-session'
+                """,
+                user_id,
+            )
+            assert await pool.fetchval("""
+                SELECT capture_attempt_ordinal
+                FROM ella_diagnostic_events
+                WHERE event_id = 'legacy-new-start'
+                """) == 1
+
+            async def get_pool():
+                return pool
+
+            repository = PostgresAccountDiagnosticsRepository(get_pool)
+            authority = await repository.resolve_account_authority(uid)
+            authority_material = {
+                "uid": uid,
+                "profile_binding_id": "aipb_test",
+                "consent_receipt_id": "aicr_test",
+                "expected_fingerprint": fingerprint,
+            }
+            records = await repository.list_session_events(authority, "legacy-session", **authority_material)
+            assert [event_from_record(record).event.capture_attempt_id for record in records] == ["legacy-attempt-new"]
+            projection = project_account_state(
+                "legacy-session",
+                [event_from_record(record) for record in records],
+                now=datetime.now(timezone.utc),
+            )
+            assert projection.capture_attempt_id == "legacy-attempt-new"
+
+            now = datetime.now(timezone.utc)
+            await repository.create_support_grant(
+                authority,
+                diagnostic_session_id="legacy-session",
+                code_hash="e" * 64,
+                evidence_not_before=now - timedelta(minutes=1),
+                evidence_not_after=now + timedelta(minutes=1),
+                expires_at=now + timedelta(minutes=5),
+                **authority_material,
+            )
+            support_session, support_records = await repository.consume_support_grant(
+                code_hash="e" * 64,
+                operator_id="operator@example.invalid",
+                case_id="case-legacy-migration",
+                reason="customer_requested_help",
+            )
+            assert support_session == "legacy-session"
+            assert [event_from_record(record).event.capture_attempt_id for record in support_records] == [
+                "legacy-attempt-new"
+            ]
+
+            appended = new_attempt.model_copy(
+                update={
+                    "event_id": "legacy-new-connected",
+                    "capture_attempt_ordinal": 1,
+                    "event_name": "peripheral_connected",
+                    "outcome": DiagnosticOutcome.succeeded,
+                    "client_sequence": 1,
+                    "client_monotonic_ms": 210,
+                }
+            )
+            assert await repository.append_events(authority, [appended], **authority_material) == (1, 0)
+            assert await repository.append_events(authority, [appended], **authority_material) == (0, 1)
+
+            with pytest.raises(asyncpg.RaiseError, match="immutable"):
+                await pool.execute(
+                    "UPDATE ella_diagnostic_events SET event_name = 'changed' WHERE event_id = 'legacy-new-start'"
+                )
+        finally:
+            await _drop_schema(admin, pool, schema)
+
+    asyncio.run(scenario())
 
 
 def test_event_append_is_idempotent_immutable_cascading_and_support_read_is_single_use():
