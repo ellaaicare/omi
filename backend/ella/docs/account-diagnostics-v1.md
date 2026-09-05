@@ -80,7 +80,8 @@ The event table is update-immutable. Retention deletion and account-deletion
 cascade are the only deletion paths. Events expire after 30 days. A bounded
 retention worker runs immediately when an Ella API process starts and every six
 hours while it remains live; concurrent replicas use `FOR UPDATE SKIP LOCKED`
-against the `expires_at` index. The allowlist
+against the `expires_at` index. A pass that exhausts its bounded batch allowance
+retries after 30 seconds instead of sleeping for six hours. The allowlist
 contains lifecycle identifiers, revisions, firmware/codec labels, stable failure
 codes, and bounded counters; it has no transcript, audio, memory text, contact,
 location, URL, token, or raw hardware identifier field.

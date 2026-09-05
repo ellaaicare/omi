@@ -149,8 +149,20 @@ def test_projection_reports_first_stable_failure_without_claiming_later_layers()
 
 
 def test_projection_selects_latest_attempt_by_client_chronology_not_upload_order():
-    newer_attempt = _stored(_event(sequence=11, attempt_id="attempt-new"), 1)
-    delayed_older_attempt = _stored(_event(sequence=4, attempt_id="attempt-old"), 30)
+    older_event = _event(sequence=10, attempt_id="attempt-old").model_copy(
+        update={
+            "client_monotonic_ms": 100,
+            "client_utc_time": NOW + timedelta(milliseconds=100),
+        }
+    )
+    newer_event = _event(sequence=2, attempt_id="attempt-new").model_copy(
+        update={
+            "client_monotonic_ms": 200,
+            "client_utc_time": NOW + timedelta(milliseconds=200),
+        }
+    )
+    newer_attempt = _stored(newer_event, 1)
+    delayed_older_attempt = _stored(older_event, 30)
 
     projection = project_account_state(
         "session-1",
@@ -322,5 +334,37 @@ def test_retention_worker_drains_bounded_batches():
         max_batches_per_run=5,
     )
 
-    assert asyncio.run(worker.run_once()) == 5
+    result = asyncio.run(worker.run_once())
+    assert result.deleted == 5
+    assert result.backlog_may_remain is False
     assert repository.calls == 3
+
+
+def test_retention_worker_retries_saturated_pass_promptly(monkeypatch):
+    class Repository:
+        async def delete_expired_events(self, *, batch_size=1_000):
+            assert batch_size == 2
+            return 2
+
+    worker = DiagnosticRetentionWorker(
+        Repository(),
+        interval_seconds=60,
+        saturated_retry_seconds=5,
+        batch_size=2,
+        max_batches_per_run=2,
+    )
+
+    result = asyncio.run(worker.run_once())
+    assert result.deleted == 4
+    assert result.backlog_may_remain is True
+
+    observed_delays = []
+
+    async def stop_after_sleep(delay):
+        observed_delays.append(delay)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", stop_after_sleep)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(worker.run_forever())
+    assert observed_delays == [5]

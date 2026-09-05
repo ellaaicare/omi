@@ -204,6 +204,7 @@ def test_event_append_is_idempotent_immutable_cascading_and_support_read_is_sing
                 evidence_not_before=now - timedelta(hours=1),
                 evidence_not_after=now + timedelta(seconds=1),
                 expires_at=now + timedelta(minutes=5),
+                **append_authority,
             )
             session_id, evidence = await repository.consume_support_grant(
                 code_hash="b" * 64,
@@ -232,7 +233,7 @@ def test_event_append_is_idempotent_immutable_cascading_and_support_read_is_sing
     asyncio.run(scenario())
 
 
-def test_append_revalidates_consent_after_waiting_for_canonical_authority_lock():
+def test_append_and_support_grant_revalidate_consent_after_canonical_lock_wait():
     async def scenario() -> None:
         admin, pool, schema = await _create_schema()
         try:
@@ -296,6 +297,48 @@ def test_append_revalidates_consent_after_waiting_for_canonical_authority_lock()
             with pytest.raises(DiagnosticAccountAuthorityChanged):
                 await append_task
             assert await pool.fetchval("SELECT COUNT(*) FROM ella_diagnostic_events") == 0
+
+            await pool.execute(
+                """
+                UPDATE ella_managed_cloud_consent_authority
+                SET decision = 'granted', consent_receipt_ref = $2
+                WHERE user_id = $1
+                """,
+                user_id,
+                managed_cloud_consent.consent_receipt_ref(uid, "aicr_test"),
+            )
+            now = datetime.now(timezone.utc)
+            async with pool.acquire() as writer, writer.transaction():
+                owner = authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
+                await authority_advisory_lock.acquire_authority_lock(writer, owner=owner)
+                grant_task = asyncio.create_task(
+                    repository.create_support_grant(
+                        authority,
+                        diagnostic_session_id="session-1",
+                        code_hash="c" * 64,
+                        evidence_not_before=now - timedelta(hours=1),
+                        evidence_not_after=now,
+                        expires_at=now + timedelta(minutes=5),
+                        uid=uid,
+                        profile_binding_id="aipb_test",
+                        consent_receipt_id="aicr_test",
+                        expected_fingerprint=fingerprint,
+                    )
+                )
+                await asyncio.sleep(0.05)
+                assert not grant_task.done()
+                await writer.execute(
+                    """
+                    UPDATE ella_managed_cloud_consent_authority
+                    SET decision = 'revoked', consent_receipt_ref = NULL
+                    WHERE user_id = $1
+                    """,
+                    user_id,
+                )
+
+            with pytest.raises(DiagnosticAccountAuthorityChanged):
+                await grant_task
+            assert await pool.fetchval("SELECT COUNT(*) FROM ella_diagnostic_support_grants") == 0
         finally:
             await _drop_schema(admin, pool, schema)
 

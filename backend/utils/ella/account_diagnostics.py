@@ -343,9 +343,9 @@ def project_account_state(
     latest_attempt = max(
         session_evidence,
         key=lambda item: (
-            item.event.client_sequence,
             item.event.client_monotonic_ms,
             item.event.client_utc_time,
+            item.event.client_sequence,
             item.event.event_id,
         ),
     ).event.capture_attempt_id

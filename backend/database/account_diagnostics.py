@@ -102,6 +102,82 @@ class PostgresAccountDiagnosticsRepository:
             binding_revision=int(row["binding_revision"]),
         )
 
+    async def _lock_and_verify_current_authority(
+        self,
+        conn: asyncpg.Connection,
+        authority: DiagnosticAccountAuthority,
+        *,
+        uid: str,
+        profile_binding_id: str,
+        consent_receipt_id: str,
+        expected_fingerprint: str,
+        event_fingerprints: tuple[str, ...] = (),
+    ) -> None:
+        """Acquire the canonical lock first, then fail closed on any drift."""
+        account_user_id = uuid.UUID(authority.account_user_id)
+        owner = authority_advisory_lock.AuthorityOwner.from_values(
+            account_user_id,
+            account_user_id,
+        )
+        owner_lock = await authority_advisory_lock.acquire_authority_lock(
+            conn,
+            owner=owner,
+        )
+        current_user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+            conn,
+            uid=uid,
+            owner=owner,
+            proof=owner_lock,
+        )
+        binding = await conn.fetchrow(
+            """
+            SELECT candidate.profile_user_id, candidate.revision
+            FROM ella_runtime_bindings candidate
+            WHERE candidate.user_id = $1
+              AND candidate.role = 'user'
+              AND candidate.active = TRUE
+              AND candidate.status = 'active'
+              AND (
+                  candidate.account_user_id IS NULL
+                  OR candidate.account_user_id = $1
+              )
+            ORDER BY candidate.revision DESC, candidate.updated_at DESC
+            LIMIT 1
+            """,
+            current_user_id,
+        )
+        current_profile_user_id = current_user_id if binding is None else binding["profile_user_id"] or current_user_id
+        current_binding_revision = 1 if binding is None else int(binding["revision"])
+        consent = await conn.fetchrow(
+            """
+            SELECT decision, consent_receipt_ref, profile_binding_id
+            FROM ella_managed_cloud_consent_authority
+            WHERE user_id = $1
+            FOR UPDATE
+            """,
+            current_user_id,
+        )
+        expected_receipt_ref = managed_cloud_consent.consent_receipt_ref(uid, consent_receipt_id)
+        current_fingerprint = account_binding_fingerprint(
+            uid=uid,
+            profile_binding_id=profile_binding_id,
+            binding_revision=current_binding_revision,
+            consent_receipt_id=consent_receipt_id,
+        )
+        authority_is_current = bool(
+            str(current_user_id) == authority.account_user_id
+            and str(current_profile_user_id) == authority.profile_user_id
+            and current_binding_revision == authority.binding_revision
+            and consent is not None
+            and consent["decision"] == "granted"
+            and hmac.compare_digest(str(consent["profile_binding_id"] or ""), profile_binding_id)
+            and hmac.compare_digest(str(consent["consent_receipt_ref"] or ""), expected_receipt_ref)
+            and hmac.compare_digest(expected_fingerprint, current_fingerprint)
+            and all(hmac.compare_digest(fingerprint, current_fingerprint) for fingerprint in event_fingerprints)
+        )
+        if not authority_is_current:
+            raise DiagnosticAccountAuthorityChanged
+
     async def append_events(
         self,
         authority: DiagnosticAccountAuthority,
@@ -113,72 +189,16 @@ class PostgresAccountDiagnosticsRepository:
         expected_fingerprint: str,
     ) -> tuple[int, int]:
         pool = await self._pool_factory()
-        account_user_id = uuid.UUID(authority.account_user_id)
-        owner = authority_advisory_lock.AuthorityOwner.from_values(
-            account_user_id,
-            account_user_id,
-        )
         async with pool.acquire() as conn, conn.transaction():
-            owner_lock = await authority_advisory_lock.acquire_authority_lock(
+            await self._lock_and_verify_current_authority(
                 conn,
-                owner=owner,
-            )
-            current_user_id = await authority_advisory_lock.verify_self_owner_after_lock(
-                conn,
-                uid=uid,
-                owner=owner,
-                proof=owner_lock,
-            )
-            binding = await conn.fetchrow(
-                """
-                SELECT candidate.profile_user_id, candidate.revision
-                FROM ella_runtime_bindings candidate
-                WHERE candidate.user_id = $1
-                  AND candidate.role = 'user'
-                  AND candidate.active = TRUE
-                  AND candidate.status = 'active'
-                  AND (
-                      candidate.account_user_id IS NULL
-                      OR candidate.account_user_id = $1
-                  )
-                ORDER BY candidate.revision DESC, candidate.updated_at DESC
-                LIMIT 1
-                """,
-                current_user_id,
-            )
-            current_profile_user_id = (
-                current_user_id if binding is None else binding["profile_user_id"] or current_user_id
-            )
-            current_binding_revision = 1 if binding is None else int(binding["revision"])
-            consent = await conn.fetchrow(
-                """
-                SELECT decision, consent_receipt_ref, profile_binding_id
-                FROM ella_managed_cloud_consent_authority
-                WHERE user_id = $1
-                FOR UPDATE
-                """,
-                current_user_id,
-            )
-            expected_receipt_ref = managed_cloud_consent.consent_receipt_ref(uid, consent_receipt_id)
-            current_fingerprint = account_binding_fingerprint(
+                authority,
                 uid=uid,
                 profile_binding_id=profile_binding_id,
-                binding_revision=current_binding_revision,
                 consent_receipt_id=consent_receipt_id,
+                expected_fingerprint=expected_fingerprint,
+                event_fingerprints=tuple(event.account_binding_fingerprint for event in events),
             )
-            authority_is_current = bool(
-                str(current_user_id) == authority.account_user_id
-                and str(current_profile_user_id) == authority.profile_user_id
-                and current_binding_revision == authority.binding_revision
-                and consent is not None
-                and consent["decision"] == "granted"
-                and hmac.compare_digest(str(consent["profile_binding_id"] or ""), profile_binding_id)
-                and hmac.compare_digest(str(consent["consent_receipt_ref"] or ""), expected_receipt_ref)
-                and hmac.compare_digest(expected_fingerprint, current_fingerprint)
-                and all(hmac.compare_digest(event.account_binding_fingerprint, current_fingerprint) for event in events)
-            )
-            if not authority_is_current:
-                raise DiagnosticAccountAuthorityChanged
             event_ids = [event.event_id for event in events]
             existing_rows = await conn.fetch(
                 """
@@ -301,12 +321,20 @@ class PostgresAccountDiagnosticsRepository:
         evidence_not_before: datetime,
         evidence_not_after: datetime,
         expires_at: datetime,
+        uid: str,
+        profile_binding_id: str,
+        consent_receipt_id: str,
+        expected_fingerprint: str,
     ) -> str:
         pool = await self._pool_factory()
         async with pool.acquire() as conn, conn.transaction():
-            await conn.execute(
-                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-                f"ella-account-diagnostics:{authority.account_user_id}",
+            await self._lock_and_verify_current_authority(
+                conn,
+                authority,
+                uid=uid,
+                profile_binding_id=profile_binding_id,
+                consent_receipt_id=consent_receipt_id,
+                expected_fingerprint=expected_fingerprint,
             )
             active_count = int(
                 await conn.fetchval(

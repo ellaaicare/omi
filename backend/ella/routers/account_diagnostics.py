@@ -213,7 +213,7 @@ def create_account_diagnostics_router(
         uid: str = Depends(get_exact_firebase_uid),
     ) -> DiagnosticSupportGrantReceiptV1:
         _evidence_headers(response)
-        authority, _, _, _ = await current_authority(uid)
+        authority, expected_fingerprint, profile_binding_id, receipt_id = await current_authority(uid)
         try:
             records = await repository.list_session_events(authority, payload.diagnostic_session_id)
         except Exception as exc:
@@ -234,7 +234,13 @@ def create_account_diagnostics_router(
                 evidence_not_before=issued_at - timedelta(hours=payload.evidence_window_hours),
                 evidence_not_after=issued_at,
                 expires_at=expires_at,
+                uid=uid,
+                profile_binding_id=profile_binding_id,
+                consent_receipt_id=receipt_id,
+                expected_fingerprint=expected_fingerprint,
             )
+        except DiagnosticAccountAuthorityChanged as exc:
+            raise HTTPException(status_code=409, detail={"code": "diagnostic_account_binding_stale"}) from exc
         except DiagnosticSupportGrantLimitExceeded as exc:
             raise HTTPException(status_code=429, detail={"code": "diagnostic_support_grant_limit"}) from exc
         except Exception as exc:
