@@ -27,7 +27,7 @@ _OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SAFE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _FINGERPRINT_RE = re.compile(r"^[a-f0-9]{64}$")
 _SAFE_VALUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,127}$")
-_REVISION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,127}$")
+_REVISION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+-]{0,127}$")
 _SUPPORT_CODE_RE = re.compile(r"^ELLA-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$")
 _SAFE_COUNTER_NAMES = frozenset({"frames", "bytes", "retry_number", "rssi_bucket", "queue_age_seconds"})
 
@@ -170,6 +170,7 @@ class DiagnosticEventV1(BaseModel):
     event_id: str = Field(min_length=1, max_length=128)
     diagnostic_session_id: str = Field(min_length=1, max_length=128)
     capture_attempt_id: str = Field(min_length=1, max_length=128)
+    capture_attempt_ordinal: int = Field(ge=0, le=9_223_372_036_854_775_807)
     account_binding_fingerprint: str = Field(min_length=64, max_length=64)
     authority_generation: int = Field(ge=0, le=9_223_372_036_854_775_807)
     source_revision: str = Field(min_length=1, max_length=128)
@@ -272,12 +273,6 @@ class DiagnosticEventBatchV1(BaseModel):
         fingerprints = {event.account_binding_fingerprint for event in self.events}
         if len(fingerprints) != 1:
             raise ValueError("one batch must belong to exactly one account authority")
-        event_ids = {event.event_id for event in self.events}
-        coordinates = {
-            (event.diagnostic_session_id, event.capture_attempt_id, event.client_sequence) for event in self.events
-        }
-        if len(event_ids) != len(self.events) or len(coordinates) != len(self.events):
-            raise ValueError("one batch must not contain duplicate event identities or sequences")
         return self
 
 
@@ -340,12 +335,13 @@ def project_account_state(
             ],
         )
 
-    attempt_starts = [item for item in session_evidence if item.event.event_name == "capture_attempt_started"]
     latest_attempt = max(
-        attempt_starts or session_evidence,
+        session_evidence,
         key=lambda item: (
-            item.event.client_monotonic_ms,
+            item.event.capture_attempt_ordinal,
+            item.event.event_name == "capture_attempt_started",
             item.event.client_utc_time,
+            item.event.client_monotonic_ms,
             item.event.client_sequence,
             item.event.event_id,
         ),

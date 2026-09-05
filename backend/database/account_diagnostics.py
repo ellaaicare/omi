@@ -230,6 +230,36 @@ class PostgresAccountDiagnosticsRepository:
             raise DiagnosticEventConflict
         return True
 
+    @staticmethod
+    async def _validate_attempt_identity(
+        conn: asyncpg.Connection,
+        authority: DiagnosticAccountAuthority,
+        event: Any,
+    ) -> None:
+        """Keep each session's attempt ID and ordinal in a one-to-one mapping."""
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT capture_attempt_id, capture_attempt_ordinal
+            FROM ella_diagnostic_events
+            WHERE account_user_id = $1::uuid
+              AND diagnostic_session_id = $2
+              AND (
+                  capture_attempt_id = $3
+                  OR capture_attempt_ordinal = $4
+              )
+            """,
+            authority.account_user_id,
+            event.diagnostic_session_id,
+            event.capture_attempt_id,
+            event.capture_attempt_ordinal,
+        )
+        if any(
+            str(row["capture_attempt_id"]) != event.capture_attempt_id
+            or int(row["capture_attempt_ordinal"]) != event.capture_attempt_ordinal
+            for row in rows
+        ):
+            raise DiagnosticEventConflict
+
     async def append_events(
         self,
         authority: DiagnosticAccountAuthority,
@@ -254,8 +284,20 @@ class PostgresAccountDiagnosticsRepository:
             pending_events: list[Any] = []
             pending_by_event_id: dict[str, Any] = {}
             pending_by_coordinate: dict[tuple[str, str, int], Any] = {}
+            pending_ordinals_by_attempt: dict[tuple[str, str], int] = {}
+            pending_attempts_by_ordinal: dict[tuple[str, int], str] = {}
             duplicates = 0
             for event in events:
+                await self._validate_attempt_identity(conn, authority, event)
+                attempt_key = (event.diagnostic_session_id, event.capture_attempt_id)
+                ordinal_key = (event.diagnostic_session_id, event.capture_attempt_ordinal)
+                if (
+                    pending_ordinals_by_attempt.get(attempt_key, event.capture_attempt_ordinal)
+                    != event.capture_attempt_ordinal
+                    or pending_attempts_by_ordinal.get(ordinal_key, event.capture_attempt_id)
+                    != event.capture_attempt_id
+                ):
+                    raise DiagnosticEventConflict
                 if await self._event_is_exact_retry(conn, authority, event):
                     duplicates += 1
                     continue
@@ -280,6 +322,8 @@ class PostgresAccountDiagnosticsRepository:
                 pending_events.append(event)
                 pending_by_event_id[event.event_id] = event
                 pending_by_coordinate[coordinate] = event
+                pending_ordinals_by_attempt[attempt_key] = event.capture_attempt_ordinal
+                pending_attempts_by_ordinal[ordinal_key] = event.capture_attempt_id
             recent_count = int(
                 await conn.fetchval(
                     """
@@ -300,17 +344,17 @@ class PostgresAccountDiagnosticsRepository:
                     """
                     INSERT INTO ella_diagnostic_events (
                         account_user_id, profile_user_id, event_id,
-                        diagnostic_session_id, capture_attempt_id,
+                        diagnostic_session_id, capture_attempt_id, capture_attempt_ordinal,
                         account_binding_fingerprint, authority_generation,
                         layer, event_name, outcome, stable_failure_code,
                         client_sequence, client_monotonic_ms, client_utc_time,
                         payload, expires_at
                     )
                     VALUES (
-                        $1::uuid, $2::uuid, $3, $4, $5, $6, $7,
-                        $8, $9, $10, $11, $12, $13, $14,
-                        $15::jsonb,
-                        CURRENT_TIMESTAMP + make_interval(days => $16)
+                        $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8,
+                        $9, $10, $11, $12, $13, $14, $15,
+                        $16::jsonb,
+                        CURRENT_TIMESTAMP + make_interval(days => $17)
                     )
                     ON CONFLICT DO NOTHING
                     RETURNING event_id
@@ -320,6 +364,7 @@ class PostgresAccountDiagnosticsRepository:
                     event.event_id,
                     event.diagnostic_session_id,
                     event.capture_attempt_id,
+                    event.capture_attempt_ordinal,
                     event.account_binding_fingerprint,
                     event.authority_generation,
                     event.layer.value,
@@ -391,9 +436,10 @@ class PostgresAccountDiagnosticsRepository:
                   AND ($4::timestamptz IS NULL OR candidate.server_received_at >= $4::timestamptz)
                   AND ($5::timestamptz IS NULL OR candidate.server_received_at <= $5::timestamptz)
                 ORDER BY
+                    candidate.capture_attempt_ordinal DESC,
                     (candidate.event_name = 'capture_attempt_started') DESC,
-                    candidate.client_monotonic_ms DESC,
                     candidate.client_utc_time DESC,
+                    candidate.client_monotonic_ms DESC,
                     candidate.client_sequence DESC,
                     candidate.event_id DESC
                 LIMIT 1
