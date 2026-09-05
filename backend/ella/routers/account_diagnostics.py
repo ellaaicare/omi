@@ -15,6 +15,7 @@ from database.account_diagnostics import (
     DiagnosticAccountAuthority,
     DiagnosticAccountAuthorityChanged,
     DiagnosticAccountNotFound,
+    DiagnosticEventConflict,
     DiagnosticRateLimitExceeded,
     DiagnosticSupportGrantInvalid,
     DiagnosticSupportGrantLimitExceeded,
@@ -173,6 +174,8 @@ def create_account_diagnostics_router(
             )
         except DiagnosticAccountAuthorityChanged as exc:
             raise HTTPException(status_code=409, detail={"code": "diagnostic_account_binding_stale"}) from exc
+        except DiagnosticEventConflict as exc:
+            raise HTTPException(status_code=409, detail={"code": "diagnostic_event_conflict"}) from exc
         except DiagnosticRateLimitExceeded as exc:
             raise HTTPException(status_code=429, detail={"code": "diagnostic_rate_limit_exceeded"}) from exc
         except Exception as exc:
@@ -191,9 +194,18 @@ def create_account_diagnostics_router(
         _evidence_headers(response)
         if re.fullmatch(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", diagnostic_session_id) is None:
             raise HTTPException(status_code=422, detail={"code": "diagnostic_session_id_invalid"})
-        authority, _, _, _ = await current_authority(uid)
+        authority, expected_fingerprint, profile_binding_id, receipt_id = await current_authority(uid)
         try:
-            records = await repository.list_session_events(authority, diagnostic_session_id)
+            records = await repository.list_session_events(
+                authority,
+                diagnostic_session_id,
+                uid=uid,
+                profile_binding_id=profile_binding_id,
+                consent_receipt_id=receipt_id,
+                expected_fingerprint=expected_fingerprint,
+            )
+        except DiagnosticAccountAuthorityChanged as exc:
+            raise HTTPException(status_code=409, detail={"code": "diagnostic_account_binding_stale"}) from exc
         except Exception as exc:
             raise HTTPException(status_code=503, detail={"code": "diagnostic_store_unavailable"}) from exc
         return project_account_state(
@@ -215,7 +227,16 @@ def create_account_diagnostics_router(
         _evidence_headers(response)
         authority, expected_fingerprint, profile_binding_id, receipt_id = await current_authority(uid)
         try:
-            records = await repository.list_session_events(authority, payload.diagnostic_session_id)
+            records = await repository.list_session_events(
+                authority,
+                payload.diagnostic_session_id,
+                uid=uid,
+                profile_binding_id=profile_binding_id,
+                consent_receipt_id=receipt_id,
+                expected_fingerprint=expected_fingerprint,
+            )
+        except DiagnosticAccountAuthorityChanged as exc:
+            raise HTTPException(status_code=409, detail={"code": "diagnostic_account_binding_stale"}) from exc
         except Exception as exc:
             raise HTTPException(status_code=503, detail={"code": "diagnostic_store_unavailable"}) from exc
         if not records:

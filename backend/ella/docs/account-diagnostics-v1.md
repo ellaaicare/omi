@@ -18,6 +18,9 @@ BLE, capture, conversation, memory, or presentation state.
   re-reads the account owner, active binding revision, and synchronized consent
   receipt. Revocation or binding drift while a request is in flight therefore
   fails before the immutable insert.
+- Authenticated projection and support-grant reads acquire that same authority
+  lock and revalidate the binding and consent inside the read transaction, so a
+  prior profile cannot be projected after an account switch or revocation.
 - `diagnostic_session_id`, `capture_attempt_id`, `authority_generation`, and all
   diagnostic receipts are correlation evidence only. They never grant capture,
   finalization, repair, or data-read authority.
@@ -58,6 +61,9 @@ All responses use `Cache-Control: no-store` and
   each and 600 events per account per hour. Unknown fields, unregistered event
   names, raw URLs, email-like values, non-allowlisted counters, and
   failure-taxonomy drift are rejected.
+  Retries count as duplicates only when both immutable identities and the full
+  payload match. Reuse of an event ID or attempt sequence for different evidence
+  returns `diagnostic_event_conflict` and rolls back the whole batch.
 - `GET /v1/ella/diagnostics/projection/{diagnostic_session_id}` builds a
   disposable projection for the authenticated account. Missing evidence remains
   `unknown`; it is never presented as a negative fact.

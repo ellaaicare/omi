@@ -10,6 +10,7 @@ import pytest
 from database import authority_advisory_lock, managed_cloud_consent
 from database.account_diagnostics import (
     DiagnosticAccountAuthorityChanged,
+    DiagnosticEventConflict,
     DiagnosticSupportGrantInvalid,
     PostgresAccountDiagnosticsRepository,
     account_binding_fingerprint,
@@ -149,7 +150,70 @@ def test_event_append_is_idempotent_immutable_cascading_and_support_read_is_sing
             }
             assert await repository.append_events(authority, [event], **append_authority) == (1, 0)
             assert await repository.append_events(authority, [event], **append_authority) == (0, 1)
-            assert len(await repository.list_session_events(authority, "session-1")) == 1
+            assert len(await repository.list_session_events(authority, "session-1", **append_authority)) == 1
+
+            same_id_different_payload = event.model_copy(update={"source_revision": "build-850"})
+            with pytest.raises(DiagnosticEventConflict):
+                await repository.append_events(authority, [same_id_different_payload], **append_authority)
+            same_coordinate_different_id = event.model_copy(update={"event_id": "event-coordinate-collision"})
+            with pytest.raises(DiagnosticEventConflict):
+                await repository.append_events(authority, [same_coordinate_different_id], **append_authority)
+            assert (
+                await pool.fetchval(
+                    "SELECT COUNT(*) FROM ella_diagnostic_events WHERE diagnostic_session_id = 'session-1'"
+                )
+                == 1
+            )
+
+            concurrent_events = [
+                event.model_copy(
+                    update={
+                        "event_id": f"event-race-{suffix}",
+                        "diagnostic_session_id": "session-race",
+                        "capture_attempt_id": "attempt-race",
+                        "client_sequence": 0,
+                    }
+                )
+                for suffix in ("a", "b")
+            ]
+            concurrent_results = await asyncio.gather(
+                *(
+                    repository.append_events(authority, [candidate], **append_authority)
+                    for candidate in concurrent_events
+                ),
+                return_exceptions=True,
+            )
+            assert concurrent_results.count((1, 0)) == 1
+            assert sum(isinstance(result, DiagnosticEventConflict) for result in concurrent_results) == 1
+            assert (
+                await pool.fetchval(
+                    "SELECT COUNT(*) FROM ella_diagnostic_events WHERE diagnostic_session_id = 'session-race'"
+                )
+                == 1
+            )
+
+            replacement_profile_id = await pool.fetchval(
+                "INSERT INTO users (omi_uid) VALUES ('replacement-profile') RETURNING id"
+            )
+            await pool.execute(
+                """
+                UPDATE ella_runtime_bindings
+                SET profile_user_id = $2, revision = 8, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = $1 AND role = 'user'
+                """,
+                user_id,
+                replacement_profile_id,
+            )
+            with pytest.raises(DiagnosticAccountAuthorityChanged):
+                await repository.list_session_events(authority, "session-1", **append_authority)
+            await pool.execute(
+                """
+                UPDATE ella_runtime_bindings
+                SET profile_user_id = $1, revision = 7, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = $1 AND role = 'user'
+                """,
+                user_id,
+            )
 
             expired_event = event.model_copy(
                 update={

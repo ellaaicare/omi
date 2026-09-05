@@ -38,6 +38,10 @@ class DiagnosticRateLimitExceeded(RuntimeError):
     pass
 
 
+class DiagnosticEventConflict(RuntimeError):
+    pass
+
+
 class DiagnosticSupportGrantLimitExceeded(RuntimeError):
     pass
 
@@ -178,6 +182,49 @@ class PostgresAccountDiagnosticsRepository:
         if not authority_is_current:
             raise DiagnosticAccountAuthorityChanged
 
+    @staticmethod
+    async def _event_is_exact_retry(
+        conn: asyncpg.Connection,
+        authority: DiagnosticAccountAuthority,
+        event: Any,
+    ) -> bool:
+        """Return true only when both immutable identities and payload match."""
+        rows = await conn.fetch(
+            """
+            SELECT event_id, diagnostic_session_id, capture_attempt_id,
+                   client_sequence, payload = $6::jsonb AS payload_matches
+            FROM ella_diagnostic_events
+            WHERE account_user_id = $1::uuid
+              AND (
+                  event_id = $2
+                  OR (
+                      diagnostic_session_id = $3
+                      AND capture_attempt_id = $4
+                      AND client_sequence = $5
+                  )
+              )
+            """,
+            authority.account_user_id,
+            event.event_id,
+            event.diagnostic_session_id,
+            event.capture_attempt_id,
+            event.client_sequence,
+            event.model_dump_json(exclude_none=True),
+        )
+        if not rows:
+            return False
+        exact_retry = bool(
+            len(rows) == 1
+            and str(rows[0]["event_id"]) == event.event_id
+            and str(rows[0]["diagnostic_session_id"]) == event.diagnostic_session_id
+            and str(rows[0]["capture_attempt_id"]) == event.capture_attempt_id
+            and int(rows[0]["client_sequence"]) == event.client_sequence
+            and rows[0]["payload_matches"] is True
+        )
+        if not exact_retry:
+            raise DiagnosticEventConflict
+        return True
+
     async def append_events(
         self,
         authority: DiagnosticAccountAuthority,
@@ -199,19 +246,35 @@ class PostgresAccountDiagnosticsRepository:
                 expected_fingerprint=expected_fingerprint,
                 event_fingerprints=tuple(event.account_binding_fingerprint for event in events),
             )
-            event_ids = [event.event_id for event in events]
-            existing_rows = await conn.fetch(
-                """
-                SELECT event_id
-                FROM ella_diagnostic_events
-                WHERE account_user_id = $1::uuid
-                  AND event_id = ANY($2::text[])
-                """,
-                authority.account_user_id,
-                event_ids,
-            )
-            existing_event_ids = {str(row["event_id"]) for row in existing_rows}
-            new_event_count = sum(1 for event_id in event_ids if event_id not in existing_event_ids)
+            pending_events: list[Any] = []
+            pending_by_event_id: dict[str, Any] = {}
+            pending_by_coordinate: dict[tuple[str, str, int], Any] = {}
+            duplicates = 0
+            for event in events:
+                if await self._event_is_exact_retry(conn, authority, event):
+                    duplicates += 1
+                    continue
+                coordinate = (
+                    event.diagnostic_session_id,
+                    event.capture_attempt_id,
+                    event.client_sequence,
+                )
+                pending_collision = pending_by_event_id.get(event.event_id) or pending_by_coordinate.get(coordinate)
+                if pending_collision is not None:
+                    if (
+                        pending_collision.event_id != event.event_id
+                        or pending_collision.diagnostic_session_id != event.diagnostic_session_id
+                        or pending_collision.capture_attempt_id != event.capture_attempt_id
+                        or pending_collision.client_sequence != event.client_sequence
+                        or pending_collision.model_dump(mode="json", exclude_none=True)
+                        != event.model_dump(mode="json", exclude_none=True)
+                    ):
+                        raise DiagnosticEventConflict
+                    duplicates += 1
+                    continue
+                pending_events.append(event)
+                pending_by_event_id[event.event_id] = event
+                pending_by_coordinate[coordinate] = event
             recent_count = int(
                 await conn.fetchval(
                     """
@@ -224,10 +287,10 @@ class PostgresAccountDiagnosticsRepository:
                 )
                 or 0
             )
-            if recent_count + new_event_count > MAX_EVENTS_PER_ACCOUNT_HOUR:
+            if recent_count + len(pending_events) > MAX_EVENTS_PER_ACCOUNT_HOUR:
                 raise DiagnosticRateLimitExceeded
             accepted = 0
-            for event in events:
+            for event in pending_events:
                 inserted = await conn.fetchval(
                     """
                     INSERT INTO ella_diagnostic_events (
@@ -264,29 +327,48 @@ class PostgresAccountDiagnosticsRepository:
                     event.model_dump_json(exclude_none=True),
                     DIAGNOSTIC_RETENTION_DAYS,
                 )
-                accepted += int(inserted is not None)
-        return accepted, len(events) - accepted
+                if inserted is None:
+                    if await self._event_is_exact_retry(conn, authority, event):
+                        duplicates += 1
+                        continue
+                    raise DiagnosticEventConflict
+                accepted += 1
+        return accepted, duplicates
 
     async def list_session_events(
         self,
         authority: DiagnosticAccountAuthority,
         diagnostic_session_id: str,
+        *,
+        uid: str,
+        profile_binding_id: str,
+        consent_receipt_id: str,
+        expected_fingerprint: str,
     ) -> list[Any]:
         pool = await self._pool_factory()
-        rows = await pool.fetch(
-            """
-            SELECT payload, server_received_at
-            FROM ella_diagnostic_events
-            WHERE account_user_id = $1::uuid
-              AND profile_user_id = $2::uuid
-              AND diagnostic_session_id = $3
-              AND expires_at > CURRENT_TIMESTAMP
-            ORDER BY server_received_at, client_sequence
-            """,
-            authority.account_user_id,
-            authority.profile_user_id,
-            diagnostic_session_id,
-        )
+        async with pool.acquire() as conn, conn.transaction():
+            await self._lock_and_verify_current_authority(
+                conn,
+                authority,
+                uid=uid,
+                profile_binding_id=profile_binding_id,
+                consent_receipt_id=consent_receipt_id,
+                expected_fingerprint=expected_fingerprint,
+            )
+            rows = await conn.fetch(
+                """
+                SELECT payload, server_received_at
+                FROM ella_diagnostic_events
+                WHERE account_user_id = $1::uuid
+                  AND profile_user_id = $2::uuid
+                  AND diagnostic_session_id = $3
+                  AND expires_at > CURRENT_TIMESTAMP
+                ORDER BY server_received_at, client_sequence
+                """,
+                authority.account_user_id,
+                authority.profile_user_id,
+                diagnostic_session_id,
+            )
         return list(rows)
 
     async def delete_expired_events(self, *, batch_size: int = 1_000) -> int:

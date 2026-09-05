@@ -10,7 +10,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from database.account_diagnostics import DiagnosticAccountAuthority, DiagnosticSupportGrantInvalid
+from database.account_diagnostics import (
+    DiagnosticAccountAuthority,
+    DiagnosticAccountAuthorityChanged,
+    DiagnosticEventConflict,
+    DiagnosticSupportGrantInvalid,
+)
 from ella.routers.account_diagnostics import create_account_diagnostics_router, require_diagnostic_operator
 from utils.ella.account_diagnostics import (
     DIAGNOSTIC_EVENT_REGISTRY,
@@ -216,15 +221,21 @@ class FakeRepository:
         self.events: list[StoredDiagnosticEvent] = []
         self.support_hash = ""
         self.support_used = False
+        self.append_error: Exception | None = None
+        self.list_error: Exception | None = None
 
     async def resolve_account_authority(self, _uid):
         return self.authority
 
     async def append_events(self, _authority, events, **_authority_material):
+        if self.append_error is not None:
+            raise self.append_error
         self.events.extend(_stored(event, index) for index, event in enumerate(events))
         return len(events), 0
 
-    async def list_session_events(self, _authority, diagnostic_session_id):
+    async def list_session_events(self, _authority, diagnostic_session_id, **_authority_material):
+        if self.list_error is not None:
+            raise self.list_error
         return [item for item in self.events if item.event.diagnostic_session_id == diagnostic_session_id]
 
     async def create_support_grant(self, _authority, **kwargs):
@@ -267,6 +278,26 @@ def test_ingest_rejects_cross_account_fingerprint_before_write(monkeypatch):
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "diagnostic_account_binding_stale"
     assert repository.events == []
+
+
+def test_ingest_maps_semantic_identity_collision_to_typed_conflict(monkeypatch):
+    client, repository = _client(monkeypatch)
+    repository.append_error = DiagnosticEventConflict()
+
+    response = client.post("/v1/ella/diagnostics/events", json={"events": [_event().model_dump(mode="json")]})
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "diagnostic_event_conflict"
+
+
+def test_projection_fails_closed_when_authority_changes_during_read(monkeypatch):
+    client, repository = _client(monkeypatch)
+    repository.list_error = DiagnosticAccountAuthorityChanged()
+
+    response = client.get("/v1/ella/diagnostics/projection/session-1")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "diagnostic_account_binding_stale"
 
 
 def test_account_ingest_projection_and_single_use_audited_support_exchange(monkeypatch):
