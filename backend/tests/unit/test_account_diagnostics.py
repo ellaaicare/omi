@@ -47,6 +47,7 @@ def _event(
     retry_class: str = "never",
     fingerprint: str = FINGERPRINT,
     attempt_id: str = "attempt-1",
+    attempt_ordinal: int = 0,
 ) -> DiagnosticEventV1:
     return DiagnosticEventV1.model_validate(
         {
@@ -54,6 +55,7 @@ def _event(
             "event_id": f"event-{sequence}",
             "diagnostic_session_id": "session-1",
             "capture_attempt_id": attempt_id,
+            "capture_attempt_ordinal": attempt_ordinal,
             "account_binding_fingerprint": fingerprint,
             "authority_generation": 4,
             "source_revision": "build-849",
@@ -98,6 +100,13 @@ def test_event_contract_rejects_raw_identifying_values(field, value):
     payload = _event().model_dump(mode="json")
     payload[field] = value
     with pytest.raises(ValidationError, match="raw identifying"):
+        DiagnosticEventV1.model_validate(payload)
+
+
+def test_event_contract_rejects_email_like_source_revision():
+    payload = _event().model_dump(mode="json")
+    payload["source_revision"] = "patient@example.invalid"
+    with pytest.raises(ValidationError, match="safe bounded revision"):
         DiagnosticEventV1.model_validate(payload)
 
 
@@ -154,16 +163,16 @@ def test_projection_reports_first_stable_failure_without_claiming_later_layers()
     assert projection.layers[2].state == "unknown"
 
 
-def test_projection_selects_latest_attempt_by_client_chronology_not_upload_order():
-    older_event = _event(sequence=10, attempt_id="attempt-old").model_copy(
+def test_projection_selects_latest_attempt_by_restart_safe_ordinal_not_monotonic_or_upload_order():
+    older_event = _event(sequence=10, attempt_id="attempt-old", attempt_ordinal=0).model_copy(
         update={
-            "client_monotonic_ms": 100,
+            "client_monotonic_ms": 100_000,
             "client_utc_time": NOW + timedelta(milliseconds=100),
         }
     )
-    newer_event = _event(sequence=2, attempt_id="attempt-new").model_copy(
+    newer_event = _event(sequence=2, attempt_id="attempt-new", attempt_ordinal=1).model_copy(
         update={
-            "client_monotonic_ms": 200,
+            "client_monotonic_ms": 5,
             "client_utc_time": NOW + timedelta(milliseconds=200),
         }
     )
@@ -187,6 +196,7 @@ def test_projection_selects_newest_attempt_start_despite_older_late_terminal_eve
         layer="ble_transport",
         outcome="started",
         event_name="capture_attempt_started",
+        attempt_ordinal=0,
     ).model_copy(update={"event_id": "old-start", "client_monotonic_ms": 100})
     newer_start = _event(
         sequence=0,
@@ -194,6 +204,7 @@ def test_projection_selects_newest_attempt_start_despite_older_late_terminal_eve
         layer="ble_transport",
         outcome="started",
         event_name="capture_attempt_started",
+        attempt_ordinal=1,
     ).model_copy(
         update={
             "event_id": "new-start",
@@ -209,6 +220,7 @@ def test_projection_selects_newest_attempt_start_despite_older_late_terminal_eve
         event_name="peripheral_connect_failed",
         failure_code="peripheral_connect_timeout",
         retry_class="bounded_automatic",
+        attempt_ordinal=1,
     ).model_copy(
         update={
             "event_id": "new-failure",
@@ -221,6 +233,7 @@ def test_projection_selects_newest_attempt_start_despite_older_late_terminal_eve
         attempt_id="attempt-old",
         layer="publication",
         event_name="conversation_published",
+        attempt_ordinal=0,
     ).model_copy(
         update={
             "event_id": "old-late-terminal",
@@ -289,6 +302,7 @@ class FakeRepository:
         self.support_hash = ""
         self.support_used = False
         self.append_error: Exception | None = None
+        self.append_result: tuple[int, int] | None = None
         self.list_error: Exception | None = None
         self.consume_error: Exception | None = None
 
@@ -298,6 +312,8 @@ class FakeRepository:
     async def append_events(self, _authority, events, **_authority_material):
         if self.append_error is not None:
             raise self.append_error
+        if self.append_result is not None:
+            return self.append_result
         self.events.extend(_stored(event, index) for index, event in enumerate(events))
         return len(events), 0
 
@@ -358,6 +374,18 @@ def test_ingest_maps_semantic_identity_collision_to_typed_conflict(monkeypatch):
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "diagnostic_event_conflict"
+
+
+def test_ingest_allows_exact_in_batch_retries_and_reports_duplicate_receipt(monkeypatch):
+    client, repository = _client(monkeypatch)
+    repository.append_result = (1, 1)
+    event = _event().model_dump(mode="json")
+
+    response = client.post("/v1/ella/diagnostics/events", json={"events": [event, event]})
+
+    assert response.status_code == 202
+    assert response.json()["accepted"] == 1
+    assert response.json()["duplicates"] == 1
 
 
 def test_projection_fails_closed_when_authority_changes_during_read(monkeypatch):

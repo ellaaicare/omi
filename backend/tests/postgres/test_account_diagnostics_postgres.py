@@ -17,10 +17,19 @@ from database.account_diagnostics import (
     MAX_EVENTS_PER_PROJECTION,
     account_binding_fingerprint,
 )
-from utils.ella.account_diagnostics import DiagnosticEventV1
+from utils.ella.account_diagnostics import (
+    DiagnosticEventV1,
+    DiagnosticLayer,
+    DiagnosticOutcome,
+    DiagnosticRetryClass,
+    event_from_record,
+)
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
-MIGRATION = Path(__file__).resolve().parents[2] / "migrations" / "017_create_account_diagnostics.sql"
+MIGRATIONS = tuple(
+    Path(__file__).resolve().parents[2] / "migrations" / filename
+    for filename in ("017_create_account_diagnostics.sql", "018_add_diagnostic_attempt_ordinal.sql")
+)
 
 pytestmark = pytest.mark.skipif(
     not TEST_DSN,
@@ -68,9 +77,10 @@ async def _create_schema() -> tuple[asyncpg.Connection, asyncpg.Pool, str]:
     pool = await _pool_for_schema(schema)
     async with pool.acquire() as conn:
         await conn.execute(BASE_SCHEMA)
-        migration = MIGRATION.read_text(encoding="utf-8")
-        await conn.execute(migration)
-        await conn.execute(migration)
+        for migration_path in MIGRATIONS:
+            migration = migration_path.read_text(encoding="utf-8")
+            await conn.execute(migration)
+            await conn.execute(migration)
     return admin, pool, schema
 
 
@@ -86,6 +96,7 @@ def _event() -> DiagnosticEventV1:
             "event_id": "event-1",
             "diagnostic_session_id": "session-1",
             "capture_attempt_id": "attempt-1",
+            "capture_attempt_ordinal": 0,
             "account_binding_fingerprint": "a" * 64,
             "authority_generation": 3,
             "source_revision": "build-849",
@@ -154,12 +165,41 @@ def test_event_append_is_idempotent_immutable_cascading_and_support_read_is_sing
             assert await repository.append_events(authority, [event], **append_authority) == (0, 1)
             assert len(await repository.list_session_events(authority, "session-1", **append_authority)) == 1
 
+            fresh_batch_event = event.model_copy(
+                update={
+                    "event_id": "event-fresh-batch",
+                    "diagnostic_session_id": "session-fresh-batch",
+                    "capture_attempt_id": "attempt-fresh-batch",
+                }
+            )
+            assert await repository.append_events(
+                authority, [fresh_batch_event, fresh_batch_event], **append_authority
+            ) == (1, 1)
+
             same_id_different_payload = event.model_copy(update={"source_revision": "build-850"})
             with pytest.raises(DiagnosticEventConflict):
                 await repository.append_events(authority, [same_id_different_payload], **append_authority)
             same_coordinate_different_id = event.model_copy(update={"event_id": "event-coordinate-collision"})
             with pytest.raises(DiagnosticEventConflict):
                 await repository.append_events(authority, [same_coordinate_different_id], **append_authority)
+
+            rollback_candidate = event.model_copy(
+                update={
+                    "event_id": "event-rollback-candidate",
+                    "diagnostic_session_id": "session-rollback",
+                    "capture_attempt_id": "attempt-rollback",
+                }
+            )
+            with pytest.raises(DiagnosticEventConflict):
+                await repository.append_events(
+                    authority, [rollback_candidate, same_id_different_payload], **append_authority
+                )
+            assert (
+                await pool.fetchval(
+                    "SELECT COUNT(*) FROM ella_diagnostic_events WHERE diagnostic_session_id = 'session-rollback'"
+                )
+                == 0
+            )
             assert (
                 await pool.fetchval(
                     "SELECT COUNT(*) FROM ella_diagnostic_events WHERE diagnostic_session_id = 'session-1'"
@@ -194,6 +234,46 @@ def test_event_append_is_idempotent_immutable_cascading_and_support_read_is_sing
                 == 1
             )
 
+            older_attempt = event.model_copy(
+                update={
+                    "event_id": "event-attempt-old",
+                    "diagnostic_session_id": "session-restarted-client",
+                    "capture_attempt_id": "attempt-old",
+                    "capture_attempt_ordinal": 0,
+                    "layer": DiagnosticLayer.ble_transport,
+                    "event_name": "capture_attempt_started",
+                    "outcome": DiagnosticOutcome.started,
+                    "retry_class": DiagnosticRetryClass.bounded_automatic,
+                    "client_monotonic_ms": 100_000,
+                    "client_utc_time": datetime(2026, 9, 5, 19, 0, tzinfo=timezone.utc),
+                }
+            )
+            newer_attempt_after_restart = event.model_copy(
+                update={
+                    "event_id": "event-attempt-new",
+                    "diagnostic_session_id": "session-restarted-client",
+                    "capture_attempt_id": "attempt-new",
+                    "capture_attempt_ordinal": 1,
+                    "layer": DiagnosticLayer.ble_transport,
+                    "event_name": "capture_attempt_started",
+                    "outcome": DiagnosticOutcome.started,
+                    "retry_class": DiagnosticRetryClass.bounded_automatic,
+                    "client_monotonic_ms": 5,
+                    "client_utc_time": datetime(2026, 9, 5, 19, 1, tzinfo=timezone.utc),
+                }
+            )
+            assert await repository.append_events(
+                authority, [older_attempt, newer_attempt_after_restart], **append_authority
+            ) == (2, 0)
+            selected = await repository.list_session_events(authority, "session-restarted-client", **append_authority)
+            assert [event_from_record(record).event.capture_attempt_id for record in selected] == ["attempt-new"]
+
+            ordinal_collision = newer_attempt_after_restart.model_copy(
+                update={"event_id": "event-attempt-collision", "capture_attempt_id": "attempt-collision"}
+            )
+            with pytest.raises(DiagnosticEventConflict):
+                await repository.append_events(authority, [ordinal_collision], **append_authority)
+
             replacement_profile_id = await pool.fetchval(
                 "INSERT INTO users (omi_uid) VALUES ('replacement-profile') RETURNING id"
             )
@@ -221,14 +301,14 @@ def test_event_append_is_idempotent_immutable_cascading_and_support_read_is_sing
                 """
                 INSERT INTO ella_diagnostic_events (
                     account_user_id, profile_user_id, event_id,
-                    diagnostic_session_id, capture_attempt_id,
+                    diagnostic_session_id, capture_attempt_id, capture_attempt_ordinal,
                     account_binding_fingerprint, authority_generation,
                     layer, event_name, outcome, stable_failure_code,
                     client_sequence, client_monotonic_ms, client_utc_time,
                     payload, expires_at
                 )
                 SELECT $1, $1, 'event-oversized-' || series::text,
-                       'session-oversized', 'attempt-oversized',
+                       'session-oversized', 'attempt-oversized', 0,
                        $2, 3, 'ble_transport',
                        CASE WHEN series = 0 THEN 'capture_attempt_started' ELSE 'peripheral_connected' END,
                        CASE WHEN series = 0 THEN 'started' ELSE 'succeeded' END,
@@ -277,15 +357,15 @@ def test_event_append_is_idempotent_immutable_cascading_and_support_read_is_sing
                 """
                 INSERT INTO ella_diagnostic_events (
                     account_user_id, profile_user_id, event_id,
-                    diagnostic_session_id, capture_attempt_id,
+                    diagnostic_session_id, capture_attempt_id, capture_attempt_ordinal,
                     account_binding_fingerprint, authority_generation,
                     layer, event_name, outcome, stable_failure_code,
                     client_sequence, client_monotonic_ms, client_utc_time,
                     payload, server_received_at, expires_at
                 ) VALUES (
-                    $1, $1, $2, $3, $4, $5, $6,
-                    $7, $8, $9, NULL, $10, $11, $12,
-                    $13::jsonb, CURRENT_TIMESTAMP - INTERVAL '31 days',
+                    $1, $1, $2, $3, $4, $5, $6, $7,
+                    $8, $9, $10, NULL, $11, $12, $13,
+                    $14::jsonb, CURRENT_TIMESTAMP - INTERVAL '31 days',
                     CURRENT_TIMESTAMP - INTERVAL '1 day'
                 )
                 """,
@@ -293,6 +373,7 @@ def test_event_append_is_idempotent_immutable_cascading_and_support_read_is_sing
                 expired_event.event_id,
                 expired_event.diagnostic_session_id,
                 expired_event.capture_attempt_id,
+                expired_event.capture_attempt_ordinal,
                 expired_event.account_binding_fingerprint,
                 expired_event.authority_generation,
                 expired_event.layer.value,

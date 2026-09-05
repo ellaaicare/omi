@@ -21,9 +21,9 @@ BLE, capture, conversation, memory, or presentation state.
 - Authenticated projection and support-grant reads acquire that same authority
   lock and revalidate the binding and consent inside the read transaction, so a
   prior profile cannot be projected after an account switch or revocation.
-- `diagnostic_session_id`, `capture_attempt_id`, `authority_generation`, and all
-  diagnostic receipts are correlation evidence only. They never grant capture,
-  finalization, repair, or data-read authority.
+- `diagnostic_session_id`, `capture_attempt_id`, `capture_attempt_ordinal`,
+  `authority_generation`, and all diagnostic receipts are correlation evidence
+  only. They never grant capture, finalization, repair, or data-read authority.
 
 The app contract is frozen in
 `ella/contracts/diagnostic-event-v1.schema.json`; the failure registry is frozen
@@ -38,6 +38,7 @@ request for the same attempt:
 | --- | --- |
 | `X-Ella-Diagnostic-Session` | One user-visible troubleshooting session |
 | `X-Ella-Capture-Attempt` | A fresh identifier for every retry |
+| `X-Ella-Capture-Attempt-Ordinal` | Restart-safe, zero-based attempt order within the session |
 | `X-Ella-Account-Binding` | Current 64-character authority fingerprint |
 | `X-Ella-Authority-Generation` | Local process lease fence, evidence only |
 
@@ -62,12 +63,14 @@ All responses use `Cache-Control: no-store` and
   names, raw URLs, email-like values, non-allowlisted counters, and
   failure-taxonomy drift are rejected.
   Retries count as duplicates only when both immutable identities and the full
-  payload match. Reuse of an event ID or attempt sequence for different evidence
-  returns `diagnostic_event_conflict` and rolls back the whole batch.
+  payload match, including exact repeats inside one fresh batch. Reuse of an
+  event ID or attempt sequence for different evidence returns
+  `diagnostic_event_conflict` and rolls back the whole batch.
 - `GET /v1/ella/diagnostics/projection/{diagnostic_session_id}` builds a
   disposable projection for the authenticated account. It selects the latest
-  attempt by the `capture_attempt_started` client chronology and loads at most
-  1,000 events for that attempt. Oversized evidence fails closed with
+  attempt by `capture_attempt_ordinal`, with client timestamps only as
+  deterministic within-ordinal tie breakers, and loads at most 1,000 events for
+  that attempt. Oversized evidence fails closed with
   `diagnostic_projection_evidence_limit`. Missing evidence remains `unknown`; it
   is never presented as a negative fact.
 - `POST /v1/ella/diagnostics/support-grants` issues a random, short-lived,
@@ -100,9 +103,18 @@ first non-succeeded layer, completeness, staleness, and a stable failure code.
 It does not trigger reconnects, retries, finalization, publication, cache repair,
 or any other mutation.
 
+Every event carries the same `capture_attempt_ordinal` for its attempt. The
+first attempt in a diagnostic session is `0`, each retry increments it, and the
+client persists the next ordinal if the process restarts while the same session
+continues. Within one session, an attempt ID and ordinal form a one-to-one
+mapping; conflicting reuse returns `diagnostic_event_conflict`. This explicit
+order is authoritative because process monotonic clocks reset after reboot,
+wall clocks can move, and upload order can be delayed.
+
 ## Rollout gates
 
-1. Apply migration `017_create_account_diagnostics.sql`.
+1. Apply migrations `017_create_account_diagnostics.sql` and
+   `018_add_diagnostic_attempt_ordinal.sql` in order.
 2. Configure the two diagnostic-only secrets.
 3. Replay the Build 849 success and BLE-timeout fixtures under
    `tests/fixtures/diagnostics/`.
