@@ -113,8 +113,12 @@ wall clocks can move, and upload order can be delayed.
 
 ## Rollout gates
 
-1. Apply migrations `017_create_account_diagnostics.sql` and
-   `018_add_diagnostic_attempt_ordinal.sql` in order.
+1. Apply migrations `017_create_account_diagnostics.sql`,
+   `018_add_diagnostic_attempt_ordinal.sql`, and
+   `019_backfill_diagnostic_attempt_ordinals.sql` in order. Migration 019
+   deterministically ranks any retained migration-017 attempts, mirrors the
+   ordinal into their JSON evidence, and fails closed if the result is not a
+   one-to-one attempt/ordinal mapping.
 2. Configure the two diagnostic-only secrets.
 3. Replay the Build 849 success and BLE-timeout fixtures under
    `tests/fixtures/diagnostics/`.
