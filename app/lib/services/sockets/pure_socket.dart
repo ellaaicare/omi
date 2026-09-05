@@ -87,16 +87,16 @@ class PureSocket implements IPureSocket {
       await channel.ready;
     } on TimeoutException catch (e) {
       err = e;
-      DebugLogManager.logWarning('pure_socket_connect_timeout', {'error': e.toString()});
+      DebugLogManager.logWarning('pure_socket_connect_timeout', {'error_type': e.runtimeType.toString()});
     } on SocketException catch (e) {
       err = e;
-      DebugLogManager.logWarning('pure_socket_connect_socket_error', {'error': e.toString()});
+      DebugLogManager.logWarning('pure_socket_connect_socket_error', {'error_type': e.runtimeType.toString()});
     } on WebSocketChannelException catch (e) {
       err = e;
-      DebugLogManager.logWarning('pure_socket_connect_websocket_error', {'error': e.toString()});
+      DebugLogManager.logWarning('pure_socket_connect_websocket_error', {'error_type': e.runtimeType.toString()});
     }
     if (err != null) {
-      Logger.debug("[Socket] Connect error: $err");
+      Logger.debug("[Socket] Connect error (${err.runtimeType})");
       _status = PureSocketStatus.notConnected;
       return false;
     }
@@ -176,9 +176,9 @@ class PureSocket implements IPureSocket {
   @override
   void onError(Object err, StackTrace trace) {
     _status = PureSocketStatus.disconnected;
-    Logger.debug("[Socket] Error: $err");
+    Logger.debug("[Socket] Error (${err.runtimeType})");
 
-    DebugLogManager.logError(err, trace, 'pure_socket_error');
+    DebugLogManager.logWarning('pure_socket_error', {'error_type': err.runtimeType.toString()});
 
     _listener?.onError(err, trace);
     PlatformManager.instance.crashReporter.reportCrash(err, trace);

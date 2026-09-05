@@ -59,6 +59,12 @@ enum SocketServiceState {
   disconnected,
 }
 
+enum TranscriptSocketStartFailure {
+  consentUnavailable,
+  transportUnavailable,
+  captureProtocolTimeout,
+}
+
 class CaptureProtocolAuthority {
   const CaptureProtocolAuthority({
     required this.protocolVersion,
@@ -102,8 +108,10 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
   CaptureProtocolAuthority? _captureAuthority;
   CaptureProtocolAuthority? _pendingDrainAuthority;
   final Set<String> _retiredCaptureConversationIds = <String>{};
+  TranscriptSocketStartFailure? _lastStartFailure;
 
   CaptureProtocolAuthority? get captureAuthority => _captureAuthority;
+  TranscriptSocketStartFailure? get lastStartFailure => _lastStartFailure;
 
   /// Access to the underlying socket (for composite service creation)
   IPureSocket get socket => _socket;
@@ -188,8 +196,12 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
     _listeners.remove(context.hashCode);
   }
 
-  Future start() async {
-    if (!SharedPreferencesUtil().aiConsentAccepted) return;
+  Future<void> start() async {
+    _lastStartFailure = null;
+    if (!SharedPreferencesUtil().aiConsentAccepted) {
+      _lastStartFailure = TranscriptSocketStartFailure.consentUnavailable;
+      return;
+    }
     if (_requiresCaptureProtocol) {
       _captureProtocolReady = false;
       _captureAuthority = null;
@@ -197,11 +209,17 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
       _retiredCaptureConversationIds.clear();
       _captureProtocolReadyCompleter = Completer<bool>();
     }
-    bool ok = await _socket.connect();
+    bool ok;
+    try {
+      ok = await _socket.connect();
+    } catch (_) {
+      _lastStartFailure = TranscriptSocketStartFailure.transportUnavailable;
+      rethrow;
+    }
     if (!ok) {
+      _lastStartFailure = TranscriptSocketStartFailure.transportUnavailable;
       Logger.debug("Can not connect to websocket");
       await DebugLogManager.logWarning('transcription_socket_connect_failed', {
-        'url': Env.apiBaseUrl?.replaceAll('https', 'wss') ?? 'null',
         'sample_rate': sampleRate,
         'codec': codec.toString(),
         'language': language,
@@ -214,6 +232,7 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
         onTimeout: () => false,
       );
       if (!ready) {
+        _lastStartFailure = TranscriptSocketStartFailure.captureProtocolTimeout;
         await _socket.stop();
         Logger.debug('Capture websocket did not establish protocol authority');
         return;
@@ -318,7 +337,7 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
     _listeners.forEach((k, v) {
       v.onError(err);
     });
-    DebugLogManager.logError(err, trace, 'transcription_socket_error');
+    DebugLogManager.logWarning('transcription_socket_error', {'error_type': err.runtimeType.toString()});
   }
 
   @override
@@ -328,11 +347,11 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
     try {
       jsonEvent = jsonDecode(event);
     } on FormatException catch (e) {
-      Logger.debug(e.toString());
-      DebugLogManager.logWarning('transcription_socket_parse_error', {'error': e.toString()});
+      Logger.debug('Transcription socket parse error (${e.runtimeType})');
+      DebugLogManager.logWarning('transcription_socket_parse_error', {'error_type': e.runtimeType.toString()});
     }
     if (jsonEvent == null) {
-      Logger.debug("Can not decode message event json $event");
+      Logger.debug('Can not decode transcription socket message');
       return;
     }
 

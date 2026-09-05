@@ -7,7 +7,10 @@ import 'package:uuid/uuid.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 
 const ellaDiagnosticEventSchemaVersion = 'ella.diagnostic_event.v1';
-const ellaDiagnosticSourceRevision = String.fromEnvironment('ELLA_SOURCE_REVISION', defaultValue: 'unknown');
+const ellaDiagnosticSourceRevision = String.fromEnvironment(
+  'ELLA_SOURCE_REVISION',
+  defaultValue: 'unattributed_local_build',
+);
 
 enum EllaDiagnosticLayer {
   accountBinding('account_binding'),
@@ -43,15 +46,13 @@ enum EllaDiagnosticRetryClass {
 }
 
 enum EllaDiagnosticFailureCode {
-  bleNotPowered('ble_not_powered'),
-  blePermissionDenied('ble_permission_denied'),
   rememberedDeviceNotResolved('remembered_device_not_resolved'),
   peripheralConnectTimeout('peripheral_connect_timeout'),
-  requiredServiceMissing('required_service_missing'),
   notificationSubscriptionFailed('notification_subscription_failed'),
   audioFirstFrameTimeout('audio_first_frame_timeout'),
   audioFramesStalled('audio_frames_stalled'),
   websocketAuthFailed('websocket_auth_failed'),
+  websocketUnavailable('websocket_unavailable'),
   captureAuthorityConflict('capture_authority_conflict'),
   captureReadyTimeout('capture_ready_timeout'),
   captureFirstFrameRejected('capture_first_frame_rejected'),
@@ -185,8 +186,9 @@ class EllaDiagnosticCaptureTrace {
     required this.authorityGeneration,
     required this.opaqueDeviceBinding,
     required this.sink,
-    required Stopwatch monotonicClock,
-  }) : _monotonicClock = monotonicClock;
+    required this.retryNumber,
+    required _EllaDiagnosticTraceState state,
+  }) : _state = state;
 
   factory EllaDiagnosticCaptureTrace.begin({
     required ActiveWalAuthority authority,
@@ -200,14 +202,20 @@ class EllaDiagnosticCaptureTrace {
     final deviceDigest = Hmac(sha256, utf8.encode(ownerFingerprint)).convert(utf8.encode(deviceIdentifier));
     final clock = monotonicClock ?? (Stopwatch()..start());
     if (!clock.isRunning) clock.start();
-    return EllaDiagnosticCaptureTrace._(
+    final state = _EllaDiagnosticTraceState(
       diagnosticSessionId: diagnosticSessionId ?? uuid.v4(),
+      monotonicClock: clock,
+      authorityIsCurrent: authority.isCurrent,
+    );
+    return EllaDiagnosticCaptureTrace._(
+      diagnosticSessionId: state.diagnosticSessionId,
       captureAttemptId: uuid.v4(),
       accountBindingFingerprint: ownerFingerprint,
       authorityGeneration: authority.owner.authorityGenerationAtCapture,
       opaqueDeviceBinding: deviceDigest.toString(),
       sink: sink,
-      monotonicClock: clock,
+      retryNumber: 1,
+      state: state,
     );
   }
 
@@ -217,8 +225,19 @@ class EllaDiagnosticCaptureTrace {
   final int authorityGeneration;
   final String opaqueDeviceBinding;
   final EllaDiagnosticEventSink sink;
-  final Stopwatch _monotonicClock;
-  int _sequence = 0;
+  final int retryNumber;
+  final _EllaDiagnosticTraceState _state;
+
+  EllaDiagnosticCaptureTrace nextAttempt() => EllaDiagnosticCaptureTrace._(
+        diagnosticSessionId: diagnosticSessionId,
+        captureAttemptId: const Uuid().v4(),
+        accountBindingFingerprint: accountBindingFingerprint,
+        authorityGeneration: authorityGeneration,
+        opaqueDeviceBinding: opaqueDeviceBinding,
+        sink: sink,
+        retryNumber: retryNumber + 1,
+        state: _state,
+      );
 
   Future<void> emit({
     required EllaDiagnosticLayer layer,
@@ -231,30 +250,49 @@ class EllaDiagnosticCaptureTrace {
     String? firmware,
     String? codec,
     Map<String, int> safeCounters = const <String, int>{},
-  }) {
-    final event = EllaDiagnosticEvent(
-      eventId: const Uuid().v4(),
-      diagnosticSessionId: diagnosticSessionId,
-      captureAttemptId: captureAttemptId,
-      accountBindingFingerprint: accountBindingFingerprint,
-      authorityGeneration: authorityGeneration,
-      layer: layer,
-      eventName: eventName,
-      outcome: outcome,
-      retryClass: retryClass,
-      clientSequence: _sequence++,
-      clientMonotonicMs: _monotonicClock.elapsedMilliseconds,
-      clientUtcTime: DateTime.now().toUtc(),
-      opaqueResourceId: opaqueDeviceBinding,
-      firmware: firmware,
-      codec: codec,
-      stableFailureCode: failureCode,
-      expectedNextEvent: expectedNextEvent,
-      deadlineMs: deadlineMs,
-      safeCounters: safeCounters,
-    );
-    return sink.append(event);
+  }) async {
+    if (!_state.authorityIsCurrent()) return;
+    try {
+      final event = EllaDiagnosticEvent(
+        eventId: const Uuid().v4(),
+        diagnosticSessionId: diagnosticSessionId,
+        captureAttemptId: captureAttemptId,
+        accountBindingFingerprint: accountBindingFingerprint,
+        authorityGeneration: authorityGeneration,
+        layer: layer,
+        eventName: eventName,
+        outcome: outcome,
+        retryClass: retryClass,
+        clientSequence: _state.sequence++,
+        clientMonotonicMs: _state.monotonicClock.elapsedMilliseconds,
+        clientUtcTime: DateTime.now().toUtc(),
+        opaqueResourceId: opaqueDeviceBinding,
+        firmware: firmware,
+        codec: codec,
+        stableFailureCode: failureCode,
+        expectedNextEvent: expectedNextEvent,
+        deadlineMs: deadlineMs,
+        safeCounters: safeCounters,
+      );
+      await sink.append(event);
+    } catch (error) {
+      // Diagnostics must never interrupt capture, account transitions, or UI.
+      debugPrint('Ella diagnostic event was dropped (${error.runtimeType})');
+    }
   }
+}
+
+class _EllaDiagnosticTraceState {
+  _EllaDiagnosticTraceState({
+    required this.diagnosticSessionId,
+    required this.monotonicClock,
+    required this.authorityIsCurrent,
+  });
+
+  final String diagnosticSessionId;
+  final Stopwatch monotonicClock;
+  final bool Function() authorityIsCurrent;
+  int sequence = 0;
 }
 
 abstract interface class EllaDiagnosticEventSink {

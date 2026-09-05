@@ -8,12 +8,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
+import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/diagnostics/ella_diagnostic_event.dart';
+import 'package:omi/ella/services/diagnostics/ella_diagnostic_event_journal.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/devices/device_connection.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/services/wals/wal.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/enums.dart';
 
 class _TestConnectivityPlatform extends ConnectivityPlatform {
@@ -81,18 +85,30 @@ class _FakeDeviceService implements IDeviceService {
 }
 
 class _RecordingCaptureProvider extends CaptureProvider {
-  _RecordingCaptureProvider({this.startGate, this.disconnectGate, this.failuresBeforeStart = 0, this.onDeviceStart});
+  _RecordingCaptureProvider({
+    this.startGate,
+    this.disconnectGate,
+    this.failuresBeforeStart = 0,
+    this.onDeviceStart,
+    this.diagnosticTrace,
+  });
 
   final Completer<void>? startGate;
   final Completer<void>? disconnectGate;
   final int failuresBeforeStart;
   final void Function(int attempt)? onDeviceStart;
+  final EllaDiagnosticCaptureTrace? diagnosticTrace;
   int deviceStarts = 0;
   final List<String> disconnectedDeviceIds = [];
+  final List<EllaDiagnosticCaptureTrace?> startTraces = <EllaDiagnosticCaptureTrace?>[];
+
+  @override
+  EllaDiagnosticCaptureTrace? beginDeviceDiagnosticTrace(BtDevice device) => diagnosticTrace;
 
   @override
   Future<void> streamDeviceRecording({BtDevice? device, EllaDiagnosticCaptureTrace? diagnosticTrace}) async {
     deviceStarts++;
+    startTraces.add(diagnosticTrace);
     if (deviceStarts <= failuresBeforeStart) {
       updateRecordingState(RecordingState.error);
       onDeviceStart?.call(deviceStarts);
@@ -109,6 +125,37 @@ class _RecordingCaptureProvider extends CaptureProvider {
     await disconnectGate?.future;
     return true;
   }
+}
+
+EllaDiagnosticCaptureTrace _diagnosticTraceForCurrentTestAuthority({EllaDiagnosticEventSink? sink}) {
+  const uid = 'test-user';
+  const profile = 'test-profile';
+  final owner = WalOwner(
+    uid: uid,
+    profileBindingId: profile,
+    bindingRevision: 1,
+    consentReceiptId: 'receipt-a',
+    authorityGenerationAtCapture: 1,
+  );
+  return EllaDiagnosticCaptureTrace.begin(
+    authority: ActiveWalAuthority(
+      owner: owner,
+      consent: const AiConsentAuthoritySnapshot(
+        generation: 1,
+        uid: uid,
+        verifiedPersonaId: null,
+        profileBindingId: profile,
+        receiptId: 'receipt-a',
+        policyVersion: 'policy-a',
+        processorSetHash: 'processors-a',
+        scopeVersion: 'scope-a',
+        scopeHash: 'scope-hash-a',
+      ),
+      currentCheck: () => true,
+    ),
+    deviceIdentifier: 'necklace-1',
+    sink: sink ?? InMemoryEllaDiagnosticEventSink(),
+  );
 }
 
 Future<void> bindRememberedDeviceForCurrentTestAuthority(
@@ -799,6 +846,80 @@ void main() {
     expect(capture.deviceStarts, 2);
     expect(capture.recordingState, RecordingState.deviceRecord);
     expect(provider.connectedDevice?.id, necklace.id);
+  });
+
+  test('bounded necklace retries keep one diagnostic session and rotate attempt ids', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final trace = _diagnosticTraceForCurrentTestAuthority();
+    final capture = _RecordingCaptureProvider(failuresBeforeStart: 2, diagnosticTrace: trace);
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      connectionResolver: (_) async => necklace,
+      deviceCaptureRetryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
+    for (var attempt = 0; attempt < 100 && capture.deviceStarts < 3; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+
+    expect(capture.deviceStarts, 3);
+    expect(
+        capture.startTraces.whereType<EllaDiagnosticCaptureTrace>().map((item) => item.diagnosticSessionId).toSet(), {
+      trace.diagnosticSessionId,
+    });
+    expect(
+      capture.startTraces.whereType<EllaDiagnosticCaptureTrace>().map((item) => item.captureAttemptId).toSet(),
+      hasLength(3),
+    );
+    expect(
+      capture.startTraces.whereType<EllaDiagnosticCaptureTrace>().map((item) => item.retryNumber),
+      <int>[1, 2, 3],
+    );
+  });
+
+  test('bound-device resolution failures are typed and each reconnect gets a fresh attempt', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final sink = InMemoryEllaDiagnosticEventSink();
+    final trace = _diagnosticTraceForCurrentTestAuthority(sink: sink);
+    final capture = _RecordingCaptureProvider(diagnosticTrace: trace);
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      scanConnector: () async => null,
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    await provider.scanAndConnectToDevice(startCaptureWhenConnected: true);
+    await provider.scanAndConnectToDevice(startCaptureWhenConnected: true);
+    await pumpEventQueue();
+
+    final resolutionEvents = sink.events.where((event) => event.eventName == 'peripheral_resolution').toList();
+    expect(resolutionEvents.map((event) => event.outcome), <EllaDiagnosticOutcome>[
+      EllaDiagnosticOutcome.started,
+      EllaDiagnosticOutcome.failed,
+      EllaDiagnosticOutcome.started,
+      EllaDiagnosticOutcome.failed,
+    ]);
+    expect(resolutionEvents.map((event) => event.diagnosticSessionId).toSet(), {trace.diagnosticSessionId});
+    expect(resolutionEvents.map((event) => event.captureAttemptId).toSet(), hasLength(2));
+    expect(
+        resolutionEvents.where((event) => event.outcome == EllaDiagnosticOutcome.failed).map((event) {
+          return event.stableFailureCode;
+        }),
+        everyElement(EllaDiagnosticFailureCode.peripheralConnectTimeout));
+    expect(
+      resolutionEvents.where((event) => event.outcome == EllaDiagnosticOutcome.started).map((event) {
+        return event.safeCounters['retry_number'];
+      }),
+      <int?>[1, 2],
+    );
   });
 
   test('in-flight connected resolution cannot repopulate after stop', () async {

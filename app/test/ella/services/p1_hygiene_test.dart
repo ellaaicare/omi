@@ -217,6 +217,8 @@ void main() {
     final auth = File('${lib.path}/services/auth_service.dart').readAsStringSync();
     expect(auth, contains('Future<T> runIdentityTransition<T>'));
     expect(auth.indexOf('stopForAccountTransition()'), lessThan(auth.indexOf('return mutation();')));
+    expect(auth.indexOf('clearAll()'), greaterThan(auth.indexOf('stopForAccountTransition()')));
+    expect(auth.indexOf('clearAll()'), lessThan(auth.indexOf('return mutation();')));
     expect(auth, contains('Future<void> signOutWithQuiescedCleanup'));
     expect(auth, contains('Future<void> signOut() => signOutWithQuiescedCleanup(() async {})'));
     expect(auth, contains('replaceIdentityWithCredential'));
@@ -253,6 +255,52 @@ void main() {
     expect(capture, contains('registerCaptureProducer(stopForAccountTransition)'));
     expect(capture, contains('ownerAtCapture: captureAuthority.owner'));
     expect(capture, isNot(contains('ownerAtCapture: null')));
+  });
+
+  test('diagnostic journal has no caller-selected account read surface and release attribution is exact', () {
+    final appRoot = _appRoot();
+    final journal =
+        File('${appRoot.path}/lib/ella/services/diagnostics/ella_diagnostic_event_journal.dart').readAsStringSync();
+    final appDelegate = File('${appRoot.path}/ios/Runner/AppDelegate.swift').readAsStringSync();
+    final diagnosticChannel = appDelegate.substring(
+      appDelegate.indexOf('let diagnosticEventsChannel = FlutterMethodChannel('),
+      appDelegate.indexOf('print("AppDelegate: Diagnostic Events MethodChannel registered")'),
+    );
+    final buildScript = File('${appRoot.path}/ios/build-and-upload.sh').readAsStringSync();
+    final xcodeCloudScript = File('${appRoot.path}/ios/ci_scripts/ci_pre_xcodebuild.sh').readAsStringSync();
+    final nativeStore = File('${appRoot.path}/ios/Runner/GuardianMode/DebugEventBuffer.swift').readAsStringSync();
+    final socketSources = <String>[
+      File('${appRoot.path}/lib/services/sockets/pure_socket.dart').readAsStringSync(),
+      File('${appRoot.path}/lib/services/sockets/pure_streaming_stt.dart').readAsStringSync(),
+      File('${appRoot.path}/lib/services/sockets/transcription_service.dart').readAsStringSync(),
+    ].join('\n');
+
+    expect(journal, contains("invokeMethod<void>('clearAllEvents')"));
+    expect(journal, isNot(contains('eventsFor(')));
+    expect(journal, isNot(contains('clearFor(')));
+    expect(diagnosticChannel, contains('case "clearAllEvents":'));
+    expect(diagnosticChannel, isNot(contains('case "getEvents":')));
+    expect(diagnosticChannel, isNot(contains('case "clearEvents":')));
+    expect(buildScript, contains('status --porcelain --untracked-files=all'));
+    expect(
+      buildScript.indexOf(r'SOURCE_REVISION="$(git -C "$REPO_ROOT" rev-parse HEAD)"'),
+      greaterThan(buildScript.indexOf(r'if [ "${RUN_TESTS:-0}" = "1" ]')),
+    );
+    expect(xcodeCloudScript, contains('set -euo pipefail'));
+    expect(xcodeCloudScript, contains('status --porcelain --untracked-files=all'));
+    expect(xcodeCloudScript, contains(r'SOURCE_REVISION="$(git -C "$REPO_ROOT" rev-parse HEAD)"'));
+    expect(xcodeCloudScript, contains(r'--dart-define="ELLA_SOURCE_REVISION=$SOURCE_REVISION"'));
+    expect(nativeStore, contains('private let maxTotalBytes = 512 * 1024'));
+    expect(nativeStore, contains('private let maxPartitionFiles = 4'));
+    expect(nativeStore, contains('private let maxFileAge: TimeInterval = 7 * 24 * 60 * 60'));
+    expect(nativeStore, contains('.withFractionalSeconds'));
+    expect(nativeStore, contains('isValidClientTimestamp(event["client_utc_time"] as! String)'));
+    expect(nativeStore, contains('try self.enforceGlobalRetention(preservingFingerprint: fingerprint)'));
+    expect(nativeStore, contains(r'events-v1-\(fingerprint).json'));
+    expect(nativeStore, isNot(contains('fingerprint.prefix')));
+    expect(socketSources, isNot(contains("'error': e.toString()")));
+    expect(socketSources, isNot(contains('DebugLogManager.logError')));
+    expect(socketSources, isNot(contains("'url': Env.apiBaseUrl")));
   });
 }
 

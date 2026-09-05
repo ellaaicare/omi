@@ -150,6 +150,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   int? _activeDeviceConnectionSession;
   final Map<int, EllaDiagnosticCaptureTrace> _diagnosticTraceByOperationGeneration =
       <int, EllaDiagnosticCaptureTrace>{};
+  final Set<int> _diagnosticResolutionStartedByOperationGeneration = <int>{};
   bool _disposed = false;
 
   void Function(BtDevice device)? onDeviceConnected;
@@ -248,6 +249,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     _lastDeviceOwnerBinding = settledOwnerBinding;
     _activeDeviceConnectionSession = null;
     _diagnosticTraceByOperationGeneration.clear();
+    _diagnosticResolutionStartedByOperationGeneration.clear();
     final disconnectedDeviceId = connectedDevice?.id ?? pairedDevice?.id ?? captureProvider?.recordingDevice?.id;
     _reconnectionTimer?.cancel();
     _disconnectNotificationTimer?.cancel();
@@ -695,11 +697,31 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   Future scanAndConnectToDevice({int? operationGeneration, bool startCaptureWhenConnected = false}) async {
     final generation = operationGeneration ?? _deviceOperationGeneration;
     if (!_isDeviceOperationCurrent(generation)) return;
-    if (startCaptureWhenConnected && !_diagnosticTraceByOperationGeneration.containsKey(generation)) {
+    EllaDiagnosticCaptureTrace? diagnosticTrace;
+    if (startCaptureWhenConnected) {
       final rememberedDevice = _rememberedDeviceForCurrentAuthority();
-      final diagnosticTrace =
-          rememberedDevice == null ? null : captureProvider?.beginDeviceDiagnosticTrace(rememberedDevice);
-      if (diagnosticTrace != null) _diagnosticTraceByOperationGeneration[generation] = diagnosticTrace;
+      diagnosticTrace = _diagnosticTraceByOperationGeneration[generation];
+      if (diagnosticTrace == null) {
+        diagnosticTrace =
+            rememberedDevice == null ? null : captureProvider?.beginDeviceDiagnosticTrace(rememberedDevice);
+      } else if (_diagnosticResolutionStartedByOperationGeneration.contains(generation)) {
+        diagnosticTrace = diagnosticTrace.nextAttempt();
+      }
+      if (diagnosticTrace != null) {
+        _diagnosticTraceByOperationGeneration[generation] = diagnosticTrace;
+        _diagnosticResolutionStartedByOperationGeneration.add(generation);
+        unawaited(
+          diagnosticTrace.emit(
+            layer: EllaDiagnosticLayer.bleTransport,
+            eventName: 'peripheral_resolution',
+            outcome: EllaDiagnosticOutcome.started,
+            retryClass: EllaDiagnosticRetryClass.boundedAutomatic,
+            expectedNextEvent: 'peripheral_connected',
+            deadlineMs: 15000,
+            safeCounters: <String, int>{'retry_number': diagnosticTrace.retryNumber},
+          ),
+        );
+      }
     }
     updateConnectingStatus(true);
     if (isConnected) {
@@ -707,6 +729,18 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         final resolvedDevice = await _getConnectedDevice();
         if (!_isDeviceOperationCurrent(generation)) return;
         if (resolvedDevice == null) {
+          if (diagnosticTrace != null) {
+            unawaited(
+              diagnosticTrace.emit(
+                layer: EllaDiagnosticLayer.bleTransport,
+                eventName: 'peripheral_resolution',
+                outcome: EllaDiagnosticOutcome.failed,
+                retryClass: EllaDiagnosticRetryClass.boundedAutomatic,
+                failureCode: EllaDiagnosticFailureCode.rememberedDeviceNotResolved,
+                safeCounters: <String, int>{'retry_number': diagnosticTrace.retryNumber},
+              ),
+            );
+          }
           updateConnectingStatus(false);
           return;
         }
@@ -729,7 +763,24 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     }
 
     // else
-    var device = await (_scanConnector?.call() ?? _scanConnectDevice(generation));
+    BtDevice? device;
+    try {
+      device = await (_scanConnector?.call() ?? _scanConnectDevice(generation));
+    } catch (_) {
+      if (diagnosticTrace != null) {
+        unawaited(
+          diagnosticTrace.emit(
+            layer: EllaDiagnosticLayer.bleTransport,
+            eventName: 'peripheral_resolution',
+            outcome: EllaDiagnosticOutcome.failed,
+            retryClass: EllaDiagnosticRetryClass.boundedAutomatic,
+            failureCode: EllaDiagnosticFailureCode.peripheralConnectTimeout,
+            safeCounters: <String, int>{'retry_number': diagnosticTrace.retryNumber},
+          ),
+        );
+      }
+      rethrow;
+    }
     if (!_isDeviceOperationCurrent(generation)) return;
     Logger.debug('inside scanAndConnectToDevice $device in device_provider');
     if (device != null) {
@@ -749,6 +800,17 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       MixpanelManager().deviceConnected();
       setIsConnected(true);
       Logger.debug('device is not null $cDevice');
+    } else if (diagnosticTrace != null) {
+      unawaited(
+        diagnosticTrace.emit(
+          layer: EllaDiagnosticLayer.bleTransport,
+          eventName: 'peripheral_resolution',
+          outcome: EllaDiagnosticOutcome.failed,
+          retryClass: EllaDiagnosticRetryClass.boundedAutomatic,
+          failureCode: EllaDiagnosticFailureCode.peripheralConnectTimeout,
+          safeCounters: <String, int>{'retry_number': diagnosticTrace.retryNumber},
+        ),
+      );
     }
     if (!_isDeviceOperationCurrent(generation)) return;
     updateConnectingStatus(false);
@@ -779,6 +841,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     _authorityReconciliationPending = false;
     _activeDeviceConnectionSession = null;
     _diagnosticTraceByOperationGeneration.clear();
+    _diagnosticResolutionStartedByOperationGeneration.clear();
     WidgetsBinding.instance.removeObserver(this);
     _accountAuthorityChanges.removeListener(_handleAccountAuthorityChanged);
     captureProvider?.removeListener(_onCaptureProviderChanged);
@@ -824,6 +887,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
 
     final generation = ++_deviceOperationGeneration;
     _diagnosticTraceByOperationGeneration.clear();
+    _diagnosticResolutionStartedByOperationGeneration.clear();
     final diagnosticTrace = captureProvider?.beginDeviceDiagnosticTrace(stored);
     if (diagnosticTrace != null) _diagnosticTraceByOperationGeneration[generation] = diagnosticTrace;
     pairedDevice = stored;
@@ -1074,12 +1138,18 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   }) async {
     final capture = captureProvider;
     if (capture == null) return false;
-    final activeDiagnosticTrace = diagnosticTrace ?? _diagnosticTraceByOperationGeneration[operationGeneration];
+    var activeDiagnosticTrace = diagnosticTrace ?? _diagnosticTraceByOperationGeneration[operationGeneration];
     for (var attempt = 1; attempt <= _maxDeviceCaptureStartAttempts; attempt++) {
       if (!_isDeviceOperationCurrent(operationGeneration)) return false;
       if (capture.phoneCaptureOwnsMobileAudio) {
         _deferDeviceCaptureUntilPhoneReleases(device, operationGeneration);
         return false;
+      }
+      if (attempt > 1) {
+        activeDiagnosticTrace = activeDiagnosticTrace?.nextAttempt();
+        if (activeDiagnosticTrace != null) {
+          _diagnosticTraceByOperationGeneration[operationGeneration] = activeDiagnosticTrace;
+        }
       }
       try {
         await capture.streamDeviceRecording(device: device, diagnosticTrace: activeDiagnosticTrace);
@@ -1120,7 +1190,12 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         !_isCurrentOwnerBoundDevice(device.id)) {
       return;
     }
-    await _onDeviceConnected(device, operationGeneration);
+    var diagnosticTrace = _diagnosticTraceByOperationGeneration[operationGeneration];
+    diagnosticTrace ??= captureProvider?.beginDeviceDiagnosticTrace(device);
+    if (diagnosticTrace != null) {
+      _diagnosticTraceByOperationGeneration[operationGeneration] = diagnosticTrace;
+    }
+    await _onDeviceConnected(device, operationGeneration, diagnosticTrace: diagnosticTrace);
   }
 
   void _checkFirmwareUpdates({int? operationGeneration}) async {

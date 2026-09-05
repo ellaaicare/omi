@@ -163,15 +163,6 @@ if [ "${SKIP_PULL:-0}" != "1" ]; then
   git pull origin main
 fi
 
-# Bind local diagnostic receipts to the exact source used for this artifact.
-# Release gates should reject dirty trees; the suffix prevents a dirty local
-# diagnostic build from claiming the immutable commit as its complete source.
-SOURCE_REVISION="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-if ! git -C "$REPO_ROOT" diff --quiet || ! git -C "$REPO_ROOT" diff --cached --quiet; then
-  SOURCE_REVISION="${SOURCE_REVISION}-dirty"
-fi
-DART_DEFINES+=(--dart-define=ELLA_SOURCE_REVISION="$SOURCE_REVISION")
-
 # ── Step 2: Flutter setup ─────────────────────────────────────
 log "Flutter pub get + build_runner"
 cd "$APP_DIR"
@@ -275,6 +266,17 @@ if [ "${RUN_TESTS:-0}" = "1" ]; then
 fi
 
 # ── Step 4: Flutter build iOS (no codesign) ───────────────────
+# Stamp diagnostics only after generated release inputs and optional tests are
+# complete. A release artifact must never claim an immutable source revision
+# while tracked or untracked repository inputs have drifted.
+if [ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)" ]; then
+  echo "ERROR: Release source/config tree changed before source attribution; refusing to build."
+  git -C "$REPO_ROOT" status --short --untracked-files=all
+  exit 1
+fi
+SOURCE_REVISION="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+DART_DEFINES+=(--dart-define=ELLA_SOURCE_REVISION="$SOURCE_REVISION")
+
 log "Flutter build ios --flavor $FLAVOR --release --no-codesign ELLA_PUBLIC_BUILD=$ELLA_PUBLIC_BUILD ELLA_ENTITLEMENT_GATE=${ELLA_ENTITLEMENT_GATE:-false} ELLA_GUARDIAN_ENABLED=$ELLA_GUARDIAN_ENABLED"
 FLUTTER_BUILD_ARGS=(
   build ios

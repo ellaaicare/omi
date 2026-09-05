@@ -6,7 +6,6 @@ import 'dart:typed_data';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
-import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/models/stt_response_schema.dart';
 import 'package:omi/models/stt_result.dart';
 import 'package:omi/services/custom_stt_log_service.dart';
@@ -141,23 +140,23 @@ class GeminiStreamingSttSocket implements IPureSocket {
       onConnected();
       return true;
     } on TimeoutException catch (e) {
-      CustomSttLogService.instance.error('GeminiStreaming', 'Connection timeout: $e');
-      DebugLogManager.logWarning('gemini_streaming_connect_timeout', {'error': e.toString()});
+      CustomSttLogService.instance.error('GeminiStreaming', 'Connection timeout (${e.runtimeType})');
+      DebugLogManager.logWarning('gemini_streaming_connect_timeout', {'error_type': e.runtimeType.toString()});
       _status = PureSocketStatus.notConnected;
       return false;
     } on SocketException catch (e) {
-      CustomSttLogService.instance.error('GeminiStreaming', 'Socket error: $e');
-      DebugLogManager.logWarning('gemini_streaming_socket_error', {'error': e.toString()});
+      CustomSttLogService.instance.error('GeminiStreaming', 'Socket error (${e.runtimeType})');
+      DebugLogManager.logWarning('gemini_streaming_socket_error', {'error_type': e.runtimeType.toString()});
       _status = PureSocketStatus.notConnected;
       return false;
     } on WebSocketChannelException catch (e) {
-      CustomSttLogService.instance.error('GeminiStreaming', 'WebSocket error: $e');
-      DebugLogManager.logWarning('gemini_streaming_websocket_error', {'error': e.toString()});
+      CustomSttLogService.instance.error('GeminiStreaming', 'WebSocket error (${e.runtimeType})');
+      DebugLogManager.logWarning('gemini_streaming_websocket_error', {'error_type': e.runtimeType.toString()});
       _status = PureSocketStatus.notConnected;
       return false;
     } catch (e) {
-      CustomSttLogService.instance.error('GeminiStreaming', 'Connection error: $e');
-      DebugLogManager.logWarning('gemini_streaming_connect_error', {'error': e.toString()});
+      CustomSttLogService.instance.error('GeminiStreaming', 'Connection error (${e.runtimeType})');
+      DebugLogManager.logWarning('gemini_streaming_connect_error', {'error_type': e.runtimeType.toString()});
       _status = PureSocketStatus.notConnected;
       return false;
     }
@@ -383,8 +382,8 @@ class GeminiStreamingSttSocket implements IPureSocket {
 
   @override
   void onError(Object err, StackTrace trace) {
-    CustomSttLogService.instance.error('GeminiStreaming', 'Error: $err');
-    DebugLogManager.logError(err, trace, 'gemini_streaming_error');
+    CustomSttLogService.instance.error('GeminiStreaming', 'Error (${err.runtimeType})');
+    DebugLogManager.logWarning('gemini_streaming_error', {'error_type': err.runtimeType.toString()});
     _listener?.onError(err, trace);
   }
 }
@@ -450,31 +449,34 @@ class PureStreamingSttSocket implements IPureSocket {
 
       return true;
     } on TimeoutException catch (e) {
-      CustomSttLogService.instance.error(config.serviceId, 'Connection timeout: $e');
+      CustomSttLogService.instance.error(config.serviceId, 'Connection timeout (${e.runtimeType})');
       DebugLogManager.logWarning('streaming_stt_connect_timeout', {
         'service_id': config.serviceId,
-        'error': e.toString(),
+        'error_type': e.runtimeType.toString(),
       });
       _status = PureSocketStatus.notConnected;
       return false;
     } on SocketException catch (e) {
-      CustomSttLogService.instance.error(config.serviceId, 'Socket error: $e');
-      DebugLogManager.logWarning('streaming_stt_socket_error', {'service_id': config.serviceId, 'error': e.toString()});
+      CustomSttLogService.instance.error(config.serviceId, 'Socket error (${e.runtimeType})');
+      DebugLogManager.logWarning('streaming_stt_socket_error', {
+        'service_id': config.serviceId,
+        'error_type': e.runtimeType.toString(),
+      });
       _status = PureSocketStatus.notConnected;
       return false;
     } on WebSocketChannelException catch (e) {
-      CustomSttLogService.instance.error(config.serviceId, 'WebSocket error: $e');
+      CustomSttLogService.instance.error(config.serviceId, 'WebSocket error (${e.runtimeType})');
       DebugLogManager.logWarning('streaming_stt_websocket_error', {
         'service_id': config.serviceId,
-        'error': e.toString(),
+        'error_type': e.runtimeType.toString(),
       });
       _status = PureSocketStatus.notConnected;
       return false;
     } catch (e) {
-      CustomSttLogService.instance.error(config.serviceId, 'Connection error: $e');
+      CustomSttLogService.instance.error(config.serviceId, 'Connection error (${e.runtimeType})');
       DebugLogManager.logWarning('streaming_stt_connect_error', {
         'service_id': config.serviceId,
-        'error': e.toString(),
+        'error_type': e.runtimeType.toString(),
       });
       _status = PureSocketStatus.notConnected;
       return false;
@@ -683,8 +685,11 @@ class PureStreamingSttSocket implements IPureSocket {
 
   @override
   void onError(Object err, StackTrace trace) {
-    CustomSttLogService.instance.error(config.serviceId, 'Error: $err');
-    DebugLogManager.logError(err, trace, 'streaming_stt_error', {'service_id': config.serviceId});
+    CustomSttLogService.instance.error(config.serviceId, 'Error (${err.runtimeType})');
+    DebugLogManager.logWarning('streaming_stt_error', {
+      'service_id': config.serviceId,
+      'error_type': err.runtimeType.toString(),
+    });
     _listener?.onError(err, trace);
   }
 }

@@ -9,6 +9,8 @@ import 'package:omi/utils/mutex.dart';
 export 'package:omi/services/freemium_transcription_service.dart';
 
 abstract class ISocketService {
+  TranscriptSocketStartFailure? get lastConversationStartFailure;
+
   void start();
 
   Future<void> stop();
@@ -36,6 +38,10 @@ abstract interface class ISocketServiceSubsciption {}
 class SocketServicePool extends ISocketService {
   TranscriptSegmentSocketService? _socket;
   TranscriptSegmentSocketService? _speechProfileSocket;
+  TranscriptSocketStartFailure? _lastConversationStartFailure;
+
+  @override
+  TranscriptSocketStartFailure? get lastConversationStartFailure => _lastConversationStartFailure;
 
   @override
   void start() {}
@@ -76,6 +82,7 @@ class SocketServicePool extends ISocketService {
 
       // new socket
       await _socket?.stop();
+      _lastConversationStartFailure = null;
 
       if (customSttConfig != null && customSttConfig.isEnabled) {
         _socket = TranscriptSocketServiceFactory.createFromCustomConfig(
@@ -91,6 +98,7 @@ class SocketServicePool extends ISocketService {
       }
 
       await _socket?.start();
+      _lastConversationStartFailure = _socket?.lastStartFailure;
       if (_socket?.state != SocketServiceState.connected) {
         return null;
       }

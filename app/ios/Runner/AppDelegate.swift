@@ -218,24 +218,8 @@ extension FlutterError: Error {}
                     result(nil)
                 }
             }
-        case "getEvents":
-            guard let fingerprint = arguments?["account_binding_fingerprint"] as? String else {
-                result(FlutterError(code: "invalid_fingerprint", message: nil, details: nil))
-                return
-            }
-            EllaDiagnosticEventStore.shared.events(fingerprint: fingerprint) { events, error in
-                if let error {
-                    result(FlutterError(code: "diagnostic_store_failed", message: error.localizedDescription, details: nil))
-                } else {
-                    result(events ?? [])
-                }
-            }
-        case "clearEvents":
-            guard let fingerprint = arguments?["account_binding_fingerprint"] as? String else {
-                result(FlutterError(code: "invalid_fingerprint", message: nil, details: nil))
-                return
-            }
-            EllaDiagnosticEventStore.shared.clear(fingerprint: fingerprint) { error in
+        case "clearAllEvents":
+            EllaDiagnosticEventStore.shared.clearAll { error in
                 if let error {
                     result(FlutterError(code: "diagnostic_store_failed", message: error.localizedDescription, details: nil))
                 } else {

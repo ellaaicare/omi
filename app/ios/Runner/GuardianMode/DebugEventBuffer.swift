@@ -61,6 +61,9 @@ final class EllaDiagnosticEventStore {
 
     private let maxEvents = 200
     private let maxBytes = 256 * 1024
+    private let maxTotalBytes = 512 * 1024
+    private let maxPartitionFiles = 4
+    private let maxFileAge: TimeInterval = 7 * 24 * 60 * 60
     private let queue = DispatchQueue(label: "com.ellaaicare.ella.diagnostic-events")
     private let allowedKeys: Set<String> = [
         "schema_version", "event_id", "diagnostic_session_id", "capture_attempt_id",
@@ -70,6 +73,32 @@ final class EllaDiagnosticEventStore {
         "codec", "stable_failure_code", "expected_next_event", "deadline_ms",
         "safe_counters", "projection_revision", "action_revision"
     ]
+    private let requiredStringKeys: Set<String> = [
+        "schema_version", "event_id", "diagnostic_session_id", "capture_attempt_id",
+        "account_binding_fingerprint", "source_revision", "layer", "event_name",
+        "outcome", "retry_class", "client_utc_time"
+    ]
+    private let requiredIntegerKeys: Set<String> = [
+        "authority_generation", "client_sequence", "client_monotonic_ms"
+    ]
+    private let optionalStringKeys: Set<String> = [
+        "opaque_resource_id", "firmware", "codec", "stable_failure_code", "expected_next_event"
+    ]
+    private let optionalIntegerKeys: Set<String> = [
+        "deadline_ms", "projection_revision", "action_revision"
+    ]
+    private let allowedLayers: Set<String> = [
+        "account_binding", "ble_transport", "physical_audio", "server_capture", "publication", "presentation"
+    ]
+    private let allowedOutcomes: Set<String> = ["started", "succeeded", "failed", "cancelled", "unknown"]
+    private let allowedRetryClasses: Set<String> = ["never", "user_action", "bounded_automatic", "operator_only"]
+    private let allowedCounterKeys: Set<String> = ["frames", "bytes", "retry_number", "rssi_bucket", "queue_age_seconds"]
+    private let clientTimestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private let fallbackTimestampFormatter = ISO8601DateFormatter()
 
     private init() {}
 
@@ -97,6 +126,7 @@ final class EllaDiagnosticEventStore {
                     throw StoreError.eventTooLarge
                 }
                 try self.write(data, fingerprint: fingerprint)
+                try self.enforceGlobalRetention(preservingFingerprint: fingerprint)
                 DispatchQueue.main.async { completion(nil) }
             } catch {
                 DispatchQueue.main.async { completion(error) }
@@ -104,25 +134,12 @@ final class EllaDiagnosticEventStore {
         }
     }
 
-    func events(fingerprint: String, completion: @escaping ([[String: Any]]?, Error?) -> Void) {
+    func clearAll(completion: @escaping (Error?) -> Void) {
         queue.async {
             do {
-                try self.validateFingerprint(fingerprint)
-                let events = try self.readEvents(fingerprint: fingerprint)
-                DispatchQueue.main.async { completion(events, nil) }
-            } catch {
-                DispatchQueue.main.async { completion(nil, error) }
-            }
-        }
-    }
-
-    func clear(fingerprint: String, completion: @escaping (Error?) -> Void) {
-        queue.async {
-            do {
-                try self.validateFingerprint(fingerprint)
-                let url = try self.fileURL(fingerprint: fingerprint)
-                if FileManager.default.fileExists(atPath: url.path) {
-                    try FileManager.default.removeItem(at: url)
+                let directory = try self.diagnosticsDirectory(create: false)
+                if FileManager.default.fileExists(atPath: directory.path) {
+                    try FileManager.default.removeItem(at: directory)
                 }
                 DispatchQueue.main.async { completion(nil) }
             } catch {
@@ -136,6 +153,40 @@ final class EllaDiagnosticEventStore {
               event["schema_version"] as? String == "ella.diagnostic_event.v1",
               let fingerprint = event["account_binding_fingerprint"] as? String else {
             throw StoreError.invalidEvent
+        }
+        for key in requiredStringKeys {
+            guard let value = event[key] as? String, !value.isEmpty else { throw StoreError.invalidEvent }
+        }
+        for key in requiredIntegerKeys {
+            guard let value = event[key] as? Int, value >= 0 else { throw StoreError.invalidEvent }
+        }
+        for key in optionalStringKeys where event[key] != nil {
+            guard event[key] is String else { throw StoreError.invalidEvent }
+        }
+        for key in optionalIntegerKeys where event[key] != nil {
+            guard let value = event[key] as? Int, value >= 0 else { throw StoreError.invalidEvent }
+        }
+        guard let layer = event["layer"] as? String, allowedLayers.contains(layer),
+              let outcome = event["outcome"] as? String, allowedOutcomes.contains(outcome),
+              let retryClass = event["retry_class"] as? String, allowedRetryClasses.contains(retryClass),
+              let eventName = event["event_name"] as? String,
+              isSafeName(eventName),
+              isOpaqueIdentifier(event["event_id"] as! String),
+              isOpaqueIdentifier(event["diagnostic_session_id"] as! String),
+              isOpaqueIdentifier(event["capture_attempt_id"] as! String),
+              isValidClientTimestamp(event["client_utc_time"] as! String) else {
+            throw StoreError.invalidEvent
+        }
+        if let expectedNextEvent = event["expected_next_event"] as? String, !isSafeName(expectedNextEvent) {
+            throw StoreError.invalidEvent
+        }
+        if let counters = event["safe_counters"] {
+            guard let dictionary = counters as? [String: Any] else { throw StoreError.invalidEvent }
+            for (key, rawValue) in dictionary {
+                guard allowedCounterKeys.contains(key), let value = rawValue as? Int, value >= 0 else {
+                    throw StoreError.invalidEvent
+                }
+            }
         }
         try validateFingerprint(fingerprint)
         guard JSONSerialization.isValidJSONObject(event) else {
@@ -173,6 +224,18 @@ final class EllaDiagnosticEventStore {
         }
     }
 
+    private func isOpaqueIdentifier(_ value: String) -> Bool {
+        value.range(of: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", options: .regularExpression) != nil
+    }
+
+    private func isSafeName(_ value: String) -> Bool {
+        value.range(of: "^[a-z][a-z0-9_]{0,63}$", options: .regularExpression) != nil
+    }
+
+    private func isValidClientTimestamp(_ value: String) -> Bool {
+        clientTimestampFormatter.date(from: value) != nil || fallbackTimestampFormatter.date(from: value) != nil
+    }
+
     private func readEvents(fingerprint: String) throws -> [[String: Any]] {
         let url = try fileURL(fingerprint: fingerprint)
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
@@ -199,18 +262,84 @@ final class EllaDiagnosticEventStore {
 
     private func fileURL(fingerprint: String) throws -> URL {
         try validateFingerprint(fingerprint)
+        return try diagnosticsDirectory(create: true)
+            .appendingPathComponent("events-v1-\(fingerprint).json", isDirectory: false)
+    }
+
+    private func enforceGlobalRetention(preservingFingerprint: String) throws {
+        let directory = try diagnosticsDirectory(create: true)
+        let preservingURL = try fileURL(fingerprint: preservingFingerprint)
+        let resourceKeys: Set<URLResourceKey> = [
+            .isRegularFileKey,
+            .contentModificationDateKey,
+            .fileSizeKey
+        ]
+        let fileManager = FileManager.default
+        var files = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: Array(resourceKeys),
+            options: [.skipsHiddenFiles]
+        ).filter {
+            $0.lastPathComponent.hasPrefix("events-v1-") && $0.pathExtension == "json"
+        }
+        let expiry = Date().addingTimeInterval(-maxFileAge)
+
+        for file in files where file != preservingURL {
+            let values = try file.resourceValues(forKeys: resourceKeys)
+            if values.isRegularFile != true || (values.contentModificationDate ?? .distantPast) < expiry {
+                try fileManager.removeItem(at: file)
+            }
+        }
+
+        files = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: Array(resourceKeys),
+            options: [.skipsHiddenFiles]
+        ).filter {
+            $0.lastPathComponent.hasPrefix("events-v1-") && $0.pathExtension == "json"
+        }
+        files.sort { left, right in
+            if left == preservingURL { return true }
+            if right == preservingURL { return false }
+            let leftDate = (try? left.resourceValues(forKeys: resourceKeys).contentModificationDate) ?? .distantPast
+            let rightDate = (try? right.resourceValues(forKeys: resourceKeys).contentModificationDate) ?? .distantPast
+            return leftDate > rightDate
+        }
+
+        var retainedFiles = 0
+        var retainedBytes = 0
+        for file in files {
+            let values = try file.resourceValues(forKeys: resourceKeys)
+            guard values.isRegularFile == true else {
+                try fileManager.removeItem(at: file)
+                continue
+            }
+            let fileBytes = max(0, values.fileSize ?? 0)
+            let withinBudget = retainedFiles < maxPartitionFiles && retainedBytes + fileBytes <= maxTotalBytes
+            if file == preservingURL || withinBudget {
+                retainedFiles += 1
+                retainedBytes += fileBytes
+            } else {
+                try fileManager.removeItem(at: file)
+            }
+        }
+    }
+
+    private func diagnosticsDirectory(create: Bool) throws -> URL {
         let root = try FileManager.default.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,
             appropriateFor: nil,
-            create: true
+            create: create
         ).appendingPathComponent("EllaDiagnostics", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: root,
-            withIntermediateDirectories: true,
-            attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
-        )
-        return root.appendingPathComponent("events-v1-\(fingerprint.prefix(24)).json", isDirectory: false)
+        if create {
+            try FileManager.default.createDirectory(
+                at: root,
+                withIntermediateDirectories: true,
+                attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
+            )
+        }
+        return root
     }
 
     private enum StoreError: String, LocalizedError {

@@ -35,6 +35,7 @@ import 'package:omi/providers/message_provider.dart';
 import 'package:omi/providers/people_provider.dart';
 import 'package:omi/providers/usage_provider.dart';
 import 'package:omi/services/connectivity_service.dart';
+import 'package:omi/services/devices/device_connection.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/services/sockets/transcription_service.dart';
 import 'package:omi/services/wals.dart';
@@ -273,6 +274,7 @@ typedef CaptureGeolocationSender = Future<bool> Function({
 });
 typedef CaptureConsentAuthorityEnsurer = Future<bool> Function();
 typedef DeviceCaptureStarter = Future<bool> Function();
+typedef DeviceConnectionEnsurer = Future<DeviceConnection?> Function(String deviceId);
 typedef PhoneCaptureStarter = Future<PhoneCaptureStartResult> Function();
 typedef PhoneTranscriptionPreparer = Future<bool> Function();
 typedef PhoneAudioSender = bool Function(Uint8List bytes);
@@ -531,6 +533,7 @@ class CaptureProvider extends ChangeNotifier
   final Set<Future<bool>> _captureGeolocationFutures = <Future<bool>>{};
   final CaptureConsentAuthorityEnsurer? _captureConsentAuthorityEnsurer;
   final DeviceCaptureStarter? _deviceCaptureStarter;
+  final DeviceConnectionEnsurer? _deviceConnectionEnsurer;
   final DeviceTranscriptionSocketPreparer? _deviceTranscriptionSocketPreparer;
   final PhoneCaptureStarter? _phoneCaptureStarter;
   final IMicRecorderService? _phoneMicRecorder;
@@ -601,6 +604,7 @@ class CaptureProvider extends ChangeNotifier
     CaptureGeolocationSender? geolocationSender,
     CaptureConsentAuthorityEnsurer? captureConsentAuthorityEnsurer,
     DeviceCaptureStarter? deviceCaptureStarter,
+    DeviceConnectionEnsurer? deviceConnectionEnsurer,
     DeviceTranscriptionSocketPreparer? deviceTranscriptionSocketPreparer,
     PhoneCaptureStarter? phoneCaptureStarter,
     IMicRecorderService? phoneMicRecorder,
@@ -621,6 +625,7 @@ class CaptureProvider extends ChangeNotifier
         _geolocationSender = geolocationSender,
         _captureConsentAuthorityEnsurer = captureConsentAuthorityEnsurer,
         _deviceCaptureStarter = deviceCaptureStarter,
+        _deviceConnectionEnsurer = deviceConnectionEnsurer,
         _deviceTranscriptionSocketPreparer = deviceTranscriptionSocketPreparer,
         _phoneCaptureStarter = phoneCaptureStarter,
         _phoneMicRecorder = phoneMicRecorder,
@@ -932,6 +937,7 @@ class CaptureProvider extends ChangeNotifier
   bool get shouldAutoResumeAfterWake => _shouldAutoResumeAfterWake;
 
   bool _transcriptServiceReady = false;
+  TranscriptSocketStartFailure? _lastDeviceSocketStartFailure;
 
   bool get transcriptServiceReady => _transcriptServiceReady && _isConnected;
 
@@ -1263,14 +1269,17 @@ class CaptureProvider extends ChangeNotifier
     }
 
     // Connect to the transcript socket
-    _socket = await ServiceManager.instance().socket.conversation(
-          codec: codec,
-          sampleRate: sampleRate,
-          language: language,
-          force: force,
-          source: source,
-          customSttConfig: effectiveConfig,
-        );
+    _lastDeviceSocketStartFailure = null;
+    final socketService = ServiceManager.instance().socket;
+    _socket = await socketService.conversation(
+      codec: codec,
+      sampleRate: sampleRate,
+      language: language,
+      force: force,
+      source: source,
+      customSttConfig: effectiveConfig,
+    );
+    _lastDeviceSocketStartFailure = socketService.lastConversationStartFailure;
     if (_socket == null) {
       _startKeepAliveServices();
       Logger.debug("Can not create new conversation socket");
@@ -1325,11 +1334,16 @@ class CaptureProvider extends ChangeNotifier
     _processVoiceCommandBytes(deviceId, data);
   }
 
-  Future<StreamSubscription?> _streamButton(String deviceId, _DeviceCaptureSession session) async {
+  Future<StreamSubscription?> _streamButton(
+    String deviceId,
+    _DeviceCaptureSession session, {
+    DeviceConnection? connection,
+  }) async {
     Logger.debug('streamButton in capture_provider');
     await _bleButtonStream?.cancel();
     final subscription = await _getBleButtonListener(
       deviceId,
+      connection: connection,
       onButtonReceived: (List<int> value) {
         if (!_isDeviceCaptureCurrent(session)) return;
         final snapshot = List<int>.from(value);
@@ -1447,6 +1461,7 @@ class CaptureProvider extends ChangeNotifier
     BleAudioCodec codec, {
     required _DeviceCaptureSession session,
     DeviceCaptureStartProof? startProof,
+    DeviceConnection? connection,
   }) async {
     if (!SharedPreferencesUtil().aiConsentAccepted) {
       await _bleBytesStream?.cancel();
@@ -1462,6 +1477,7 @@ class CaptureProvider extends ChangeNotifier
     _startMetricsTracking();
     final subscription = await _getBleAudioBytesListener(
       deviceId,
+      connection: connection,
       onAudioBytesReceived: (List<int> value) {
         _handleDeviceAudioFrame(session, codec, value, startProof: startProof);
       },
@@ -1626,23 +1642,25 @@ class CaptureProvider extends ChangeNotifier
   Future<StreamSubscription?> _getBleAudioBytesListener(
     String deviceId, {
     required void Function(List<int>) onAudioBytesReceived,
+    DeviceConnection? connection,
   }) async {
-    var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
-    if (connection == null) {
+    final activeConnection = connection ?? await ServiceManager.instance().device.ensureConnection(deviceId);
+    if (activeConnection == null) {
       return Future.value(null);
     }
-    return connection.getBleAudioBytesListener(onAudioBytesReceived: onAudioBytesReceived);
+    return activeConnection.getBleAudioBytesListener(onAudioBytesReceived: onAudioBytesReceived);
   }
 
   Future<StreamSubscription?> _getBleButtonListener(
     String deviceId, {
     required void Function(List<int>) onButtonReceived,
+    DeviceConnection? connection,
   }) async {
-    var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
-    if (connection == null) {
+    final activeConnection = connection ?? await ServiceManager.instance().device.ensureConnection(deviceId);
+    if (activeConnection == null) {
       return Future.value(null);
     }
-    return connection.getBleButtonListener(onButtonReceived: onButtonReceived);
+    return activeConnection.getBleButtonListener(onButtonReceived: onButtonReceived);
   }
 
   Future<TranscriptSegmentSocketService?> _ensureDeviceSocketConnection(BtDevice device, {bool force = false}) async {
@@ -1651,9 +1669,11 @@ class CaptureProvider extends ChangeNotifier
       final prepared = await testPreparer(device, force: force);
       _socket = prepared;
       if (prepared == null || prepared.state != SocketServiceState.connected) {
+        _lastDeviceSocketStartFailure = prepared?.lastStartFailure ?? TranscriptSocketStartFailure.transportUnavailable;
         _transcriptServiceReady = false;
         return null;
       }
+      _lastDeviceSocketStartFailure = null;
       prepared.subscribe(this, this);
       _transcriptServiceReady = true;
       return prepared;
@@ -1674,6 +1694,18 @@ class CaptureProvider extends ChangeNotifier
     }
     final socket = _socket;
     return socket?.state == SocketServiceState.connected ? socket : null;
+  }
+
+  EllaDiagnosticFailureCode _diagnosticSocketFailureCode() {
+    switch (_lastDeviceSocketStartFailure) {
+      case TranscriptSocketStartFailure.consentUnavailable:
+        return EllaDiagnosticFailureCode.accountAuthorityChanged;
+      case TranscriptSocketStartFailure.captureProtocolTimeout:
+        return EllaDiagnosticFailureCode.captureReadyTimeout;
+      case TranscriptSocketStartFailure.transportUnavailable:
+      case null:
+        return EllaDiagnosticFailureCode.websocketUnavailable;
+    }
   }
 
   Future<bool> _replaceDeviceCaptureSocket(
@@ -1761,11 +1793,55 @@ class CaptureProvider extends ChangeNotifier
         ),
       );
     }
-    final connection = await ServiceManager.instance().device.ensureConnection(deviceId);
-    if (connection == null || !_isDeviceCaptureCurrent(session)) {
+    final connection =
+        await (_deviceConnectionEnsurer?.call(deviceId) ?? ServiceManager.instance().device.ensureConnection(deviceId));
+    if (connection == null) {
+      if (diagnosticTrace != null) {
+        unawaited(
+          Future.wait<void>([
+            diagnosticTrace.emit(
+              layer: EllaDiagnosticLayer.bleTransport,
+              eventName: 'peripheral_connected',
+              outcome: EllaDiagnosticOutcome.failed,
+              retryClass: EllaDiagnosticRetryClass.boundedAutomatic,
+              failureCode: EllaDiagnosticFailureCode.peripheralConnectTimeout,
+            ),
+            diagnosticTrace.emit(
+              layer: EllaDiagnosticLayer.physicalAudio,
+              eventName: 'audio_subscription_open',
+              outcome: EllaDiagnosticOutcome.failed,
+              retryClass: EllaDiagnosticRetryClass.boundedAutomatic,
+              failureCode: EllaDiagnosticFailureCode.peripheralConnectTimeout,
+            ),
+          ]),
+        );
+      }
       return false;
     }
-    final codec = await _getAudioCodec(deviceId);
+    if (!_isDeviceCaptureCurrent(session)) {
+      if (diagnosticTrace != null) {
+        unawaited(
+          Future.wait<void>([
+            diagnosticTrace.emit(
+              layer: EllaDiagnosticLayer.bleTransport,
+              eventName: 'peripheral_connected',
+              outcome: EllaDiagnosticOutcome.cancelled,
+              retryClass: EllaDiagnosticRetryClass.never,
+              failureCode: EllaDiagnosticFailureCode.accountAuthorityChanged,
+            ),
+            diagnosticTrace.emit(
+              layer: EllaDiagnosticLayer.physicalAudio,
+              eventName: 'audio_subscription_open',
+              outcome: EllaDiagnosticOutcome.cancelled,
+              retryClass: EllaDiagnosticRetryClass.never,
+              failureCode: EllaDiagnosticFailureCode.accountAuthorityChanged,
+            ),
+          ]),
+        );
+      }
+      return false;
+    }
+    final codec = await connection.getAudioCodec();
     await _wal.getSyncs().phone.onAudioCodecChanged(codec);
 
     // Set device info for WAL creation
@@ -1773,11 +1849,55 @@ class CaptureProvider extends ChangeNotifier
     final deviceModel = pd.modelNumber.isNotEmpty ? pd.modelNumber : "Omi";
     _wal.getSyncs().phone.setDeviceInfo(deviceId, deviceModel);
 
-    await _streamButton(deviceId, session);
+    await _streamButton(deviceId, session, connection: connection);
     final startProof = DeviceCaptureStartProof();
-    final subscription = await _streamAudioToWs(deviceId, codec, session: session, startProof: startProof);
-    if (subscription == null || !_isDeviceCaptureCurrent(session)) {
+    final subscription = await _streamAudioToWs(
+      deviceId,
+      codec,
+      session: session,
+      startProof: startProof,
+      connection: connection,
+    );
+    if (subscription == null) {
+      if (diagnosticTrace != null) {
+        unawaited(
+          diagnosticTrace.emit(
+            layer: EllaDiagnosticLayer.physicalAudio,
+            eventName: 'audio_subscription_open',
+            outcome: EllaDiagnosticOutcome.failed,
+            retryClass: EllaDiagnosticRetryClass.boundedAutomatic,
+            failureCode: EllaDiagnosticFailureCode.notificationSubscriptionFailed,
+          ),
+        );
+      }
       return false;
+    }
+    if (!_isDeviceCaptureCurrent(session)) {
+      await subscription.cancel();
+      if (diagnosticTrace != null) {
+        unawaited(
+          diagnosticTrace.emit(
+            layer: EllaDiagnosticLayer.physicalAudio,
+            eventName: 'audio_subscription_open',
+            outcome: EllaDiagnosticOutcome.cancelled,
+            retryClass: EllaDiagnosticRetryClass.never,
+            failureCode: EllaDiagnosticFailureCode.accountAuthorityChanged,
+          ),
+        );
+      }
+      return false;
+    }
+    if (diagnosticTrace != null) {
+      unawaited(
+        diagnosticTrace.emit(
+          layer: EllaDiagnosticLayer.physicalAudio,
+          eventName: 'audio_subscription_open',
+          outcome: EllaDiagnosticOutcome.succeeded,
+          retryClass: EllaDiagnosticRetryClass.never,
+          expectedNextEvent: 'audio_first_frame',
+          deadlineMs: _captureStartProofTimeout.inMilliseconds,
+        ),
+      );
     }
     _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.waitingForAudio, clearFailure: true);
     try {
@@ -1810,20 +1930,6 @@ class CaptureProvider extends ChangeNotifier
       }
       return false;
     }
-    if (!_isDeviceCaptureCurrent(session) || session.socket.state != SocketServiceState.connected) {
-      if (_isDeviceCaptureCurrent(session)) {
-        await _failDeviceCaptureSession(session, 'Necklace transcription disconnected during physical start');
-      } else {
-        await _closeDeviceCaptureSession(session, stopSocket: false);
-      }
-      return false;
-    }
-
-    // Recording is visible after physical BLE audio is proven. The socket is
-    // still prepared first and receives frames when connected, but transport
-    // latency does not rewrite physical necklace state.
-    updateRecordingState(RecordingState.deviceRecord);
-    _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.streaming, clearFailure: true);
     if (diagnosticTrace != null) {
       unawaited(
         diagnosticTrace.emit(
@@ -1839,6 +1945,20 @@ class CaptureProvider extends ChangeNotifier
         ),
       );
     }
+    if (!_isDeviceCaptureCurrent(session) || session.socket.state != SocketServiceState.connected) {
+      if (_isDeviceCaptureCurrent(session)) {
+        await _failDeviceCaptureSession(session, 'Necklace transcription disconnected during physical start');
+      } else {
+        await _closeDeviceCaptureSession(session, stopSocket: false);
+      }
+      return false;
+    }
+
+    // Recording is visible after physical BLE audio is proven. The socket is
+    // still prepared first and receives frames when connected, but transport
+    // latency does not rewrite physical necklace state.
+    updateRecordingState(RecordingState.deviceRecord);
+    _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.streaming, clearFailure: true);
     notifyListeners();
     if (await connection.hasPhotoStreamingCharacteristic() && _isDeviceCaptureCurrent(session)) {
       await _initiateDevicePhotoStreaming(session);
@@ -2539,6 +2659,7 @@ class CaptureProvider extends ChangeNotifier
           expectedNextEvent: 'capture_authority_current',
           deadlineMs: 15000,
           firmware: targetDevice.firmwareRevision,
+          safeCounters: <String, int>{'retry_number': trace.retryNumber},
         ),
       );
     }
@@ -2660,10 +2781,10 @@ class CaptureProvider extends ChangeNotifier
         unawaited(
           diagnosticTrace.emit(
             layer: EllaDiagnosticLayer.serverCapture,
-            eventName: 'websocket_authenticated',
+            eventName: 'websocket_connected',
             outcome: EllaDiagnosticOutcome.failed,
             retryClass: EllaDiagnosticRetryClass.boundedAutomatic,
-            failureCode: EllaDiagnosticFailureCode.websocketAuthFailed,
+            failureCode: EllaDiagnosticFailureCode.websocketUnavailable,
           ),
         );
       }
@@ -2688,7 +2809,7 @@ class CaptureProvider extends ChangeNotifier
             eventName: 'capture_protocol_ready',
             outcome: EllaDiagnosticOutcome.failed,
             retryClass: EllaDiagnosticRetryClass.boundedAutomatic,
-            failureCode: EllaDiagnosticFailureCode.captureReadyTimeout,
+            failureCode: _diagnosticSocketFailureCode(),
           ),
         );
       }
@@ -2817,7 +2938,20 @@ class CaptureProvider extends ChangeNotifier
     updateRecordingState(RecordingState.stop);
     final shouldFinalize = _captureDiagnostics.hasPhysicalAudio || hasCapturableContent;
     try {
-      final finalized = shouldFinalize && await _serializedDeviceCaptureFinalization();
+      if (!shouldFinalize) {
+        if (diagnosticTrace != null) {
+          unawaited(
+            diagnosticTrace.emit(
+              layer: EllaDiagnosticLayer.publication,
+              eventName: 'capture_finalized',
+              outcome: EllaDiagnosticOutcome.cancelled,
+              retryClass: EllaDiagnosticRetryClass.never,
+            ),
+          );
+        }
+        return false;
+      }
+      final finalized = await _serializedDeviceCaptureFinalization();
       if (diagnosticTrace != null) {
         unawaited(
           diagnosticTrace.emit(
@@ -2825,11 +2959,37 @@ class CaptureProvider extends ChangeNotifier
             eventName: 'capture_finalized',
             outcome: finalized ? EllaDiagnosticOutcome.succeeded : EllaDiagnosticOutcome.failed,
             retryClass: finalized ? EllaDiagnosticRetryClass.never : EllaDiagnosticRetryClass.userAction,
-            failureCode: finalized ? null : EllaDiagnosticFailureCode.finalizationTimeout,
+            failureCode: finalized ? null : EllaDiagnosticFailureCode.captureDrainAmbiguous,
           ),
         );
       }
       return finalized;
+    } on TimeoutException {
+      if (diagnosticTrace != null) {
+        unawaited(
+          diagnosticTrace.emit(
+            layer: EllaDiagnosticLayer.publication,
+            eventName: 'capture_finalized',
+            outcome: EllaDiagnosticOutcome.failed,
+            retryClass: EllaDiagnosticRetryClass.userAction,
+            failureCode: EllaDiagnosticFailureCode.finalizationTimeout,
+          ),
+        );
+      }
+      return false;
+    } catch (_) {
+      if (diagnosticTrace != null) {
+        unawaited(
+          diagnosticTrace.emit(
+            layer: EllaDiagnosticLayer.publication,
+            eventName: 'capture_finalized',
+            outcome: EllaDiagnosticOutcome.failed,
+            retryClass: EllaDiagnosticRetryClass.userAction,
+            failureCode: EllaDiagnosticFailureCode.captureDrainAmbiguous,
+          ),
+        );
+      }
+      return false;
     } finally {
       if (_socket?.state == SocketServiceState.connected) {
         await _socket?.stop(reason: 'necklace capture finalized');

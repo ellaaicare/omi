@@ -10,7 +10,12 @@ import 'package:omi/services/wals/wal_owner_authority.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  ActiveWalAuthority authority({String uid = 'firebase-user-a', String profile = 'profile-a', int generation = 7}) {
+  ActiveWalAuthority authority({
+    String uid = 'firebase-user-a',
+    String profile = 'profile-a',
+    int generation = 7,
+    bool Function()? currentCheck,
+  }) {
     final owner = WalOwner(
       uid: uid,
       profileBindingId: profile,
@@ -31,7 +36,7 @@ void main() {
         scopeVersion: 'scope-v1',
         scopeHash: 'scope-hash',
       ),
-      currentCheck: () => true,
+      currentCheck: currentCheck ?? () => true,
     );
   }
 
@@ -84,6 +89,55 @@ void main() {
     expect(first.captureAttemptId, isNot(otherDevice.captureAttemptId));
   });
 
+  test('bounded retries retain one session but use fresh attempt ids and a monotonic sequence', () async {
+    final sink = InMemoryEllaDiagnosticEventSink();
+    final first = EllaDiagnosticCaptureTrace.begin(authority: authority(), deviceIdentifier: 'device-a', sink: sink);
+    final second = first.nextAttempt();
+    final third = second.nextAttempt();
+
+    for (final trace in <EllaDiagnosticCaptureTrace>[first, second, third]) {
+      await trace.emit(
+        layer: EllaDiagnosticLayer.bleTransport,
+        eventName: 'capture_attempt_started',
+        outcome: EllaDiagnosticOutcome.started,
+        retryClass: EllaDiagnosticRetryClass.boundedAutomatic,
+        safeCounters: <String, int>{'retry_number': trace.retryNumber},
+      );
+    }
+
+    expect(sink.events.map((event) => event.diagnosticSessionId).toSet(), {first.diagnosticSessionId});
+    expect(sink.events.map((event) => event.captureAttemptId).toSet(), hasLength(3));
+    expect(sink.events.map((event) => event.clientSequence), <int>[0, 1, 2]);
+    expect(<int>[first.retryNumber, second.retryNumber, third.retryNumber], <int>[1, 2, 3]);
+    expect(sink.events.map((event) => event.safeCounters['retry_number']), <int?>[1, 2, 3]);
+  });
+
+  test('diagnostics stop writing immediately when the exact capture authority drifts', () async {
+    var current = true;
+    final sink = InMemoryEllaDiagnosticEventSink();
+    final trace = EllaDiagnosticCaptureTrace.begin(
+      authority: authority(currentCheck: () => current),
+      deviceIdentifier: 'device-a',
+      sink: sink,
+    );
+
+    await trace.emit(
+      layer: EllaDiagnosticLayer.bleTransport,
+      eventName: 'peripheral_connected',
+      outcome: EllaDiagnosticOutcome.succeeded,
+      retryClass: EllaDiagnosticRetryClass.never,
+    );
+    current = false;
+    await trace.emit(
+      layer: EllaDiagnosticLayer.physicalAudio,
+      eventName: 'audio_first_frame',
+      outcome: EllaDiagnosticOutcome.succeeded,
+      retryClass: EllaDiagnosticRetryClass.never,
+    );
+
+    expect(sink.events.map((event) => event.eventName), <String>['peripheral_connected']);
+  });
+
   test('event rejects non-allowlisted counters and identifying values', () {
     final trace = EllaDiagnosticCaptureTrace.begin(
       authority: authority(),
@@ -108,6 +162,39 @@ void main() {
     );
 
     expect(event.toJson, throwsStateError);
+  });
+
+  test('rejected diagnostic values and sink failures never escape capture callers', () async {
+    final invalidValueTrace = EllaDiagnosticCaptureTrace.begin(
+      authority: authority(),
+      deviceIdentifier: 'device-a',
+      sink: InMemoryEllaDiagnosticEventSink(),
+    );
+    final failingSinkTrace = EllaDiagnosticCaptureTrace.begin(
+      authority: authority(),
+      deviceIdentifier: 'device-a',
+      sink: _ThrowingDiagnosticSink(),
+    );
+
+    await expectLater(
+      invalidValueTrace.emit(
+        layer: EllaDiagnosticLayer.bleTransport,
+        eventName: 'peripheral_connected',
+        outcome: EllaDiagnosticOutcome.succeeded,
+        retryClass: EllaDiagnosticRetryClass.never,
+        firmware: 'https://example.invalid/private',
+      ),
+      completes,
+    );
+    await expectLater(
+      failingSinkTrace.emit(
+        layer: EllaDiagnosticLayer.bleTransport,
+        eventName: 'peripheral_connected',
+        outcome: EllaDiagnosticOutcome.succeeded,
+        retryClass: EllaDiagnosticRetryClass.never,
+      ),
+      completes,
+    );
   });
 
   test('in-memory journal remains bounded', () async {
@@ -154,4 +241,39 @@ void main() {
     expect(payload.keys, isNot(contains('url')));
     expect(payload.keys, isNot(contains('transcript')));
   });
+
+  test('platform journal exposes only append and whole-store identity-transition purge', () async {
+    const channel = MethodChannel('test.ella/diagnostic_events.clear');
+    final calls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call);
+      return null;
+    });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null),
+    );
+
+    await EllaDiagnosticEventJournal(channel: channel).clearAll();
+
+    expect(calls.single.method, 'clearAllEvents');
+    expect(calls.single.arguments, isNull);
+  });
+
+  test('identity-transition purge fails closed when native storage cannot be cleared', () async {
+    const channel = MethodChannel('test.ella/diagnostic_events.clear.failure');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+      channel,
+      (_) async => throw PlatformException(code: 'storage_unavailable'),
+    );
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null),
+    );
+
+    expect(EllaDiagnosticEventJournal(channel: channel).clearAll, throwsA(isA<PlatformException>()));
+  });
+}
+
+class _ThrowingDiagnosticSink implements EllaDiagnosticEventSink {
+  @override
+  Future<void> append(EllaDiagnosticEvent event) => Future<void>.error(StateError('synthetic persistence failure'));
 }

@@ -18,6 +18,7 @@ import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/ella/services/ella_account_isolation_service.dart';
+import 'package:omi/ella/services/diagnostics/ella_diagnostic_event_journal.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 
@@ -39,6 +40,7 @@ class AuthService {
 
   Future<T> runIdentityTransition<T>(Future<T> Function() mutation) async {
     await const EllaAccountIsolationService().stopForAccountTransition();
+    await EllaDiagnosticEventJournal.instance.clearAll();
     return mutation();
   }
 
@@ -164,9 +166,9 @@ class AuthService {
   /// caches cannot survive into the next account, while callers that already
   /// need cleanup do not invoke the full shutdown sequence a second time.
   Future<void> signOutWithQuiescedCleanup(Future<void> Function() cleanup) => runIdentityTransition(() async {
-    await cleanup();
-    await FirebaseAuth.instance.signOut();
-  });
+        await cleanup();
+        await FirebaseAuth.instance.signOut();
+      });
 
   Future<void> signOut() => signOutWithQuiescedCleanup(() async {});
 

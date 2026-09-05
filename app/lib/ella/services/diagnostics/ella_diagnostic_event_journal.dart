@@ -24,30 +24,14 @@ class EllaDiagnosticEventJournal implements EllaDiagnosticEventSink {
     }
   }
 
-  Future<List<Map<String, Object?>>> eventsFor(String accountBindingFingerprint) async {
+  /// Purge the complete local journal before Firebase identity changes. There
+  /// is intentionally no caller-selected read API until a support-grant
+  /// contract can bind access to the current authenticated account.
+  Future<void> clearAll() async {
     try {
-      final events = await _channel.invokeListMethod<Map<Object?, Object?>>('getEvents', <String, Object?>{
-        'account_binding_fingerprint': accountBindingFingerprint,
-      });
-      return (events ?? const <Map<Object?, Object?>>[])
-          .map((event) => event.map((key, value) => MapEntry(key.toString(), value)))
-          .toList(growable: false);
-    } on MissingPluginException {
-      return const <Map<String, Object?>>[];
-    } on PlatformException {
-      return const <Map<String, Object?>>[];
-    }
-  }
-
-  Future<void> clearFor(String accountBindingFingerprint) async {
-    try {
-      await _channel.invokeMethod<void>('clearEvents', <String, Object?>{
-        'account_binding_fingerprint': accountBindingFingerprint,
-      });
+      await _channel.invokeMethod<void>('clearAllEvents');
     } on MissingPluginException {
       // Non-iOS platforms do not persist the iOS support journal.
-    } on PlatformException catch (error) {
-      debugPrint('Ella diagnostic events were not cleared: ${error.code}');
     }
   }
 }
