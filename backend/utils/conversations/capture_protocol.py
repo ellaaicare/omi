@@ -142,6 +142,38 @@ def _lease_expired(data: Dict[str, Any], now: datetime, field: str = 'lease_expi
     return not isinstance(expires_at, datetime) or _aware(expires_at) <= now
 
 
+def _authority_live_for_reconnect(authority: Dict[str, Any], now: datetime) -> bool:
+    state = str(authority.get('state') or '')
+    if state in {'drained', 'terminal'}:
+        return False
+    if state == 'finalizing':
+        return not _lease_expired(authority, now, field='finalization_lease_expires_at')
+    return not _lease_expired(authority, now)
+
+
+def _strict_lease_expired(data: Dict[str, Any], now: datetime, field: str) -> bool:
+    expires_at = data.get(field)
+    return isinstance(expires_at, datetime) and _aware(expires_at) <= now
+
+
+def _durable_capture_side_is_quiescent(
+    data: Dict[str, Any],
+    now: datetime,
+    *,
+    state_field: str,
+    lease_field: str,
+    finalization_lease_field: str,
+) -> bool:
+    state = str(data.get(state_field) or '')
+    if state in {'drained', 'terminal'}:
+        return True
+    if state == 'active':
+        return _strict_lease_expired(data, now, lease_field)
+    if state == 'finalizing':
+        return _strict_lease_expired(data, now, finalization_lease_field)
+    return False
+
+
 def _finalization_claim_is_live(
     authority: Dict[str, Any],
     conversation: Dict[str, Any],
@@ -174,6 +206,129 @@ def capture_finalization_effect_operation_token(
             uuid.NAMESPACE_URL,
             f'omi:capture-finalization:{conversation_id}:{generation}:{owner_token}:{effect_id}',
         )
+    )
+
+
+@transactional
+def _claim_reconnect_authority_transaction(
+    transaction,
+    authority_ref,
+    conversation_ref,
+    conversation_id: str,
+    generation: str,
+    expected_owner_token: Optional[str],
+    owner_token: str,
+    now: datetime,
+) -> bool:
+    """Atomically fence an expired capture generation before reconnect publication."""
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    if not conversation_snapshot.exists:
+        return False
+    conversation = conversation_snapshot.to_dict() or {}
+    if (
+        _status_value(conversation.get('status')) != 'in_progress'
+        or str(conversation.get('id') or '') != conversation_id
+        or str(conversation.get('capture_owner_id') or '') != str(expected_owner_token or '')
+    ):
+        return False
+
+    authority_snapshot = authority_ref.get(transaction=transaction)
+    authority = authority_snapshot.to_dict() if authority_snapshot.exists else {}
+    exact_claim = bool(
+        authority.get('state') == 'active'
+        and conversation.get('capture_state') == 'active'
+        and _authority_tuple_matches(authority, conversation_id, generation, owner_token)
+        and _conversation_tuple_matches(conversation, conversation_id, generation, owner_token)
+        and str(conversation.get('capture_owner_id') or '') == owner_token
+        and isinstance(authority.get('lease_expires_at'), datetime)
+        and _aware(authority['lease_expires_at']) > now
+        and isinstance(conversation.get('capture_lease_expires_at'), datetime)
+        and _aware(conversation['capture_lease_expires_at']) > now
+    )
+    if exact_claim:
+        return True
+
+    conversation_has_v2_state = any(
+        field in conversation
+        for field in (
+            'capture_protocol_version',
+            'capture_generation',
+            'capture_owner_token',
+            'capture_state',
+            'capture_lease_expires_at',
+            'capture_finalization_lease_expires_at',
+        )
+    )
+    if authority or conversation_has_v2_state:
+        prior_generation = str(authority.get('generation') or '')
+        prior_owner_token = str(authority.get('owner_token') or '')
+        if (
+            not prior_generation
+            or not prior_owner_token
+            or not _authority_tuple_matches(authority, conversation_id, prior_generation, prior_owner_token)
+            or not _conversation_tuple_matches(conversation, conversation_id, prior_generation, prior_owner_token)
+            or not _durable_capture_side_is_quiescent(
+                authority,
+                now,
+                state_field='state',
+                lease_field='lease_expires_at',
+                finalization_lease_field='finalization_lease_expires_at',
+            )
+            or not _durable_capture_side_is_quiescent(
+                conversation,
+                now,
+                state_field='capture_state',
+                lease_field='capture_lease_expires_at',
+                finalization_lease_field='capture_finalization_lease_expires_at',
+            )
+        ):
+            return False
+
+    lease_expires_at = now + timedelta(seconds=CAPTURE_AUTHORITY_LEASE_SECONDS)
+    transaction.set(
+        authority_ref,
+        {
+            'protocol_version': CAPTURE_PROTOCOL_VERSION,
+            'conversation_id': conversation_id,
+            'generation': generation,
+            'owner_token': owner_token,
+            'state': 'active',
+            'lease_expires_at': lease_expires_at,
+            'updated_at': now,
+        },
+    )
+    transaction.update(
+        conversation_ref,
+        {
+            'capture_owner_id': owner_token,
+            'capture_protocol_version': CAPTURE_PROTOCOL_VERSION,
+            'capture_generation': generation,
+            'capture_owner_token': owner_token,
+            'capture_state': 'active',
+            'capture_lease_expires_at': lease_expires_at,
+            'capture_drained_at': None,
+            'capture_finalization_claim_token': None,
+        },
+    )
+    return True
+
+
+def claim_capture_authority_for_reconnect(
+    uid: str,
+    conversation_id: str,
+    generation: str,
+    expected_owner_token: Optional[str],
+    owner_token: str,
+) -> bool:
+    return _claim_reconnect_authority_transaction(
+        db.transaction(),
+        _authority_ref(uid),
+        _conversation_ref(uid, conversation_id),
+        conversation_id,
+        generation,
+        expected_owner_token,
+        owner_token,
+        datetime.now(timezone.utc),
     )
 
 
