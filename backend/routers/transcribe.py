@@ -3458,11 +3458,11 @@ async def web_listen_handler(
         await websocket.close(code=1013, reason="Ella setup incomplete")
         return
 
-    diagnostic_correlation = await _validate_socket_diagnostic_correlation(websocket, uid)
-
     # Send success response
     await websocket.send_json({"type": "auth_response", "success": True})
     print("web_listen_handler authenticated", uid)
+
+    diagnostic_correlation = await _validate_socket_diagnostic_correlation(websocket, uid)
 
     # Proceed with streaming (websocket already accepted, uid already validated)
     custom_stt_mode = CustomSttMode.enabled if custom_stt == 'enabled' else CustomSttMode.disabled
