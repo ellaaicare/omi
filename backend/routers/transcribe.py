@@ -75,6 +75,7 @@ from utils.conversations.process_conversation import (
 )
 from utils.conversations.capture_protocol import (
     CAPTURE_PROTOCOL_VERSION,
+    capture_drain_diagnostic_correlation_matches,
     claim_capture_authority_for_reconnect,
     complete_rotated_capture,
     flush_capture_before_drained,
@@ -93,6 +94,7 @@ from utils.capture_buffer import (
     queue_pusher_transcript_batch,
 )
 from utils.ella.memory_artwork_storage import acquire_memory_artwork_publication_lock
+from utils.ella.account_diagnostics import CaptureDiagnosticCorrelation
 from utils.ella.scanner_keyterms import cache_status as scanner_keyterm_cache_status
 from utils.ella.scanner_keyterms import combine_deepgram_keyterms, get_scanner_keyterms
 from utils.notifications import send_credit_limit_notification, send_silent_user_notification
@@ -125,6 +127,10 @@ from ella.routers.auto_provision import (
     listen_runtime_gate,
 )
 from ella.services.ai_consent import assert_current_ai_consent, require_current_ai_consent, resolve_processor
+from ella.services.account_diagnostics import (
+    DiagnosticCorrelationAuthorityError,
+    validate_capture_diagnostic_correlation,
+)
 
 from utils.aac import AACDecoder
 from utils.audio import AudioRingBuffer
@@ -137,7 +143,8 @@ from utils.speaker_sample_migration import maybe_migrate_person_samples
 
 router = APIRouter()
 
-
+DIAGNOSTIC_CORRELATION_VALIDATION_TIMEOUT_SECONDS = 0.25
+DIAGNOSTIC_CORRELATION_STATUS_TIMEOUT_SECONDS = 0.05
 PUSHER_ENABLED = bool(os.getenv('HOSTED_PUSHER_API_URL'))
 CAPTURE_CONVERSATION_ID_KEY = "_capture_conversation_id"
 
@@ -236,6 +243,42 @@ def _stt_service_value(service: Optional[STTService]) -> Optional[str]:
     return service.value if isinstance(service, STTService) else service
 
 
+async def _validate_socket_diagnostic_correlation(
+    websocket: WebSocket,
+    uid: str,
+) -> Optional[CaptureDiagnosticCorrelation]:
+    """Validate evidence after auth without allowing diagnostics to block capture."""
+    rejection_code: Optional[str] = None
+    try:
+        return await asyncio.wait_for(
+            validate_capture_diagnostic_correlation(uid, websocket.headers),
+            timeout=DIAGNOSTIC_CORRELATION_VALIDATION_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        rejection_code = "diagnostic_store_unavailable"
+    except DiagnosticCorrelationAuthorityError as exc:
+        rejection_code = exc.code
+    except Exception:
+        rejection_code = "diagnostic_store_unavailable"
+
+    if rejection_code is not None:
+        try:
+            await asyncio.wait_for(
+                websocket.send_json(
+                    {
+                        "type": "service_status",
+                        "status": "diagnostic_correlation_rejected",
+                        "status_text": rejection_code,
+                        "evidence_only": True,
+                    }
+                ),
+                timeout=DIAGNOSTIC_CORRELATION_STATUS_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            pass
+    return None
+
+
 async def _stream_handler(
     websocket: WebSocket,
     uid: str,
@@ -252,6 +295,7 @@ async def _stream_handler(
     speaker_auto_assign_enabled: bool = False,
     capture_protocol: int = 0,
     socket_accepted_at: Optional[float] = None,
+    diagnostic_correlation: Optional[CaptureDiagnosticCorrelation] = None,
 ):
     """
     Core WebSocket streaming handler. Assumes websocket is already accepted and uid is validated.
@@ -848,6 +892,7 @@ async def _stream_handler(
             owner_token,
             expected_conversation_id=expected_conversation_id,
             adopt=adopt,
+            **({"diagnostic_correlation": diagnostic_correlation} if diagnostic_correlation is not None else {}),
         )
         if not installed:
             _latency_log(
@@ -865,6 +910,8 @@ async def _stream_handler(
                 conversation_id=conversation_id,
                 generation=generation_id,
                 owner_token=owner_token,
+                **(diagnostic_correlation.receipt_fields() if diagnostic_correlation else {}),
+                evidence_only=True if diagnostic_correlation else None,
             )
         )
         if not delivered:
@@ -1180,6 +1227,9 @@ async def _stream_handler(
                     generation_id,
                     candidate_owner_id,
                     session_id,
+                    **(
+                        {"diagnostic_correlation": diagnostic_correlation} if diagnostic_correlation is not None else {}
+                    ),
                 )
                 if not authority_claimed:
                     await asyncio.sleep(0)
@@ -2899,6 +2949,21 @@ async def _stream_handler(
                             ):
                                 websocket_close_code = 1008
                                 break
+                            if not capture_drain_diagnostic_correlation_matches(
+                                json_data,
+                                diagnostic_correlation,
+                            ):
+                                try:
+                                    await websocket.send_json(
+                                        {
+                                            "type": "service_status",
+                                            "status": "diagnostic_correlation_rejected",
+                                            "status_text": "capture_diagnostic_correlation_mismatch",
+                                            "evidence_only": True,
+                                        }
+                                    )
+                                except Exception:
+                                    pass
                             accepting_capture = False
                             capture_drain_tasks: set[asyncio.Task] = set()
                             capture_drain_complete = asyncio.Event()
@@ -2943,6 +3008,8 @@ async def _stream_handler(
                                     conversation_id=exact_conversation_id,
                                     generation=generation_id,
                                     owner_token=owner_token,
+                                    **(diagnostic_correlation.receipt_fields() if diagnostic_correlation else {}),
+                                    evidence_only=True if diagnostic_correlation else None,
                                 )
                             )
                             websocket_active = False
@@ -3230,6 +3297,8 @@ async def _listen(
         print(f"_listen: accept error {e}", uid)
         return
 
+    diagnostic_correlation = await _validate_socket_diagnostic_correlation(websocket, uid)
+
     await _stream_handler(
         websocket,
         uid,
@@ -3246,6 +3315,7 @@ async def _listen(
         speaker_auto_assign_enabled=speaker_auto_assign_enabled,
         capture_protocol=capture_protocol,
         socket_accepted_at=socket_accepted_at,
+        diagnostic_correlation=diagnostic_correlation,
     )
     print("_listen ended", uid)
 
@@ -3407,6 +3477,8 @@ async def web_listen_handler(
     await websocket.send_json({"type": "auth_response", "success": True})
     print("web_listen_handler authenticated", uid)
 
+    diagnostic_correlation = await _validate_socket_diagnostic_correlation(websocket, uid)
+
     # Proceed with streaming (websocket already accepted, uid already validated)
     custom_stt_mode = CustomSttMode.enabled if custom_stt == 'enabled' else CustomSttMode.disabled
     onboarding_mode = onboarding == 'enabled'
@@ -3426,5 +3498,6 @@ async def web_listen_handler(
         onboarding_mode=onboarding_mode,
         capture_protocol=capture_protocol,
         socket_accepted_at=socket_accepted_at,
+        diagnostic_correlation=diagnostic_correlation,
     )
     print("web_listen_handler ended", uid)

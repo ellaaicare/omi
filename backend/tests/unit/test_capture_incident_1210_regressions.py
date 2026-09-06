@@ -42,6 +42,160 @@ def _nested_function(relative_path: str, name: str, globals_: dict, closure_valu
     return types.FunctionType(code, {"__builtins__": __builtins__, **globals_}, name, closure=closure)
 
 
+def test_diagnostic_correlation_rejection_is_evidence_only_and_never_closes_capture():
+    class CorrelationError(RuntimeError):
+        def __init__(self):
+            self.code = "diagnostic_account_binding_stale"
+            self.retryable = False
+
+    async def reject(_uid, _headers):
+        raise CorrelationError
+
+    class Socket:
+        headers = {"x-ella-diagnostic-session": "session-a"}
+
+        def __init__(self):
+            self.messages = []
+            self.closed = False
+
+        async def send_json(self, payload):
+            self.messages.append(payload)
+
+        async def close(self, **_kwargs):
+            self.closed = True
+
+    validate = types.FunctionType(
+        _nested_code("routers/transcribe.py", "_validate_socket_diagnostic_correlation"),
+        {
+            "__builtins__": __builtins__,
+            "asyncio": asyncio,
+            "DiagnosticCorrelationAuthorityError": CorrelationError,
+            "DIAGNOSTIC_CORRELATION_STATUS_TIMEOUT_SECONDS": 0.05,
+            "DIAGNOSTIC_CORRELATION_VALIDATION_TIMEOUT_SECONDS": 0.05,
+            "validate_capture_diagnostic_correlation": reject,
+        },
+        "_validate_socket_diagnostic_correlation",
+    )
+    socket = Socket()
+
+    assert asyncio.run(validate(socket, "uid-a")) is None
+    assert socket.closed is False
+    assert socket.messages == [
+        {
+            "type": "service_status",
+            "status": "diagnostic_correlation_rejected",
+            "status_text": "diagnostic_account_binding_stale",
+            "evidence_only": True,
+        }
+    ]
+
+    async def stall(_uid, _headers):
+        await asyncio.sleep(60)
+
+    timeout_validate = types.FunctionType(
+        _nested_code("routers/transcribe.py", "_validate_socket_diagnostic_correlation"),
+        {
+            "__builtins__": __builtins__,
+            "asyncio": asyncio,
+            "DiagnosticCorrelationAuthorityError": CorrelationError,
+            "DIAGNOSTIC_CORRELATION_STATUS_TIMEOUT_SECONDS": 0.05,
+            "DIAGNOSTIC_CORRELATION_VALIDATION_TIMEOUT_SECONDS": 0.01,
+            "validate_capture_diagnostic_correlation": stall,
+        },
+        "_validate_socket_diagnostic_correlation",
+    )
+    timeout_socket = Socket()
+    started_at = time.monotonic()
+
+    assert asyncio.run(timeout_validate(timeout_socket, "uid-a")) is None
+    assert time.monotonic() - started_at < 0.5
+    assert timeout_socket.closed is False
+    assert timeout_socket.messages[0]["status_text"] == "diagnostic_store_unavailable"
+
+    correlation = object()
+    streamed = []
+
+    class WebSocket:
+        headers = {"x-ella-diagnostic-session": "session-a"}
+
+        def __init__(self):
+            self.accepted = False
+            self.messages = []
+
+        async def accept(self):
+            self.accepted = True
+
+        async def receive(self):
+            return {"type": "auth", "token": "valid-token"}
+
+        async def send_json(self, payload):
+            self.messages.append(payload)
+
+        async def close(self, **_kwargs):
+            raise AssertionError("evidence-only diagnostic rejection must not close capture")
+
+    async def validate_after_auth(websocket, uid):
+        assert uid == "uid-a"
+        assert websocket.messages == [{"type": "auth_response", "success": True}]
+        await websocket.send_json(
+            {
+                "type": "service_status",
+                "status": "diagnostic_correlation_rejected",
+                "evidence_only": True,
+            }
+        )
+        return correlation
+
+    async def stream_handler(*_args, **kwargs):
+        streamed.append(kwargs["diagnostic_correlation"])
+
+    async def runtime_gate(_uid, _exists):
+        return {"required": False}
+
+    web_handler = types.FunctionType(
+        _nested_code("routers/transcribe.py", "web_listen_handler"),
+        {
+            "__builtins__": __builtins__,
+            "asyncio": asyncio,
+            "time": time,
+            "auth": SimpleNamespace(get_current_user_uid_from_ws_message=lambda _message: "uid-a"),
+            "InvalidIdTokenError": type("InvalidIdTokenError", (Exception,), {}),
+            "WebSocketDisconnect": type("WebSocketDisconnect", (Exception,), {}),
+            "HTTPException": type("HTTPException", (Exception,), {}),
+            "assert_current_ai_consent": lambda _uid: None,
+            "listen_runtime_gate": runtime_gate,
+            "user_db": SimpleNamespace(is_exists_user=lambda _uid: True),
+            "logging": MagicMock(),
+            "_validate_socket_diagnostic_correlation": validate_after_auth,
+            "CustomSttMode": SimpleNamespace(enabled="enabled", disabled="disabled"),
+            "_stream_handler": stream_handler,
+        },
+        "web_listen_handler",
+    )
+    web_socket = WebSocket()
+
+    asyncio.run(
+        web_handler(
+            web_socket,
+            language="en",
+            sample_rate=8000,
+            codec="pcm8",
+            channels=1,
+            include_speech_profile=False,
+            conversation_timeout=120,
+            source=None,
+            custom_stt="disabled",
+            onboarding="disabled",
+            capture_protocol=2,
+        )
+    )
+
+    assert web_socket.accepted is True
+    assert web_socket.messages[0] == {"type": "auth_response", "success": True}
+    assert web_socket.messages[1]["status"] == "diagnostic_correlation_rejected"
+    assert streamed == [correlation]
+
+
 @cache
 def _load_conversations_module():
     spec = importlib.util.spec_from_file_location(
@@ -742,6 +896,7 @@ def test_production_reconnect_path_does_not_let_overlapping_socket_steal_authori
                 "capture_recovery_conversation_ids": set(),
                 "conversation_creation_timeout": 120,
                 "current_conversation_id": None,
+                "diagnostic_correlation": None,
                 "generation_id": generation_id,
                 "session_id": session_id,
                 "uid": "uid-a",

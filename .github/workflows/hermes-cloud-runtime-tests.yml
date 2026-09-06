@@ -3,6 +3,22 @@ name: Hermes Cloud Runtime Tests
 on:
   pull_request:
     paths:
+      - "backend/.env.template"
+      - "backend/database/account_diagnostics.py"
+      - "backend/ella/contracts/diagnostic-event-v1.schema.json"
+      - "backend/ella/contracts/diagnostic-failure-registry-v1.json"
+      - "backend/ella/docs/account-diagnostics-v1.md"
+      - "backend/ella/routers/account_diagnostics.py"
+      - "backend/ella/services/account_diagnostics.py"
+      - "backend/migrations/018_create_account_diagnostics.sql"
+      - "backend/migrations/019_add_diagnostic_attempt_ordinal.sql"
+      - "backend/migrations/020_backfill_diagnostic_attempt_ordinals.sql"
+      - "backend/tests/fixtures/diagnostics/*.json"
+      - "backend/tests/postgres/test_account_diagnostics_postgres.py"
+      - "backend/tests/unit/test_account_diagnostics.py"
+      - "backend/tests/unit/test_ella_all_router_authority_manifest.py"
+      - "backend/utils/ella/account_diagnostics.py"
+      - "backend/utils/ella/account_diagnostics_retention.py"
       - "app/ios/Runner.xcodeproj/project.pbxproj"
       - "app/ios/Runner/GuardianMode/GuardianAuthenticatedTransport.swift"
       - "app/ios/Runner/GuardianMode/GuardianModeManager.swift"
@@ -26,12 +42,14 @@ on:
       - "backend/database/voice_canary.py"
       - "backend/models/conversation.py"
       - "backend/models/conversation_integrity.py"
+      - "backend/models/message_event.py"
       - "backend/models/hermes_cloud_enrichment_contract.py"
       - "backend/routers/transcribe.py"
       - "backend/routers/pusher.py"
       - "backend/routers/integration.py"
       - "backend/routers/workflow.py"
       - "backend/utils/capture_buffer.py"
+      - "backend/utils/conversations/capture_protocol.py"
       - "backend/utils/conversations/process_conversation.py"
       - "backend/utils/conversations/postprocess_conversation.py"
       - "backend/utils/conversations/merge_conversations.py"
@@ -170,6 +188,22 @@ on:
   push:
     branches: [main]
     paths:
+      - "backend/.env.template"
+      - "backend/database/account_diagnostics.py"
+      - "backend/ella/contracts/diagnostic-event-v1.schema.json"
+      - "backend/ella/contracts/diagnostic-failure-registry-v1.json"
+      - "backend/ella/docs/account-diagnostics-v1.md"
+      - "backend/ella/routers/account_diagnostics.py"
+      - "backend/ella/services/account_diagnostics.py"
+      - "backend/migrations/018_create_account_diagnostics.sql"
+      - "backend/migrations/019_add_diagnostic_attempt_ordinal.sql"
+      - "backend/migrations/020_backfill_diagnostic_attempt_ordinals.sql"
+      - "backend/tests/fixtures/diagnostics/*.json"
+      - "backend/tests/postgres/test_account_diagnostics_postgres.py"
+      - "backend/tests/unit/test_account_diagnostics.py"
+      - "backend/tests/unit/test_ella_all_router_authority_manifest.py"
+      - "backend/utils/ella/account_diagnostics.py"
+      - "backend/utils/ella/account_diagnostics_retention.py"
       - "app/ios/Runner.xcodeproj/project.pbxproj"
       - "app/ios/Runner/GuardianMode/GuardianAuthenticatedTransport.swift"
       - "app/ios/Runner/GuardianMode/GuardianModeManager.swift"
@@ -193,12 +227,14 @@ on:
       - "backend/database/voice_canary.py"
       - "backend/models/conversation.py"
       - "backend/models/conversation_integrity.py"
+      - "backend/models/message_event.py"
       - "backend/models/hermes_cloud_enrichment_contract.py"
       - "backend/routers/transcribe.py"
       - "backend/routers/pusher.py"
       - "backend/routers/integration.py"
       - "backend/routers/workflow.py"
       - "backend/utils/capture_buffer.py"
+      - "backend/utils/conversations/capture_protocol.py"
       - "backend/utils/conversations/process_conversation.py"
       - "backend/utils/conversations/postprocess_conversation.py"
       - "backend/utils/conversations/merge_conversations.py"
@@ -662,6 +698,7 @@ jobs:
             "tests/unit/test_capture_incident_1210_regressions.py::test_superseded_socket_cannot_persist_a_batch_after_ownership_handoff"
             "tests/unit/test_capture_incident_1210_regressions.py::test_live_capture_persistence_holds_ownership_lease_through_commit"
             "tests/unit/test_capture_incident_1210_regressions.py::test_capture_owner_is_initialized_before_reconnect_preparation_uses_it"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_diagnostic_correlation_rejection_is_evidence_only_and_never_closes_capture"
             "tests/unit/test_capture_incident_1210_regressions.py::test_failed_stub_publication_abandons_only_the_still_owned_firestore_generation"
             "tests/unit/test_capture_incident_1210_regressions.py::test_duplicate_processing_claim_is_a_no_write_inflight_result"
             "tests/unit/test_capture_incident_1210_regressions.py::test_stale_processing_claim_without_a_lease_can_be_recovered"
@@ -675,6 +712,7 @@ jobs:
             "tests/unit/test_capture_incident_1210_regressions.py::test_reconnect_claims_firestore_authority_before_publishing_redis_owner"
             "tests/unit/test_capture_protocol_v2_live.py::test_capture_ready_receipt_is_complete_for_each_production_codec[opus_fs320]"
             "tests/unit/test_capture_protocol_v2_live.py::test_capture_ready_receipt_is_complete_for_each_production_codec[pcm16]"
+            "tests/unit/test_capture_protocol_v2_live.py::test_correlated_capture_receipt_echoes_only_opaque_ids_as_evidence"
             "tests/unit/test_capture_protocol_v2_live.py::test_expired_predecessor_allows_new_generation_reconnect"
             "tests/unit/test_capture_protocol_v2_live.py::test_drained_predecessor_allows_exact_new_generation_rotation"
             "tests/unit/test_capture_protocol_v2_live.py::test_drained_predecessor_rejects_mismatch_or_invalid_lease_without_writes"
@@ -690,13 +728,17 @@ jobs:
             "tests/unit/test_capture_protocol_v2_live.py::test_reconnect_claim_rejects_live_conversation_capture_lease_when_authority_expired"
             "tests/unit/test_capture_protocol_v2_live.py::test_reconnect_claim_rejects_live_conversation_finalizer_when_authority_finalizer_expired"
             "tests/unit/test_capture_protocol_v2_live.py::test_reconnect_claim_rejects_missing_or_malformed_v2_lease_evidence"
+            "tests/unit/test_capture_protocol_v2_live.py::test_drain_authority_is_independent_from_diagnostic_session_and_attempt"
+            "tests/unit/test_capture_protocol_v2_live.py::test_close_before_ready_retains_correlated_authority_and_fences_competing_attempt"
+            "tests/unit/test_capture_protocol_v2_live.py::test_unvalidated_diagnostic_metadata_is_dropped_without_blocking_capture_authority"
+            "tests/unit/test_capture_protocol_v2_live.py::test_finalization_authority_is_independent_from_diagnostic_correlation"
             "tests/unit/test_capture_task_sync_idempotency.py::test_task_sync_retry_release_is_exact_claim_cas"
             "tests/unit/test_capture_task_sync_idempotency.py::test_auto_sync_transient_failure_releases_then_retries_same_operation_once"
             "tests/unit/test_capture_task_sync_idempotency.py::test_auto_sync_explicit_terminal_failure_completes_without_provider_retry"
             "tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[todoist]"
             "tests/unit/test_capture_webhook_delivery.py::test_capture_developer_webhook_failure_is_not_acknowledged"
           )
-          test "$(grep -c '::' <<<"$capture_ids")" -eq 66
+          test "$(grep -c '::' <<<"$capture_ids")" -eq 72
           for required_id in "${required_capture_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$capture_ids"
           done
@@ -708,6 +750,41 @@ jobs:
             tests/unit/test_capture_webhook_delivery.py \
             -v | tee /tmp/capture-buffer-retention-pytest.log
           ! grep -Eq '[0-9]+ skipped' /tmp/capture-buffer-retention-pytest.log
+
+      - name: Run account diagnostic evidence contract
+        run: |
+          set -euo pipefail
+          diagnostic_ids="$(
+            pytest --collect-only -q \
+              tests/unit/test_account_diagnostics.py \
+              tests/postgres/test_account_diagnostics_postgres.py |
+              sed '/^$/d'
+          )"
+          required_diagnostic_ids=(
+            "tests/unit/test_account_diagnostics.py::test_capture_correlation_is_fenced_by_authenticated_current_account_authority"
+            "tests/unit/test_account_diagnostics.py::test_support_grant_rejects_session_without_evidence_in_requested_window"
+            "tests/unit/test_account_diagnostics.py::test_checked_in_schema_registry_and_build_849_golden_traces_match_runtime_contract"
+            "tests/postgres/test_account_diagnostics_postgres.py::test_two_accounts_cannot_cross_read_append_or_revoke_diagnostic_evidence"
+            "tests/postgres/test_account_diagnostics_postgres.py::test_support_code_redemption_revalidates_consent_and_binding_before_read"
+          )
+          test "$(grep -c '::' <<<"$diagnostic_ids")" -eq 30
+          for required_id in "${required_diagnostic_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$diagnostic_ids"
+          done
+          pytest \
+            tests/unit/test_account_diagnostics.py \
+            tests/postgres/test_account_diagnostics_postgres.py \
+            -v | tee /tmp/account-diagnostics-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/account-diagnostics-pytest.log
+          black --check --line-length 120 --skip-string-normalization \
+            database/account_diagnostics.py \
+            ella/routers/account_diagnostics.py \
+            ella/services/account_diagnostics.py \
+            tests/postgres/test_account_diagnostics_postgres.py \
+            tests/unit/test_account_diagnostics.py \
+            utils/ella/account_diagnostics.py \
+            utils/ella/account_diagnostics_retention.py
+          python -c "import json; json.load(open('ella/contracts/diagnostic-event-v1.schema.json', encoding='utf-8')); json.load(open('ella/contracts/diagnostic-failure-registry-v1.json', encoding='utf-8'))"
 
       - name: Run incident 1182 mounted-route exploit controls
         run: |

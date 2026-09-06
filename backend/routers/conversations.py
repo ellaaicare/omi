@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, BackgroundTasks
 from starlette.concurrency import run_in_threadpool
 from typing import Optional, List
 from datetime import datetime, timezone
@@ -43,6 +43,7 @@ from utils.conversations.capture_protocol import (
     claim_capture_finalization_effect,
     complete_capture_finalization,
     complete_capture_finalization_effect,
+    capture_diagnostic_correlation_matches,
     renew_capture_finalization,
     release_capture_finalization,
 )
@@ -57,6 +58,7 @@ from utils.app_integrations import trigger_external_integrations
 from models.chat import Message
 from utils.conversations.location import get_google_maps_location
 from utils.ella.memory_artwork_storage import MemoryArtworkStorageError, acquire_memory_artwork_publication_lock
+from utils.ella.account_diagnostics import CaptureDiagnosticCorrelation, DiagnosticCorrelationError
 
 router = APIRouter()
 
@@ -80,6 +82,30 @@ class ProcessConversationRequest(BaseModel):
     owner_token: Optional[str] = None
 
 
+def _request_diagnostic_correlation(
+    diagnostic_session_id: Optional[str],
+    capture_attempt_id: Optional[str],
+    capture_attempt_ordinal: Optional[str],
+    account_binding_fingerprint: Optional[str],
+    authority_generation: Optional[str],
+) -> tuple[Optional[CaptureDiagnosticCorrelation], Optional[str]]:
+    headers = {
+        name: value
+        for name, value in {
+            "x-ella-diagnostic-session": diagnostic_session_id,
+            "x-ella-capture-attempt": capture_attempt_id,
+            "x-ella-capture-attempt-ordinal": capture_attempt_ordinal,
+            "x-ella-account-binding": account_binding_fingerprint,
+            "x-ella-authority-generation": authority_generation,
+        }.items()
+        if isinstance(value, str)
+    }
+    try:
+        return CaptureDiagnosticCorrelation.from_headers(headers), None
+    except DiagnosticCorrelationError as exc:
+        return None, exc.code
+
+
 @router.post(
     "/v1/conversations",
     response_model=CreateConversationResponse,
@@ -87,8 +113,24 @@ class ProcessConversationRequest(BaseModel):
     dependencies=[Depends(require_current_ai_consent)],
 )
 def process_in_progress_conversation(
-    request: ProcessConversationRequest = None, uid: str = Depends(auth.get_current_user_uid)
+    request: ProcessConversationRequest = None,
+    uid: str = Depends(auth.get_current_user_uid),
+    x_ella_diagnostic_session: Optional[str] = Header(default=None, alias="X-Ella-Diagnostic-Session"),
+    x_ella_capture_attempt: Optional[str] = Header(default=None, alias="X-Ella-Capture-Attempt"),
+    x_ella_capture_attempt_ordinal: Optional[str] = Header(
+        default=None,
+        alias="X-Ella-Capture-Attempt-Ordinal",
+    ),
+    x_ella_account_binding: Optional[str] = Header(default=None, alias="X-Ella-Account-Binding"),
+    x_ella_authority_generation: Optional[str] = Header(default=None, alias="X-Ella-Authority-Generation"),
 ):
+    diagnostic_correlation, diagnostic_correlation_status = _request_diagnostic_correlation(
+        x_ella_diagnostic_session,
+        x_ella_capture_attempt,
+        x_ella_capture_attempt_ordinal,
+        x_ella_account_binding,
+        x_ella_authority_generation,
+    )
     requested_conversation_id = str(request.conversation_id or '').strip() if request else ''
     discovered_conversation = None if requested_conversation_id else retrieve_in_progress_conversation(uid)
     conversation_id = requested_conversation_id or str((discovered_conversation or {}).get('id') or '').strip()
@@ -98,6 +140,12 @@ def process_in_progress_conversation(
     initial_conversation = conversations_db.get_conversation(uid, conversation_id)
     if not initial_conversation:
         raise HTTPException(status_code=404, detail="Conversation in progress not found")
+    if not capture_diagnostic_correlation_matches(
+        initial_conversation,
+        diagnostic_correlation,
+    ):
+        diagnostic_correlation = None
+        diagnostic_correlation_status = diagnostic_correlation_status or "capture_diagnostic_correlation_mismatch"
     capture_claim_token = None
     capture_finalization_claimed = False
     is_capture_v2 = initial_conversation.get('capture_protocol_version') == CAPTURE_PROTOCOL_VERSION
@@ -116,7 +164,13 @@ def process_in_progress_conversation(
             request.owner_token or '',
         )
         if capture_outcome == 'terminal':
-            return CreateConversationResponse(conversation=Conversation(**initial_conversation), messages=[])
+            return CreateConversationResponse(
+                conversation=Conversation(**initial_conversation),
+                messages=[],
+                **(diagnostic_correlation.receipt_fields() if diagnostic_correlation else {}),
+                diagnostic_correlation_status=diagnostic_correlation_status,
+                evidence_only=True if diagnostic_correlation or diagnostic_correlation_status else None,
+            )
         if capture_outcome == 'not_found':
             raise HTTPException(status_code=404, detail="Conversation in progress not found")
         if capture_outcome in {'mismatch', 'not_drained'}:
@@ -277,7 +331,13 @@ def process_in_progress_conversation(
                 raise HTTPException(status_code=409, detail="Conversation finalization terminal result is unavailable")
             conversation = Conversation(**terminal_conversation)
 
-        return CreateConversationResponse(conversation=conversation, messages=messages)
+        return CreateConversationResponse(
+            conversation=conversation,
+            messages=messages,
+            **(diagnostic_correlation.receipt_fields() if diagnostic_correlation else {}),
+            diagnostic_correlation_status=diagnostic_correlation_status,
+            evidence_only=True if diagnostic_correlation or diagnostic_correlation_status else None,
+        )
     except Exception:
         if is_capture_v2 and capture_finalization_claimed:
             release_capture_finalization(
