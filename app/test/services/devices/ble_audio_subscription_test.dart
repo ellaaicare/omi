@@ -376,12 +376,84 @@ void main() {
     resetBarrier.complete();
 
     expect(await overlappingReady, isNotNull);
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    await pumpEventQueue(times: 20);
     expect(endpoint.notifyCalls, [
       (true, bleNotificationEnableTimeoutSeconds),
       (false, bleNotificationResetTimeoutSeconds),
       (true, bleNotificationEnableTimeoutSeconds),
     ]);
     expect(endpoint.freshValueRequests, 2);
+  });
+
+  test('legacy characteristic requested during reconnect survives the prior generation teardown', () async {
+    final endpoint = _FakeBleNotificationEndpoint();
+    final connectionStates = StreamController<BluetoothConnectionState>.broadcast();
+    final enableBarrier = Completer<void>();
+    endpoint.notifyCallBarriers[1] = enableBarrier;
+    var connected = true;
+    final transport = _testBleTransport(
+      endpoint,
+      connectionProbe: () => connected,
+      connectionStates: connectionStates.stream,
+    );
+    addTearDown(endpoint.dispose);
+    addTearDown(connectionStates.close);
+    addTearDown(transport.dispose);
+
+    final staleAudioReady = transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+    while (endpoint.notifyCalls.isEmpty) {
+      await pumpEventQueue();
+    }
+    connected = false;
+    connectionStates.add(BluetoothConnectionState.disconnected);
+    await pumpEventQueue();
+    connected = true;
+    connectionStates.add(BluetoothConnectionState.connected);
+
+    final received = <List<int>>[];
+    var streamClosed = false;
+    final legacyStream = transport.getCharacteristicStream(omiServiceUuid, '2A19');
+    final subscription = legacyStream.listen(received.add, onDone: () => streamClosed = true);
+    addTearDown(subscription.cancel);
+    enableBarrier.complete();
+    expect(await staleAudioReady, isNull);
+    await pumpEventQueue(times: 20);
+    endpoint.replaying.add([88]);
+    await pumpEventQueue();
+
+    expect(streamClosed, isFalse);
+    expect(received, [
+      [88],
+    ]);
+  });
+
+  test('fresh audio arriving during CCCD enable is buffered until the capture listener attaches', () async {
+    final endpoint = _FakeBleNotificationEndpoint();
+    final enableBarrier = Completer<void>();
+    endpoint.notifyCallBarriers[1] = enableBarrier;
+    final transport = _testBleTransport(endpoint);
+    addTearDown(endpoint.dispose);
+    addTearDown(transport.dispose);
+
+    final streamFuture = transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+    while (endpoint.notifyCalls.isEmpty) {
+      await pumpEventQueue();
+    }
+    endpoint.fresh.add([6, 7, 8]);
+    await pumpEventQueue();
+    enableBarrier.complete();
+
+    final stream = await streamFuture;
+    final received = <List<int>>[];
+    final subscription = stream?.listen(received.add);
+    addTearDown(() => subscription?.cancel());
+    await pumpEventQueue();
+
+    expect(stream, isNotNull);
+    expect(received, [
+      [6, 7, 8],
+    ]);
   });
 
   test('Omi production audio entrypoint fails closed until the BLE subscription is ready', () async {
