@@ -268,36 +268,16 @@ async def _validate_socket_diagnostic_correlation(
         validation_task.add_done_callback(_consume_diagnostic_task_result)
         return None
 
-    rejection_code: Optional[str] = None
     try:
         return validation_task.result()
-    except DiagnosticCorrelationAuthorityError as exc:
-        rejection_code = exc.code
+    except DiagnosticCorrelationAuthorityError:
+        # A rejection is evidence-only. Do not attempt a best-effort WebSocket
+        # status here: an ASGI send that ignores cancellation could outlive the
+        # startup deadline and race the stream's socket writer. Capture must
+        # retain sole ownership of the socket once this boundary returns.
+        return None
     except Exception:
-        rejection_code = "diagnostic_store_unavailable"
-
-    remaining = deadline - loop.time()
-    if rejection_code is not None and remaining > 0:
-        status_task = asyncio.create_task(
-            websocket.send_json(
-                {
-                    "type": "service_status",
-                    "status": "diagnostic_correlation_rejected",
-                    "status_text": rejection_code,
-                    "evidence_only": True,
-                }
-            )
-        )
-        completed, _ = await asyncio.wait({status_task}, timeout=remaining)
-        if status_task not in completed:
-            status_task.cancel()
-            status_task.add_done_callback(_consume_diagnostic_task_result)
-            return None
-        try:
-            status_task.result()
-        except Exception:
-            pass
-    return None
+        return None
 
 
 async def _stream_handler(

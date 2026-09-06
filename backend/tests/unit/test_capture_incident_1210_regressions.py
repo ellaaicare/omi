@@ -65,8 +65,10 @@ def test_diagnostic_correlation_rejection_is_evidence_only_and_never_closes_capt
         def __init__(self):
             self.messages = []
             self.closed = False
+            self.send_calls = 0
 
         async def send_json(self, payload):
+            self.send_calls += 1
             self.messages.append(payload)
 
         async def close(self, **_kwargs):
@@ -84,18 +86,13 @@ def test_diagnostic_correlation_rejection_is_evidence_only_and_never_closes_capt
         },
         "_validate_socket_diagnostic_correlation",
     )
+    assert "send_json" not in validate.__code__.co_names
     socket = Socket()
 
     assert asyncio.run(validate(socket, "uid-a")) is None
     assert socket.closed is False
-    assert socket.messages == [
-        {
-            "type": "service_status",
-            "status": "diagnostic_correlation_rejected",
-            "status_text": "diagnostic_account_binding_stale",
-            "evidence_only": True,
-        }
-    ]
+    assert socket.send_calls == 0
+    assert socket.messages == []
 
     async def stall(_uid, _headers):
         try:
@@ -122,32 +119,6 @@ def test_diagnostic_correlation_rejection_is_evidence_only_and_never_closes_capt
     assert time.monotonic() - started_at < 0.5
     assert timeout_socket.closed is False
     assert timeout_socket.messages == []
-
-    class BackpressuredSocket(Socket):
-        async def send_json(self, _payload):
-            try:
-                await asyncio.sleep(60)
-            except asyncio.CancelledError:
-                await asyncio.sleep(60)
-
-    status_timeout_validate = types.FunctionType(
-        _nested_code("routers/transcribe.py", "_validate_socket_diagnostic_correlation"),
-        {
-            "__builtins__": __builtins__,
-            "asyncio": asyncio,
-            "DiagnosticCorrelationAuthorityError": CorrelationError,
-            "DIAGNOSTIC_CORRELATION_VALIDATION_TIMEOUT_SECONDS": 0.01,
-            "_consume_diagnostic_task_result": consume_task_result,
-            "validate_capture_diagnostic_correlation": reject,
-        },
-        "_validate_socket_diagnostic_correlation",
-    )
-    status_timeout_socket = BackpressuredSocket()
-    started_at = time.monotonic()
-
-    assert asyncio.run(status_timeout_validate(status_timeout_socket, "uid-a")) is None
-    assert time.monotonic() - started_at < 0.5
-    assert status_timeout_socket.closed is False
 
     correlation = object()
     streamed = []
