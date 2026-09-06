@@ -103,7 +103,9 @@ class BleTransport extends DeviceTransport {
   List<BluetoothService> _services = [];
   DeviceTransportState _state = DeviceTransportState.disconnected;
   StreamSubscription<BluetoothConnectionState>? _bleConnectionSubscription;
+  Future<void> _characteristicTeardownOperation = Future<void>.value();
   int _connectionGeneration = 0;
+  bool _disposed = false;
 
   BleTransport(
     this._bleDevice, {
@@ -120,10 +122,8 @@ class BleTransport extends DeviceTransport {
     _bleConnectionSubscription = (connectionStateStream ?? _bleDevice.connectionState).listen((state) {
       switch (state) {
         case BluetoothConnectionState.disconnected:
-          _connectionGeneration++;
-          _audioLivenessRecovery.reset();
-          unawaited(_clearCharacteristicState());
           _updateState(DeviceTransportState.disconnected);
+          unawaited(_invalidateAndClearCharacteristicState());
           break;
         case BluetoothConnectionState.connecting:
           _updateState(DeviceTransportState.connecting);
@@ -189,13 +189,12 @@ class BleTransport extends DeviceTransport {
     }
 
     _updateState(DeviceTransportState.disconnecting);
-    _connectionGeneration++;
-    _audioLivenessRecovery.reset();
 
     try {
-      await _clearCharacteristicState();
+      await _invalidateAndClearCharacteristicState();
 
       await _bleDevice.disconnect();
+      await _characteristicTeardownOperation;
 
       _updateState(DeviceTransportState.disconnected);
     } catch (e) {
@@ -230,14 +229,18 @@ class BleTransport extends DeviceTransport {
 
   @override
   Future<Stream<List<int>>?> getReadyCharacteristicStream(String serviceUuid, String characteristicUuid) async {
+    final requestGeneration = _connectionGeneration;
+    await _characteristicTeardownOperation;
+    if (!_isSetupCurrent(requestGeneration)) return null;
     final key = _characteristicKey(serviceUuid, characteristicUuid);
     final controller = _streamControllers.putIfAbsent(key, StreamController<List<int>>.broadcast);
     var ready = await _ensureCharacteristicListener(serviceUuid, characteristicUuid, key);
-    if (!ready && _isOperationConnected) {
+    if (!ready && _isSetupCurrent(requestGeneration)) {
       await Future<void>.delayed(bleNotificationSetupRetryDelay);
+      if (!_isSetupCurrent(requestGeneration)) return null;
       ready = await _ensureCharacteristicListener(serviceUuid, characteristicUuid, key, force: true);
     }
-    if (!ready) return null;
+    if (!ready || !_isSetupCurrent(requestGeneration) || !identical(_streamControllers[key], controller)) return null;
     if (_isAudioCharacteristic(characteristicUuid)) {
       _audioLivenessRecovery.arm(() => _recoverSilentAudioSubscription(serviceUuid, characteristicUuid, key));
     }
@@ -251,6 +254,8 @@ class BleTransport extends DeviceTransport {
 
   bool get _isOperationConnected => _connectionProbe?.call() ?? _state == DeviceTransportState.connected;
 
+  bool _isSetupCurrent(int generation) => !_disposed && _isOperationConnected && generation == _connectionGeneration;
+
   Future<bool> _ensureCharacteristicListener(
     String serviceUuid,
     String characteristicUuid,
@@ -258,6 +263,8 @@ class BleTransport extends DeviceTransport {
     bool force = false,
     bool resetNotifications = false,
   }) async {
+    await _characteristicTeardownOperation;
+    if (_disposed || !_isOperationConnected) return false;
     if (!force && _characteristicSubscriptions.containsKey(key)) return true;
     final pending = _characteristicSetupOperations[key];
     if (pending != null) return pending;
@@ -290,6 +297,7 @@ class BleTransport extends DeviceTransport {
     try {
       if (force) {
         await _characteristicSubscriptions.remove(key)?.cancel();
+        if (!_isSetupCurrent(setupGeneration)) return false;
       } else if (_characteristicSubscriptions.containsKey(key)) {
         return true;
       }
@@ -298,7 +306,7 @@ class BleTransport extends DeviceTransport {
         Logger.debug('BLE Transport: Characteristic not found: $serviceUuid:$characteristicUuid');
         return false;
       }
-      if (!_isOperationConnected || setupGeneration != _connectionGeneration) return false;
+      if (!_isSetupCurrent(setupGeneration)) return false;
 
       if (resetNotifications) {
         try {
@@ -306,11 +314,13 @@ class BleTransport extends DeviceTransport {
         } catch (error) {
           Logger.debug('BLE Transport: Could not clear stale notification state before retry: $error');
         }
+        if (!_isSetupCurrent(setupGeneration)) return false;
       }
 
       final values = _isAudioCharacteristic(characteristicUuid) ? endpoint.freshValues : endpoint.replayingValues;
       final subscription = values.listen(
         (value) {
+          if (!_isSetupCurrent(setupGeneration)) return;
           if (value.isNotEmpty && _isAudioCharacteristic(characteristicUuid)) {
             _audioLivenessRecovery.observedAudio();
           }
@@ -329,7 +339,7 @@ class BleTransport extends DeviceTransport {
         await subscription.cancel();
         rethrow;
       }
-      if (!_isOperationConnected || setupGeneration != _connectionGeneration) {
+      if (!_isSetupCurrent(setupGeneration)) {
         await subscription.cancel();
         return false;
       }
@@ -430,12 +440,33 @@ class BleTransport extends DeviceTransport {
     }
   }
 
+  Future<void> _finishCharacteristicTeardown(
+    Future<void> previousTeardown,
+    List<Future<bool>> pendingSetups,
+  ) async {
+    await previousTeardown;
+    await Future.wait(pendingSetups);
+    await _clearCharacteristicState();
+  }
+
+  Future<void> _invalidateAndClearCharacteristicState() {
+    _connectionGeneration++;
+    _audioLivenessRecovery.reset();
+    final operation = _finishCharacteristicTeardown(
+      _characteristicTeardownOperation,
+      _characteristicSetupOperations.values.toList(growable: false),
+    );
+    _characteristicTeardownOperation = operation;
+    return operation;
+  }
+
   @override
   Future<void> dispose() async {
-    _connectionGeneration++;
+    if (_disposed) return;
+    _disposed = true;
     _audioLivenessRecovery.dispose();
     await _bleConnectionSubscription?.cancel();
-    await _clearCharacteristicState();
+    await _invalidateAndClearCharacteristicState();
 
     await _connectionStateController.close();
   }
