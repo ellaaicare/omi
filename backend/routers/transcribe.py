@@ -143,7 +143,8 @@ from utils.speaker_sample_migration import maybe_migrate_person_samples
 
 router = APIRouter()
 
-
+DIAGNOSTIC_CORRELATION_VALIDATION_TIMEOUT_SECONDS = 0.25
+DIAGNOSTIC_CORRELATION_STATUS_TIMEOUT_SECONDS = 0.05
 PUSHER_ENABLED = bool(os.getenv('HOSTED_PUSHER_API_URL'))
 CAPTURE_CONVERSATION_ID_KEY = "_capture_conversation_id"
 
@@ -247,21 +248,35 @@ async def _validate_socket_diagnostic_correlation(
     uid: str,
 ) -> Optional[CaptureDiagnosticCorrelation]:
     """Validate evidence after auth without allowing diagnostics to block capture."""
+    rejection_code: Optional[str] = None
     try:
-        return await validate_capture_diagnostic_correlation(uid, websocket.headers)
+        return await asyncio.wait_for(
+            validate_capture_diagnostic_correlation(uid, websocket.headers),
+            timeout=DIAGNOSTIC_CORRELATION_VALIDATION_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        rejection_code = "diagnostic_store_unavailable"
     except DiagnosticCorrelationAuthorityError as exc:
+        rejection_code = exc.code
+    except Exception:
+        rejection_code = "diagnostic_store_unavailable"
+
+    if rejection_code is not None:
         try:
-            await websocket.send_json(
-                {
-                    "type": "service_status",
-                    "status": "diagnostic_correlation_rejected",
-                    "status_text": exc.code,
-                    "evidence_only": True,
-                }
+            await asyncio.wait_for(
+                websocket.send_json(
+                    {
+                        "type": "service_status",
+                        "status": "diagnostic_correlation_rejected",
+                        "status_text": rejection_code,
+                        "evidence_only": True,
+                    }
+                ),
+                timeout=DIAGNOSTIC_CORRELATION_STATUS_TIMEOUT_SECONDS,
             )
         except Exception:
             pass
-        return None
+    return None
 
 
 async def _stream_handler(

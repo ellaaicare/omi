@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 from typing import Any, Callable, Mapping
 
@@ -70,7 +71,7 @@ async def validate_capture_diagnostic_correlation(
 
     if consent_status is None:
         consent_status = ai_consent.get_ai_consent_service().status
-    profile_binding_id, receipt_id = current_consent_material(uid, consent_status)
+    profile_binding_id, receipt_id = await asyncio.to_thread(current_consent_material, uid, consent_status)
     expected_fingerprint = account_binding_fingerprint(
         uid=uid,
         profile_binding_id=profile_binding_id,

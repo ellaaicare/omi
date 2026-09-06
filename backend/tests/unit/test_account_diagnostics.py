@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -453,19 +454,26 @@ def _client(monkeypatch):
 
 def test_capture_correlation_is_fenced_by_authenticated_current_account_authority():
     repository = FakeRepository()
+    consent_thread_ids = []
+
+    def consent_status(_uid):
+        consent_thread_ids.append(threading.get_ident())
+        return {
+            "authorized": True,
+            "consent": {"profile_binding_id": "aipb_test", "receipt_id": "aicr_test"},
+        }
+
     correlation = asyncio.run(
         validate_capture_diagnostic_correlation(
             "uid-a",
             _correlation_headers(),
             repository=repository,
-            consent_status=lambda _uid: {
-                "authorized": True,
-                "consent": {"profile_binding_id": "aipb_test", "receipt_id": "aicr_test"},
-            },
+            consent_status=consent_status,
         )
     )
 
     assert correlation is not None
+    assert consent_thread_ids and consent_thread_ids[0] != threading.get_ident()
     assert correlation.validated_binding_revision == 7
     assert repository.validated_authority == {
         "uid": "uid-a",

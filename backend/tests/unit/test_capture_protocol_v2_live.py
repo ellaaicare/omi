@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from models.message_event import MessageServiceStatusEvent
 from utils.ella.account_diagnostics import CaptureDiagnosticCorrelation
 
 BACKEND = Path(__file__).resolve().parents[2]
@@ -157,8 +158,6 @@ def test_capture_protocol_rejects_pre_v2_and_unattested_v2_before_creation(captu
 
 @pytest.mark.parametrize('codec', ['opus_fs320', 'pcm16'])
 def test_capture_ready_receipt_is_complete_for_each_production_codec(codec):
-    from models.message_event import MessageServiceStatusEvent
-
     receipt = MessageServiceStatusEvent(
         status='capture_protocol_ready',
         protocol_version=2,
@@ -180,8 +179,6 @@ def test_capture_ready_receipt_is_complete_for_each_production_codec(codec):
 
 
 def test_correlated_capture_receipt_echoes_only_opaque_ids_as_evidence():
-    from models.message_event import MessageServiceStatusEvent
-
     receipt = MessageServiceStatusEvent(
         status='capture_protocol_ready',
         protocol_version=2,
