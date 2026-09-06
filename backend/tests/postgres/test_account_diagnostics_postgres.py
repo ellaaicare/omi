@@ -216,11 +216,13 @@ def test_legacy_attempt_migration_preserves_projection_support_and_append_semant
                 """,
                 user_id,
             )
-            assert await pool.fetchval("""
+            migrated_ordinal_query = """
                 SELECT capture_attempt_ordinal
                 FROM ella_diagnostic_events
                 WHERE event_id = 'legacy-new-start'
-                """) == 1
+                """
+            migrated_ordinal = await pool.fetchval(migrated_ordinal_query)
+            assert migrated_ordinal == 1
 
             async def get_pool():
                 return pool
