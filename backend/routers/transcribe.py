@@ -144,7 +144,6 @@ from utils.speaker_sample_migration import maybe_migrate_person_samples
 router = APIRouter()
 
 DIAGNOSTIC_CORRELATION_VALIDATION_TIMEOUT_SECONDS = 0.25
-DIAGNOSTIC_CORRELATION_STATUS_TIMEOUT_SECONDS = 0.05
 PUSHER_ENABLED = bool(os.getenv('HOSTED_PUSHER_API_URL'))
 CAPTURE_CONVERSATION_ID_KEY = "_capture_conversation_id"
 
@@ -243,40 +242,42 @@ def _stt_service_value(service: Optional[STTService]) -> Optional[str]:
     return service.value if isinstance(service, STTService) else service
 
 
+def _consume_diagnostic_task_result(task) -> None:
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except Exception:
+        pass
+
+
 async def _validate_socket_diagnostic_correlation(
     websocket: WebSocket,
     uid: str,
 ) -> Optional[CaptureDiagnosticCorrelation]:
     """Validate evidence after auth without allowing diagnostics to block capture."""
-    rejection_code: Optional[str] = None
-    try:
-        return await asyncio.wait_for(
-            validate_capture_diagnostic_correlation(uid, websocket.headers),
-            timeout=DIAGNOSTIC_CORRELATION_VALIDATION_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        rejection_code = "diagnostic_store_unavailable"
-    except DiagnosticCorrelationAuthorityError as exc:
-        rejection_code = exc.code
-    except Exception:
-        rejection_code = "diagnostic_store_unavailable"
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + DIAGNOSTIC_CORRELATION_VALIDATION_TIMEOUT_SECONDS
+    validation_task = asyncio.create_task(validate_capture_diagnostic_correlation(uid, websocket.headers))
+    completed, _ = await asyncio.wait(
+        {validation_task},
+        timeout=max(0.0, deadline - loop.time()),
+    )
+    if validation_task not in completed:
+        validation_task.cancel()
+        validation_task.add_done_callback(_consume_diagnostic_task_result)
+        return None
 
-    if rejection_code is not None:
-        try:
-            await asyncio.wait_for(
-                websocket.send_json(
-                    {
-                        "type": "service_status",
-                        "status": "diagnostic_correlation_rejected",
-                        "status_text": rejection_code,
-                        "evidence_only": True,
-                    }
-                ),
-                timeout=DIAGNOSTIC_CORRELATION_STATUS_TIMEOUT_SECONDS,
-            )
-        except Exception:
-            pass
-    return None
+    try:
+        return validation_task.result()
+    except DiagnosticCorrelationAuthorityError:
+        # A rejection is evidence-only. Do not attempt a best-effort WebSocket
+        # status here: an ASGI send that ignores cancellation could outlive the
+        # startup deadline and race the stream's socket writer. Capture must
+        # retain sole ownership of the socket once this boundary returns.
+        return None
+    except Exception:
+        return None
 
 
 async def _stream_handler(

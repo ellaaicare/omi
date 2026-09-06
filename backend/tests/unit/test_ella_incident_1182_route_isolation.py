@@ -997,6 +997,7 @@ def test_affected_background_boundaries_are_exact_and_trace_has_no_detached_task
         {
             ("chat", "_stream_level_4_openclaw", "asyncio.create_task"): 1,
             ("chat", "_stream_hermes_chat", "asyncio.create_task"): 1,
+            ("account_diagnostics", "current_authority", "asyncio.to_thread"): 1,
             ("voice", "_resolve_voice_honcho_binding", "asyncio.to_thread"): 1,
             ("voice", "_resolve_voice_memory_scope", "asyncio.to_thread"): 1,
             ("voice", "heartbeat_voice_canary_session", "asyncio.create_task"): 1,

@@ -388,8 +388,10 @@ class FakeRepository:
         self.list_error: Exception | None = None
         self.consume_error: Exception | None = None
         self.validated_authority: dict | None = None
+        self.authority_thread_id: int | None = None
 
     async def resolve_account_authority(self, _uid):
+        self.authority_thread_id = threading.get_ident()
         return self.authority
 
     async def validate_current_authority(self, authority, **authority_material):
@@ -433,17 +435,20 @@ class FakeRepository:
         return "session-1", list(self.events)
 
 
-def _client(monkeypatch):
+def _client(monkeypatch, *, consent_status=None):
     monkeypatch.setenv("ELLA_DIAGNOSTICS_SUPPORT_HMAC_KEY", "support-hmac-key-that-is-at-least-32-bytes")
     repository = FakeRepository()
     app = FastAPI()
     app.include_router(
         create_account_diagnostics_router(
             repository,
-            consent_status=lambda _uid: {
-                "authorized": True,
-                "consent": {"profile_binding_id": "aipb_test", "receipt_id": "aicr_test"},
-            },
+            consent_status=consent_status
+            or (
+                lambda _uid: {
+                    "authorized": True,
+                    "consent": {"profile_binding_id": "aipb_test", "receipt_id": "aicr_test"},
+                }
+            ),
             clock=lambda: NOW,
         )
     )
@@ -500,12 +505,22 @@ def test_capture_correlation_is_fenced_by_authenticated_current_account_authorit
 
 
 def test_ingest_rejects_cross_account_fingerprint_before_write(monkeypatch):
-    client, repository = _client(monkeypatch)
+    consent_thread_ids = []
+
+    def consent_status(_uid):
+        consent_thread_ids.append(threading.get_ident())
+        return {
+            "authorized": True,
+            "consent": {"profile_binding_id": "aipb_test", "receipt_id": "aicr_test"},
+        }
+
+    client, repository = _client(monkeypatch, consent_status=consent_status)
     payload = {"events": [_event(fingerprint="0" * 64).model_dump(mode="json")]}
     response = client.post("/v1/ella/diagnostics/events", json=payload)
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "diagnostic_account_binding_stale"
     assert repository.events == []
+    assert consent_thread_ids and consent_thread_ids[0] != repository.authority_thread_id
 
 
 def test_ingest_maps_semantic_identity_collision_to_typed_conflict(monkeypatch):
