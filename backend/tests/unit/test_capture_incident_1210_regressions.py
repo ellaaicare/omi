@@ -51,6 +51,14 @@ def test_diagnostic_correlation_rejection_is_evidence_only_and_never_closes_capt
     async def reject(_uid, _headers):
         raise CorrelationError
 
+    def consume_task_result(task):
+        if task.cancelled():
+            return
+        try:
+            task.exception()
+        except Exception:
+            pass
+
     class Socket:
         headers = {"x-ella-diagnostic-session": "session-a"}
 
@@ -70,8 +78,8 @@ def test_diagnostic_correlation_rejection_is_evidence_only_and_never_closes_capt
             "__builtins__": __builtins__,
             "asyncio": asyncio,
             "DiagnosticCorrelationAuthorityError": CorrelationError,
-            "DIAGNOSTIC_CORRELATION_STATUS_TIMEOUT_SECONDS": 0.05,
             "DIAGNOSTIC_CORRELATION_VALIDATION_TIMEOUT_SECONDS": 0.05,
+            "_consume_diagnostic_task_result": consume_task_result,
             "validate_capture_diagnostic_correlation": reject,
         },
         "_validate_socket_diagnostic_correlation",
@@ -90,7 +98,10 @@ def test_diagnostic_correlation_rejection_is_evidence_only_and_never_closes_capt
     ]
 
     async def stall(_uid, _headers):
-        await asyncio.sleep(60)
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            await asyncio.sleep(60)
 
     timeout_validate = types.FunctionType(
         _nested_code("routers/transcribe.py", "_validate_socket_diagnostic_correlation"),
@@ -98,8 +109,8 @@ def test_diagnostic_correlation_rejection_is_evidence_only_and_never_closes_capt
             "__builtins__": __builtins__,
             "asyncio": asyncio,
             "DiagnosticCorrelationAuthorityError": CorrelationError,
-            "DIAGNOSTIC_CORRELATION_STATUS_TIMEOUT_SECONDS": 0.05,
             "DIAGNOSTIC_CORRELATION_VALIDATION_TIMEOUT_SECONDS": 0.01,
+            "_consume_diagnostic_task_result": consume_task_result,
             "validate_capture_diagnostic_correlation": stall,
         },
         "_validate_socket_diagnostic_correlation",
@@ -110,7 +121,33 @@ def test_diagnostic_correlation_rejection_is_evidence_only_and_never_closes_capt
     assert asyncio.run(timeout_validate(timeout_socket, "uid-a")) is None
     assert time.monotonic() - started_at < 0.5
     assert timeout_socket.closed is False
-    assert timeout_socket.messages[0]["status_text"] == "diagnostic_store_unavailable"
+    assert timeout_socket.messages == []
+
+    class BackpressuredSocket(Socket):
+        async def send_json(self, _payload):
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                await asyncio.sleep(60)
+
+    status_timeout_validate = types.FunctionType(
+        _nested_code("routers/transcribe.py", "_validate_socket_diagnostic_correlation"),
+        {
+            "__builtins__": __builtins__,
+            "asyncio": asyncio,
+            "DiagnosticCorrelationAuthorityError": CorrelationError,
+            "DIAGNOSTIC_CORRELATION_VALIDATION_TIMEOUT_SECONDS": 0.01,
+            "_consume_diagnostic_task_result": consume_task_result,
+            "validate_capture_diagnostic_correlation": reject,
+        },
+        "_validate_socket_diagnostic_correlation",
+    )
+    status_timeout_socket = BackpressuredSocket()
+    started_at = time.monotonic()
+
+    assert asyncio.run(status_timeout_validate(status_timeout_socket, "uid-a")) is None
+    assert time.monotonic() - started_at < 0.5
+    assert status_timeout_socket.closed is False
 
     correlation = object()
     streamed = []
