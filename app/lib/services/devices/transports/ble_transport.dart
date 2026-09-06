@@ -229,7 +229,10 @@ class BleTransport extends DeviceTransport {
   @override
   Stream<List<int>> getCharacteristicStream(String serviceUuid, String characteristicUuid) {
     final key = _characteristicKey(serviceUuid, characteristicUuid);
-    final controller = _streamControllers.putIfAbsent(key, () => _newCharacteristicController(key, characteristicUuid));
+    final controller = _streamControllers.putIfAbsent(
+      key,
+      () => _newCharacteristicController(key, characteristicUuid, _connectionGeneration),
+    );
     unawaited(_ensureCharacteristicListener(serviceUuid, characteristicUuid, key));
     return controller.stream;
   }
@@ -240,7 +243,10 @@ class BleTransport extends DeviceTransport {
     await _characteristicTeardownOperation;
     if (!_isSetupCurrent(requestGeneration)) return null;
     final key = _characteristicKey(serviceUuid, characteristicUuid);
-    final controller = _streamControllers.putIfAbsent(key, () => _newCharacteristicController(key, characteristicUuid));
+    final controller = _streamControllers.putIfAbsent(
+      key,
+      () => _newCharacteristicController(key, characteristicUuid, requestGeneration),
+    );
     if (_isAudioCharacteristic(characteristicUuid) && !controller.hasListener) {
       _readyCharacteristicHandoffGenerations[key] = requestGeneration;
     }
@@ -272,13 +278,22 @@ class BleTransport extends DeviceTransport {
 
   bool _isSetupCurrent(int generation) => !_disposed && _isOperationConnected && generation == _connectionGeneration;
 
-  StreamController<List<int>> _newCharacteristicController(String key, String characteristicUuid) {
+  StreamController<List<int>> _newCharacteristicController(
+    String key,
+    String characteristicUuid,
+    int controllerGeneration,
+  ) {
     late final StreamController<List<int>> controller;
     controller = StreamController<List<int>>.broadcast(
       onListen: () => _flushPendingCharacteristicValues(key, characteristicUuid, controller),
       onCancel: () {
-        if (!controller.hasListener) {
+        if (!controller.hasListener &&
+            identical(_streamControllers[key], controller) &&
+            controllerGeneration == _connectionGeneration) {
           _endReadyCharacteristicHandoff(key, controller: controller);
+          if (_isAudioCharacteristic(characteristicUuid)) {
+            _audioLivenessRecovery.reset();
+          }
         }
       },
     );

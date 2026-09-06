@@ -491,6 +491,37 @@ void main() {
     ]);
   });
 
+  test('cancelled silent capture cannot consume the next capture recovery budget', () async {
+    final endpoint = _FakeBleNotificationEndpoint();
+    final transport = _testBleTransport(
+      endpoint,
+      recovery: BleAudioLivenessRecovery(window: const Duration(milliseconds: 1)),
+    );
+    addTearDown(endpoint.dispose);
+    addTearDown(transport.dispose);
+
+    final firstStream = await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+    final firstSubscription = firstStream?.listen((_) {});
+    await firstSubscription?.cancel();
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    await pumpEventQueue(times: 20);
+
+    expect(endpoint.notifyCalls, [(true, bleNotificationEnableTimeoutSeconds)]);
+
+    final secondStream =
+        await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+    final secondSubscription = secondStream?.listen((_) {});
+    addTearDown(() => secondSubscription?.cancel());
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    await pumpEventQueue(times: 20);
+
+    expect(endpoint.notifyCalls, [
+      (true, bleNotificationEnableTimeoutSeconds),
+      (false, bleNotificationResetTimeoutSeconds),
+      (true, bleNotificationEnableTimeoutSeconds),
+    ]);
+  });
+
   test('Omi production audio entrypoint fails closed until the BLE subscription is ready', () async {
     final transport = _AudioTransport(ready: false);
     final connection = OmiDeviceConnection(necklace(), transport);
