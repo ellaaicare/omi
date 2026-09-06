@@ -11,8 +11,47 @@ import 'package:omi/utils/bluetooth/bluetooth_adapter.dart';
 import 'package:omi/utils/logger.dart';
 import 'device_transport.dart';
 
-const _audioLivenessWindow = Duration(seconds: 2);
-const _notificationSetupTimeoutSeconds = 4;
+@visibleForTesting
+const bleAudioLivenessWindow = Duration(milliseconds: 500);
+
+@visibleForTesting
+const bleNotificationEnableTimeoutSeconds = 2;
+
+@visibleForTesting
+const bleNotificationResetTimeoutSeconds = 1;
+
+@visibleForTesting
+const bleNotificationSetupRetryDelay = Duration(milliseconds: 100);
+
+@visibleForTesting
+abstract class BleNotificationEndpoint {
+  Stream<List<int>> get freshValues;
+  Stream<List<int>> get replayingValues;
+
+  Future<void> setNotifyValue(bool enabled, {required int timeout});
+}
+
+class _FlutterBlueNotificationEndpoint implements BleNotificationEndpoint {
+  _FlutterBlueNotificationEndpoint(this.characteristic);
+
+  final BluetoothCharacteristic characteristic;
+
+  @override
+  Stream<List<int>> get freshValues => characteristic.onValueReceived;
+
+  @override
+  Stream<List<int>> get replayingValues => characteristic.lastValueStream;
+
+  @override
+  Future<void> setNotifyValue(bool enabled, {required int timeout}) =>
+      characteristic.setNotifyValue(enabled, timeout: timeout);
+}
+
+@visibleForTesting
+typedef BleNotificationEndpointResolver = Future<BleNotificationEndpoint?> Function(
+  String serviceUuid,
+  String characteristicUuid,
+);
 
 @visibleForTesting
 bool bleCharacteristicUsesFreshNotifications(String characteristicUuid) =>
@@ -20,7 +59,7 @@ bool bleCharacteristicUsesFreshNotifications(String characteristicUuid) =>
 
 @visibleForTesting
 class BleAudioLivenessRecovery {
-  BleAudioLivenessRecovery({this.window = _audioLivenessWindow});
+  BleAudioLivenessRecovery({this.window = bleAudioLivenessWindow});
 
   final Duration window;
   Timer? _timer;
@@ -57,18 +96,33 @@ class BleTransport extends DeviceTransport {
   final Map<String, StreamSubscription> _characteristicSubscriptions = {};
   final Map<String, Future<bool>> _characteristicSetupOperations = {};
   final BleAudioLivenessRecovery _audioLivenessRecovery;
+  final BleNotificationEndpointResolver? _notificationEndpointResolver;
+  final bool Function()? _connectionProbe;
+  final void Function(StreamSubscription<List<int>>)? _disconnectRegistrar;
 
   List<BluetoothService> _services = [];
   DeviceTransportState _state = DeviceTransportState.disconnected;
   StreamSubscription<BluetoothConnectionState>? _bleConnectionSubscription;
+  int _connectionGeneration = 0;
 
-  BleTransport(this._bleDevice, {@visibleForTesting BleAudioLivenessRecovery? audioLivenessRecovery})
-      : _connectionStateController = StreamController<DeviceTransportState>.broadcast(),
-        _audioLivenessRecovery = audioLivenessRecovery ?? BleAudioLivenessRecovery() {
-    _bleConnectionSubscription = _bleDevice.connectionState.listen((state) {
+  BleTransport(
+    this._bleDevice, {
+    @visibleForTesting BleAudioLivenessRecovery? audioLivenessRecovery,
+    @visibleForTesting BleNotificationEndpointResolver? notificationEndpointResolver,
+    @visibleForTesting bool Function()? connectionProbe,
+    @visibleForTesting void Function(StreamSubscription<List<int>>)? disconnectRegistrar,
+    @visibleForTesting Stream<BluetoothConnectionState>? connectionStateStream,
+  })  : _connectionStateController = StreamController<DeviceTransportState>.broadcast(),
+        _audioLivenessRecovery = audioLivenessRecovery ?? BleAudioLivenessRecovery(),
+        _notificationEndpointResolver = notificationEndpointResolver,
+        _connectionProbe = connectionProbe,
+        _disconnectRegistrar = disconnectRegistrar {
+    _bleConnectionSubscription = (connectionStateStream ?? _bleDevice.connectionState).listen((state) {
       switch (state) {
         case BluetoothConnectionState.disconnected:
+          _connectionGeneration++;
           _audioLivenessRecovery.reset();
+          unawaited(_clearCharacteristicState());
           _updateState(DeviceTransportState.disconnected);
           break;
         case BluetoothConnectionState.connecting:
@@ -135,18 +189,11 @@ class BleTransport extends DeviceTransport {
     }
 
     _updateState(DeviceTransportState.disconnecting);
+    _connectionGeneration++;
     _audioLivenessRecovery.reset();
 
     try {
-      for (final subscription in _characteristicSubscriptions.values) {
-        await subscription.cancel();
-      }
-      _characteristicSubscriptions.clear();
-
-      for (final controller in _streamControllers.values) {
-        await controller.close();
-      }
-      _streamControllers.clear();
+      await _clearCharacteristicState();
 
       await _bleDevice.disconnect();
 
@@ -185,7 +232,11 @@ class BleTransport extends DeviceTransport {
   Future<Stream<List<int>>?> getReadyCharacteristicStream(String serviceUuid, String characteristicUuid) async {
     final key = _characteristicKey(serviceUuid, characteristicUuid);
     final controller = _streamControllers.putIfAbsent(key, StreamController<List<int>>.broadcast);
-    final ready = await _ensureCharacteristicListener(serviceUuid, characteristicUuid, key);
+    var ready = await _ensureCharacteristicListener(serviceUuid, characteristicUuid, key);
+    if (!ready && _isOperationConnected) {
+      await Future<void>.delayed(bleNotificationSetupRetryDelay);
+      ready = await _ensureCharacteristicListener(serviceUuid, characteristicUuid, key, force: true);
+    }
     if (!ready) return null;
     if (_isAudioCharacteristic(characteristicUuid)) {
       _audioLivenessRecovery.arm(() => _recoverSilentAudioSubscription(serviceUuid, characteristicUuid, key));
@@ -198,12 +249,26 @@ class BleTransport extends DeviceTransport {
 
   bool _isAudioCharacteristic(String characteristicUuid) => bleCharacteristicUsesFreshNotifications(characteristicUuid);
 
-  Future<bool> _ensureCharacteristicListener(String serviceUuid, String characteristicUuid, String key) async {
-    if (_characteristicSubscriptions.containsKey(key)) return true;
+  bool get _isOperationConnected => _connectionProbe?.call() ?? _state == DeviceTransportState.connected;
+
+  Future<bool> _ensureCharacteristicListener(
+    String serviceUuid,
+    String characteristicUuid,
+    String key, {
+    bool force = false,
+    bool resetNotifications = false,
+  }) async {
+    if (!force && _characteristicSubscriptions.containsKey(key)) return true;
     final pending = _characteristicSetupOperations[key];
     if (pending != null) return pending;
 
-    final operation = _setupCharacteristicListener(serviceUuid, characteristicUuid, key);
+    final operation = _setupCharacteristicListener(
+      serviceUuid,
+      characteristicUuid,
+      key,
+      force: force,
+      resetNotifications: resetNotifications,
+    );
     _characteristicSetupOperations[key] = operation;
     try {
       return await operation;
@@ -219,30 +284,31 @@ class BleTransport extends DeviceTransport {
     String characteristicUuid,
     String key, {
     bool force = false,
+    bool resetNotifications = false,
   }) async {
+    final setupGeneration = _connectionGeneration;
     try {
       if (force) {
         await _characteristicSubscriptions.remove(key)?.cancel();
       } else if (_characteristicSubscriptions.containsKey(key)) {
         return true;
       }
-      final characteristic = await _getCharacteristic(serviceUuid, characteristicUuid);
-      if (characteristic == null) {
+      final endpoint = await _getNotificationEndpoint(serviceUuid, characteristicUuid);
+      if (endpoint == null) {
         Logger.debug('BLE Transport: Characteristic not found: $serviceUuid:$characteristicUuid');
         return false;
       }
-      if (_state != DeviceTransportState.connected) return false;
+      if (!_isOperationConnected || setupGeneration != _connectionGeneration) return false;
 
-      if (force) {
+      if (resetNotifications) {
         try {
-          await characteristic.setNotifyValue(false, timeout: _notificationSetupTimeoutSeconds);
+          await endpoint.setNotifyValue(false, timeout: bleNotificationResetTimeoutSeconds);
         } catch (error) {
           Logger.debug('BLE Transport: Could not clear stale notification state before retry: $error');
         }
       }
 
-      final values =
-          _isAudioCharacteristic(characteristicUuid) ? characteristic.onValueReceived : characteristic.lastValueStream;
+      final values = _isAudioCharacteristic(characteristicUuid) ? endpoint.freshValues : endpoint.replayingValues;
       final subscription = values.listen(
         (value) {
           if (value.isNotEmpty && _isAudioCharacteristic(characteristicUuid)) {
@@ -258,18 +324,23 @@ class BleTransport extends DeviceTransport {
       );
 
       try {
-        await characteristic.setNotifyValue(true, timeout: _notificationSetupTimeoutSeconds);
+        await endpoint.setNotifyValue(true, timeout: bleNotificationEnableTimeoutSeconds);
       } catch (_) {
         await subscription.cancel();
         rethrow;
       }
-      if (_state != DeviceTransportState.connected) {
+      if (!_isOperationConnected || setupGeneration != _connectionGeneration) {
         await subscription.cancel();
         return false;
       }
 
       _characteristicSubscriptions[key] = subscription;
-      _bleDevice.cancelWhenDisconnected(subscription);
+      final disconnectRegistrar = _disconnectRegistrar;
+      if (disconnectRegistrar != null) {
+        disconnectRegistrar(subscription);
+      } else {
+        _bleDevice.cancelWhenDisconnected(subscription);
+      }
       return true;
     } catch (e) {
       Logger.debug('BLE Transport: Failed to setup characteristic listener: $e');
@@ -278,9 +349,15 @@ class BleTransport extends DeviceTransport {
   }
 
   Future<void> _recoverSilentAudioSubscription(String serviceUuid, String characteristicUuid, String key) async {
-    if (_state != DeviceTransportState.connected) return;
+    if (!_isOperationConnected) return;
     Logger.debug('BLE Transport: Connected audio channel is silent; retrying its notification subscription once');
-    final recovered = await _setupCharacteristicListener(serviceUuid, characteristicUuid, key, force: true);
+    final recovered = await _ensureCharacteristicListener(
+      serviceUuid,
+      characteristicUuid,
+      key,
+      force: true,
+      resetNotifications: true,
+    );
     if (!recovered) {
       Logger.debug('BLE Transport: Silent audio notification subscription retry failed');
     }
@@ -332,20 +409,33 @@ class BleTransport extends DeviceTransport {
     );
   }
 
-  @override
-  Future<void> dispose() async {
-    _audioLivenessRecovery.dispose();
-    await _bleConnectionSubscription?.cancel();
+  Future<BleNotificationEndpoint?> _getNotificationEndpoint(String serviceUuid, String characteristicUuid) async {
+    final resolver = _notificationEndpointResolver;
+    if (resolver != null) return resolver(serviceUuid, characteristicUuid);
+    final characteristic = await _getCharacteristic(serviceUuid, characteristicUuid);
+    return characteristic == null ? null : _FlutterBlueNotificationEndpoint(characteristic);
+  }
 
-    for (final subscription in _characteristicSubscriptions.values) {
+  Future<void> _clearCharacteristicState() async {
+    final subscriptions = _characteristicSubscriptions.values.toList(growable: false);
+    _characteristicSubscriptions.clear();
+    final controllers = _streamControllers.values.toList(growable: false);
+    _streamControllers.clear();
+
+    for (final subscription in subscriptions) {
       await subscription.cancel();
     }
-    _characteristicSubscriptions.clear();
-
-    for (final controller in _streamControllers.values) {
-      await controller.close();
+    for (final controller in controllers) {
+      if (!controller.isClosed) await controller.close();
     }
-    _streamControllers.clear();
+  }
+
+  @override
+  Future<void> dispose() async {
+    _connectionGeneration++;
+    _audioLivenessRecovery.dispose();
+    await _bleConnectionSubscription?.cancel();
+    await _clearCharacteristicState();
 
     await _connectionStateController.close();
   }

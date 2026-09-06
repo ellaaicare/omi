@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
@@ -60,12 +61,185 @@ class _AudioTransport extends DeviceTransport {
   }
 }
 
+class _FakeBleNotificationEndpoint implements BleNotificationEndpoint {
+  final StreamController<List<int>> fresh = StreamController<List<int>>.broadcast();
+  final StreamController<List<int>> replaying = StreamController<List<int>>.broadcast();
+  final List<(bool, int)> notifyCalls = [];
+  int failedEnableAttempts = 0;
+  int freshValueRequests = 0;
+  int replayingValueRequests = 0;
+  Completer<void>? notifyBarrier;
+
+  @override
+  Stream<List<int>> get freshValues {
+    freshValueRequests++;
+    return fresh.stream;
+  }
+
+  @override
+  Stream<List<int>> get replayingValues {
+    replayingValueRequests++;
+    return replaying.stream;
+  }
+
+  @override
+  Future<void> setNotifyValue(bool enabled, {required int timeout}) async {
+    notifyCalls.add((enabled, timeout));
+    await notifyBarrier?.future;
+    if (enabled && failedEnableAttempts > 0) {
+      failedEnableAttempts--;
+      throw StateError('transient CCCD failure');
+    }
+  }
+
+  Future<void> dispose() async {
+    await fresh.close();
+    await replaying.close();
+  }
+}
+
+BleTransport _testBleTransport(
+  _FakeBleNotificationEndpoint endpoint, {
+  BleAudioLivenessRecovery? recovery,
+  bool Function()? connectionProbe,
+  Stream<BluetoothConnectionState>? connectionStates,
+}) {
+  return BleTransport(
+    BluetoothDevice.fromId('00000000-0000-0000-0000-000000000001'),
+    audioLivenessRecovery: recovery,
+    notificationEndpointResolver: (_, __) async => endpoint,
+    connectionProbe: connectionProbe ?? () => true,
+    disconnectRegistrar: (_) {},
+    connectionStateStream: connectionStates ?? const Stream<BluetoothConnectionState>.empty(),
+  );
+}
+
 void main() {
   BtDevice necklace() => BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
 
   test('audio subscriptions accept fresh notifications only', () {
     expect(bleCharacteristicUsesFreshNotifications(audioDataStreamCharacteristicUuid), isTrue);
     expect(bleCharacteristicUsesFreshNotifications('2A19'), isFalse, reason: 'battery may retain replay semantics');
+  });
+
+  test('production BLE transport retries one transient CCCD failure and forwards only fresh audio', () async {
+    final endpoint = _FakeBleNotificationEndpoint()..failedEnableAttempts = 1;
+    final transport = _testBleTransport(endpoint);
+    addTearDown(endpoint.dispose);
+    addTearDown(transport.dispose);
+
+    final stream = await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+    final received = <List<int>>[];
+    final subscription = stream?.listen(received.add);
+    addTearDown(() => subscription?.cancel());
+    endpoint.replaying.add([9, 9, 9]);
+    endpoint.fresh.add([1, 2, 3]);
+    await pumpEventQueue();
+
+    expect(stream, isNotNull);
+    expect(endpoint.notifyCalls, [
+      (true, bleNotificationEnableTimeoutSeconds),
+      (true, bleNotificationEnableTimeoutSeconds),
+    ]);
+    expect(endpoint.freshValueRequests, 2);
+    expect(endpoint.replayingValueRequests, 0);
+    expect(received, [
+      [1, 2, 3],
+    ]);
+  });
+
+  test('production BLE transport resets one silent CCCD inside the physical-audio deadline', () async {
+    final endpoint = _FakeBleNotificationEndpoint();
+    final recovery = BleAudioLivenessRecovery(window: const Duration(milliseconds: 1));
+    final transport = _testBleTransport(endpoint, recovery: recovery);
+    addTearDown(endpoint.dispose);
+    addTearDown(transport.dispose);
+
+    final stream = await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+    final received = <List<int>>[];
+    final subscription = stream?.listen(received.add);
+    addTearDown(() => subscription?.cancel());
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    await pumpEventQueue(times: 20);
+    endpoint.fresh.add([4, 5, 6]);
+    await pumpEventQueue();
+
+    expect(endpoint.notifyCalls, [
+      (true, bleNotificationEnableTimeoutSeconds),
+      (false, bleNotificationResetTimeoutSeconds),
+      (true, bleNotificationEnableTimeoutSeconds),
+    ]);
+    expect(received, [
+      [4, 5, 6],
+    ]);
+    final worstCaseRecovery = bleAudioLivenessWindow +
+        const Duration(seconds: bleNotificationResetTimeoutSeconds + bleNotificationEnableTimeoutSeconds);
+    expect(worstCaseRecovery, lessThan(const Duration(seconds: 5)));
+  });
+
+  test('production BLE setup fails closed when the account/device connection generation drifts', () async {
+    final endpoint = _FakeBleNotificationEndpoint();
+    final connectionStates = StreamController<BluetoothConnectionState>.broadcast();
+    final notifyBarrier = Completer<void>();
+    var connected = true;
+    endpoint.notifyBarrier = notifyBarrier;
+    final transport = _testBleTransport(
+      endpoint,
+      connectionProbe: () => connected,
+      connectionStates: connectionStates.stream,
+    );
+    addTearDown(endpoint.dispose);
+    addTearDown(connectionStates.close);
+    addTearDown(transport.dispose);
+
+    final streamFuture = transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+    await pumpEventQueue();
+    connected = false;
+    connectionStates.add(BluetoothConnectionState.disconnected);
+    await pumpEventQueue();
+    notifyBarrier.complete();
+
+    expect(await streamFuture, isNull);
+    await pumpEventQueue();
+    expect(endpoint.fresh.hasListener, isFalse);
+  });
+
+  test('production BLE transport discards a stale subscription before reconnect', () async {
+    final endpoint = _FakeBleNotificationEndpoint();
+    final connectionStates = StreamController<BluetoothConnectionState>.broadcast();
+    var connected = true;
+    final transport = _testBleTransport(
+      endpoint,
+      connectionProbe: () => connected,
+      connectionStates: connectionStates.stream,
+    );
+    addTearDown(endpoint.dispose);
+    addTearDown(connectionStates.close);
+    addTearDown(transport.dispose);
+
+    final firstStream = await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+    final firstSubscription = firstStream?.listen((_) {});
+    addTearDown(() => firstSubscription?.cancel());
+    expect(endpoint.notifyCalls, [(true, bleNotificationEnableTimeoutSeconds)]);
+
+    connected = false;
+    connectionStates.add(BluetoothConnectionState.disconnected);
+    await pumpEventQueue();
+    connected = true;
+    connectionStates.add(BluetoothConnectionState.connected);
+    await pumpEventQueue();
+
+    final secondStream =
+        await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+    final secondSubscription = secondStream?.listen((_) {});
+    addTearDown(() => secondSubscription?.cancel());
+
+    expect(secondStream, isNotNull);
+    expect(endpoint.notifyCalls, [
+      (true, bleNotificationEnableTimeoutSeconds),
+      (true, bleNotificationEnableTimeoutSeconds),
+    ]);
+    expect(endpoint.freshValueRequests, 2);
   });
 
   test('Omi production audio entrypoint fails closed until the BLE subscription is ready', () async {
