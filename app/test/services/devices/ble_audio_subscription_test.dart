@@ -306,6 +306,51 @@ void main() {
     expect(endpoint.notifyCalls, [(true, bleNotificationEnableTimeoutSeconds)]);
   });
 
+  test('disconnect and reconnect during readiness rejects the stale stream and forwards on a fresh request', () async {
+    final endpoint = _FakeBleNotificationEndpoint();
+    final connectionStates = StreamController<BluetoothConnectionState>.broadcast();
+    final enableBarrier = Completer<void>();
+    endpoint.notifyCallBarriers[1] = enableBarrier;
+    var connected = true;
+    final transport = _testBleTransport(
+      endpoint,
+      connectionProbe: () => connected,
+      connectionStates: connectionStates.stream,
+    );
+    addTearDown(endpoint.dispose);
+    addTearDown(connectionStates.close);
+    addTearDown(transport.dispose);
+
+    final staleReady = transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+    while (endpoint.notifyCalls.isEmpty) {
+      await pumpEventQueue();
+    }
+    connected = false;
+    connectionStates.add(BluetoothConnectionState.disconnected);
+    await pumpEventQueue();
+    connected = true;
+    connectionStates.add(BluetoothConnectionState.connected);
+    enableBarrier.complete();
+
+    expect(await staleReady, isNull);
+
+    final freshStream = await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+    final received = <List<int>>[];
+    final subscription = freshStream?.listen(received.add);
+    addTearDown(() => subscription?.cancel());
+    endpoint.fresh.add([7, 8, 9]);
+    await pumpEventQueue();
+
+    expect(freshStream, isNotNull);
+    expect(received, [
+      [7, 8, 9],
+    ]);
+    expect(endpoint.notifyCalls, [
+      (true, bleNotificationEnableTimeoutSeconds),
+      (true, bleNotificationEnableTimeoutSeconds),
+    ]);
+  });
+
   test('ready request overlapping silent recovery reuses one serialized listener setup', () async {
     final endpoint = _FakeBleNotificationEndpoint();
     final resetBarrier = Completer<void>();
