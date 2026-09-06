@@ -362,10 +362,11 @@ void main() {
     addTearDown(endpoint.dispose);
     addTearDown(transport.dispose);
 
-    expect(
-      await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid),
-      isNotNull,
-    );
+    final initialStream =
+        await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+    expect(initialStream, isNotNull);
+    final initialSubscription = initialStream?.listen((_) {});
+    addTearDown(() => initialSubscription?.cancel());
     await Future<void>.delayed(const Duration(milliseconds: 10));
     while (endpoint.notifyCalls.length < 2) {
       await pumpEventQueue();
@@ -516,6 +517,49 @@ void main() {
     await pumpEventQueue(times: 20);
 
     expect(endpoint.notifyCalls, [
+      (true, bleNotificationEnableTimeoutSeconds),
+      (false, bleNotificationResetTimeoutSeconds),
+      (true, bleNotificationEnableTimeoutSeconds),
+    ]);
+  });
+
+  test('capture cancellation during silent reset prevents stale re-enable and preserves next recovery', () async {
+    final endpoint = _FakeBleNotificationEndpoint();
+    final resetBarrier = Completer<void>();
+    endpoint.notifyCallBarriers[2] = resetBarrier;
+    final transport = _testBleTransport(
+      endpoint,
+      recovery: BleAudioLivenessRecovery(window: const Duration(milliseconds: 1)),
+    );
+    addTearDown(endpoint.dispose);
+    addTearDown(transport.dispose);
+
+    final firstStream = await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+    final firstSubscription = firstStream?.listen((_) {});
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    while (endpoint.notifyCalls.length < 2) {
+      await pumpEventQueue();
+    }
+
+    await firstSubscription?.cancel();
+    resetBarrier.complete();
+    await pumpEventQueue(times: 20);
+
+    expect(endpoint.notifyCalls, [
+      (true, bleNotificationEnableTimeoutSeconds),
+      (false, bleNotificationResetTimeoutSeconds),
+    ]);
+
+    final secondStream =
+        await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+    final secondSubscription = secondStream?.listen((_) {});
+    addTearDown(() => secondSubscription?.cancel());
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    await pumpEventQueue(times: 20);
+
+    expect(endpoint.notifyCalls, [
+      (true, bleNotificationEnableTimeoutSeconds),
+      (false, bleNotificationResetTimeoutSeconds),
       (true, bleNotificationEnableTimeoutSeconds),
       (false, bleNotificationResetTimeoutSeconds),
       (true, bleNotificationEnableTimeoutSeconds),
