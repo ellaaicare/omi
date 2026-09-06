@@ -80,14 +80,26 @@ class _FakeDeviceService implements IDeviceService {
 }
 
 class _RecordingCaptureProvider extends CaptureProvider {
-  _RecordingCaptureProvider({this.startGate, this.disconnectGate, this.failuresBeforeStart = 0, this.onDeviceStart});
+  _RecordingCaptureProvider({
+    this.startGate,
+    this.disconnectGate,
+    this.failuresBeforeStart = 0,
+    this.onDeviceStart,
+    this.forcedDiagnosticFailure,
+  });
 
   final Completer<void>? startGate;
   final Completer<void>? disconnectGate;
   final int failuresBeforeStart;
   final void Function(int attempt)? onDeviceStart;
+  final CaptureDiagnosticFailure? forcedDiagnosticFailure;
   int deviceStarts = 0;
   final List<String> disconnectedDeviceIds = [];
+
+  @override
+  CaptureDiagnostics get captureDiagnostics => forcedDiagnosticFailure == null
+      ? super.captureDiagnostics
+      : CaptureDiagnostics(phase: CaptureDiagnosticPhase.failed, failure: forcedDiagnosticFailure!);
 
   @override
   Future<void> streamDeviceRecording({BtDevice? device}) async {
@@ -1110,6 +1122,33 @@ void main() {
     expect(provider.isConnecting, isFalse);
     expect(capture.deviceStarts, 2);
     expect(capture.recordingState, RecordingState.deviceRecord);
+  });
+
+  test('connected callback does not hammer transcription after a definitive capture failure', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final capture = _RecordingCaptureProvider(
+      failuresBeforeStart: 3,
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.transcriptionUnavailable,
+    );
+    final provider = DeviceProvider(
+      deviceService: service,
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      deviceCaptureRetryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+
+    expect(capture.deviceStarts, 1);
+    expect(capture.recordingState, RecordingState.error);
+    expect(provider.presentationIsConnected, isTrue);
   });
 
   test('a connected necklace is persisted before optional metadata work so startup can reconnect it', () async {

@@ -123,10 +123,11 @@ class OmiGlassConnection extends DeviceConnection {
     required void Function(List<int>) onAudioBytesReceived,
   }) async {
     try {
-      final stream = transport.getCharacteristicStream(
+      final stream = await transport.getReadyCharacteristicStream(
         omiServiceUuid,
         audioDataStreamCharacteristicUuid,
       );
+      if (stream == null) return null;
 
       final subscription = stream.listen((value) {
         if (value.isNotEmpty) {

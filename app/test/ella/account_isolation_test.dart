@@ -2317,6 +2317,11 @@ class _LateDisconnectTransport implements DeviceTransport {
   Stream<List<int>> getCharacteristicStream(String serviceUuid, String characteristicUuid) => const Stream.empty();
 
   @override
+  Future<Stream<List<int>>?> getReadyCharacteristicStream(String serviceUuid, String characteristicUuid) async {
+    return getCharacteristicStream(serviceUuid, characteristicUuid);
+  }
+
+  @override
   Future<bool> isConnected() async => _connected;
 
   @override

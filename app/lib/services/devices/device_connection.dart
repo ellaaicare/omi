@@ -266,7 +266,8 @@ abstract class DeviceConnection {
   Future<StreamSubscription?> performGetBleAudioBytesListener({
     required void Function(List<int>) onAudioBytesReceived,
   }) async {
-    final stream = transport.getCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+    final stream = await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+    if (stream == null) return null;
     return stream.listen(onAudioBytesReceived);
   }
 
