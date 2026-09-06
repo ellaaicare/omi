@@ -1049,6 +1049,14 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         _deferDeviceCaptureUntilPhoneReleases(device, operationGeneration);
         return false;
       }
+      final failure = capture.captureDiagnostics.failure;
+      if (failure == CaptureDiagnosticFailure.transcriptionUnavailable ||
+          failure == CaptureDiagnosticFailure.physicalAudioUnavailable ||
+          failure == CaptureDiagnosticFailure.necklaceAudioSubscriptionUnavailable ||
+          failure == CaptureDiagnosticFailure.necklaceConnectionUnavailable) {
+        Logger.debug('Necklace capture start stopped after definitive failure: $failure');
+        break;
+      }
       if (attempt < _maxDeviceCaptureStartAttempts) {
         await Future<void>.delayed(_deviceCaptureRetryDelay);
       }

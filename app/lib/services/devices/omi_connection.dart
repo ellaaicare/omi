@@ -119,7 +119,11 @@ class OmiDeviceConnection extends DeviceConnection {
     required void Function(List<int>) onAudioBytesReceived,
   }) async {
     try {
-      final stream = transport.getCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+      final stream = await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+      if (stream == null) {
+        Logger.debug('OmiDeviceConnection: Audio notification subscription was not ready');
+        return null;
+      }
 
       Logger.debug('Subscribed to audioBytes stream from Omi Device');
       final subscription = stream.listen((value) {

@@ -17457,6 +17457,24 @@ abstract class AppLocalizations {
   /// **'Recording isn\'t available right now.'**
   String get todayRecordingUnavailable;
 
+  /// No description provided for @todayNecklaceConnectionUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella couldn\'t connect to your necklace. Keep it nearby and try again.'**
+  String get todayNecklaceConnectionUnavailable;
+
+  /// No description provided for @todayNecklaceAudioSubscriptionUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Your necklace is connected, but its audio channel could not start. Keep it nearby and try again.'**
+  String get todayNecklaceAudioSubscriptionUnavailable;
+
+  /// No description provided for @todayNecklaceAudioSilent.
+  ///
+  /// In en, this message translates to:
+  /// **'Your necklace is connected, but it did not send audio. Keep it nearby and try again.'**
+  String get todayNecklaceAudioSilent;
+
   /// No description provided for @todayMicrophonePermissionDenied.
   ///
   /// In en, this message translates to:

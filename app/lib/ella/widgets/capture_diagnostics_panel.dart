@@ -29,9 +29,10 @@ class CaptureDiagnosticsPanel extends StatelessWidget {
         CaptureDiagnosticFailure.none => null,
         CaptureDiagnosticFailure.microphonePermissionDenied => context.l10n.todayMicrophonePermissionDenied,
         CaptureDiagnosticFailure.transcriptionUnavailable => context.l10n.todayTranscriptionUnavailable,
-        CaptureDiagnosticFailure.physicalAudioUnavailable ||
-        CaptureDiagnosticFailure.necklaceConnectionUnavailable =>
-          context.l10n.waitingForDevice,
+        CaptureDiagnosticFailure.necklaceAudioSubscriptionUnavailable =>
+          context.l10n.todayNecklaceAudioSubscriptionUnavailable,
+        CaptureDiagnosticFailure.physicalAudioUnavailable => context.l10n.todayNecklaceAudioSilent,
+        CaptureDiagnosticFailure.necklaceConnectionUnavailable => context.l10n.todayNecklaceConnectionUnavailable,
         CaptureDiagnosticFailure.socketClosed ||
         CaptureDiagnosticFailure.socketError =>
           context.l10n.todayTranscriptionUnavailable,

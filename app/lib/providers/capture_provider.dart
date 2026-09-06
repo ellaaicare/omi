@@ -99,6 +99,7 @@ enum CaptureDiagnosticFailure {
   transcriptionUnavailable,
   recorderUnavailable,
   necklaceConnectionUnavailable,
+  necklaceAudioSubscriptionUnavailable,
   physicalAudioUnavailable,
   socketClosed,
   socketError,
@@ -1720,7 +1721,13 @@ class CaptureProvider extends ChangeNotifier
     }
     _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.startingCapture, clearFailure: true);
     final connection = await ServiceManager.instance().device.ensureConnection(deviceId);
-    if (connection == null || !_isDeviceCaptureCurrent(session)) {
+    if (connection == null) {
+      if (_isDeviceCaptureCurrent(session)) {
+        _failCaptureDiagnostics(CaptureDiagnosticFailure.necklaceConnectionUnavailable);
+      }
+      return false;
+    }
+    if (!_isDeviceCaptureCurrent(session)) {
       return false;
     }
     final codec = await _getAudioCodec(deviceId);
@@ -1734,7 +1741,13 @@ class CaptureProvider extends ChangeNotifier
     await _streamButton(deviceId, session);
     final startProof = DeviceCaptureStartProof();
     final subscription = await _streamAudioToWs(deviceId, codec, session: session, startProof: startProof);
-    if (subscription == null || !_isDeviceCaptureCurrent(session)) {
+    if (subscription == null) {
+      if (_isDeviceCaptureCurrent(session)) {
+        _failCaptureDiagnostics(CaptureDiagnosticFailure.necklaceAudioSubscriptionUnavailable);
+      }
+      return false;
+    }
+    if (!_isDeviceCaptureCurrent(session)) {
       return false;
     }
     _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.waitingForAudio, clearFailure: true);

@@ -9419,6 +9419,18 @@ class AppLocalizationsCa extends AppLocalizations {
   String get todayRecordingUnavailable => 'Recording isn\'t available right now.';
 
   @override
+  String get todayNecklaceConnectionUnavailable =>
+      'Ella couldn\'t connect to your necklace. Keep it nearby and try again.';
+
+  @override
+  String get todayNecklaceAudioSubscriptionUnavailable =>
+      'Your necklace is connected, but its audio channel could not start. Keep it nearby and try again.';
+
+  @override
+  String get todayNecklaceAudioSilent =>
+      'Your necklace is connected, but it did not send audio. Keep it nearby and try again.';
+
+  @override
   String get todayMicrophonePermissionDenied =>
       'Microphone access is off. Allow it in Settings before recording a moment.';
 
