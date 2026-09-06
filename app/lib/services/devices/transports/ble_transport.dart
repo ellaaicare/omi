@@ -196,8 +196,7 @@ class BleTransport extends DeviceTransport {
   String _characteristicKey(String serviceUuid, String characteristicUuid) =>
       '${serviceUuid.toLowerCase()}:${characteristicUuid.toLowerCase()}';
 
-  bool _isAudioCharacteristic(String characteristicUuid) =>
-      bleCharacteristicUsesFreshNotifications(characteristicUuid);
+  bool _isAudioCharacteristic(String characteristicUuid) => bleCharacteristicUsesFreshNotifications(characteristicUuid);
 
   Future<bool> _ensureCharacteristicListener(String serviceUuid, String characteristicUuid, String key) async {
     if (_characteristicSubscriptions.containsKey(key)) return true;
@@ -242,9 +241,8 @@ class BleTransport extends DeviceTransport {
         }
       }
 
-      final values = _isAudioCharacteristic(characteristicUuid)
-          ? characteristic.onValueReceived
-          : characteristic.lastValueStream;
+      final values =
+          _isAudioCharacteristic(characteristicUuid) ? characteristic.onValueReceived : characteristic.lastValueStream;
       final subscription = values.listen(
         (value) {
           if (value.isNotEmpty && _isAudioCharacteristic(characteristicUuid)) {
