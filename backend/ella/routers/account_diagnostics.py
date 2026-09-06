@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import re
 import uuid
@@ -135,7 +136,11 @@ def create_account_diagnostics_router(
         except Exception as exc:
             raise HTTPException(status_code=503, detail={"code": "diagnostic_store_unavailable"}) from exc
         try:
-            profile_binding_id, receipt_id = _current_consent_material(uid, read_consent_status)
+            profile_binding_id, receipt_id = await asyncio.to_thread(
+                _current_consent_material,
+                uid,
+                read_consent_status,
+            )
         except HTTPException:
             raise
         except Exception as exc:
