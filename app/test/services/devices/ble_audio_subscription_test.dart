@@ -456,6 +456,41 @@ void main() {
     ]);
   });
 
+  test('audio after capture cancellation is never replayed into a later readiness handoff', () async {
+    final endpoint = _FakeBleNotificationEndpoint();
+    final transport = _testBleTransport(endpoint);
+    addTearDown(endpoint.dispose);
+    addTearDown(transport.dispose);
+
+    final firstStream = await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+    final firstReceived = <List<int>>[];
+    final firstSubscription = firstStream?.listen(firstReceived.add);
+    endpoint.fresh.add([1]);
+    await pumpEventQueue();
+    await firstSubscription?.cancel();
+
+    endpoint.fresh.add([2]);
+    await pumpEventQueue();
+
+    final secondStream =
+        await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+    final secondReceived = <List<int>>[];
+    final secondSubscription = secondStream?.listen(secondReceived.add);
+    addTearDown(() => secondSubscription?.cancel());
+    await pumpEventQueue();
+
+    expect(firstReceived, [
+      [1],
+    ]);
+    expect(secondReceived, isEmpty);
+
+    endpoint.fresh.add([3]);
+    await pumpEventQueue();
+    expect(secondReceived, [
+      [3],
+    ]);
+  });
+
   test('Omi production audio entrypoint fails closed until the BLE subscription is ready', () async {
     final transport = _AudioTransport(ready: false);
     final connection = OmiDeviceConnection(necklace(), transport);

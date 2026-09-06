@@ -101,6 +101,7 @@ class BleTransport extends DeviceTransport {
   final Map<String, Future<bool>> _characteristicSetupOperations = {};
   final Map<String, ListQueue<List<int>>> _pendingCharacteristicValues = {};
   final Map<String, int> _pendingCharacteristicByteCounts = {};
+  final Map<String, int> _readyCharacteristicHandoffGenerations = {};
   final BleAudioLivenessRecovery _audioLivenessRecovery;
   final BleNotificationEndpointResolver? _notificationEndpointResolver;
   final bool Function()? _connectionProbe;
@@ -240,13 +241,22 @@ class BleTransport extends DeviceTransport {
     if (!_isSetupCurrent(requestGeneration)) return null;
     final key = _characteristicKey(serviceUuid, characteristicUuid);
     final controller = _streamControllers.putIfAbsent(key, () => _newCharacteristicController(key, characteristicUuid));
+    if (_isAudioCharacteristic(characteristicUuid) && !controller.hasListener) {
+      _readyCharacteristicHandoffGenerations[key] = requestGeneration;
+    }
     var ready = await _ensureCharacteristicListener(serviceUuid, characteristicUuid, key);
     if (!ready && _isSetupCurrent(requestGeneration)) {
       await Future<void>.delayed(bleNotificationSetupRetryDelay);
-      if (!_isSetupCurrent(requestGeneration)) return null;
+      if (!_isSetupCurrent(requestGeneration)) {
+        _endReadyCharacteristicHandoff(key, generation: requestGeneration);
+        return null;
+      }
       ready = await _ensureCharacteristicListener(serviceUuid, characteristicUuid, key, force: true);
     }
-    if (!ready || !_isSetupCurrent(requestGeneration) || !identical(_streamControllers[key], controller)) return null;
+    if (!ready || !_isSetupCurrent(requestGeneration) || !identical(_streamControllers[key], controller)) {
+      _endReadyCharacteristicHandoff(key, generation: requestGeneration);
+      return null;
+    }
     if (_isAudioCharacteristic(characteristicUuid)) {
       _audioLivenessRecovery.arm(() => _recoverSilentAudioSubscription(serviceUuid, characteristicUuid, key));
     }
@@ -266,8 +276,25 @@ class BleTransport extends DeviceTransport {
     late final StreamController<List<int>> controller;
     controller = StreamController<List<int>>.broadcast(
       onListen: () => _flushPendingCharacteristicValues(key, characteristicUuid, controller),
+      onCancel: () {
+        if (!controller.hasListener) {
+          _endReadyCharacteristicHandoff(key, controller: controller);
+        }
+      },
     );
     return controller;
+  }
+
+  void _endReadyCharacteristicHandoff(
+    String key, {
+    int? generation,
+    StreamController<List<int>>? controller,
+  }) {
+    if (generation != null && _readyCharacteristicHandoffGenerations[key] != generation) return;
+    if (controller != null && !identical(_streamControllers[key], controller)) return;
+    _readyCharacteristicHandoffGenerations.remove(key);
+    _pendingCharacteristicValues.remove(key);
+    _pendingCharacteristicByteCounts.remove(key);
   }
 
   void _flushPendingCharacteristicValues(
@@ -276,6 +303,7 @@ class BleTransport extends DeviceTransport {
     StreamController<List<int>> controller,
   ) {
     if (!identical(_streamControllers[key], controller) || controller.isClosed) return;
+    _readyCharacteristicHandoffGenerations.remove(key);
     final pending = _pendingCharacteristicValues.remove(key);
     _pendingCharacteristicByteCounts.remove(key);
     if (pending == null) return;
@@ -303,7 +331,11 @@ class BleTransport extends DeviceTransport {
       }
       return;
     }
-    if (!_isAudioCharacteristic(characteristicUuid) || value.isEmpty) return;
+    if (!_isAudioCharacteristic(characteristicUuid) ||
+        value.isEmpty ||
+        _readyCharacteristicHandoffGenerations[key] != setupGeneration) {
+      return;
+    }
 
     final pending = _pendingCharacteristicValues.putIfAbsent(key, ListQueue<List<int>>.new);
     final bufferedValue = List<int>.unmodifiable(value);
@@ -509,6 +541,7 @@ class BleTransport extends DeviceTransport {
     _streamControllers.clear();
     _pendingCharacteristicValues.clear();
     _pendingCharacteristicByteCounts.clear();
+    _readyCharacteristicHandoffGenerations.clear();
     final operation = _finishCharacteristicTeardown(
       _characteristicTeardownOperation,
       _characteristicSetupOperations.values.toList(growable: false),
