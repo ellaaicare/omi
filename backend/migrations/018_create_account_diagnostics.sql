@@ -80,6 +80,11 @@ CREATE TABLE IF NOT EXISTS ella_diagnostic_support_grants (
         REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE,
     profile_user_id UUID NOT NULL
         REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    binding_revision BIGINT NOT NULL CHECK (binding_revision >= 1),
+    profile_binding_id TEXT COLLATE "C" NOT NULL,
+    consent_receipt_ref TEXT COLLATE "C" NOT NULL,
+    account_binding_fingerprint CHAR(64) COLLATE "C" NOT NULL
+        CHECK (account_binding_fingerprint ~ '^[0-9a-f]{64}$'),
     diagnostic_session_id TEXT COLLATE "C" NOT NULL
         CHECK (diagnostic_session_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'),
     code_hash CHAR(64) COLLATE "C" NOT NULL UNIQUE

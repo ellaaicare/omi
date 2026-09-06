@@ -229,6 +229,8 @@ def create_account_diagnostics_router(
     ) -> DiagnosticSupportGrantReceiptV1:
         _evidence_headers(response)
         authority, expected_fingerprint, profile_binding_id, receipt_id = await current_authority(uid)
+        issued_at = now().astimezone(timezone.utc)
+        evidence_not_before = issued_at - timedelta(hours=payload.evidence_window_hours)
         try:
             records = await repository.list_session_events(
                 authority,
@@ -237,6 +239,8 @@ def create_account_diagnostics_router(
                 profile_binding_id=profile_binding_id,
                 consent_receipt_id=receipt_id,
                 expected_fingerprint=expected_fingerprint,
+                evidence_not_before=evidence_not_before,
+                evidence_not_after=issued_at,
             )
         except DiagnosticAccountAuthorityChanged as exc:
             raise HTTPException(status_code=409, detail={"code": "diagnostic_account_binding_stale"}) from exc
@@ -249,7 +253,6 @@ def create_account_diagnostics_router(
         hmac_key = authority_credential("ELLA_DIAGNOSTICS_SUPPORT_HMAC_KEY")
         if not hmac_key:
             raise HTTPException(status_code=503, detail={"code": "diagnostic_support_grants_not_configured"})
-        issued_at = now().astimezone(timezone.utc)
         expires_at = issued_at + timedelta(seconds=payload.expires_in_seconds)
         code = generate_support_code()
         try:
@@ -257,7 +260,7 @@ def create_account_diagnostics_router(
                 authority,
                 diagnostic_session_id=payload.diagnostic_session_id,
                 code_hash=support_code_hash(code, hmac_key=hmac_key),
-                evidence_not_before=issued_at - timedelta(hours=payload.evidence_window_hours),
+                evidence_not_before=evidence_not_before,
                 evidence_not_after=issued_at,
                 expires_at=expires_at,
                 uid=uid,

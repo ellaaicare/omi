@@ -26,12 +26,14 @@ on:
       - "backend/database/voice_canary.py"
       - "backend/models/conversation.py"
       - "backend/models/conversation_integrity.py"
+      - "backend/models/message_event.py"
       - "backend/models/hermes_cloud_enrichment_contract.py"
       - "backend/routers/transcribe.py"
       - "backend/routers/pusher.py"
       - "backend/routers/integration.py"
       - "backend/routers/workflow.py"
       - "backend/utils/capture_buffer.py"
+      - "backend/utils/conversations/capture_protocol.py"
       - "backend/utils/conversations/process_conversation.py"
       - "backend/utils/conversations/postprocess_conversation.py"
       - "backend/utils/conversations/merge_conversations.py"
@@ -193,12 +195,14 @@ on:
       - "backend/database/voice_canary.py"
       - "backend/models/conversation.py"
       - "backend/models/conversation_integrity.py"
+      - "backend/models/message_event.py"
       - "backend/models/hermes_cloud_enrichment_contract.py"
       - "backend/routers/transcribe.py"
       - "backend/routers/pusher.py"
       - "backend/routers/integration.py"
       - "backend/routers/workflow.py"
       - "backend/utils/capture_buffer.py"
+      - "backend/utils/conversations/capture_protocol.py"
       - "backend/utils/conversations/process_conversation.py"
       - "backend/utils/conversations/postprocess_conversation.py"
       - "backend/utils/conversations/merge_conversations.py"
@@ -714,6 +718,41 @@ jobs:
             tests/unit/test_capture_webhook_delivery.py \
             -v | tee /tmp/capture-buffer-retention-pytest.log
           ! grep -Eq '[0-9]+ skipped' /tmp/capture-buffer-retention-pytest.log
+
+      - name: Run account diagnostic evidence contract
+        run: |
+          set -euo pipefail
+          diagnostic_ids="$(
+            pytest --collect-only -q \
+              tests/unit/test_account_diagnostics.py \
+              tests/postgres/test_account_diagnostics_postgres.py |
+              sed '/^$/d'
+          )"
+          required_diagnostic_ids=(
+            "tests/unit/test_account_diagnostics.py::test_capture_correlation_is_fenced_by_authenticated_current_account_authority"
+            "tests/unit/test_account_diagnostics.py::test_support_grant_rejects_session_without_evidence_in_requested_window"
+            "tests/unit/test_account_diagnostics.py::test_checked_in_schema_registry_and_build_849_golden_traces_match_runtime_contract"
+            "tests/postgres/test_account_diagnostics_postgres.py::test_two_accounts_cannot_cross_read_append_or_revoke_diagnostic_evidence"
+            "tests/postgres/test_account_diagnostics_postgres.py::test_support_code_redemption_revalidates_consent_and_binding_before_read"
+          )
+          test "$(grep -c '::' <<<"$diagnostic_ids")" -eq 30
+          for required_id in "${required_diagnostic_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$diagnostic_ids"
+          done
+          pytest \
+            tests/unit/test_account_diagnostics.py \
+            tests/postgres/test_account_diagnostics_postgres.py \
+            -v | tee /tmp/account-diagnostics-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/account-diagnostics-pytest.log
+          black --check --line-length 120 --skip-string-normalization \
+            database/account_diagnostics.py \
+            ella/routers/account_diagnostics.py \
+            ella/services/account_diagnostics.py \
+            tests/postgres/test_account_diagnostics_postgres.py \
+            tests/unit/test_account_diagnostics.py \
+            utils/ella/account_diagnostics.py \
+            utils/ella/account_diagnostics_retention.py
+          python -c "import json; json.load(open('ella/contracts/diagnostic-event-v1.schema.json', encoding='utf-8')); json.load(open('ella/contracts/diagnostic-failure-registry-v1.json', encoding='utf-8'))"
 
       - name: Run incident 1182 mounted-route exploit controls
         run: |

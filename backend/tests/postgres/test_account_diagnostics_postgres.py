@@ -844,3 +844,118 @@ def test_two_accounts_cannot_cross_read_append_or_revoke_diagnostic_evidence():
             await _drop_schema(admin, pool, schema)
 
     asyncio.run(scenario())
+
+
+def test_support_code_redemption_revalidates_consent_and_binding_before_read():
+    async def scenario() -> None:
+        admin, pool, schema = await _create_schema()
+        try:
+
+            async def get_pool():
+                return pool
+
+            repository = PostgresAccountDiagnosticsRepository(get_pool)
+            uid = "diagnostic-support-authority"
+            user_id = await pool.fetchval("INSERT INTO users (omi_uid) VALUES ($1) RETURNING id", uid)
+            await pool.execute(
+                """
+                INSERT INTO ella_runtime_bindings (
+                    user_id, account_user_id, profile_user_id,
+                    role, status, active, revision
+                ) VALUES ($1, $1, $1, 'user', 'active', TRUE, 7)
+                """,
+                user_id,
+            )
+            profile_binding_id = "aipb_support_authority"
+            receipt_id = "aicr_support_authority"
+            await pool.execute(
+                """
+                INSERT INTO ella_managed_cloud_consent_authority (
+                    user_id, decision, consent_receipt_ref, profile_binding_id
+                ) VALUES ($1, 'granted', $2, $3)
+                """,
+                user_id,
+                managed_cloud_consent.consent_receipt_ref(uid, receipt_id),
+                profile_binding_id,
+            )
+            authority = await repository.resolve_account_authority(uid)
+            fingerprint = account_binding_fingerprint(
+                uid=uid,
+                profile_binding_id=profile_binding_id,
+                binding_revision=authority.binding_revision,
+                consent_receipt_id=receipt_id,
+            )
+            authority_kwargs = {
+                "uid": uid,
+                "profile_binding_id": profile_binding_id,
+                "consent_receipt_id": receipt_id,
+                "expected_fingerprint": fingerprint,
+            }
+            now = datetime.now(timezone.utc)
+            grant_id = await repository.create_support_grant(
+                authority,
+                diagnostic_session_id="support-authority-session",
+                code_hash="e" * 64,
+                evidence_not_before=now - timedelta(minutes=1),
+                evidence_not_after=now + timedelta(minutes=1),
+                expires_at=now + timedelta(minutes=5),
+                **authority_kwargs,
+            )
+
+            await pool.execute(
+                "UPDATE ella_managed_cloud_consent_authority SET decision = 'revoked' WHERE user_id = $1",
+                user_id,
+            )
+            with pytest.raises(DiagnosticSupportGrantInvalid):
+                await repository.consume_support_grant(
+                    code_hash="e" * 64,
+                    operator_id="support@example.invalid",
+                    case_id="case-revoked",
+                    reason="customer_requested_help",
+                )
+            assert await pool.fetchval(
+                "SELECT redeemed_at IS NULL FROM ella_diagnostic_support_grants WHERE id = $1::uuid",
+                grant_id,
+            )
+
+            await pool.execute(
+                "UPDATE ella_managed_cloud_consent_authority SET decision = 'granted' WHERE user_id = $1",
+                user_id,
+            )
+            replacement_profile_id = await pool.fetchval(
+                "INSERT INTO users (omi_uid) VALUES ($1) RETURNING id",
+                "diagnostic-support-authority-replacement-profile",
+            )
+            await pool.execute(
+                """
+                UPDATE ella_runtime_bindings
+                SET profile_user_id = $2, revision = revision + 1
+                WHERE user_id = $1
+                """,
+                user_id,
+                replacement_profile_id,
+            )
+            await pool.execute(
+                """
+                UPDATE ella_managed_cloud_consent_authority
+                SET profile_binding_id = 'aipb_support_authority_replacement'
+                WHERE user_id = $1
+                """,
+                user_id,
+            )
+            with pytest.raises(DiagnosticSupportGrantInvalid):
+                await repository.consume_support_grant(
+                    code_hash="e" * 64,
+                    operator_id="support@example.invalid",
+                    case_id="case-binding-drift",
+                    reason="customer_requested_help",
+                )
+            assert await pool.fetchval(
+                "SELECT redeemed_at IS NULL FROM ella_diagnostic_support_grants WHERE id = $1::uuid",
+                grant_id,
+            )
+            assert await pool.fetchval("SELECT COUNT(*) FROM ella_diagnostic_support_audit") == 0
+        finally:
+            await _drop_schema(admin, pool, schema)
+
+    asyncio.run(scenario())

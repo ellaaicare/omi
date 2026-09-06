@@ -415,6 +415,8 @@ class PostgresAccountDiagnosticsRepository:
         profile_binding_id: str,
         consent_receipt_id: str,
         expected_fingerprint: str,
+        evidence_not_before: datetime | None = None,
+        evidence_not_after: datetime | None = None,
     ) -> list[Any]:
         pool = await self._pool_factory()
         async with pool.acquire() as conn, conn.transaction():
@@ -431,6 +433,8 @@ class PostgresAccountDiagnosticsRepository:
                 account_user_id=authority.account_user_id,
                 profile_user_id=authority.profile_user_id,
                 diagnostic_session_id=diagnostic_session_id,
+                evidence_not_before=evidence_not_before,
+                evidence_not_after=evidence_not_after,
             )
         return list(rows)
 
@@ -552,17 +556,24 @@ class PostgresAccountDiagnosticsRepository:
             )
             if active_count >= 3:
                 raise DiagnosticSupportGrantLimitExceeded
+            expected_receipt_ref = managed_cloud_consent.consent_receipt_ref(uid, consent_receipt_id)
             grant_id = await conn.fetchval(
                 """
                 INSERT INTO ella_diagnostic_support_grants (
-                    account_user_id, profile_user_id, diagnostic_session_id,
+                    account_user_id, profile_user_id, binding_revision,
+                    profile_binding_id, consent_receipt_ref,
+                    account_binding_fingerprint, diagnostic_session_id,
                     code_hash, evidence_not_before, evidence_not_after, expires_at
                 )
-                VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7)
+                VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 RETURNING id
                 """,
                 authority.account_user_id,
                 authority.profile_user_id,
+                authority.binding_revision,
+                profile_binding_id,
+                expected_receipt_ref,
+                expected_fingerprint,
                 diagnostic_session_id,
                 code_hash,
                 evidence_not_before,
@@ -607,6 +618,95 @@ class PostgresAccountDiagnosticsRepository:
             )
         return result == "UPDATE 1"
 
+    @staticmethod
+    async def _lock_and_verify_support_grant_authority(
+        conn: asyncpg.Connection,
+        grant_hint: Any,
+        *,
+        code_hash: str,
+    ) -> Any:
+        """Re-read a grant under canonical authority before any support read."""
+        account_user_id = uuid.UUID(str(grant_hint["account_user_id"]))
+        owner = authority_advisory_lock.AuthorityOwner.from_values(
+            account_user_id,
+            account_user_id,
+        )
+        owner_lock = await authority_advisory_lock.acquire_authority_lock(
+            conn,
+            owner=owner,
+        )
+        current_user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+            conn,
+            uid=str(grant_hint["omi_uid"]),
+            owner=owner,
+            proof=owner_lock,
+        )
+        grant = await conn.fetchrow(
+            """
+            SELECT id, account_user_id, profile_user_id, binding_revision,
+                   profile_binding_id, consent_receipt_ref,
+                   account_binding_fingerprint, diagnostic_session_id,
+                   evidence_not_before, evidence_not_after
+            FROM ella_diagnostic_support_grants
+            WHERE id = $1::uuid
+              AND code_hash = $2
+              AND redeemed_at IS NULL
+              AND revoked_at IS NULL
+              AND expires_at > clock_timestamp()
+            FOR UPDATE
+            """,
+            grant_hint["id"],
+            code_hash,
+        )
+        if grant is None:
+            raise DiagnosticSupportGrantInvalid
+        binding = await conn.fetchrow(
+            """
+            SELECT candidate.profile_user_id, candidate.revision
+            FROM ella_runtime_bindings candidate
+            WHERE candidate.user_id = $1
+              AND candidate.role = 'user'
+              AND candidate.active = TRUE
+              AND candidate.status = 'active'
+              AND (
+                  candidate.account_user_id IS NULL
+                  OR candidate.account_user_id = $1
+              )
+            ORDER BY candidate.revision DESC, candidate.updated_at DESC
+            LIMIT 1
+            """,
+            current_user_id,
+        )
+        current_profile_user_id = current_user_id if binding is None else binding["profile_user_id"] or current_user_id
+        current_binding_revision = 1 if binding is None else int(binding["revision"])
+        consent = await conn.fetchrow(
+            """
+            SELECT decision, consent_receipt_ref, profile_binding_id
+            FROM ella_managed_cloud_consent_authority
+            WHERE user_id = $1
+            FOR UPDATE
+            """,
+            current_user_id,
+        )
+        authority_is_current = bool(
+            str(current_user_id) == str(grant["account_user_id"])
+            and str(current_profile_user_id) == str(grant["profile_user_id"])
+            and current_binding_revision == int(grant["binding_revision"])
+            and consent is not None
+            and consent["decision"] == "granted"
+            and hmac.compare_digest(
+                str(consent["profile_binding_id"] or ""),
+                str(grant["profile_binding_id"]),
+            )
+            and hmac.compare_digest(
+                str(consent["consent_receipt_ref"] or ""),
+                str(grant["consent_receipt_ref"]),
+            )
+        )
+        if not authority_is_current:
+            raise DiagnosticSupportGrantInvalid
+        return grant
+
     async def consume_support_grant(
         self,
         *,
@@ -617,20 +717,38 @@ class PostgresAccountDiagnosticsRepository:
     ) -> tuple[str, list[Any]]:
         pool = await self._pool_factory()
         async with pool.acquire() as conn, conn.transaction():
-            grant = await conn.fetchrow(
+            grant_hint = await conn.fetchrow(
                 """
-                UPDATE ella_diagnostic_support_grants
-                SET redeemed_at = CURRENT_TIMESTAMP
-                WHERE code_hash = $1
-                  AND redeemed_at IS NULL
-                  AND revoked_at IS NULL
-                  AND expires_at > CURRENT_TIMESTAMP
-                RETURNING id, account_user_id, profile_user_id,
-                          diagnostic_session_id, evidence_not_before, evidence_not_after
+                SELECT support_grant.id, support_grant.account_user_id, app_user.omi_uid
+                FROM ella_diagnostic_support_grants support_grant
+                JOIN users app_user ON app_user.id = support_grant.account_user_id
+                WHERE support_grant.code_hash = $1
+                  AND support_grant.redeemed_at IS NULL
+                  AND support_grant.revoked_at IS NULL
+                  AND support_grant.expires_at > clock_timestamp()
                 """,
                 code_hash,
             )
-            if grant is None:
+            if grant_hint is None:
+                raise DiagnosticSupportGrantInvalid
+            grant = await self._lock_and_verify_support_grant_authority(
+                conn,
+                grant_hint,
+                code_hash=code_hash,
+            )
+            redeemed = await conn.fetchval(
+                """
+                UPDATE ella_diagnostic_support_grants
+                SET redeemed_at = clock_timestamp()
+                WHERE id = $1::uuid
+                  AND redeemed_at IS NULL
+                  AND revoked_at IS NULL
+                  AND expires_at > clock_timestamp()
+                RETURNING id
+                """,
+                grant["id"],
+            )
+            if redeemed is None:
                 raise DiagnosticSupportGrantInvalid
             rows = await self._list_bounded_latest_attempt_events(
                 conn,

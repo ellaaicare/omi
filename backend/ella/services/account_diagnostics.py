@@ -11,6 +11,7 @@ from database.account_diagnostics import (
     PostgresAccountDiagnosticsRepository,
     account_binding_fingerprint,
 )
+from ella.services.ai_consent import get_ai_consent_service
 from utils.ella.account_diagnostics import CaptureDiagnosticCorrelation, DiagnosticCorrelationError
 
 
@@ -68,8 +69,6 @@ async def validate_capture_diagnostic_correlation(
         raise DiagnosticCorrelationAuthorityError("diagnostic_store_unavailable", retryable=True) from exc
 
     if consent_status is None:
-        from ella.services.ai_consent import get_ai_consent_service
-
         consent_status = get_ai_consent_service().status
     profile_binding_id, receipt_id = current_consent_material(uid, consent_status)
     expected_fingerprint = account_binding_fingerprint(

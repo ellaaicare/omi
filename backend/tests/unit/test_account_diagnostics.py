@@ -406,7 +406,15 @@ class FakeRepository:
     async def list_session_events(self, _authority, diagnostic_session_id, **_authority_material):
         if self.list_error is not None:
             raise self.list_error
-        return [item for item in self.events if item.event.diagnostic_session_id == diagnostic_session_id]
+        evidence_not_before = _authority_material.get("evidence_not_before")
+        evidence_not_after = _authority_material.get("evidence_not_after")
+        return [
+            item
+            for item in self.events
+            if item.event.diagnostic_session_id == diagnostic_session_id
+            and (evidence_not_before is None or item.server_received_at >= evidence_not_before)
+            and (evidence_not_after is None or item.server_received_at <= evidence_not_after)
+        ]
 
     async def create_support_grant(self, _authority, **kwargs):
         self.support_hash = kwargs["code_hash"]
@@ -554,6 +562,25 @@ def test_support_exchange_maps_oversized_attempt_to_typed_safe_failure(monkeypat
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "diagnostic_projection_evidence_limit"
+
+
+def test_support_grant_rejects_session_without_evidence_in_requested_window(monkeypatch):
+    client, repository = _client(monkeypatch)
+    repository.events = [
+        StoredDiagnosticEvent(
+            event=_event(),
+            server_received_at=NOW - timedelta(hours=2),
+        )
+    ]
+
+    response = client.post(
+        "/v1/ella/diagnostics/support-grants",
+        json={"diagnostic_session_id": "session-1", "evidence_window_hours": 1},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "diagnostic_session_not_found"
+    assert repository.support_hash == ""
 
 
 def test_account_ingest_projection_and_single_use_audited_support_exchange(monkeypatch):

@@ -21,6 +21,11 @@ BLE, capture, conversation, memory, or presentation state.
 - Authenticated projection and support-grant reads acquire that same authority
   lock and revalidate the binding and consent inside the read transaction, so a
   prior profile cannot be projected after an account switch or revocation.
+- A support grant snapshots the exact account/profile, binding revision,
+  consent binding/reference, and authority fingerprint. Exchange reacquires the
+  canonical account lock and revalidates that snapshot before redeeming the
+  single-use code. Consent revocation or profile/binding drift leaves the code
+  unredeemed and returns the same invalid-code surface.
 - `diagnostic_session_id`, `capture_attempt_id`, `capture_attempt_ordinal`,
   `authority_generation`, and all diagnostic receipts are correlation evidence
   only. They never grant capture, finalization, repair, or data-read authority.
@@ -103,12 +108,15 @@ All responses use `Cache-Control: no-store` and
   `diagnostic_projection_evidence_limit`. Missing evidence remains `unknown`; it
   is never presented as a negative fact.
 - `POST /v1/ella/diagnostics/support-grants` issues a random, short-lived,
-  session-bound, single-use support code. Only its HMAC is stored.
+  session-bound, single-use support code. A code is issued only when the
+  requested evidence window contains retained evidence; only the code HMAC is
+  stored.
 - `DELETE /v1/ella/diagnostics/support-grants/{grant_id}` revokes an unused code.
 - `POST /v1/ella/operator/diagnostics/support-code/exchange` requires the
   dedicated diagnostic operator bearer and `X-Ella-Operator-Id`. It atomically
-  consumes the code, records case/stable-reason/operator/event count, and returns only
-  the content-free projection.
+  revalidates current account/profile/consent authority, consumes the code,
+  records case/stable-reason/operator/event count, and returns only the
+  content-free projection.
 
 Support operator auth uses `ELLA_DIAGNOSTICS_OPERATOR_TOKEN`; support-code HMACs
 use a separate `ELLA_DIAGNOSTICS_SUPPORT_HMAC_KEY` of at least 32 characters.
