@@ -583,6 +583,10 @@ class ExternalIntegrationCreateConversation(BaseModel):
 class CreateConversationResponse(BaseModel):
     conversation: Conversation
     messages: List[Message] = []
+    diagnostic_session_id: Optional[str] = None
+    capture_attempt_id: Optional[str] = None
+    diagnostic_correlation_status: Optional[str] = None
+    evidence_only: Optional[bool] = None
 
 
 # MIGRATE: For backward compatibility with the old memories routes and app

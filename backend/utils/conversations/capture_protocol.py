@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Set
 from google.cloud.firestore_v1 import transactional
 
 from database._client import db
+from utils.ella.account_diagnostics import CaptureDiagnosticCorrelation
 
 CAPTURE_PROTOCOL_VERSION = 2
 CAPTURE_PROTOCOL_UPGRADE_CLOSE_CODE = 1008
@@ -55,6 +56,19 @@ def valid_capture_drain_body(
         and body.get('conversation_id') == conversation_id
         and body.get('generation') == generation
         and body.get('owner_token') == owner_token
+    )
+
+
+def capture_drain_diagnostic_correlation_matches(
+    body: dict,
+    diagnostic_correlation: Optional[CaptureDiagnosticCorrelation],
+) -> bool:
+    """Check evidence IDs separately so they can never authorize or block drain."""
+    if diagnostic_correlation is None:
+        return not body.get('diagnostic_session_id') and not body.get('capture_attempt_id')
+    return bool(
+        body.get('diagnostic_session_id') == diagnostic_correlation.diagnostic_session_id
+        and body.get('capture_attempt_id') == diagnostic_correlation.capture_attempt_id
     )
 
 
@@ -131,6 +145,26 @@ def _conversation_tuple_matches(data: Dict[str, Any], conversation_id: str, gene
         and data.get('capture_generation') == generation
         and data.get('capture_owner_token') == owner_token
     )
+
+
+def capture_diagnostic_correlation_matches(
+    data: Dict[str, Any],
+    diagnostic_correlation: Optional[CaptureDiagnosticCorrelation],
+) -> bool:
+    stored = data.get('diagnostic_correlation')
+    if diagnostic_correlation is None:
+        return stored is None
+    return diagnostic_correlation.matches_storage(stored)
+
+
+def _diagnostic_correlation_storage(
+    diagnostic_correlation: Optional[CaptureDiagnosticCorrelation],
+) -> Optional[Dict[str, Any]]:
+    if diagnostic_correlation is None:
+        return None
+    if not diagnostic_correlation.authority_validated:
+        return None
+    return diagnostic_correlation.as_storage_dict()
 
 
 def _aware(value: datetime) -> datetime:
@@ -219,6 +253,7 @@ def _claim_reconnect_authority_transaction(
     expected_owner_token: Optional[str],
     owner_token: str,
     now: datetime,
+    diagnostic_correlation: Optional[CaptureDiagnosticCorrelation] = None,
 ) -> bool:
     """Atomically fence an expired capture generation before reconnect publication."""
     conversation_snapshot = conversation_ref.get(transaction=transaction)
@@ -285,6 +320,7 @@ def _claim_reconnect_authority_transaction(
             return False
 
     lease_expires_at = now + timedelta(seconds=CAPTURE_AUTHORITY_LEASE_SECONDS)
+    diagnostic_storage = _diagnostic_correlation_storage(diagnostic_correlation)
     transaction.set(
         authority_ref,
         {
@@ -295,6 +331,7 @@ def _claim_reconnect_authority_transaction(
             'state': 'active',
             'lease_expires_at': lease_expires_at,
             'updated_at': now,
+            'diagnostic_correlation': diagnostic_storage,
         },
     )
     transaction.update(
@@ -308,6 +345,7 @@ def _claim_reconnect_authority_transaction(
             'capture_lease_expires_at': lease_expires_at,
             'capture_drained_at': None,
             'capture_finalization_claim_token': None,
+            'diagnostic_correlation': diagnostic_storage,
         },
     )
     return True
@@ -319,6 +357,7 @@ def claim_capture_authority_for_reconnect(
     generation: str,
     expected_owner_token: Optional[str],
     owner_token: str,
+    diagnostic_correlation: Optional[CaptureDiagnosticCorrelation] = None,
 ) -> bool:
     return _claim_reconnect_authority_transaction(
         db.transaction(),
@@ -329,6 +368,7 @@ def claim_capture_authority_for_reconnect(
         expected_owner_token,
         owner_token,
         datetime.now(timezone.utc),
+        diagnostic_correlation,
     )
 
 
@@ -344,6 +384,7 @@ def _install_authority_transaction(
     expected_conversation_id: Optional[str],
     predecessor_ref,
     adopt: bool,
+    diagnostic_correlation: Optional[CaptureDiagnosticCorrelation] = None,
 ) -> bool:
     conversation_snapshot = conversation_ref.get(transaction=transaction)
     if not conversation_snapshot.exists:
@@ -448,6 +489,7 @@ def _install_authority_transaction(
         return False
 
     lease_expires_at = now + timedelta(seconds=CAPTURE_AUTHORITY_LEASE_SECONDS)
+    diagnostic_storage = _diagnostic_correlation_storage(diagnostic_correlation)
     authority_data = {
         'protocol_version': CAPTURE_PROTOCOL_VERSION,
         'conversation_id': conversation_id,
@@ -456,6 +498,7 @@ def _install_authority_transaction(
         'state': 'active',
         'lease_expires_at': lease_expires_at,
         'updated_at': now,
+        'diagnostic_correlation': diagnostic_storage,
     }
     if predecessor_ref is not None and predecessor is not None:
         transaction.update(
@@ -477,6 +520,7 @@ def _install_authority_transaction(
             'capture_lease_expires_at': lease_expires_at,
             'capture_drained_at': None,
             'capture_finalization_claim_token': None,
+            'diagnostic_correlation': diagnostic_storage,
         },
     )
     return True
@@ -490,6 +534,7 @@ def install_capture_authority(
     *,
     expected_conversation_id: Optional[str] = None,
     adopt: bool = False,
+    diagnostic_correlation: Optional[CaptureDiagnosticCorrelation] = None,
 ) -> bool:
     predecessor_ref = _conversation_ref(uid, expected_conversation_id) if expected_conversation_id is not None else None
     return _install_authority_transaction(
@@ -503,6 +548,7 @@ def install_capture_authority(
         expected_conversation_id,
         predecessor_ref,
         adopt,
+        diagnostic_correlation,
     )
 
 
@@ -624,7 +670,6 @@ def _claim_finalization_transaction(
         return 'mismatch'
     if not _conversation_tuple_matches(conversation, conversation_id, generation, owner_token):
         return 'mismatch'
-
     state = str(authority.get('state') or '')
     if state == 'terminal' and str(conversation.get('capture_state') or '') == 'terminal':
         return 'terminal'

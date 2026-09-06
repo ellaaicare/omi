@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from utils.ella.account_diagnostics import CaptureDiagnosticCorrelation
+
 BACKEND = Path(__file__).resolve().parents[2]
 
 
@@ -85,6 +87,23 @@ def _conversation(
     }
 
 
+def _diagnostic_correlation(
+    *,
+    session_id='session-a',
+    attempt_id='attempt-a',
+    attempt_ordinal=0,
+    authority_generation=4,
+):
+    return CaptureDiagnosticCorrelation(
+        diagnostic_session_id=session_id,
+        capture_attempt_id=attempt_id,
+        capture_attempt_ordinal=attempt_ordinal,
+        account_binding_fingerprint='a' * 64,
+        authority_generation=authority_generation,
+        validated_binding_revision=7,
+    )
+
+
 def _updated(document, transaction, ref):
     result = dict(document)
     for updated_ref, values in transaction.updates:
@@ -158,6 +177,27 @@ def test_capture_ready_receipt_is_complete_for_each_production_codec(codec):
         'generation': 'generation-a',
         'owner_token': 'owner-a',
     }
+
+
+def test_correlated_capture_receipt_echoes_only_opaque_ids_as_evidence():
+    from models.message_event import MessageServiceStatusEvent
+
+    receipt = MessageServiceStatusEvent(
+        status='capture_protocol_ready',
+        protocol_version=2,
+        conversation_id='capture-a',
+        generation='generation-a',
+        owner_token='owner-a',
+        diagnostic_session_id='session-a',
+        capture_attempt_id='attempt-a',
+        evidence_only=True,
+    ).to_json()
+
+    assert receipt['diagnostic_session_id'] == 'session-a'
+    assert receipt['capture_attempt_id'] == 'attempt-a'
+    assert receipt['evidence_only'] is True
+    assert 'account_binding_fingerprint' not in receipt
+    assert 'authority_generation' not in receipt
 
 
 def test_live_authority_blocks_overlapping_reconnect_before_owner_rebind(capture_protocol):
@@ -1011,3 +1051,163 @@ def test_capture_drain_body_rejects_missing_and_cross_session_fields(capture_pro
         'generation-a',
         'owner-a',
     )
+
+
+def test_drain_authority_is_independent_from_diagnostic_session_and_attempt(capture_protocol):
+    correlation = _diagnostic_correlation()
+    body = {
+        'type': 'capture_drain',
+        'protocol_version': 2,
+        'conversation_id': 'capture-a',
+        'generation': 'generation-a',
+        'owner_token': 'owner-a',
+    }
+
+    assert capture_protocol.valid_capture_drain_body(
+        body,
+        'capture-a',
+        'generation-a',
+        'owner-a',
+    )
+    assert not capture_protocol.capture_drain_diagnostic_correlation_matches(body, correlation)
+    assert capture_protocol.valid_capture_drain_body(
+        {
+            **body,
+            'diagnostic_session_id': correlation.diagnostic_session_id,
+            'capture_attempt_id': correlation.capture_attempt_id,
+        },
+        'capture-a',
+        'generation-a',
+        'owner-a',
+    )
+    assert capture_protocol.capture_drain_diagnostic_correlation_matches(
+        {**body, 'diagnostic_session_id': 'session-a', 'capture_attempt_id': 'attempt-a'},
+        correlation,
+    )
+    assert capture_protocol.valid_capture_drain_body(
+        {**body, 'diagnostic_session_id': 'stray-session', 'capture_attempt_id': 'stray-attempt'},
+        'capture-a',
+        'generation-a',
+        'owner-a',
+    )
+    assert not capture_protocol.capture_drain_diagnostic_correlation_matches(
+        {**body, 'diagnostic_session_id': 'stray-session', 'capture_attempt_id': 'stray-attempt'},
+        None,
+    )
+
+
+def test_close_before_ready_retains_correlated_authority_and_fences_competing_attempt(capture_protocol):
+    now = datetime.now(timezone.utc)
+    first_correlation = _diagnostic_correlation()
+    authority_ref = _Document()
+    first_conversation_ref = _Document({'id': 'capture-a', 'status': 'in_progress', 'capture_owner_id': 'owner-a'})
+    first_transaction = _Transaction()
+
+    installed = capture_protocol._install_authority_transaction.to_wrap(
+        first_transaction,
+        authority_ref,
+        first_conversation_ref,
+        'capture-a',
+        'generation-a',
+        'owner-a',
+        now,
+        None,
+        None,
+        False,
+        first_correlation,
+    )
+
+    assert installed is True
+    authority_ref.data = _updated({}, first_transaction, authority_ref)
+    first_conversation_ref.data = _updated(first_conversation_ref.data, first_transaction, first_conversation_ref)
+    expected_storage = first_correlation.as_storage_dict()
+    assert authority_ref.data['diagnostic_correlation'] == expected_storage
+    assert first_conversation_ref.data['diagnostic_correlation'] == expected_storage
+
+    competing_transaction = _Transaction()
+    competing_correlation = _diagnostic_correlation(
+        attempt_id='attempt-b',
+        attempt_ordinal=1,
+        authority_generation=5,
+    )
+    competing_conversation_ref = _Document({'id': 'capture-b', 'status': 'in_progress', 'capture_owner_id': 'owner-b'})
+    competing = capture_protocol._install_authority_transaction.to_wrap(
+        competing_transaction,
+        authority_ref,
+        competing_conversation_ref,
+        'capture-b',
+        'generation-b',
+        'owner-b',
+        now + timedelta(seconds=1),
+        None,
+        None,
+        False,
+        competing_correlation,
+    )
+
+    assert competing is False
+    assert competing_transaction.sets == []
+    assert competing_transaction.updates == []
+    assert authority_ref.data['diagnostic_correlation'] == expected_storage
+
+
+def test_unvalidated_diagnostic_metadata_is_dropped_without_blocking_capture_authority(capture_protocol):
+    transaction = _Transaction()
+    correlation = _diagnostic_correlation().validated_for_binding(7)
+    unvalidated = CaptureDiagnosticCorrelation(
+        diagnostic_session_id=correlation.diagnostic_session_id,
+        capture_attempt_id=correlation.capture_attempt_id,
+        capture_attempt_ordinal=correlation.capture_attempt_ordinal,
+        account_binding_fingerprint=correlation.account_binding_fingerprint,
+        authority_generation=correlation.authority_generation,
+    )
+    authority_ref = _Document()
+    conversation_ref = _Document({'id': 'capture-a', 'status': 'in_progress', 'capture_owner_id': 'owner-a'})
+
+    installed = capture_protocol._install_authority_transaction.to_wrap(
+        transaction,
+        authority_ref,
+        conversation_ref,
+        'capture-a',
+        'generation-a',
+        'owner-a',
+        datetime.now(timezone.utc),
+        None,
+        None,
+        False,
+        unvalidated,
+    )
+
+    assert installed is True
+    assert _updated({}, transaction, authority_ref)['diagnostic_correlation'] is None
+    assert _updated(conversation_ref.data, transaction, conversation_ref)['diagnostic_correlation'] is None
+
+
+def test_finalization_authority_is_independent_from_diagnostic_correlation(capture_protocol):
+    now = datetime.now(timezone.utc)
+    correlation = _diagnostic_correlation()
+    authority = _authority(state='drained')
+    authority['diagnostic_correlation'] = correlation.as_storage_dict()
+    conversation = _conversation(state='drained')
+    conversation['diagnostic_correlation'] = correlation.as_storage_dict()
+
+    assert capture_protocol.capture_diagnostic_correlation_matches(conversation, correlation)
+    assert not capture_protocol.capture_diagnostic_correlation_matches(conversation, None)
+    assert not capture_protocol.capture_diagnostic_correlation_matches(
+        conversation,
+        _diagnostic_correlation(attempt_id='attempt-b'),
+    )
+
+    accepted_transaction = _Transaction()
+    accepted = capture_protocol._claim_finalization_transaction.to_wrap(
+        accepted_transaction,
+        _Document(authority),
+        _Document(conversation),
+        'capture-a',
+        'generation-a',
+        'owner-a',
+        'claim-a',
+        now,
+    )
+    assert accepted == 'claimed'
+    assert len(accepted_transaction.updates) == 2
