@@ -35,6 +35,9 @@ logger = logging.getLogger("ella.canonical_events")
 
 DEFAULT_TIMELINE_LIMIT = 100
 MAX_TIMELINE_LIMIT = 500
+CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD = "canonical_summary_publication_sequence"
+CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD = "canonical_summary_publication_sha256"
+MAX_CANONICAL_SUMMARY_PUBLICATION_SEQUENCE = (1 << 63) - 1
 
 
 async def _get_pool() -> asyncpg.Pool:
@@ -81,6 +84,43 @@ def _should_replace_existing_event(item: dict[str, Any]) -> bool:
     """
     metadata = item.get("metadata") or {}
     return item.get("channel") == "omi" and metadata.get("adapter") == "omi-enriched-conversation"
+
+
+def _canonical_summary_publication_fence(item: dict[str, Any]) -> Optional[tuple[int, str]]:
+    if not _should_replace_existing_event(item):
+        return None
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    raw_sequence = metadata.get(CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD)
+    raw_sha256 = metadata.get(CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD)
+    if raw_sequence is None and raw_sha256 is None:
+        return None
+    try:
+        sequence = int(raw_sequence)
+    except (TypeError, ValueError) as error:
+        raise ValueError("invalid canonical summary publication sequence") from error
+    sha256 = str(raw_sha256 or "")
+    if (
+        sequence < 1
+        or sequence > MAX_CANONICAL_SUMMARY_PUBLICATION_SEQUENCE
+        or len(sha256) != 64
+        or any(character not in "0123456789abcdef" for character in sha256)
+    ):
+        raise ValueError("invalid canonical summary publication fence")
+    return sequence, sha256
+
+
+def _should_accept_canonical_summary_replacement(existing: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    incoming_fence = _canonical_summary_publication_fence(incoming)
+    existing_fence = _canonical_summary_publication_fence(existing)
+    if existing_fence is None:
+        return True
+    if incoming_fence is None:
+        return False
+    existing_sequence, existing_sha256 = existing_fence
+    incoming_sequence, incoming_sha256 = incoming_fence
+    return incoming_sequence > existing_sequence or (
+        incoming_sequence == existing_sequence and incoming_sha256 == existing_sha256
+    )
 
 
 def _today_card_source_id(item: dict[str, Any]) -> str:
@@ -298,13 +338,18 @@ class CanonicalEventIn(BaseModel):
             session_id=self.session_id,
             source_ref=self.source_ref,
         )
-        return {
+        normalized = {
             **raw_event,
             "started_at": started_at,
             "ended_at": ended_at,
             "source_identity": source_identity,
             "raw_event": raw_event,
         }
+        try:
+            _canonical_summary_publication_fence(normalized)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return normalized
 
 
 class CanonicalEventsBatch(BaseModel):
@@ -409,7 +454,7 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                         if previous:
                             previous_source_snapshot = _today_card_source_snapshot(dict(previous))
                     conflict_clause = (
-                        """
+                        f"""
                         DO UPDATE SET
                             uid = EXCLUDED.uid,
                             canonical_identity = EXCLUDED.canonical_identity,
@@ -425,6 +470,35 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                             source_ref = EXCLUDED.source_ref,
                             metadata = EXCLUDED.metadata,
                             raw_event = EXCLUDED.raw_event
+                        WHERE
+                            NOT (canonical_events.metadata ? '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}')
+                            OR NOT (
+                                canonical_events.metadata ->> '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}'
+                                ~ '^[0-9]+$'
+                            )
+                            OR (
+                                EXCLUDED.metadata ->> '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}'
+                                ~ '^[0-9]+$'
+                                AND (
+                                    (
+                                        canonical_events.metadata ->> '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}'
+                                    )::bigint < (
+                                        EXCLUDED.metadata ->> '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}'
+                                    )::bigint
+                                    OR (
+                                        (
+                                            canonical_events.metadata
+                                            ->> '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}'
+                                        )::bigint = (
+                                            EXCLUDED.metadata ->> '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}'
+                                        )::bigint
+                                        AND canonical_events.metadata
+                                            ->> '{CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD}'
+                                            = EXCLUDED.metadata
+                                            ->> '{CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD}'
+                                    )
+                                )
+                            )
                         """
                         if _should_replace_existing_event(item)
                         else "DO NOTHING"
@@ -649,21 +723,30 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
             item = event.normalized()
             item["inserted_at"] = _utc_now()
             key = (item["event_id"], item["source_identity"])
-            inserted = key not in self._events
+            existing = self._events.get(key)
+            inserted = existing is None
+            updated = False
             if inserted:
                 self._events[key] = item
+            elif _should_replace_existing_event(item) and _should_accept_canonical_summary_replacement(existing, item):
+                item["inserted_at"] = existing["inserted_at"]
+                self._events[key] = item
+                updated = True
             statuses.append(
                 {
                     "event_id": item["event_id"],
                     "source_identity": item["source_identity"],
                     "inserted": inserted,
+                    "updated": updated,
                 }
             )
         inserted_count = sum(1 for status in statuses if status["inserted"])
+        updated_count = sum(1 for status in statuses if status["updated"])
         return {
             "ok": True,
             "inserted": inserted_count,
-            "duplicates": len(statuses) - inserted_count,
+            "updated": updated_count,
+            "duplicates": len(statuses) - inserted_count - updated_count,
             "events": statuses,
         }
 

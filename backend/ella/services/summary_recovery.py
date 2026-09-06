@@ -14,6 +14,7 @@ import httpx
 
 import database.conversations as conversations_db
 from ella.services.hermes_session import canonical_omi_session_key
+from ella.services.memory_artwork_recovery import claim_memory_artwork_enrichment_recovery
 from ella.services.runtime_resolver import (
     CloudRuntimeAuthorityIdentity,
     cloud_runtime_authority_identity,
@@ -1089,4 +1090,29 @@ async def recover_failed_conversation_summary(
     )
     if not recorded:
         return 'superseded'
+    await enqueue_after_terminal_enrichment(uid, conversation_id)
     return ConversationStatus.completed.value
+
+
+async def recover_memory_artwork_enrichment(uid: str, memory_id: str) -> dict[str, Any]:
+    """Run or observe canonical enrichment recovery for durable artwork reconciliation."""
+
+    claim = await claim_memory_artwork_enrichment_recovery(uid, memory_id)
+    outcome = str(claim.get('outcome') or '')
+    if outcome != 'claimed':
+        return {'outcome': outcome}
+    status = await recover_failed_conversation_summary(
+        uid=uid,
+        conversation_id=memory_id,
+        request_id=str(claim['request_id']),
+        attempt_count=int(claim.get('attempt_count') or 1),
+    )
+    return {'outcome': 'completed' if status == ConversationStatus.completed.value else status}
+
+
+from ella.services.memory_artwork import (  # noqa: E402
+    enqueue_after_terminal_enrichment,
+    register_memory_artwork_enrichment_recovery,
+)
+
+register_memory_artwork_enrichment_recovery(recover_memory_artwork_enrichment)

@@ -131,7 +131,7 @@ def test_target_refs_are_domain_separated_and_contain_no_identity():
     assert "account-a" not in account_ref + profile_ref
 
 
-def test_pilot_gate_requires_exact_v8_consent_and_all_uid_allowlists(
+def test_pilot_gate_requires_exact_v10_consent_and_all_uid_allowlists(
     monkeypatch,
 ):
     uid = "synthetic-pilot"
@@ -161,7 +161,7 @@ def test_pilot_gate_requires_exact_v8_consent_and_all_uid_allowlists(
         ),
     )
     admission = invitation_authority.authorize_invitation_pilot(uid)
-    assert admission.policy_version == "ai-data-processors-v8"
+    assert admission.policy_version == "ai-data-processors-v10"
     assert admission.account_uid == admission.profile_uid == uid
 
     monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED_UIDS", "")
@@ -336,6 +336,13 @@ def test_entitlement_read_requires_auth_and_is_uid_scoped(monkeypatch):
         captured["uid"] = uid
         return {"status": "none", "quota": {}}
 
+    recoveries = []
+
+    async def fake_no_recovery(uid):
+        recoveries.append(uid)
+        return False
+
+    monkeypatch.setattr(voice, "recover_retained_voice_entitlement", fake_no_recovery)
     monkeypatch.setattr(voice.voice_canary_db, "get_entitlement_contract", fake_contract)
     app.dependency_overrides[get_exact_firebase_uid] = lambda: "firebase-subject"
     response = client.get("/v1/entitlement")
@@ -343,6 +350,31 @@ def test_entitlement_read_requires_auth_and_is_uid_scoped(monkeypatch):
     assert captured["uid"] == "firebase-subject"
     assert response.json()["support_code"].startswith("ENT-")
     assert len(response.json()["correlation_id"]) == 36
+    assert recoveries == []
+
+    contracts = [
+        {"status": "active", "quota": {"daily_limit_s": 2700}},
+        {"status": "active", "quota": {"daily_limit_s": 2700}},
+    ]
+    recoveries.clear()
+
+    async def fake_recover(uid):
+        recoveries.append(uid)
+        return True
+
+    async def fake_recovered_contract(uid):
+        captured["recovered_uid"] = uid
+        return contracts.pop(0)
+
+    monkeypatch.setattr(voice, "recover_retained_voice_entitlement", fake_recover)
+    monkeypatch.setattr(voice.voice_canary_db, "get_entitlement_contract", fake_recovered_contract)
+    recovered_response = client.get("/v1/entitlement")
+    assert recovered_response.status_code == 200
+    assert recovered_response.json()["status"] == "active"
+    assert recovered_response.json()["quota"] == {"daily_limit_s": 2700}
+    assert captured["recovered_uid"] == "firebase-subject"
+    assert recoveries == ["firebase-subject"]
+    assert contracts == []
 
 
 def test_typed_failure_shape_is_compatible_with_ios(monkeypatch):

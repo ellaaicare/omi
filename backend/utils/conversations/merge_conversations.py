@@ -8,6 +8,7 @@ This module provides functions for merging multiple conversations into one.
 
 """
 
+import asyncio
 import copy
 import traceback
 import uuid
@@ -24,6 +25,7 @@ from models.conversation import (
 )
 from utils.conversations.process_conversation import process_conversation_with_outcome
 from utils.notifications import send_merge_completed_message
+from utils.ella.memory_artwork_storage import acquire_memory_artwork_publication_lock
 from utils.other.storage import (
     delete_conversation_audio_files,
     list_audio_chunks,
@@ -80,6 +82,16 @@ def validate_merge_compatibility(
 
     warning_msg = "; ".join(warnings) if warnings else None
     return True, None, warning_msg
+
+
+async def _delete_conversation_with_artwork_fence(uid: str, conversation_id: str) -> None:
+    async with acquire_memory_artwork_publication_lock(uid) as artwork_lock_proof:
+        await asyncio.to_thread(
+            conversations_db.delete_conversation,
+            uid,
+            conversation_id,
+            artwork_lock_proof=artwork_lock_proof,
+        )
 
 
 def perform_merge_async(
@@ -447,7 +459,7 @@ def _delete_conversation_and_related_data(uid: str, conversation_id: str) -> Non
 
     try:
         # Delete conversation document
-        conversations_db.delete_conversation(uid, conversation_id)
+        asyncio.run(_delete_conversation_with_artwork_fence(uid, conversation_id))
     except Exception as e:
         print(f"Error deleting conversation {conversation_id}: {e}")
 

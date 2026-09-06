@@ -8,6 +8,7 @@ def record_usage(
     words_transcribed: int = 0,
     insights_gained: int = 0,
     memories_created: int = 0,
+    idempotency_key: str = None,
 ):
     """Records hourly usage stats for a user."""
     now = datetime.utcnow()
@@ -17,4 +18,4 @@ def record_usage(
         'insights_gained': insights_gained,
         'memories_created': memories_created,
     }
-    user_usage_db.update_hourly_usage(uid, now, updates)
+    return user_usage_db.update_hourly_usage(uid, now, updates, idempotency_key=idempotency_key)

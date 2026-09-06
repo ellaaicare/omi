@@ -464,6 +464,7 @@ class _FallbackCaptured(Exception):
 
 def _capture_transcribe_fallback(module, websocket, monkeypatch):
     captured = {}
+    monkeypatch.setenv("CAPTURE_PROTOCOL_V2_ROLLOUT_STATE", "legacy_workers_drained")
 
     def fake_create_task(coroutine):
         coroutine.close()
@@ -491,6 +492,7 @@ def _capture_transcribe_fallback(module, websocket, monkeypatch):
                     "uid-1",
                     language="en",
                     custom_stt_mode=module.CustomSttMode.enabled,
+                    capture_protocol=2,
                 )
             )
     finally:

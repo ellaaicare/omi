@@ -26,6 +26,7 @@ import io
 import json
 import logging
 import os
+import re
 import secrets
 import string
 import asyncio
@@ -35,7 +36,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 import asyncpg
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 import database.conversations as conversations_db
@@ -56,20 +57,32 @@ from database.ella_caregivers import (
 from database.ella_contacts import create_contact, delete_contact, get_contact, get_contacts, update_contact
 from ella.config import ELLA_CONFIG
 from ella.services.ai_consent import assert_current_ai_consent
+from ella.services.canonical_summary_source import (
+    ELLA_CANONICAL_SOURCE_CONTRACT,
+    conversation_data_payload,
+)
+from ella.services.memory_artwork import enqueue_after_terminal_enrichment
 from ella.services.runtime_resolver import (
     resolve_isolated_runtime,
     runtime_authority_enabled,
 )
 from ella.services.summary_sanitizer import SummarySanitizationError
 from ella.services.summary_writeback import (
+    CanonicalConversationSourceMismatchError,
+    CanonicalSummaryDependencyUnavailableError,
+    CanonicalSummaryOperationConflictError,
+    CanonicalSummaryReconciliationPendingError,
     ConcurrentConversationSummaryChangeError,
+    ConversationSummaryOutcomeUnknownError,
     ConversationSummaryNotFoundError,
     InvalidConversationSummaryCategoryError,
     write_conversation_summary,
+    write_conversation_summary_cas,
 )
 from utils.notifications import send_notification
 from utils.ella.canonical_omi import (
     canonical_transcript_segments,
+    require_omi_canonical_write_ready,
     transcript_grounding_hash,
     write_omi_canonical_event,
 )
@@ -97,6 +110,11 @@ PROVISION_API_KEY = authority_credential("ELLA_PROVISION_API_KEY", "ELLA_PROVISI
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_URL", "http://100.76.138.56:8200")
 CALLBACK_SERVICE_HEADER = "X-Ella-Callback-Service-Key"
 CAREGIVER_SERVICE_HEADER = "X-Ella-Caregiver-Service-Key"
+SUMMARY_CAS_MODE_ENV = "ELLA_SUMMARY_CAS_MODE"
+SUMMARY_CAS_OPTIONAL = "optional"
+SUMMARY_CAS_REQUIRED = "required"
+SUMMARY_CAS_IF_MATCH_RE = re.compile(rf'^"{re.escape(ELLA_CANONICAL_SOURCE_CONTRACT)}:([0-9a-f]{{64}})"$')
+SUMMARY_OPERATION_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{16,256}$")
 
 
 def require_callback_service(
@@ -253,6 +271,81 @@ class ConversationSummaryUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _summary_cas_mode() -> str:
+    value = os.getenv(SUMMARY_CAS_MODE_ENV, SUMMARY_CAS_OPTIONAL).strip().lower()
+    return value if value in {SUMMARY_CAS_OPTIONAL, SUMMARY_CAS_REQUIRED} else SUMMARY_CAS_REQUIRED
+
+
+def _raw_header_values(request: Optional[Request], name: str) -> list[str]:
+    if request is None:
+        return []
+    expected_name = name.lower().encode("ascii")
+    return [
+        value.decode("latin-1")
+        for raw_name, value in request.scope.get("headers", [])
+        if raw_name.lower() == expected_name
+    ]
+
+
+def _summary_cas_preconditions(
+    contract: Optional[str],
+    if_match: Optional[str],
+    operation_token: Optional[str],
+    source_version: Optional[str],
+    request: Optional[Request] = None,
+) -> Optional[tuple[str, str, str]]:
+    raw_contracts = _raw_header_values(request, "x-ella-cas-contract")
+    raw_matches = _raw_header_values(request, "if-match")
+    raw_operation_tokens = _raw_header_values(request, "x-ella-operation-token")
+    raw_source_versions = _raw_header_values(request, "x-ella-source-version")
+    if any(len(values) > 1 for values in (raw_contracts, raw_matches, raw_operation_tokens, raw_source_versions)):
+        raise HTTPException(status_code=400, detail="Duplicate summary operation headers")
+    if raw_contracts:
+        contract = raw_contracts[0]
+    if raw_matches:
+        if_match = raw_matches[0]
+    if raw_operation_tokens:
+        operation_token = raw_operation_tokens[0]
+    if raw_source_versions:
+        source_version = raw_source_versions[0]
+    contract = contract if isinstance(contract, str) else None
+    if_match = if_match if isinstance(if_match, str) else None
+    operation_token = operation_token if isinstance(operation_token, str) else None
+    source_version = source_version if isinstance(source_version, str) else None
+    attempted = any(value is not None for value in (contract, if_match, operation_token, source_version))
+    if not attempted and _summary_cas_mode() == SUMMARY_CAS_OPTIONAL:
+        return None
+    if (
+        contract != ELLA_CANONICAL_SOURCE_CONTRACT
+        or if_match is None
+        or operation_token is None
+        or source_version is None
+    ):
+        raise HTTPException(status_code=428, detail="Canonical source precondition required")
+    match = SUMMARY_CAS_IF_MATCH_RE.fullmatch(if_match)
+    if (
+        match is None
+        or SUMMARY_OPERATION_TOKEN_RE.fullmatch(operation_token) is None
+        or not source_version
+        or len(source_version) > 256
+        or any(ord(char) < 32 or ord(char) > 126 for char in source_version)
+    ):
+        raise HTTPException(status_code=428, detail="Canonical source precondition required")
+    return match.group(1), operation_token, source_version
+
+
+@router.get("/conversation/summary/capabilities")
+async def conversation_summary_capabilities():
+    """Credential-free rollout signal; contains no owner or conversation data."""
+    mode = _summary_cas_mode()
+    return {
+        "contract": ELLA_CANONICAL_SOURCE_CONTRACT,
+        "conditional_write": True,
+        "enforcement": mode,
+        "headerless_legacy_writes": mode == SUMMARY_CAS_OPTIONAL,
+    }
+
+
 def _active_summary_version(conversation: dict) -> Optional[dict]:
     active_id = conversation.get("active_summary_version_id")
     versions = conversation.get("summary_versions") or []
@@ -406,8 +499,15 @@ async def _fetch_internal_assessment(uid: str, conversation_id: str) -> Optional
 async def update_conversation_summary(
     conversation_id: str,
     update: ConversationSummaryUpdate,
+    background_tasks: BackgroundTasks = None,
+    request: Request = None,
     uid: str = None,
     service: EllaRequestAuthority = Depends(require_callback_service),
+    response: Response = None,
+    cas_contract: Optional[str] = Header(default=None, alias="X-Ella-CAS-Contract"),
+    if_match: Optional[str] = Header(default=None, alias="If-Match"),
+    operation_token: Optional[str] = Header(default=None, alias="X-Ella-Operation-Token"),
+    source_version: Optional[str] = Header(default=None, alias="X-Ella-Source-Version"),
 ):
     """
     Update the structured summary of an OMI conversation.
@@ -417,9 +517,17 @@ async def update_conversation_summary(
     if not uid:
         raise HTTPException(status_code=400, detail="uid query parameter required")
     uid = service.require_uid(uid, feature="Conversation summary callback")
+    cas_preconditions = _summary_cas_preconditions(
+        cas_contract,
+        if_match,
+        operation_token,
+        source_version,
+        request,
+    )
 
     try:
-        return await write_conversation_summary(
+        writer = write_conversation_summary_cas if cas_preconditions is not None else write_conversation_summary
+        writer_args = dict(
             uid=uid,
             conversation_id=conversation_id,
             title=update.title,
@@ -438,6 +546,7 @@ async def update_conversation_summary(
             internal_assessment_fetcher=_fetch_internal_assessment,
             correction_audit_updater=_update_correction_audit,
             canonical_writer=write_omi_canonical_event,
+            canonical_preflight=require_omi_canonical_write_ready,
             require_canonical=update.require_canonical,
             expected_transcript_hash=update.expected_transcript_hash,
             require_source_match=update.require_source_match,
@@ -447,6 +556,53 @@ async def update_conversation_summary(
                 else None
             ),
         )
+        if cas_preconditions is not None:
+            expected_source_sha256, operation_token, source_version = cas_preconditions
+            if request is not None:
+                payload_sha256 = hashlib.sha256(await request.body()).hexdigest()
+            else:
+                payload_sha256 = hashlib.sha256(
+                    json.dumps(
+                        update.model_dump(mode="json"),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest()
+            writer_args.update(
+                expected_canonical_source_sha256=expected_source_sha256,
+                operation_token=operation_token,
+                source_version=source_version,
+                payload_sha256=payload_sha256,
+                canonical_preflight=require_omi_canonical_write_ready,
+            )
+            for legacy_only_argument in (
+                "correction_audit_updater",
+                "require_based_on_match",
+                "require_canonical",
+                "expected_transcript_hash",
+                "require_source_match",
+                "today_card_grounding_evidence",
+            ):
+                writer_args.pop(legacy_only_argument)
+        else:
+            writer_args.pop("canonical_preflight")
+            writer_args["require_canonical"] = update.require_canonical
+        result = await writer(**writer_args)
+        if background_tasks is not None:
+            background_tasks.add_task(enqueue_after_terminal_enrichment, uid, conversation_id)
+        if cas_preconditions is not None:
+            if response is not None:
+                if result.get("status") == "pending_reconciliation":
+                    response.status_code = 202
+                    response.headers["X-Ella-CAS-Reconciliation"] = "pending"
+                else:
+                    response.headers["X-Ella-CAS-Applied"] = ELLA_CANONICAL_SOURCE_CONTRACT
+            return {
+                "status": result["status"],
+                "operation_receipt": result["operation_receipt"],
+            }
+        return result
     except SummarySanitizationError as e:
         raise HTTPException(
             status_code=422,
@@ -454,15 +610,25 @@ async def update_conversation_summary(
         )
     except ConversationSummaryNotFoundError:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    except CanonicalConversationSourceMismatchError:
+        raise HTTPException(status_code=412, detail="Canonical source changed")
+    except CanonicalSummaryReconciliationPendingError:
+        raise HTTPException(status_code=409, detail="Canonical summary reconciliation pending")
+    except CanonicalSummaryOperationConflictError:
+        raise HTTPException(status_code=409, detail="Canonical summary operation conflict")
+    except CanonicalSummaryDependencyUnavailableError:
+        raise HTTPException(status_code=503, detail="Canonical summary dependency unavailable")
+    except ConversationSummaryOutcomeUnknownError:
+        raise HTTPException(status_code=503, detail="Conversation summary outcome unknown; retry exact request")
     except InvalidConversationSummaryCategoryError as e:
         raise HTTPException(status_code=400, detail=f"Invalid category: '{e.args[0]}'")
     except ConcurrentConversationSummaryChangeError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logging.error(f"Failed to update conversation summary: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logging.error("Failed to update conversation summary", extra={"stage": "summary_writeback"})
+        raise HTTPException(status_code=500, detail="Conversation summary update failed")
 
 
 @router.get("/conversations/enrichment/reconcile-candidates")
@@ -567,45 +733,21 @@ async def get_conversation_data(
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
+    payload = conversation_data_payload(uid=uid, conversation_id=conversation_id, conversation=conversation)
     segments = _conversation_field(conversation, "transcript_segments", []) or []
     transcript_segments = canonical_transcript_segments(list(segments))
-    transcript_parts = []
-    for segment in transcript_segments:
-        is_user = bool(segment.get("is_user"))
-        speaker = "User" if is_user else str(segment.get("speaker") or "Other")
-        text = str(segment.get("text") or "")
-        transcript_parts.append(f"{speaker}: {text}")
-
-    structured_src = _conversation_field(conversation, "structured", {}) or {}
-    structured = {}
-    if structured_src:
-        structured = {
-            "title": _structured_field(structured_src, "title"),
-            "overview": _structured_field(structured_src, "overview"),
-            "emoji": _structured_field(structured_src, "emoji"),
-            "category": _structured_field(structured_src, "category"),
-        }
-        if structured.get("category") and hasattr(structured["category"], "value"):
-            structured["category"] = structured["category"].value
-
     active_summary_version = _active_summary_version(conversation) or {}
     enrichment_state = _conversation_field(conversation, "enrichment_state", {}) or {}
     return {
-        "conversation_id": conversation_id,
-        "uid": uid,
-        "transcript": "\n\n".join(transcript_parts),
+        **payload,
         "transcript_segments": transcript_segments,
         "transcript_hash": transcript_grounding_hash(transcript_segments),
-        "segment_count": len(segments),
-        "structured": structured,
         "active_summary_version_id": _conversation_field(conversation, "active_summary_version_id"),
         "active_summary_source": active_summary_version.get("source"),
         "active_summary_kind": active_summary_version.get("kind"),
         "enrichment_status": enrichment_state.get("status"),
         "enrichment_canonical_status": enrichment_state.get("canonical_status"),
         "enrichment_trace_id": enrichment_state.get("trace_id"),
-        "started_at": str(_conversation_field(conversation, "started_at", "")),
-        "finished_at": str(_conversation_field(conversation, "finished_at", "")),
     }
 
 

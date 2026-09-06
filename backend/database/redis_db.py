@@ -682,6 +682,36 @@ def release_unowned_in_progress_conversation_id(uid: str, expected_conversation_
     )
 
 
+def release_owned_in_progress_conversation_id(
+    uid: str,
+    expected_conversation_id: str,
+    expected_owner_id: str,
+) -> bool:
+    """Release one drained capture pointer without deleting a successor or active commit."""
+    active_key, owner_key = _in_progress_conversation_keys(uid)
+    return bool(
+        r.eval(
+            """
+            local active = redis.call('GET', KEYS[1])
+            local owner = redis.call('GET', KEYS[2])
+            local commit = redis.call('GET', KEYS[3])
+            if active ~= ARGV[1] or owner ~= ARGV[2] or commit then
+                return 0
+            end
+            redis.call('DEL', KEYS[1])
+            redis.call('DEL', KEYS[2])
+            return 1
+            """,
+            3,
+            active_key,
+            owner_key,
+            _capture_commit_lease_key(uid),
+            expected_conversation_id,
+            expected_owner_id,
+        )
+    )
+
+
 def acquire_in_progress_processing_fence(
     uid: str,
     conversation_id: str,

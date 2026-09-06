@@ -28,6 +28,8 @@ from database.honcho_attestation import (
 from database.ella_provisioning import (
     EllaProvisioningRepository,
     ProvisioningSchemaNotReadyError,
+    REQUIRED_SELF_HOSTED_INVITE_COLUMNS,
+    RuntimePoolClaimError,
     deterministic_runtime_binding_id,
 )
 from ella.services.ai_consent import (
@@ -220,6 +222,7 @@ class FakeRepository:
         schema_error=None,
         self_hosted_admission=None,
         self_hosted_owned=None,
+        active_retained=False,
     ):
         self.job = _job()
         self.binding = binding
@@ -236,9 +239,19 @@ class FakeRepository:
         self.self_hosted_owned = (
             self_hosted_admission is not None if self_hosted_owned is None else bool(self_hosted_owned)
         )
+        self.active_retained = active_retained
         self.job_calls = []
         self.voice_seed_calls = []
+        self.voice_seed_lineages = []
         self.voice_seed_result = False
+        self.runtime_rearm_calls = []
+        self.runtime_rearm_lineages = []
+        self.runtime_rearm_result = False
+        self.retained_drift_quarantine_calls = []
+        self.retained_drift_quarantine_result = False
+        self.stage_error = None
+        self.activation_error = None
+        self.last_stage_arguments = None
         self.last_activation_arguments = None
 
     async def assert_schema_ready(self):
@@ -262,6 +275,9 @@ class FakeRepository:
 
     async def has_invitation_owned_self_hosted_runtime(self, _uid):
         return self.self_hosted_owned
+
+    async def has_active_retained_runtime(self, _uid):
+        return self.active_retained
 
     async def ensure_omi_user_document(self, **kwargs):
         if self.omi_identity_error:
@@ -298,11 +314,36 @@ class FakeRepository:
         del uid, provider, role
         return "44444444-4444-4444-4444-444444444444"
 
-    async def seed_voice_entitlement_if_absent(self, *, uid):
+    async def seed_voice_entitlement_if_absent(self, *, uid, retained_authority_lineage=None):
         self.voice_seed_calls.append(uid)
+        self.voice_seed_lineages.append(retained_authority_lineage)
         return self.voice_seed_result
 
-    async def stage_runtime_binding(self, *, uid, binding):
+    async def rearm_retained_runtime_after_consent(self, *, uid, authority_lineage):
+        self.runtime_rearm_calls.append(uid)
+        self.runtime_rearm_lineages.append(authority_lineage)
+        return self.runtime_rearm_result
+
+    async def quarantine_retained_runtime_authority_drift(self, **kwargs):
+        self.retained_drift_quarantine_calls.append(kwargs)
+        return self.retained_drift_quarantine_result
+
+    async def stage_runtime_binding(
+        self,
+        *,
+        uid,
+        binding,
+        retained_rearm_job_id=None,
+        retained_authority_lineage=None,
+        retained_authority_revision=None,
+    ):
+        self.last_stage_arguments = {
+            "retained_rearm_job_id": retained_rearm_job_id,
+            "retained_authority_lineage": retained_authority_lineage,
+            "retained_authority_revision": retained_authority_revision,
+        }
+        if self.stage_error is not None:
+            raise self.stage_error
         self.staged = dict(
             binding,
             id=binding["binding_id"],
@@ -323,13 +364,24 @@ class FakeRepository:
         require_invitation_target=False,
         authority_lineage=None,
         model=SELF_HOSTED_RUNTIME_MODEL,
+        retained_rearm_job_id=None,
+        retained_authority_lineage=None,
+        retained_authority_revision=None,
     ):
         self.last_activation_arguments = {
             "require_invitation_target": require_invitation_target,
             "authority_lineage": authority_lineage,
             "model": model,
         }
+        if retained_rearm_job_id is not None:
+            self.last_activation_arguments.update(
+                retained_rearm_job_id=retained_rearm_job_id,
+                retained_authority_lineage=retained_authority_lineage,
+                retained_authority_revision=retained_authority_revision,
+            )
         self.activation_calls += 1
+        if self.activation_error is not None:
+            raise self.activation_error
         self.binding = dict(self.staged, active=True, revision=2)
         self.user_active = True
         return self.binding
@@ -484,6 +536,37 @@ def test_provisioning_and_runtime_canary_allowlists_are_independent(monkeypatch)
     assert provisioning_enabled("runtime-user") is False
     assert runtime_bindings_enabled("runtime-user") is True
     assert runtime_bindings_enabled("provision-user") is False
+
+    retained = FakeRepository(self_hosted_owned=False, active_retained=True)
+    retained.voice_seed_result = True
+    assert asyncio.run(provisioning_service.recover_retained_voice_entitlement("retained-user", repository=retained))
+    assert retained.voice_seed_calls == ["retained-user"]
+    assert retained.voice_seed_lineages == [current_self_hosted_runtime_lineage()]
+    assert retained.runtime_rearm_calls == ["retained-user"]
+    assert retained.runtime_rearm_lineages == [current_self_hosted_runtime_lineage()]
+
+    already_active = FakeRepository(self_hosted_owned=False, active_retained=True)
+    already_active.runtime_rearm_result = True
+    assert asyncio.run(
+        provisioning_service.recover_retained_voice_entitlement("active-retained-user", repository=already_active)
+    )
+    assert already_active.voice_seed_calls == ["active-retained-user"]
+    assert already_active.runtime_rearm_calls == ["active-retained-user"]
+
+    invitation_owned = FakeRepository(self_hosted_owned=True, active_retained=True)
+    assert not asyncio.run(
+        provisioning_service.recover_retained_voice_entitlement("invitation-user", repository=invitation_owned)
+    )
+    assert invitation_owned.voice_seed_calls == []
+    assert invitation_owned.runtime_rearm_calls == []
+
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED_UIDS", "runtime-user,retained-runtime-user")
+    runtime_bound = FakeRepository(self_hosted_owned=False, active_retained=True)
+    assert not asyncio.run(
+        provisioning_service.recover_retained_voice_entitlement("retained-runtime-user", repository=runtime_bound)
+    )
+    assert runtime_bound.voice_seed_calls == []
+    assert runtime_bound.runtime_rearm_calls == []
 
 
 @pytest.mark.parametrize(
@@ -1730,11 +1813,27 @@ if module_name == "ella.routers.callbacks":
     fake_writeback.ConcurrentConversationSummaryChangeError = type(
         "ConcurrentConversationSummaryChangeError", (Exception,), {}
     )
+    fake_writeback.CanonicalConversationSourceMismatchError = type(
+        "CanonicalConversationSourceMismatchError", (Exception,), {}
+    )
+    fake_writeback.CanonicalSummaryDependencyUnavailableError = type(
+        "CanonicalSummaryDependencyUnavailableError", (Exception,), {}
+    )
+    fake_writeback.CanonicalSummaryOperationConflictError = type(
+        "CanonicalSummaryOperationConflictError", (Exception,), {}
+    )
+    fake_writeback.CanonicalSummaryReconciliationPendingError = type(
+        "CanonicalSummaryReconciliationPendingError", (Exception,), {}
+    )
     fake_writeback.ConversationSummaryNotFoundError = type("ConversationSummaryNotFoundError", (Exception,), {})
+    fake_writeback.ConversationSummaryOutcomeUnknownError = type(
+        "ConversationSummaryOutcomeUnknownError", (Exception,), {}
+    )
     fake_writeback.InvalidConversationSummaryCategoryError = type(
         "InvalidConversationSummaryCategoryError", (Exception,), {}
     )
     fake_writeback.write_conversation_summary = lambda *args, **kwargs: None
+    fake_writeback.write_conversation_summary_cas = lambda *args, **kwargs: None
     sys.modules["ella.services.summary_writeback"] = fake_writeback
     fake_notifications = types.ModuleType("utils.notifications")
     fake_notifications.send_notification = lambda *args, **kwargs: None
@@ -1750,6 +1849,7 @@ if module_name == "ella.routers.callbacks":
     }
     fake_canonical_omi.canonical_transcript_segments = lambda value: value
     fake_canonical_omi.transcript_grounding_hash = lambda _value: "sha256:" + ("0" * 64)
+    fake_canonical_omi.require_omi_canonical_write_ready = lambda *args, **kwargs: None
     fake_canonical_omi.write_omi_canonical_event = lambda *args, **kwargs: None
     sys.modules["utils.ella.canonical_omi"] = fake_canonical_omi
     fake_exact_auth = types.ModuleType("utils.ella.exact_firebase_auth")
@@ -2804,6 +2904,10 @@ def test_repository_schema_preflight_reports_missing_objects():
     assert len(pool.calls) == 1
 
 
+def test_self_hosted_schema_preflight_requires_consent_revision_migration():
+    assert ("voice_entitlements", "consent_authority_revision") in REQUIRED_SELF_HOSTED_INVITE_COLUMNS
+
+
 def test_schema_preflight_runs_before_identity_mutation():
     repository = FakeRepository(schema_error=ProvisioningSchemaNotReadyError(["table:ella_provisioning_jobs"]))
     coordinator = ProvisioningCoordinator(repository, FakeProvisionClient(_runtime_receipt()))
@@ -3235,6 +3339,51 @@ def test_fresh_uid_relax_admits_uninvited_self_hosted_when_flag_set(monkeypatch)
     monkeypatch.delenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", raising=False)
 
 
+def test_fresh_uid_relax_preserves_exact_active_retained_runtime(monkeypatch):
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+    repository = FakeRepository(
+        self_hosted_admission=None,
+        self_hosted_owned=False,
+        active_retained=True,
+    )
+
+    runtime = asyncio.run(
+        resolve_isolated_runtime(
+            "retained-user",
+            repository=repository,
+            target_mode="hermes-chat",
+        )
+    )
+
+    assert runtime is None
+    assert repository.identity_calls == []
+    assert repository.job_calls == []
+
+
+def test_fresh_uid_relax_still_rejects_missing_isolated_binding(monkeypatch):
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+    repository = FakeRepository(
+        self_hosted_admission=None,
+        self_hosted_owned=False,
+        active_retained=False,
+    )
+
+    with pytest.raises(ProvisioningError, match="self_hosted_invitation_runtime_not_provisioned"):
+        asyncio.run(
+            resolve_isolated_runtime(
+                "fresh-user",
+                repository=repository,
+                target_mode="hermes-chat",
+            )
+        )
+
+
 def test_fresh_uid_relax_activation_does_not_require_invitation_target(monkeypatch):
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
@@ -3278,6 +3427,106 @@ def test_fresh_uid_relax_activation_does_not_require_invitation_target(monkeypat
     assert invitation_repository.job["state"] == "ready"
     assert invitation_repository.last_activation_arguments["require_invitation_target"] is True
     assert invitation_repository.last_activation_arguments["authority_lineage"] == current_self_hosted_runtime_lineage()
+
+
+def test_retained_rearm_carries_exact_authority_through_stage_and_activation(monkeypatch):
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+    identity = VerifiedIdentity("user-a", "user@example.test", "User", "UTC")
+    lineage = current_self_hosted_runtime_lineage()
+    authority_revision = 7
+    job = _job(
+        state="provisioning",
+        stage="profile_ready",
+        receipts=[
+            {
+                "type": "retained_entitlement_recovered",
+                "content_free": True,
+                **lineage.as_dict(),
+                "authority_revision": authority_revision,
+            },
+            {
+                "type": "retained_runtime_rearmed",
+                "content_free": True,
+                "authority_revision": authority_revision,
+            },
+        ],
+    )
+    repository = FakeRepository(self_hosted_admission=None, self_hosted_owned=False)
+    repository.job = dict(job)
+
+    asyncio.run(
+        ProvisioningCoordinator(repository, FakeProvisionClient(_runtime_receipt())).process_claimed_job(
+            job=job,
+            identity=identity,
+        )
+    )
+
+    expected = {
+        "retained_rearm_job_id": str(job["id"]),
+        "retained_authority_lineage": lineage,
+        "retained_authority_revision": authority_revision,
+    }
+    assert repository.last_stage_arguments == expected
+    assert repository.last_activation_arguments == {
+        "require_invitation_target": False,
+        "authority_lineage": None,
+        "model": SELF_HOSTED_RUNTIME_MODEL,
+        **expected,
+    }
+    assert repository.binding is not None and repository.binding["active"] is True
+
+
+def test_retained_rearm_quarantines_consent_drift_before_stage_or_activation(monkeypatch):
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+    identity = VerifiedIdentity("user-a", "user@example.test", "User", "UTC")
+    lineage = current_self_hosted_runtime_lineage()
+    authority_revision = 7
+    job = _job(
+        state="provisioning",
+        stage="profile_ready",
+        receipts=[
+            {
+                "type": "retained_entitlement_recovered",
+                "content_free": True,
+                **lineage.as_dict(),
+                "authority_revision": authority_revision,
+            },
+            {
+                "type": "retained_runtime_rearmed",
+                "content_free": True,
+                "authority_revision": authority_revision,
+            },
+        ],
+    )
+    for failure_point in ("stage", "activation"):
+        repository = FakeRepository(self_hosted_admission=None, self_hosted_owned=False)
+        repository.job = dict(job)
+        setattr(repository, f"{failure_point}_error", RuntimePoolClaimError("retained_runtime_authority_stale"))
+        repository.retained_drift_quarantine_result = True
+
+        asyncio.run(
+            ProvisioningCoordinator(repository, FakeProvisionClient(_runtime_receipt())).process_claimed_job(
+                job=job,
+                identity=identity,
+            )
+        )
+
+        assert repository.retained_drift_quarantine_calls == [
+            {
+                "uid": identity.uid,
+                "job_id": str(job["id"]),
+                "authority_lineage": lineage,
+                "stale_authority_revision": authority_revision,
+            }
+        ]
+        assert not any(
+            call.get("state") == "retryable" and call.get("error_code") == "retained_runtime_authority_stale"
+            for call in repository.job_calls
+        )
+        assert repository.binding is None
+        assert repository.user_active is False
 
 
 def test_runtime_resolver_enforces_owner_health_and_credential(monkeypatch):

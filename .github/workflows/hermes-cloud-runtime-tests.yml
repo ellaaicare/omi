@@ -3,6 +3,22 @@ name: Hermes Cloud Runtime Tests
 on:
   pull_request:
     paths:
+      - "backend/.env.template"
+      - "backend/database/account_diagnostics.py"
+      - "backend/ella/contracts/diagnostic-event-v1.schema.json"
+      - "backend/ella/contracts/diagnostic-failure-registry-v1.json"
+      - "backend/ella/docs/account-diagnostics-v1.md"
+      - "backend/ella/routers/account_diagnostics.py"
+      - "backend/ella/services/account_diagnostics.py"
+      - "backend/migrations/018_create_account_diagnostics.sql"
+      - "backend/migrations/019_add_diagnostic_attempt_ordinal.sql"
+      - "backend/migrations/020_backfill_diagnostic_attempt_ordinals.sql"
+      - "backend/tests/fixtures/diagnostics/*.json"
+      - "backend/tests/postgres/test_account_diagnostics_postgres.py"
+      - "backend/tests/unit/test_account_diagnostics.py"
+      - "backend/tests/unit/test_ella_all_router_authority_manifest.py"
+      - "backend/utils/ella/account_diagnostics.py"
+      - "backend/utils/ella/account_diagnostics_retention.py"
       - "app/ios/Runner.xcodeproj/project.pbxproj"
       - "app/ios/Runner/GuardianMode/GuardianAuthenticatedTransport.swift"
       - "app/ios/Runner/GuardianMode/GuardianModeManager.swift"
@@ -26,12 +42,14 @@ on:
       - "backend/database/voice_canary.py"
       - "backend/models/conversation.py"
       - "backend/models/conversation_integrity.py"
+      - "backend/models/message_event.py"
       - "backend/models/hermes_cloud_enrichment_contract.py"
       - "backend/routers/transcribe.py"
       - "backend/routers/pusher.py"
       - "backend/routers/integration.py"
       - "backend/routers/workflow.py"
       - "backend/utils/capture_buffer.py"
+      - "backend/utils/conversations/capture_protocol.py"
       - "backend/utils/conversations/process_conversation.py"
       - "backend/utils/conversations/postprocess_conversation.py"
       - "backend/utils/conversations/merge_conversations.py"
@@ -75,6 +93,8 @@ on:
       - "backend/ella/services/provisioning.py"
       - "backend/ella/services/runtime_errors.py"
       - "backend/ella/services/runtime_resolver.py"
+      - "backend/ella/services/canonical_summary_source.py"
+      - "backend/ella/services/summary_writeback.py"
       - "backend/ella/services/summary_recovery.py"
       - "backend/ella/services/summary_writeback.py"
       - "backend/ella/services/today_card.py"
@@ -91,6 +111,7 @@ on:
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
       - "backend/migrations/016_create_today_cards.sql"
+      - "backend/migrations/017_add_voice_entitlement_consent_revision.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
@@ -108,9 +129,11 @@ on:
       - "backend/ella/docs/HERMES_BROKER_PROTOTYPE_RUNBOOK.md"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
       - "backend/ella/docs/HERMES_PRODUCT_FIT_CANARY.md"
+      - "backend/ella/docs/SUMMARY_CAS_ROLLOUT.md"
       - "backend/ella/docs/UNIFIED_MEMORY_CONTEXT.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
       - "backend/tests/fixtures/hermes_product_fit_callback_v1.json"
+      - "backend/tests/fixtures/ella_canonical_source_v1.json"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
       - "backend/tests/unit/test_authority_advisory_lock.py"
       - "backend/tests/unit/test_authority_writer_guard.py"
@@ -158,10 +181,29 @@ on:
       - "backend/tests/unit/test_ella_scanner_batching.py"
       - "backend/tests/unit/test_capture_buffer_retention.py"
       - "backend/tests/unit/test_capture_incident_1210_regressions.py"
+      - "backend/tests/unit/test_capture_protocol_v2_live.py"
+      - "backend/tests/unit/test_capture_task_sync_idempotency.py"
+      - "backend/tests/unit/test_capture_webhook_delivery.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
   push:
     branches: [main]
     paths:
+      - "backend/.env.template"
+      - "backend/database/account_diagnostics.py"
+      - "backend/ella/contracts/diagnostic-event-v1.schema.json"
+      - "backend/ella/contracts/diagnostic-failure-registry-v1.json"
+      - "backend/ella/docs/account-diagnostics-v1.md"
+      - "backend/ella/routers/account_diagnostics.py"
+      - "backend/ella/services/account_diagnostics.py"
+      - "backend/migrations/018_create_account_diagnostics.sql"
+      - "backend/migrations/019_add_diagnostic_attempt_ordinal.sql"
+      - "backend/migrations/020_backfill_diagnostic_attempt_ordinals.sql"
+      - "backend/tests/fixtures/diagnostics/*.json"
+      - "backend/tests/postgres/test_account_diagnostics_postgres.py"
+      - "backend/tests/unit/test_account_diagnostics.py"
+      - "backend/tests/unit/test_ella_all_router_authority_manifest.py"
+      - "backend/utils/ella/account_diagnostics.py"
+      - "backend/utils/ella/account_diagnostics_retention.py"
       - "app/ios/Runner.xcodeproj/project.pbxproj"
       - "app/ios/Runner/GuardianMode/GuardianAuthenticatedTransport.swift"
       - "app/ios/Runner/GuardianMode/GuardianModeManager.swift"
@@ -185,12 +227,14 @@ on:
       - "backend/database/voice_canary.py"
       - "backend/models/conversation.py"
       - "backend/models/conversation_integrity.py"
+      - "backend/models/message_event.py"
       - "backend/models/hermes_cloud_enrichment_contract.py"
       - "backend/routers/transcribe.py"
       - "backend/routers/pusher.py"
       - "backend/routers/integration.py"
       - "backend/routers/workflow.py"
       - "backend/utils/capture_buffer.py"
+      - "backend/utils/conversations/capture_protocol.py"
       - "backend/utils/conversations/process_conversation.py"
       - "backend/utils/conversations/postprocess_conversation.py"
       - "backend/utils/conversations/merge_conversations.py"
@@ -234,6 +278,8 @@ on:
       - "backend/ella/services/provisioning.py"
       - "backend/ella/services/runtime_errors.py"
       - "backend/ella/services/runtime_resolver.py"
+      - "backend/ella/services/canonical_summary_source.py"
+      - "backend/ella/services/summary_writeback.py"
       - "backend/ella/services/summary_recovery.py"
       - "backend/ella/services/summary_writeback.py"
       - "backend/ella/services/today_card.py"
@@ -250,6 +296,7 @@ on:
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
       - "backend/migrations/016_create_today_cards.sql"
+      - "backend/migrations/017_add_voice_entitlement_consent_revision.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
@@ -267,9 +314,11 @@ on:
       - "backend/ella/docs/HERMES_BROKER_PROTOTYPE_RUNBOOK.md"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
       - "backend/ella/docs/HERMES_PRODUCT_FIT_CANARY.md"
+      - "backend/ella/docs/SUMMARY_CAS_ROLLOUT.md"
       - "backend/ella/docs/UNIFIED_MEMORY_CONTEXT.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
       - "backend/tests/fixtures/hermes_product_fit_callback_v1.json"
+      - "backend/tests/fixtures/ella_canonical_source_v1.json"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
       - "backend/tests/unit/test_authority_advisory_lock.py"
       - "backend/tests/unit/test_authority_writer_guard.py"
@@ -317,6 +366,9 @@ on:
       - "backend/tests/unit/test_ella_scanner_batching.py"
       - "backend/tests/unit/test_capture_buffer_retention.py"
       - "backend/tests/unit/test_capture_incident_1210_regressions.py"
+      - "backend/tests/unit/test_capture_protocol_v2_live.py"
+      - "backend/tests/unit/test_capture_task_sync_idempotency.py"
+      - "backend/tests/unit/test_capture_webhook_delivery.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
 
 jobs:
@@ -349,6 +401,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Assert immutable checkout
+        env:
+          EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          echo "expected SHA == git rev-parse HEAD: ${EXPECTED_SHA} == ${actual_sha}"
+          test "${EXPECTED_SHA}" = "${actual_sha}"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -365,7 +427,9 @@ jobs:
           "fastapi==0.112.0"
           "firebase-admin==6.5.0"
           "httpx==0.28.0"
+          "Jinja2==3.1.4"
           "jsonschema==4.23.0"
+          "numpy==1.26.4"
           "PyJWT==2.9.0"
           "pytest==8.3.2"
           "openapi-spec-validator==0.7.1"
@@ -377,7 +441,13 @@ jobs:
         run: >-
           python -m py_compile
           database/authority_advisory_lock.py
+          database/action_items.py
+          database/chat.py
           database/conversations.py
+          database/folders.py
+          database/redis_db.py
+          database/task_sync.py
+          database/user_usage.py
           database/redis_db.py
           database/ella_caregivers.py
           database/ella_provisioning.py
@@ -389,6 +459,7 @@ jobs:
           database/runtime_targets.py
           database/voice_canary.py
           models/conversation.py
+          models/message_event.py
           models/conversation_integrity.py
           models/hermes_cloud_enrichment_contract.py
           routers/transcribe.py
@@ -486,6 +557,10 @@ jobs:
           routers/users.py
           routers/conversations.py routers/developer.py
           routers/pusher.py routers/transcribe.py routers/integration.py routers/workflow.py
+          routers/task_integrations.py
+          utils/analytics.py
+          utils/app_integrations.py
+          utils/conversations/capture_protocol.py
           utils/conversations/process_conversation.py
           utils/conversations/postprocess_conversation.py
           utils/conversations/merge_conversations.py
@@ -518,7 +593,11 @@ jobs:
           utils/ella/__init__.py utils/ella/canonical_auth.py utils/ella/canonical_context.py
           utils/ella/canonical_omi.py utils/ella/exact_firebase_auth.py utils/ella/postprocess.py
           utils/ella/scanner.py utils/ella/scanner_keyterms.py
+          utils/llm/knowledge_graph.py
+          utils/notifications.py
           utils/other/endpoints.py
+          utils/task_sync.py
+          utils/webhooks.py
           utils/capture_buffer.py
           scripts/voice_canary_admin.py
           scripts/ella_memory_e2e_smoke.py
@@ -527,6 +606,9 @@ jobs:
           tests/unit/test_ella_callbacks_summary_update.py
           tests/unit/test_capture_buffer_retention.py
           tests/unit/test_capture_incident_1210_regressions.py
+          tests/unit/test_capture_protocol_v2_live.py
+          tests/unit/test_capture_task_sync_idempotency.py
+          tests/unit/test_capture_webhook_delivery.py
           tests/unit/test_conversation_summary_cas.py
           tests/unit/test_conversation_processing_callers.py
           tests/unit/test_authority_advisory_lock.py
@@ -589,7 +671,10 @@ jobs:
           capture_ids="$(
             pytest --collect-only -q \
               tests/unit/test_capture_buffer_retention.py \
-              tests/unit/test_capture_incident_1210_regressions.py |
+              tests/unit/test_capture_incident_1210_regressions.py \
+              tests/unit/test_capture_protocol_v2_live.py \
+              tests/unit/test_capture_task_sync_idempotency.py \
+              tests/unit/test_capture_webhook_delivery.py |
               sed '/^$/d'
           )"
           required_capture_ids=(
@@ -613,26 +698,93 @@ jobs:
             "tests/unit/test_capture_incident_1210_regressions.py::test_superseded_socket_cannot_persist_a_batch_after_ownership_handoff"
             "tests/unit/test_capture_incident_1210_regressions.py::test_live_capture_persistence_holds_ownership_lease_through_commit"
             "tests/unit/test_capture_incident_1210_regressions.py::test_capture_owner_is_initialized_before_reconnect_preparation_uses_it"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_diagnostic_correlation_rejection_is_evidence_only_and_never_closes_capture"
             "tests/unit/test_capture_incident_1210_regressions.py::test_failed_stub_publication_abandons_only_the_still_owned_firestore_generation"
             "tests/unit/test_capture_incident_1210_regressions.py::test_duplicate_processing_claim_is_a_no_write_inflight_result"
             "tests/unit/test_capture_incident_1210_regressions.py::test_stale_processing_claim_without_a_lease_can_be_recovered"
-            "tests/unit/test_capture_incident_1210_regressions.py::test_reconnect_rebinds_firestore_before_publishing_redis_owner"
             "tests/unit/test_capture_incident_1210_regressions.py::test_capture_owner_rebind_and_rollback_are_generation_conditional"
             "tests/unit/test_capture_incident_1210_regressions.py::test_capture_photo_commit_uses_the_same_durable_owner_fence"
             "tests/unit/test_capture_incident_1210_regressions.py::test_capture_owner_transfer_fences_the_previous_firestore_generation"
             "tests/unit/test_capture_incident_1210_regressions.py::test_ownership_loss_exits_old_stream_and_photos_have_no_unfenced_write_path"
             "tests/unit/test_capture_incident_1210_regressions.py::test_incident_regression_file_triggers_pull_request_and_push_ci"
             "tests/unit/test_capture_incident_1210_regressions.py::test_stock_summary_commit_rejects_transcript_appended_after_processing_snapshot"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_production_reconnect_path_does_not_let_overlapping_socket_steal_authority"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_reconnect_claims_firestore_authority_before_publishing_redis_owner"
+            "tests/unit/test_capture_protocol_v2_live.py::test_capture_ready_receipt_is_complete_for_each_production_codec[opus_fs320]"
+            "tests/unit/test_capture_protocol_v2_live.py::test_capture_ready_receipt_is_complete_for_each_production_codec[pcm16]"
+            "tests/unit/test_capture_protocol_v2_live.py::test_correlated_capture_receipt_echoes_only_opaque_ids_as_evidence"
+            "tests/unit/test_capture_protocol_v2_live.py::test_expired_predecessor_allows_new_generation_reconnect"
+            "tests/unit/test_capture_protocol_v2_live.py::test_drained_predecessor_allows_exact_new_generation_rotation"
+            "tests/unit/test_capture_protocol_v2_live.py::test_drained_predecessor_rejects_mismatch_or_invalid_lease_without_writes"
+            "tests/unit/test_capture_protocol_v2_live.py::test_live_predecessor_rejects_new_generation_reconnect"
+            "tests/unit/test_capture_protocol_v2_live.py::test_missing_or_malformed_lease_rejects_new_generation_reconnect"
+            "tests/unit/test_capture_protocol_v2_live.py::test_drain_and_finalization_require_exact_tuple_and_reach_terminal"
+            "tests/unit/test_capture_protocol_v2_live.py::test_expired_authority_allows_legacy_predecessor_rotation"
+            "tests/unit/test_capture_protocol_v2_live.py::test_live_authority_rejects_legacy_predecessor_rotation_without_writes"
+            "tests/unit/test_capture_protocol_v2_live.py::test_live_authority_blocks_overlapping_reconnect_before_owner_rebind"
+            "tests/unit/test_capture_protocol_v2_live.py::test_expired_authority_allows_only_one_reconnect_owner_claim"
+            "tests/unit/test_capture_protocol_v2_live.py::test_expired_authority_recovers_conversation_after_clean_drain"
+            "tests/unit/test_capture_protocol_v2_live.py::test_live_finalization_blocks_reconnect_after_capture_lease_expires"
+            "tests/unit/test_capture_protocol_v2_live.py::test_reconnect_claim_rejects_live_conversation_capture_lease_when_authority_expired"
+            "tests/unit/test_capture_protocol_v2_live.py::test_reconnect_claim_rejects_live_conversation_finalizer_when_authority_finalizer_expired"
+            "tests/unit/test_capture_protocol_v2_live.py::test_reconnect_claim_rejects_missing_or_malformed_v2_lease_evidence"
+            "tests/unit/test_capture_protocol_v2_live.py::test_drain_authority_is_independent_from_diagnostic_session_and_attempt"
+            "tests/unit/test_capture_protocol_v2_live.py::test_close_before_ready_retains_correlated_authority_and_fences_competing_attempt"
+            "tests/unit/test_capture_protocol_v2_live.py::test_unvalidated_diagnostic_metadata_is_dropped_without_blocking_capture_authority"
+            "tests/unit/test_capture_protocol_v2_live.py::test_finalization_authority_is_independent_from_diagnostic_correlation"
+            "tests/unit/test_capture_task_sync_idempotency.py::test_task_sync_retry_release_is_exact_claim_cas"
+            "tests/unit/test_capture_task_sync_idempotency.py::test_auto_sync_transient_failure_releases_then_retries_same_operation_once"
+            "tests/unit/test_capture_task_sync_idempotency.py::test_auto_sync_explicit_terminal_failure_completes_without_provider_retry"
+            "tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[todoist]"
+            "tests/unit/test_capture_webhook_delivery.py::test_capture_developer_webhook_failure_is_not_acknowledged"
           )
-          test "$(grep -c '::' <<<"$capture_ids")" -eq 30
+          test "$(grep -c '::' <<<"$capture_ids")" -eq 72
           for required_id in "${required_capture_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$capture_ids"
           done
           pytest \
             tests/unit/test_capture_buffer_retention.py \
             tests/unit/test_capture_incident_1210_regressions.py \
+            tests/unit/test_capture_protocol_v2_live.py \
+            tests/unit/test_capture_task_sync_idempotency.py \
+            tests/unit/test_capture_webhook_delivery.py \
             -v | tee /tmp/capture-buffer-retention-pytest.log
           ! grep -Eq '[0-9]+ skipped' /tmp/capture-buffer-retention-pytest.log
+
+      - name: Run account diagnostic evidence contract
+        run: |
+          set -euo pipefail
+          diagnostic_ids="$(
+            pytest --collect-only -q \
+              tests/unit/test_account_diagnostics.py \
+              tests/postgres/test_account_diagnostics_postgres.py |
+              sed '/^$/d'
+          )"
+          required_diagnostic_ids=(
+            "tests/unit/test_account_diagnostics.py::test_capture_correlation_is_fenced_by_authenticated_current_account_authority"
+            "tests/unit/test_account_diagnostics.py::test_support_grant_rejects_session_without_evidence_in_requested_window"
+            "tests/unit/test_account_diagnostics.py::test_checked_in_schema_registry_and_build_849_golden_traces_match_runtime_contract"
+            "tests/postgres/test_account_diagnostics_postgres.py::test_two_accounts_cannot_cross_read_append_or_revoke_diagnostic_evidence"
+            "tests/postgres/test_account_diagnostics_postgres.py::test_support_code_redemption_revalidates_consent_and_binding_before_read"
+          )
+          test "$(grep -c '::' <<<"$diagnostic_ids")" -eq 30
+          for required_id in "${required_diagnostic_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$diagnostic_ids"
+          done
+          pytest \
+            tests/unit/test_account_diagnostics.py \
+            tests/postgres/test_account_diagnostics_postgres.py \
+            -v | tee /tmp/account-diagnostics-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/account-diagnostics-pytest.log
+          black --check --line-length 120 --skip-string-normalization \
+            database/account_diagnostics.py \
+            ella/routers/account_diagnostics.py \
+            ella/services/account_diagnostics.py \
+            tests/postgres/test_account_diagnostics_postgres.py \
+            tests/unit/test_account_diagnostics.py \
+            utils/ella/account_diagnostics.py \
+            utils/ella/account_diagnostics_retention.py
+          python -c "import json; json.load(open('ella/contracts/diagnostic-event-v1.schema.json', encoding='utf-8')); json.load(open('ella/contracts/diagnostic-failure-registry-v1.json', encoding='utf-8'))"
 
       - name: Run incident 1182 mounted-route exploit controls
         run: |
@@ -779,6 +931,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
+          echo "observed Hermes Cloud runtime collection count: $collected"
           required_ids=(
             "tests/unit/test_hermes_binding_envelope_contract.py::test_hermes_binding_envelope_v1_identity_and_content_free_shape"
             "tests/unit/test_hermes_binding_envelope_contract.py::test_omi_request_uses_exact_stock_contract_from_shared_envelope"
@@ -789,6 +942,9 @@ jobs:
             "tests/unit/test_hermes_product_fit_canary.py::test_fixture_prepare_requires_scope_bound_fresh_protected_off_receipt"
             "tests/unit/test_hermes_product_fit_canary.py::test_fixture_cleanup_recovers_from_partial_cleanup_idempotently"
             "tests/unit/test_hermes_product_fit_canary.py::test_fixture_show_and_cleanup_accept_expected_post_enrichment_state_only"
+            "tests/unit/test_ella_postprocess_cloud_routing.py::test_capture_delivery_http_failure_is_not_acknowledged"
+            "tests/unit/test_ella_postprocess_cloud_routing.py::test_capture_conversation_ready_http_failure_is_not_acknowledged"
+            "tests/unit/test_ella_postprocess_cloud_routing.py::test_legacy_delivery_preserves_best_effort_http_failure"
             "tests/unit/test_ella_runtime_route_isolation.py::test_cloud_chat_failure_still_emits_one_terminal_marker"
             "tests/unit/test_ella_runtime_route_isolation.py::test_isolated_hermes_chat_has_a_bounded_provider_timeout"
             "tests/unit/test_ella_runtime_route_isolation.py::test_legacy_history_unexpected_failure_logs_fixed_content_free_classification"
@@ -797,6 +953,7 @@ jobs:
             "tests/unit/test_ella_runtime_route_isolation.py::test_self_hosted_voice_session_activation_race_drift_fails_before_token_or_provider"
             "tests/unit/test_ella_runtime_route_isolation.py::test_self_hosted_voice_session_authority_denials_precede_provider_setup[invitation_runtime_fallback_enabled]"
             "tests/unit/test_ella_provisioning_service.py::test_runtime_receipt_requires_owned_workspace_port_and_honcho"
+            "tests/unit/test_ella_provisioning_service.py::test_self_hosted_schema_preflight_requires_consent_revision_migration"
             "tests/unit/test_ella_provisioning_service.py::test_authenticated_honcho_attestation_rejects_replay_swaps_staleness_and_partial_proofs"
             "tests/unit/test_ella_provisioning_service.py::test_missing_attestation_key_fails_before_provisioner_or_binding_write"
             "tests/unit/test_ella_provisioning_service.py::test_retained_authority_inventory_mutation_sensitivity_across_all_roots_and_aliases"
@@ -816,6 +973,8 @@ jobs:
             "tests/unit/test_ella_provisioning_service.py::test_invitation_runtime_requires_persisted_profile_local_honcho_proof"
             "tests/unit/test_ella_provisioning_service.py::test_retained_owner_identity_is_exact_and_requires_server_configuration"
             "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_activation_does_not_require_invitation_target"
+            "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_preserves_exact_active_retained_runtime"
+            "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_still_rejects_missing_isolated_binding"
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_proxy_re_resolves_exact_voice_target"
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_accept_drift_fails_before_session_or_provider_call[authority_digest-voice_runtime_authority_changed]"
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_accept_drift_fails_before_session_or_provider_call[session-voice_session_claim_mismatch]"
@@ -837,11 +996,13 @@ jobs:
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_resolution_rechecks_attestation_inside_authority_transaction"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_key_separation_is_rechecked_at_activation_and_resolution"
             "tests/postgres/test_hermes_cloud_pool_postgres.py::test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets"
+            "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_017_prerequisite_failure_rolls_back_added_column"
           )
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_hermes_binding_envelope_contract.py \
               tests/unit/test_hermes_product_fit_canary.py \
+              tests/unit/test_ella_postprocess_cloud_routing.py \
               tests/unit/test_ella_provisioning_service.py \
               tests/unit/test_ella_runtime_route_isolation.py \
               tests/unit/test_voice_proxy_auth.py \
@@ -850,17 +1011,21 @@ jobs:
               tests/unit/test_hermes_broker_prototype.py \
               tests/unit/test_ella_provisioning_repository.py \
               tests/postgres/test_hermes_cloud_pool_postgres.py \
-              tests/postgres/test_invitation_redemption_postgres.py |
+              tests/postgres/test_invitation_redemption_postgres.py \
+              tests/postgres/test_runtime_migration_atomicity_postgres.py |
               sed '/^$/d'
           )"
           for required_id in "${required_ids[@]}"; do
-            grep -Fqx "$required_id" <<<"$collected_ids"
+            if ! grep -Fqx "$required_id" <<<"$collected_ids"; then
+              echo "::error::required Hermes Cloud test is not collected: $required_id"
+              exit 1
+            fi
           done
           test "$(
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
-          )" -eq 20
-          test "$collected" -eq 564
+          )" -eq 21
+          test "$collected" -eq 574
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
@@ -892,6 +1057,7 @@ jobs:
 
       - name: Run exact reviewed boundary collections
         run: |
+          set -euo pipefail
           today_card_ids="$(
             pytest --collect-only -q \
               tests/unit/test_today_card.py \
@@ -940,6 +1106,14 @@ jobs:
             "tests/unit/test_conversation_processing_failures.py::test_manual_conversation_processing_targets_exact_closed_conversation"
             "tests/unit/test_conversation_processing_failures.py::test_initial_processing_claim_rejects_a_durable_capture_owner"
             "tests/unit/test_conversation_processing_failures.py::test_developer_conversation_delete_offloads_blocking_stores_from_event_loop"
+            "tests/unit/test_conversation_processing_failures.py::test_capture_effect_successor_reuses_token_and_stale_predecessor_cannot_complete"
+            "tests/unit/test_conversation_processing_failures.py::test_capture_internal_sink_reclaim_is_idempotent[action_items]"
+            "tests/unit/test_conversation_processing_failures.py::test_capture_internal_sink_reclaim_is_idempotent[usage]"
+            "tests/unit/test_conversation_processing_failures.py::test_capture_internal_sink_reclaim_is_idempotent[audio]"
+            "tests/unit/test_conversation_processing_failures.py::test_capture_usage_receipt_and_increment_commit_atomically_once"
+            "tests/unit/test_conversation_processing_failures.py::test_capture_completed_summary_resumes_missing_effect_after_lost_ack"
+            "tests/unit/test_conversation_processing_failures.py::test_capture_ready_http_failure_retries_same_effect_without_duplicate_summary"
+            "tests/unit/test_conversation_processing_failures.py::test_capture_task_sync_transient_failure_keeps_outer_effect_reclaimable"
             "tests/unit/test_conversation_processing_callers.py::test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[already_completed]"
             "tests/unit/test_conversation_processing_callers.py::test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[stock_summary_cas_lost]"
             "tests/unit/test_conversation_processing_callers.py::test_transcribe_fallback_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[already_completed]"
@@ -955,9 +1129,12 @@ jobs:
             "tests/postgres/test_today_card_lifecycle_postgres.py::test_explicit_source_currentness_uses_only_latest_canonical_version"
           )
           for required_id in "${required_today_card_ids[@]}"; do
-            grep -Fqx "$required_id" <<<"$today_card_ids"
+            if ! grep -Fqx "$required_id" <<<"$today_card_ids"; then
+              echo "::error::required Today/capture test is not collected: $required_id"
+              exit 1
+            fi
           done
-          test "$(grep -c '::' <<<"$today_card_ids")" -eq 221
+          test "$(grep -c '::' <<<"$today_card_ids")" -eq 231
           pytest \
             tests/unit/test_today_card.py \
             tests/unit/test_today_card_api.py \
@@ -1049,16 +1226,30 @@ jobs:
           grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine" \
             <<<"$authority_lock_ids"
-          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 78
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_current_retained_consent_rearms_only_exact_quarantine" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_retained_runtime_rearm_rejects_stale_authority_revision" \
+            <<<"$authority_lock_ids"
+          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 80
           pytest \
             tests/unit/test_authority_advisory_lock.py \
             tests/unit/test_authority_writer_guard.py \
             tests/postgres/test_authority_advisory_lock_postgres.py \
             -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 30
+          callback_contract_selector='not (parallel_canonical_confirmation_repairs_latest_summary_after_race or parallel_enrichment_binds_independent_grounding_to_canonical_version or parallel_grounding_evidence_fails_closed or parallel_grounding_evidence_rejects_unknown_fields_at_schema_boundary or parallel_grounding_transcript_compare_and_set_loses_race_without_publication or parallel_pending_canonical_replay_rejects_transcript_drift_without_publication or parallel_prebuilt_grounding_receipt_cannot_bypass_quote_binding or parallel_summary_source_match_rejects_stale_version_before_write or parallel_summary_source_match_replay_is_idempotent or parallel_summary_source_match_uses_transcript_and_version_cas or pending_canonical_replay_rejects_result_version_drift or summary_route_forwards_required_active_version_match)'
+          test "$(
+            pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py \
+              -k "$callback_contract_selector" |
+              grep -c '::'
+          )" -eq 81
+          pytest tests/unit/test_ella_callbacks_summary_update.py -k "$callback_contract_selector" -v
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
+          baseline_summary_cas_selector='not (conversation_builder_reads_and_writes_with_the_same_transaction or conversation_builder_commits_correction_audit_in_the_same_transaction or correction_audit_enqueue_failure_aborts_the_conversation_transaction or real_firestore_transaction_contention_preserves_one_complete_canonical_source)'
           conversation_summary_cas_ids="$(
-            pytest --collect-only -q tests/unit/test_conversation_summary_cas.py |
+            pytest --collect-only -q tests/unit/test_conversation_summary_cas.py \
+              -k "$baseline_summary_cas_selector" |
               sed '/^$/d'
           )"
           required_conversation_summary_cas_ids=(
@@ -1080,12 +1271,14 @@ jobs:
             "tests/unit/test_conversation_summary_cas.py::test_initial_processing_claim_promotes_in_progress_once_with_partial_update"
             "tests/unit/test_conversation_summary_cas.py::test_released_processing_claim_fences_terminal_failure_from_new_claimant"
             "tests/unit/test_conversation_summary_cas.py::test_terminal_failure_updates_only_the_exact_released_generation"
+            "tests/unit/test_conversation_summary_cas.py::test_capture_finalizer_summary_commit_requires_exact_unexpired_claim_in_same_transaction"
+            "tests/unit/test_conversation_summary_cas.py::test_capture_summary_commit_replay_after_lost_receipt_keeps_one_deterministic_version"
           )
           for required_id in "${required_conversation_summary_cas_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$conversation_summary_cas_ids"
           done
-          test "$(grep -c '::' <<<"$conversation_summary_cas_ids")" -eq 48
-          pytest tests/unit/test_conversation_summary_cas.py -v
+          test "$(grep -c '::' <<<"$conversation_summary_cas_ids")" -eq 50
+          pytest tests/unit/test_conversation_summary_cas.py -k "$baseline_summary_cas_selector" -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 85
           pytest tests/unit/test_ella_conversation_corrections.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 44
@@ -1137,11 +1330,55 @@ jobs:
           test "$(pytest --collect-only -q tests/unit/test_ella_scanner_batching.py | grep -c '::')" -eq 8
           pytest tests/unit/test_ella_scanner_batching.py -v
 
+      - name: Run real Firestore summary CAS contention gate
+        run: |
+          set -euo pipefail
+          summary_cas_contract_selector='active_summary_version_compare_and_set_is_atomic_and_fail_closed or conversation_builder_reads_and_writes_with_the_same_transaction or conversation_builder_commits_correction_audit_in_the_same_transaction or correction_audit_enqueue_failure_aborts_the_conversation_transaction or real_firestore_transaction_contention_preserves_one_complete_canonical_source'
+          test "$(
+            pytest --collect-only -q tests/unit/test_conversation_summary_cas.py \
+              -k "$summary_cas_contract_selector" |
+              grep -c '::'
+          )" -eq 5
+          emulator_name="omi-summary-cas-firestore-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker run --rm -d \
+            --name "${emulator_name}" \
+            -p 127.0.0.1::8080 \
+            gcr.io/google.com/cloudsdktool/google-cloud-cli@sha256:cda01b8c880e9161992c3fd61d7d0e153b4dd073aa4a9d62ad79243907cf8dd4 \
+            gcloud beta emulators firestore start --host-port=0.0.0.0:8080 --quiet
+          cleanup_emulator() {
+            docker rm -f "${emulator_name}" >/dev/null 2>&1 || true
+          }
+          trap cleanup_emulator EXIT
+          emulator_port="$(docker port "${emulator_name}" 8080/tcp | awk -F: 'END {print $NF}')"
+          test -n "${emulator_port}"
+          export FIRESTORE_EMULATOR_HOST="127.0.0.1:${emulator_port}"
+          echo "isolated Firestore emulator: ${FIRESTORE_EMULATOR_HOST}"
+          for attempt in {1..30}; do
+            if curl --silent --fail "http://${FIRESTORE_EMULATOR_HOST}/" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          curl --silent --fail "http://${FIRESTORE_EMULATOR_HOST}/" >/dev/null
+          ELLA_FIRESTORE_EMULATOR_TESTS=true \
+            python -m pytest tests/unit/test_conversation_summary_cas.py \
+              -k "$summary_cas_contract_selector" -v
+
   guardian-app-contracts:
     runs-on: macos-14
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Assert immutable checkout
+        env:
+          EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          echo "expected SHA == git rev-parse HEAD: ${EXPECTED_SHA} == ${actual_sha}"
+          test "${EXPECTED_SHA}" = "${actual_sha}"
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2

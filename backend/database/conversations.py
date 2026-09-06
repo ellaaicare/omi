@@ -10,6 +10,7 @@ from google.cloud import firestore
 from google.cloud.firestore_v1 import FieldFilter, transactional
 
 import utils.other.hume as hume
+import database.memory_artwork as memory_artwork_db
 from database import users as users_db
 from database import redis_db
 from database.hermes_cloud_enrichment_outbox import COLLECTION as hermes_cloud_enrichment_outbox_collection
@@ -27,7 +28,12 @@ from models.hermes_cloud_enrichment_contract import (
 )
 from models.transcript_segment import TranscriptSegment
 from utils import encryption
-from ._client import db
+from utils.ella.memory_artwork_storage import (
+    MemoryArtworkStorageError,
+    delete_conversation_artwork_if_present,
+    require_memory_artwork_publication_lock,
+)
+from ._client import db, document_id_from_seed
 from .helpers import set_data_protection_level, prepare_for_write, prepare_for_read, with_photos
 from utils.other.storage import list_audio_chunks
 
@@ -50,6 +56,8 @@ conversation_stock_summary_cas_lost = 'stock_summary_cas_lost'
 conversation_stock_summary_transcript_changed = 'stock_summary_transcript_changed'
 conversation_stock_summary_malformed = 'stock_summary_authority_malformed'
 conversation_stock_summary_deleted = 'stock_summary_conversation_deleted'
+capture_protocol_version = 2
+capture_finalization_lost = 'capture_finalization_lost'
 
 _STOCK_SUMMARY_RESULT_UPDATE_FIELDS = {
     'discarded',
@@ -690,6 +698,24 @@ def update_conversation(uid: str, conversation_id: str, update_data: dict):
     doc_ref.update(prepared_data)
 
 
+class PendingConversationSummaryReconciliationError(RuntimeError):
+    """A summary writer cannot supersede an unfinished canonical publication."""
+
+
+SUMMARY_WRITEBACK_RECEIPT_FIELD = 'summary_writeback_receipt'
+SUMMARY_WRITEBACK_PENDING = 'pending_reconciliation'
+
+
+def _reject_pending_summary_receipt(conversation: dict, update_data: dict) -> None:
+    receipt = conversation.get(SUMMARY_WRITEBACK_RECEIPT_FIELD) or {}
+    if (
+        SUMMARY_WRITEBACK_RECEIPT_FIELD in update_data
+        and update_data.get(SUMMARY_WRITEBACK_RECEIPT_FIELD) is None
+        and receipt.get('status') == SUMMARY_WRITEBACK_PENDING
+    ):
+        raise PendingConversationSummaryReconciliationError('canonical_summary_reconciliation_pending')
+
+
 def _processing_result_update_data(conversation_data: Dict[str, Any]) -> Dict[str, Any]:
     return {
         key: copy.deepcopy(value)
@@ -697,6 +723,24 @@ def _processing_result_update_data(conversation_data: Dict[str, Any]) -> Dict[st
         if key in _STOCK_SUMMARY_RESULT_UPDATE_FIELDS and key != 'photos'
         if key not in _STOCK_SUMMARY_OPTIONAL_METADATA_FIELDS or value is not None
     }
+
+
+def _capture_finalization_claim_matches(
+    conversation: Dict[str, Any],
+    capture_finalization: tuple[str, str, str],
+    now: datetime,
+) -> bool:
+    generation, owner_token, claim_token = capture_finalization
+    lease_expires_at = conversation.get('capture_finalization_lease_expires_at')
+    return bool(
+        conversation.get('capture_protocol_version') == capture_protocol_version
+        and conversation.get('capture_generation') == generation
+        and conversation.get('capture_owner_token') == owner_token
+        and conversation.get('capture_state') == 'finalizing'
+        and conversation.get('capture_finalization_claim_token') == claim_token
+        and isinstance(lease_expires_at, datetime)
+        and _ensure_timezone_aware(lease_expires_at) > _ensure_timezone_aware(now)
+    )
 
 
 def _parent_conversation_write_data(conversation_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -780,6 +824,8 @@ def _stock_summary_authority_update(
     durable_conversation: Dict[str, Any],
     processing_conversation: Dict[str, Any],
     expected_active_summary_version_id: Optional[str],
+    *,
+    deterministic: bool = False,
 ) -> Dict[str, Any]:
     authority = _validate_summary_authority(durable_conversation)
     if authority['status'] == conversation_stock_summary_malformed:
@@ -817,22 +863,22 @@ def _stock_summary_authority_update(
     if not _has_summary_content(structured):
         return {'status': 'version_unavailable', 'reason': 'summary_content_missing'}
 
+    new_version = _build_stock_summary_version(
+        durable_conversation or processing_conversation,
+        structured,
+        based_on_version_id=current_active_id or None,
+        deterministic=deterministic or authority['status'] == 'empty',
+    )
+    if deterministic and current_active_id == new_version['id']:
+        return {
+            'status': 'committed',
+            'update_data': update_data,
+            'active_summary_version_id': current_active_id,
+        }
+
     versions = copy.deepcopy(durable_conversation.get('summary_versions') or [])
     for version in versions:
         version['is_active'] = False
-
-    if authority['status'] == 'empty':
-        new_version = _build_stock_summary_version(
-            durable_conversation or processing_conversation,
-            structured,
-            deterministic=True,
-        )
-    else:
-        new_version = _build_stock_summary_version(
-            durable_conversation,
-            structured,
-            based_on_version_id=current_active_id,
-        )
     versions.append(new_version)
     update_data['summary_versions'] = versions
     update_data['active_summary_version_id'] = new_version['id']
@@ -853,9 +899,12 @@ def _commit_stock_summary_processing_result_transaction(
     enqueue_hermes_cloud_enrichment: bool = False,
     enrichment_enqueued_at: Optional[datetime] = None,
     expected_transcript_hash: Optional[str] = None,
+    capture_finalization: Optional[tuple[str, str, str]] = None,
 ) -> Dict[str, Any]:
     snapshot = conversation_ref.get(transaction=transaction)
     if not snapshot.exists:
+        if capture_finalization:
+            return {'status': capture_finalization_lost, 'dispatched': False}
         if not allow_create:
             return {
                 'status': conversation_stock_summary_deleted,
@@ -889,6 +938,16 @@ def _commit_stock_summary_processing_result_transaction(
         }
 
     durable_conversation = snapshot.to_dict() or {}
+    if capture_finalization and not _capture_finalization_claim_matches(
+        durable_conversation,
+        capture_finalization,
+        datetime.now(timezone.utc),
+    ):
+        return {
+            'status': capture_finalization_lost,
+            'conversation': durable_conversation,
+            'dispatched': False,
+        }
     if expected_transcript_hash is not None:
         readable_durable_conversation = _prepare_conversation_for_transcript_hash(durable_conversation, uid)
         if (
@@ -905,6 +964,7 @@ def _commit_stock_summary_processing_result_transaction(
         durable_conversation,
         processing_conversation,
         expected_active_summary_version_id,
+        deterministic=bool(capture_finalization),
     )
     if update_result['status'] != 'committed':
         return {
@@ -947,6 +1007,7 @@ def _commit_stock_summary_processing_result(
     enqueue_hermes_cloud_enrichment: bool = False,
     enrichment_enqueued_at: Optional[datetime] = None,
     expected_transcript_hash: Optional[str] = None,
+    capture_finalization: Optional[tuple[str, str, str]] = None,
 ) -> Dict[str, Any]:
     return _commit_stock_summary_processing_result_transaction(
         transaction,
@@ -958,6 +1019,7 @@ def _commit_stock_summary_processing_result(
         enqueue_hermes_cloud_enrichment,
         enrichment_enqueued_at,
         expected_transcript_hash,
+        capture_finalization,
     )
 
 
@@ -970,6 +1032,7 @@ def commit_stock_summary_processing_result(
     allow_create: bool = False,
     enqueue_hermes_cloud_enrichment: bool = False,
     expected_transcript_hash: Optional[str] = None,
+    capture_finalization: Optional[tuple[str, str, str]] = None,
 ) -> Dict[str, Any]:
     conversation_ref = (
         db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
@@ -977,6 +1040,8 @@ def commit_stock_summary_processing_result(
     commit_kwargs = {}
     if expected_transcript_hash is not None:
         commit_kwargs['expected_transcript_hash'] = expected_transcript_hash
+    if capture_finalization is not None:
+        commit_kwargs['capture_finalization'] = capture_finalization
     result = _commit_stock_summary_processing_result(
         db.transaction(),
         conversation_ref,
@@ -1272,6 +1337,7 @@ def _update_conversation_if_active_summary_version_transaction(
     if not snapshot.exists:
         return False
     conversation = snapshot.to_dict() or {}
+    _reject_pending_summary_receipt(conversation, update_data)
     if str(conversation.get('active_summary_version_id') or '') != str(expected_active_summary_version_id or ''):
         return False
     doc_level = conversation.get('data_protection_level', 'standard')
@@ -1348,6 +1414,7 @@ def _update_conversation_if_summary_authority_transaction(
     if not snapshot.exists:
         return False
     conversation = snapshot.to_dict() or {}
+    _reject_pending_summary_receipt(conversation, update_data)
     if str(conversation.get('active_summary_version_id') or '') != str(expected_active_summary_version_id or ''):
         return False
     if not _summary_enrichment_authority_matches(
@@ -1415,6 +1482,7 @@ def _update_conversation_if_transcript_hash_transaction(
     if not snapshot.exists:
         return False
     conversation = snapshot.to_dict() or {}
+    _reject_pending_summary_receipt(conversation, update_data)
     readable_conversation = _prepare_conversation_for_transcript_hash(conversation, uid)
     if readable_conversation is None:
         return False
@@ -1481,6 +1549,70 @@ def update_conversation_if_transcript_hash(
         expected_active_summary_version_id=expected_active_summary_version_id,
         match_active_summary_version=match_active_summary_version,
         expected_enrichment_state=expected_enrichment_state,
+    )
+
+
+def _update_conversation_with_builder_transaction(
+    transaction,
+    conversation_ref,
+    uid: str,
+    update_builder,
+    correction_id: Optional[str] = None,
+):
+    """Read and update one conversation and optional correction audit atomically."""
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return None
+    stored_conversation = snapshot.to_dict() or {}
+    conversation = _prepare_conversation_for_read(stored_conversation, uid) or {}
+    update_data, result = update_builder(conversation)
+    if update_data:
+        doc_level = stored_conversation.get('data_protection_level', 'standard')
+        prepared_data = _prepare_conversation_for_write(update_data, uid, doc_level)
+        transaction.update(conversation_ref, prepared_data)
+    correction_audit = result.get('correction_audit') if isinstance(result, dict) else None
+    if correction_id and correction_audit:
+        correction_ref = conversation_ref.collection('corrections').document(correction_id)
+        transaction.set(correction_ref, correction_audit, merge=True)
+    return {
+        'conversation': conversation,
+        'update_data': update_data,
+        'result': result,
+    }
+
+
+@transactional
+def _update_conversation_with_builder(
+    transaction,
+    conversation_ref,
+    uid: str,
+    update_builder,
+    correction_id: Optional[str] = None,
+):
+    return _update_conversation_with_builder_transaction(
+        transaction,
+        conversation_ref,
+        uid,
+        update_builder,
+        correction_id,
+    )
+
+
+def update_conversation_with_builder(
+    uid: str,
+    conversation_id: str,
+    update_builder,
+    correction_id: Optional[str] = None,
+):
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _update_conversation_with_builder(
+        db.transaction(),
+        conversation_ref,
+        uid,
+        update_builder,
+        correction_id,
     )
 
 
@@ -1589,6 +1721,7 @@ def ensure_voice_memory_summary_version(
 def create_audio_files_from_chunks(
     uid: str,
     conversation_id: str,
+    idempotency_key: Optional[str] = None,
 ) -> List[AudioFile]:
     """
     Create audio file records by merging chunks from a conversation.
@@ -1619,7 +1752,13 @@ def create_audio_files_from_chunks(
             time_gap = chunk['timestamp'] - prev_chunk['timestamp']
             if time_gap > 30:
                 # Gap detected, finalize current group
-                audio_file = _finalize_audio_file_group(uid, conversation_id, current_group, audio_files)
+                audio_file = _finalize_audio_file_group(
+                    uid,
+                    conversation_id,
+                    current_group,
+                    audio_files,
+                    idempotency_key=idempotency_key,
+                )
                 if audio_file:
                     audio_files.append(audio_file)
                 current_group = [chunk]
@@ -1628,15 +1767,29 @@ def create_audio_files_from_chunks(
 
     # Finalize last group
     if current_group:
-        audio_file = _finalize_audio_file_group(uid, conversation_id, current_group, audio_files)
+        audio_file = _finalize_audio_file_group(
+            uid,
+            conversation_id,
+            current_group,
+            audio_files,
+            idempotency_key=idempotency_key,
+        )
         if audio_file:
             audio_files.append(audio_file)
 
     return audio_files
 
 
+def capture_audio_file_id(idempotency_key: str, group_index: int) -> str:
+    return document_id_from_seed(f'{idempotency_key}:audio-file:{group_index}')
+
+
 def _finalize_audio_file_group(
-    uid: str, conversation_id: str, chunk_group: List[dict], existing_files: List[AudioFile]
+    uid: str,
+    conversation_id: str,
+    chunk_group: List[dict],
+    existing_files: List[AudioFile],
+    idempotency_key: Optional[str] = None,
 ) -> Optional[AudioFile]:
     """
     Create an AudioFile record that references chunks (no merging).
@@ -1654,7 +1807,7 @@ def _finalize_audio_file_group(
         return None
 
     # Generate file ID
-    file_id = str(uuid.uuid4())
+    file_id = capture_audio_file_id(idempotency_key, len(existing_files)) if idempotency_key else str(uuid.uuid4())
 
     # Extract timestamps
     timestamps = [chunk['timestamp'] for chunk in chunk_group]
@@ -1730,7 +1883,7 @@ def delete_conversation_photos(uid: str, conversation_id: str) -> int:
     return deleted_count
 
 
-def delete_conversation(uid, conversation_id):
+def delete_conversation(uid, conversation_id, *, artwork_lock_proof=None):
     """
     Delete a conversation and its photos subcollection.
 
@@ -1738,11 +1891,18 @@ def delete_conversation(uid, conversation_id):
         uid: User ID
         conversation_id: Conversation ID
     """
-    # Delete photos subcollection first
-    delete_conversation_photos(uid, conversation_id)
-
+    require_memory_artwork_publication_lock(uid, artwork_lock_proof)
     user_ref = db.collection('users').document(uid)
     conversation_ref = user_ref.collection(conversations_collection).document(conversation_id)
+    conversation = memory_artwork_db.claim_deletion(uid, conversation_id)
+    if conversation is not None:
+        if memory_artwork_db.has_processing_jobs_for_memory(uid, conversation_id):
+            raise MemoryArtworkStorageError("memory_artwork_worker_drain_pending")
+        delete_conversation_artwork_if_present(uid, conversation_id, conversation)
+        memory_artwork_db.delete_jobs_for_memory(uid, conversation_id)
+
+    # Delete photos subcollection only after private artwork is absent.
+    delete_conversation_photos(uid, conversation_id)
     conversation_ref.delete()
 
 
@@ -2973,6 +3133,7 @@ def persist_capture_persistence_batch(
     finished_at: datetime,
     capture_owner_id: str,
     photos: Optional[List[ConversationPhoto]] = None,
+    capture_generation: Optional[str] = None,
 ) -> str:
     segment_ids = [str(segment.get("id") or "").strip() for segment in segments]
     if any(not segment_id for segment_id in segment_ids):
@@ -2998,6 +3159,7 @@ def persist_capture_persistence_batch(
         "photos": prepared_photos,
         "finished_at": finished_at.astimezone(timezone.utc).isoformat(),
         "capture_owner_id": str(capture_owner_id or "").strip(),
+        "capture_generation": str(capture_generation or "").strip() or None,
     }
     if not payload["capture_owner_id"]:
         raise ValueError("capture_persistence_owner_id_required")
@@ -3300,6 +3462,7 @@ def _commit_capture_persistence_batch_transaction(
     uid: str,
     conversation_id: str,
     expected_owner_id: Optional[str] = None,
+    expected_generation: Optional[str] = None,
 ) -> dict:
     conversation_snapshot = conversation_ref.get(transaction=transaction)
     batch_snapshot = batch_ref.get(transaction=transaction)
@@ -3319,6 +3482,15 @@ def _commit_capture_persistence_batch_transaction(
     durable_owner_id = str(conversation_data.get("capture_owner_id") or "").strip()
     if not capture_owner_id or durable_owner_id != capture_owner_id:
         return {"status": "ownership_lost", "updated_segments": [], "removed_ids": []}
+    if conversation_data.get('capture_protocol_version') == 2:
+        capture_generation = str(expected_generation or payload.get('capture_generation') or '').strip()
+        if (
+            not capture_generation
+            or str(conversation_data.get('capture_generation') or '').strip() != capture_generation
+            or str(conversation_data.get('capture_owner_token') or '').strip() != capture_owner_id
+            or conversation_data.get('capture_state') != 'active'
+        ):
+            return {"status": "ownership_lost", "updated_segments": [], "removed_ids": []}
 
     conversation_data = _prepare_conversation_for_read(conversation_data, uid)
     if conversation_data is None:
@@ -3376,6 +3548,7 @@ def _commit_capture_persistence_batch(
     uid: str,
     conversation_id: str,
     expected_owner_id: str,
+    expected_generation: Optional[str] = None,
 ):
     return _commit_capture_persistence_batch_transaction(
         transaction,
@@ -3384,10 +3557,17 @@ def _commit_capture_persistence_batch(
         uid,
         conversation_id,
         expected_owner_id,
+        expected_generation,
     )
 
 
-def commit_capture_persistence_batch(uid: str, conversation_id: str, batch_id: str, owner_id: str) -> dict:
+def commit_capture_persistence_batch(
+    uid: str,
+    conversation_id: str,
+    batch_id: str,
+    owner_id: str,
+    capture_generation: Optional[str] = None,
+) -> dict:
     exact_owner_id = str(owner_id or "").strip()
     if not exact_owner_id:
         raise ValueError("capture_persistence_owner_id_required")
@@ -3405,6 +3585,7 @@ def commit_capture_persistence_batch(uid: str, conversation_id: str, batch_id: s
             uid,
             conversation_id,
             exact_owner_id,
+            capture_generation,
         )
     finally:
         redis_db.release_capture_commit_lease(uid, exact_owner_id)
@@ -3417,6 +3598,7 @@ def persist_and_commit_capture_persistence_batch(
     finished_at: datetime,
     capture_owner_id: str,
     photos: Optional[List[ConversationPhoto]] = None,
+    capture_generation: Optional[str] = None,
 ) -> dict:
     """Persist and commit a live capture while ownership transfer is fenced."""
     exact_owner_id = str(capture_owner_id or "").strip()
@@ -3433,6 +3615,7 @@ def persist_and_commit_capture_persistence_batch(
             finished_at,
             exact_owner_id,
             photos=photos,
+            capture_generation=capture_generation,
         )
         conversation_ref = (
             db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
@@ -3445,6 +3628,7 @@ def persist_and_commit_capture_persistence_batch(
             uid,
             conversation_id,
             exact_owner_id,
+            capture_generation,
         )
     finally:
         redis_db.release_capture_commit_lease(uid, exact_owner_id)

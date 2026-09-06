@@ -1,12 +1,28 @@
 from datetime import datetime
 from typing import Optional
+import uuid
 
 import database.users as users_db
 import database.action_items as action_items_db
+import database.task_sync as task_sync_db
 from utils.notifications import send_apple_reminders_sync_push
 
+TERMINAL_TASK_SYNC_ERROR_CODES = frozenset({'no_workspace', 'no_list', 'unsupported'})
 
-async def auto_sync_action_item(uid: str, action_item: dict) -> dict:
+
+class RetryableTaskSyncError(RuntimeError):
+    """Keep the enclosing capture effect reclaimable after a transient sync failure."""
+
+
+def _task_sync_result_is_terminal(result: dict) -> bool:
+    if result.get('synced') is True:
+        return True
+    if result.get('retryable') is False:
+        return True
+    return result.get('error_code') in TERMINAL_TASK_SYNC_ERROR_CODES
+
+
+async def auto_sync_action_item(uid: str, action_item: dict, idempotency_key: Optional[str] = None) -> dict:
     """
     Auto-sync a single action item to user's default integration.
 
@@ -29,18 +45,80 @@ async def auto_sync_action_item(uid: str, action_item: dict) -> dict:
         if not integration.get("connected"):
             return {"synced": False, "reason": "integration_not_connected"}
 
+        claim_token = None
+        if idempotency_key:
+            claim_token = str(uuid.uuid4())
+            claim = task_sync_db.claim_task_sync(
+                uid,
+                idempotency_key,
+                action_item['id'],
+                default_app,
+                claim_token,
+            )
+            if claim.get('outcome') == 'completed':
+                return claim.get('result') or {"synced": False, "reason": "completed_without_result"}
+            if claim.get('outcome') != 'claimed':
+                return {
+                    "synced": False,
+                    "platform": default_app,
+                    "reason": "sync_in_progress",
+                    "retryable": True,
+                }
+
         # Route to appropriate handler
         if default_app == "apple_reminders":
-            return _sync_to_apple_reminders(uid, action_item)
+            result = _sync_to_apple_reminders(uid, action_item, idempotency_key, claim_token)
         else:
-            return await _sync_to_cloud_service(uid, default_app, integration, action_item)
+            result = await _sync_to_cloud_service(
+                uid,
+                default_app,
+                integration,
+                action_item,
+                idempotency_key,
+                claim_token,
+            )
+
+        if not idempotency_key:
+            return result
+
+        if _task_sync_result_is_terminal(result):
+            completion = task_sync_db.complete_task_sync(
+                uid,
+                idempotency_key,
+                action_item['id'],
+                default_app,
+                claim_token,
+                result,
+            )
+            if completion.get('outcome') == 'completed':
+                return completion.get('result') or result
+        else:
+            completion = task_sync_db.release_task_sync(
+                uid,
+                idempotency_key,
+                action_item['id'],
+                default_app,
+                claim_token,
+            )
+            if completion.get('outcome') == 'released':
+                return result
+            if completion.get('outcome') == 'completed':
+                return completion.get('result') or result
+        return {"synced": False, "platform": default_app, "reason": "stale_sync_claim", "retryable": True}
 
     except Exception as e:
         print(f"Auto-sync failed for user {uid}: {e}")
-        return {"synced": False, "error": str(e)}
+        return {"synced": False, "error": str(e), "error_code": "task_sync_exception", "retryable": True}
 
 
-async def _sync_to_cloud_service(uid: str, app_key: str, integration: dict, action_item: dict) -> dict:
+async def _sync_to_cloud_service(
+    uid: str,
+    app_key: str,
+    integration: dict,
+    action_item: dict,
+    idempotency_key: Optional[str] = None,
+    claim_token: Optional[str] = None,
+) -> dict:
     """Create task in external service using existing task_integrations logic."""
     from routers.task_integrations import _create_task_internal
 
@@ -50,6 +128,9 @@ async def _sync_to_cloud_service(uid: str, app_key: str, integration: dict, acti
         integration=integration,
         title=action_item["description"],
         due_date=action_item.get("due_at"),
+        idempotency_key=idempotency_key,
+        action_item_id=action_item['id'],
+        sync_claim_token=claim_token,
     )
 
     if result.get("success"):
@@ -65,22 +146,62 @@ async def _sync_to_cloud_service(uid: str, app_key: str, integration: dict, acti
         )
         return {"synced": True, "platform": app_key, "external_task_id": result.get("external_task_id")}
 
-    return {"synced": False, "platform": app_key, "error": result.get("error")}
+    error_code = result.get("error_code")
+    return {
+        "synced": False,
+        "platform": app_key,
+        "error": result.get("error"),
+        "error_code": error_code,
+        "retryable": error_code not in TERMINAL_TASK_SYNC_ERROR_CODES,
+    }
 
 
-def _sync_to_apple_reminders(uid: str, action_item: dict) -> dict:
+def _sync_to_apple_reminders(
+    uid: str,
+    action_item: dict,
+    idempotency_key: Optional[str] = None,
+    claim_token: Optional[str] = None,
+) -> dict:
     """Send silent push to device for Apple Reminders."""
+    if idempotency_key:
+        claim = task_sync_db.observe_task_sync_claim(
+            uid,
+            idempotency_key,
+            action_item['id'],
+            'apple_reminders',
+            claim_token,
+        )
+        if claim.get('outcome') == 'completed':
+            return claim.get('result') or {"synced": False, "reason": "completed_without_result"}
+        if claim.get('outcome') != 'claimed':
+            return {
+                "synced": False,
+                "platform": "apple_reminders",
+                "reason": "stale_sync_claim",
+                "retryable": True,
+            }
+
     success = send_apple_reminders_sync_push(
         user_id=uid,
         action_item_id=action_item["id"],
         description=action_item["description"],
         due_at=action_item.get("due_at"),
+        idempotency_key=idempotency_key,
     )
 
-    return {"synced": success, "platform": "apple_reminders", "pending_device": True}
+    return {
+        "synced": success,
+        "platform": "apple_reminders",
+        "pending_device": True,
+        "retryable": not success,
+    }
 
 
-async def auto_sync_action_items_batch(uid: str, action_items: list) -> list:
+async def auto_sync_action_items_batch(
+    uid: str,
+    action_items: list,
+    idempotency_key: Optional[str] = None,
+) -> list:
     """
     Batch sync multiple action items.
 
@@ -92,7 +213,14 @@ async def auto_sync_action_items_batch(uid: str, action_items: list) -> list:
         list: Results for each action item
     """
     results = []
+    retryable_failure = False
     for item in action_items:
-        result = await auto_sync_action_item(uid, item)
+        item_idempotency_key = (
+            task_sync_db.task_sync_operation_key(uid, idempotency_key, item['id']) if idempotency_key else None
+        )
+        result = await auto_sync_action_item(uid, item, idempotency_key=item_idempotency_key)
         results.append(result)
+        retryable_failure = retryable_failure or result.get('retryable') is True
+    if idempotency_key and retryable_failure:
+        raise RetryableTaskSyncError('task_sync_retryable')
     return results

@@ -7,6 +7,7 @@ import os
 import pytz
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from database import (
     conversations as conversations_db,
@@ -62,6 +63,11 @@ from database.managed_cloud_consent import (
     unlink_self_owner_account_on_deletion,
 )
 from ella.services.ai_consent import build_account_deletion_receipt
+from utils.ella.memory_artwork_storage import (
+    MemoryArtworkStorageError,
+    acquire_memory_artwork_publication_lock,
+    prepare_account_artwork_deletion,
+)
 from utils.other.storage import (
     delete_all_conversation_recordings,
     get_speech_sample_signed_urls,
@@ -113,7 +119,22 @@ async def delete_account(uid: str = Depends(auth.get_current_user_uid)):
     Hermes/honcho data persists until the GC/retention pass.
     """
     try:
+        async with acquire_memory_artwork_publication_lock(uid) as artwork_lock_proof:
+            await run_in_threadpool(
+                prepare_account_artwork_deletion,
+                uid,
+                lock_proof=artwork_lock_proof,
+            )
         await unlink_self_owner_account_on_deletion(uid=uid)
+    except MemoryArtworkStorageError as exc:
+        print('delete_account', str(exc))
+        raise HTTPException(
+            status_code=503,
+            detail={
+                'code': str(exc),
+                'retryable': True,
+            },
+        )
     except ManagedCloudAuthorityUnavailable as exc:
         print('delete_account', str(exc))
         raise HTTPException(

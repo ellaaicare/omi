@@ -13,7 +13,7 @@ Issue: `ellaaicare/ella-ai#1126`. Product and security contract:
   rows. Redemption derives both identities from the authenticated first-party
   profile binding and must match one target before entitlement or capacity
   changes.
-- Redemption requires an exact current `ai-data-processors-v8` grant, presence
+- Redemption requires an exact current `ai-data-processors-v10` grant, presence
   in the runtime-binding, Hermes Cloud provisioning, Hermes Cloud synthetic,
   and AI-consent exact UID allowlists, and a persisted
   `users.profile_class = 'synthetic'`. Global rollout flags must remain false.
@@ -157,6 +157,8 @@ psql "$ELLA_POSTGRES_DSN" \
   -f backend/migrations/014_add_synthetic_invitation_operator_audit.sql
 psql "$ELLA_POSTGRES_DSN" \
   -f backend/migrations/015_add_invitation_allowed_email_hash.sql
+psql "$ELLA_POSTGRES_DSN" \
+  -f backend/migrations/017_add_voice_entitlement_consent_revision.sql
 ```
 
 Migration `015` is reserved for this invitation lane. Open

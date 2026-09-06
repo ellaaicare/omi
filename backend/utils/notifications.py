@@ -349,7 +349,13 @@ def send_new_app_review_notification(
     send_notification(app_owner_uid, title, body, data)
 
 
-def send_action_item_data_message(user_id: str, action_item_id: str, description: str, due_at: str):
+def send_action_item_data_message(
+    user_id: str,
+    action_item_id: str,
+    description: str,
+    due_at: str,
+    idempotency_key: str = None,
+):
     """
     Sends a data-only FCM message for action item reminder scheduling.
     The app receives this in the background and schedules a local notification.
@@ -360,12 +366,19 @@ def send_action_item_data_message(user_id: str, action_item_id: str, description
         'action_item_id': action_item_id,
         'description': description,
         'due_at': due_at,
+        'idempotency_key': idempotency_key or action_item_id,
     }
-    tag = _generate_tag(f"{user_id}:action_item_reminder:{action_item_id}")
+    tag = _generate_tag(f"{user_id}:action_item_reminder:{idempotency_key or action_item_id}")
     _send_to_user(user_id, tag, data=data, is_background=True, priority='high')
 
 
-def send_apple_reminders_sync_push(user_id: str, action_item_id: str, description: str, due_at=None) -> bool:
+def send_apple_reminders_sync_push(
+    user_id: str,
+    action_item_id: str,
+    description: str,
+    due_at=None,
+    idempotency_key: str = None,
+) -> bool:
     """
     Sends a silent push notification to trigger Apple Reminders creation on device.
     iOS will wake the app in background to create the reminder locally.
@@ -393,8 +406,9 @@ def send_apple_reminders_sync_push(user_id: str, action_item_id: str, descriptio
         'action_item_id': action_item_id,
         'description': description,
         'due_at': due_at_str or '',
+        'idempotency_key': idempotency_key or action_item_id,
     }
-    tag = _generate_tag(f"{user_id}:apple_reminders_sync:{action_item_id}")
+    tag = _generate_tag(f"{user_id}:apple_reminders_sync:{idempotency_key or action_item_id}")
     success_count = _send_to_user(user_id, tag, data=data, is_background=True, priority='high')
     return success_count > 0
 

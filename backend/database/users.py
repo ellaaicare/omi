@@ -7,6 +7,7 @@ from google.cloud.firestore_v1 import FieldFilter, transactional
 from ._client import db, document_id_from_seed
 from models.users import Subscription, PlanLimits, PlanType, SubscriptionStatus
 from utils.subscription import get_default_basic_subscription
+from utils.ella.memory_artwork_storage import prepare_account_artwork_deletion
 
 
 def is_exists_user(uid: str):
@@ -407,10 +408,12 @@ def update_person_speech_samples_version(uid: str, person_id: str, version: int)
     return True
 
 
-def delete_user_data(uid: str):
+def delete_user_data(uid: str, *, artwork_lock_proof=None):
     user_ref = db.collection('users').document(uid)
     if not user_ref.get().exists:
         return {'status': 'error', 'message': 'User not found'}
+
+    prepare_account_artwork_deletion(uid, lock_proof=artwork_lock_proof)
 
     subcollections_to_delete = [
         'conversations',
@@ -1065,18 +1068,14 @@ def set_user_conversation_lifecycle_preferences(
     update_data = {}
 
     if update_enabled:
-        update_data[
-            'conversation_lifecycle_preferences.conversation_max_duration_enabled'
-        ] = (
+        update_data['conversation_lifecycle_preferences.conversation_max_duration_enabled'] = (
             conversation_max_duration_enabled
             if conversation_max_duration_enabled is not None
             else firestore.DELETE_FIELD
         )
 
     if update_seconds:
-        update_data[
-            'conversation_lifecycle_preferences.conversation_max_duration_seconds'
-        ] = (
+        update_data['conversation_lifecycle_preferences.conversation_max_duration_seconds'] = (
             conversation_max_duration_seconds
             if conversation_max_duration_seconds is not None
             else firestore.DELETE_FIELD

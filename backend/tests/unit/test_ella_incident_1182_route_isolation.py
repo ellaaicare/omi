@@ -453,6 +453,7 @@ def test_chat_caller_metadata_is_fixed_before_canonical_and_cloud_sinks(monkeypa
 
         async def aiter_lines(self):
             yield 'data: {"choices":[{"delta":{"content":"ok"}}]}'
+            yield 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'
             yield "data: [DONE]"
 
     class StreamClient:
@@ -747,6 +748,9 @@ MOUNTED_ROUTE_CONTRACT = {
     ("callbacks", "GET", "/v1/ella/conversation/{conversation_id}/data"): _contract(
         "get_conversation_data", "ella.routers.callbacks:require_callback_service"
     ),
+    ("callbacks", "GET", "/v1/ella/conversation/summary/capabilities"): _contract(
+        "conversation_summary_capabilities", manual="public_static_capability"
+    ),
     ("callbacks", "GET", "/v1/ella/health"): _contract("ella_health", manual="public_minimal_health"),
     ("callbacks", "POST", "/v1/ella/notification"): _contract(
         "ella_notification", "ella.routers.callbacks:require_callback_service"
@@ -842,6 +846,21 @@ MOUNTED_ROUTE_CONTRACT = {
     ("debug_metadata", "GET", "/v1/ella/debug/conversations/{conversation_id}/metadata"): _contract(
         "read_conversation_metadata", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
     ),
+    ("account_diagnostics", "POST", "/v1/ella/diagnostics/events"): _contract(
+        "ingest_diagnostic_events", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("account_diagnostics", "GET", "/v1/ella/diagnostics/projection/{diagnostic_session_id}"): _contract(
+        "get_diagnostic_projection", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("account_diagnostics", "POST", "/v1/ella/diagnostics/support-grants"): _contract(
+        "create_diagnostic_support_grant", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("account_diagnostics", "DELETE", "/v1/ella/diagnostics/support-grants/{grant_id}"): _contract(
+        "revoke_diagnostic_support_grant", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
+    ),
+    ("account_diagnostics", "POST", "/v1/ella/operator/diagnostics/support-code/exchange"): _contract(
+        "exchange_diagnostic_support_code", "ella.routers.account_diagnostics:require_diagnostic_operator"
+    ),
     ("canonical_events", "POST", "/v1/ella/events"): _contract(
         "write_events", "ella.routers.canonical_events:_canonical_event_authority"
     ),
@@ -925,7 +944,7 @@ def test_real_mounted_route_manifest_has_exact_paths_authorities_and_no_duplicat
             endpoint_name, dependencies, manual = MOUNTED_ROUTE_CONTRACT[key]
             assert route.endpoint.__name__ == endpoint_name
             assert tuple(_authority_id(item.call) for item in route.dependant.dependencies) == dependencies
-            if manual in {"public_minimal_health", "public_static_config"}:
+            if manual in {"public_minimal_health", "public_static_capability", "public_static_config"}:
                 assert dependencies == ()
             elif manual:
                 assert manual in _direct_call_names(route.endpoint)
@@ -934,7 +953,7 @@ def test_real_mounted_route_manifest_has_exact_paths_authorities_and_no_duplicat
                 assert dependencies, f"unclassified authority: {key}"
 
     assert set(actual) == set(MOUNTED_ROUTE_CONTRACT)
-    assert len(actual) == len(MOUNTED_ROUTE_CONTRACT) == 49
+    assert len(actual) == len(MOUNTED_ROUTE_CONTRACT) == 55
     assert len(path_methods) == len(set(path_methods)), Counter(path_methods)
 
 
@@ -977,10 +996,13 @@ def test_affected_background_boundaries_are_exact_and_trace_has_no_detached_task
     assert _background_boundaries() == Counter(
         {
             ("chat", "_stream_level_4_openclaw", "asyncio.create_task"): 1,
+            ("chat", "_stream_hermes_chat", "asyncio.create_task"): 1,
+            ("account_diagnostics", "current_authority", "asyncio.to_thread"): 1,
             ("voice", "_resolve_voice_honcho_binding", "asyncio.to_thread"): 1,
             ("voice", "_resolve_voice_memory_scope", "asyncio.to_thread"): 1,
             ("voice", "heartbeat_voice_canary_session", "asyncio.create_task"): 1,
             ("voice", "get_voice_context", "asyncio.create_task"): 6,
+            ("callbacks", "update_conversation_summary", "background_tasks.add_task"): 1,
         }
     )
     chat_source = (_BACKEND / "ella" / "routers" / "chat.py").read_text(encoding="utf-8")

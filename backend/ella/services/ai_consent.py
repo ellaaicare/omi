@@ -19,25 +19,30 @@ from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 
 ConsentDecision = Literal["granted", "declined", "revoked"]
 
-# V7 is immutable historical consent. Cloud memory changed from a Honcho Cloud
-# processor to Hermes Cloud built-in profile-scoped memory, so v8 is a
-# forward-only consent version and cannot accept stale v7 receipts.
+# Prior consent versions are immutable history. V10 replaces the xAI artwork
+# recipient with the owner-only OpenAI Codex artwork designer, so stale v9
+# receipts cannot authorize selected-memory artwork egress.
 LEGACY_POLICY_VERSION_V7 = "ai-data-processors-v7"
-CURRENT_POLICY_VERSION = "ai-data-processors-v8"
+LEGACY_POLICY_VERSION_V8 = "ai-data-processors-v8"
+LEGACY_POLICY_VERSION_V9 = "ai-data-processors-v9"
+CURRENT_POLICY_VERSION = "ai-data-processors-v10"
 CANONICAL_PROCESSOR_SET = (
     "deepgram:stt|soniox:stt|speechmatics:stt|firebase:auth-infrastructure|"
     "hermes-self-hosted:agent-runtime|honcho-self-hosted:memory-context|ella-self-hosted-tts:tts|"
     "nous-hermes-cloud:managed-agent-runtime|hermes-profile-memory:profile-scoped-memory|"
-    "openai-codex:managed-agent-model|photon:messaging-delivery|"
+    "openai-codex:managed-agent-model-memory-illustration|photon:messaging-delivery|"
     "openrouter:model-routing|google-gemini:language-live-voice|openai:language-live-voice|"
-    "groq:language|xai-grok:language-live-voice|inworld:tts|elevenlabs:tts-fallback"
+    "groq:language|xai-grok:language-live-voice|"
+    "inworld:tts|elevenlabs:tts-fallback"
 )
 CURRENT_PROCESSOR_SET_HASH = f"sha256:{hashlib.sha256(CANONICAL_PROCESSOR_SET.encode()).hexdigest()}"
-CURRENT_SCOPE_VERSION = "managed-cloud-internal-pilot-v2"
+CURRENT_SCOPE_VERSION = "managed-cloud-internal-pilot-v4"
 CANONICAL_SCOPE = (
     "profile_binding=server-profile-v1|runtime_provider=hermes_cloud|"
     "model_route=openai-codex/gpt-5.6-terra|memory_provider=hermes_profile_scoped_memory|"
-    "photon_scope=shared_test_line_explicit_contact_v1;allow_all=false;caregiver=false;attachments=false"
+    "photon_scope=shared_test_line_explicit_contact_v1;allow_all=false;caregiver=false;attachments=false|"
+    "artwork_provider=openai-codex/gpt-image-2-medium;reasoning_host=openai-codex/gpt-5.6-luna;"
+    "source=selected_memory_summary_only;raw_audio=false;source_photos=false"
 )
 CURRENT_SCOPE_HASH = f"sha256:{hashlib.sha256(CANONICAL_SCOPE.encode()).hexdigest()}"
 MANAGED_CLOUD_RUNTIME_PROVIDER = "hermes_cloud"
@@ -124,9 +129,17 @@ PROCESSORS: tuple[dict[str, Any], ...] = (
     {
         "id": "openai-codex",
         "legal_recipient": "OpenAI",
-        "function": "Managed agent model processing",
-        "data": "Model input and output through the approved OpenAI Codex OAuth route",
-        "provider_aliases": ["openai-codex", "openai-codex/gpt-5.6-terra"],
+        "function": "Managed agent processing and saved-memory illustration",
+        "data": (
+            "Model input and output, plus a selected memory title and summary for an illustration, through the "
+            "approved OpenAI Codex OAuth route; no raw microphone audio or source photos for artwork"
+        ),
+        "provider_aliases": [
+            "openai-codex",
+            "openai-codex/gpt-5.6-terra",
+            "openai-codex/gpt-5.6-luna",
+            "gpt-image-2-medium",
+        ],
         "third_party": True,
     },
     {

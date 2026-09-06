@@ -112,6 +112,13 @@ CREATE TABLE users (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE agent_clusters (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    agents JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'ACTIVE'
+);
+
 CREATE TABLE ella_provisioning_jobs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -221,6 +228,7 @@ async def _run_with_database(
                 "013_create_managed_cloud_consent_authority.sql",
                 "014_add_synthetic_invitation_operator_audit.sql",
                 "015_add_invitation_allowed_email_hash.sql",
+                "017_add_voice_entitlement_consent_revision.sql",
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
             assert await conn.fetchval(

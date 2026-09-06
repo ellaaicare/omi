@@ -7,6 +7,7 @@
 import os
 import threading
 import time
+from typing import Optional
 
 import requests
 
@@ -71,7 +72,12 @@ def enqueue_cloud_enrichment(uid: str, conversation) -> dict:
     )
 
 
-def fire_postprocess_webhook(uid: str, conversation) -> None:
+def fire_postprocess_webhook(
+    uid: str,
+    conversation,
+    idempotency_key: Optional[str] = None,
+    synchronous: bool = False,
+) -> None:
     """
     Fire post-process webhook after conversation is fully saved.
 
@@ -158,11 +164,14 @@ def fire_postprocess_webhook(uid: str, conversation) -> None:
             flush=True,
         )
 
+        completed_headers = {'Content-Type': 'application/json'}
+        if idempotency_key:
+            completed_headers['Idempotency-Key'] = f'{idempotency_key}:completed'
         try:
             response = requests.post(
                 POSTPROCESS_WEBHOOK_URL,
                 json=payload,
-                headers={'Content-Type': 'application/json'},
+                headers=completed_headers,
                 timeout=POSTPROCESS_TIMEOUT,
             )
             _elapsed_completed = int((time.time() - _start) * 1000)
@@ -176,6 +185,8 @@ def fire_postprocess_webhook(uid: str, conversation) -> None:
                     f"[FLOW:POSTPROCESS] ERROR conversation-completed uid={uid} conv={conv_short} status={response.status_code} latency={_elapsed_completed}ms",
                     flush=True,
                 )
+                if synchronous:
+                    response.raise_for_status()
         except requests.RequestException as exc:
             _elapsed_completed = int((time.time() - _start) * 1000)
             print(
@@ -184,6 +195,8 @@ def fire_postprocess_webhook(uid: str, conversation) -> None:
                 f"latency={_elapsed_completed}ms",
                 flush=True,
             )
+            if synchronous:
+                raise
 
         # Notify the user's OpenClaw agent via conversation-ready webhook (fire-and-forget)
         ready_payload = {
@@ -197,27 +210,46 @@ def fire_postprocess_webhook(uid: str, conversation) -> None:
             'finished_at': conversation.finished_at.isoformat() if conversation.finished_at else None,
         }
 
-        def _fire_ready(_url, _payload, _uid, _conv_short, _segments):
+        def _fire_ready(_url, _payload, _uid, _conv_short, _segments, _idempotency_key):
             try:
                 _t = time.time()
-                r = requests.post(_url, json=_payload, headers={'Content-Type': 'application/json'}, timeout=60)
+                ready_headers = {'Content-Type': 'application/json'}
+                if _idempotency_key:
+                    ready_headers['Idempotency-Key'] = f'{_idempotency_key}:ready'
+                r = requests.post(_url, json=_payload, headers=ready_headers, timeout=60)
                 _ms = int((time.time() - _t) * 1000)
                 print(
                     f"[FLOW:POSTPROCESS] conversation-ready uid={_uid} conv={_conv_short} segments={_segments} status={r.status_code} latency={_ms}ms",
                     flush=True,
                 )
+                if synchronous and not 200 <= r.status_code < 300:
+                    raise requests.HTTPError(
+                        f'conversation-ready webhook returned HTTP {r.status_code}',
+                        response=r,
+                    )
             except Exception as _e:
                 print(
                     f"[FLOW:POSTPROCESS] ERROR conversation-ready uid={_uid} conv={_conv_short} error={_e}", flush=True
                 )
+                if synchronous:
+                    raise
 
-        threading.Thread(
-            target=_fire_ready,
-            args=(CONVERSATION_READY_WEBHOOK_URL, ready_payload, uid, conv_short, segment_count),
-            daemon=True,
-        ).start()
+        ready_args = (
+            CONVERSATION_READY_WEBHOOK_URL,
+            ready_payload,
+            uid,
+            conv_short,
+            segment_count,
+            idempotency_key,
+        )
+        if synchronous:
+            _fire_ready(*ready_args)
+        else:
+            threading.Thread(target=_fire_ready, args=ready_args, daemon=True).start()
+        delivery_mode = 'synchronously' if synchronous else 'async'
         print(
-            f"[FLOW:POSTPROCESS] conversation-ready fired async uid={uid} conv={conv_short} segments={segment_count}",
+            f"[FLOW:POSTPROCESS] conversation-ready fired {delivery_mode} "
+            f"uid={uid} conv={conv_short} segments={segment_count}",
             flush=True,
         )
 
@@ -227,8 +259,14 @@ def fire_postprocess_webhook(uid: str, conversation) -> None:
             f"[FLOW:POSTPROCESS] TIMEOUT uid={uid} conv={conv_short} timeout={POSTPROCESS_TIMEOUT}s latency={_elapsed}ms",
             flush=True,
         )
+        if synchronous:
+            raise
     except requests.RequestException as e:
         _elapsed = int((time.time() - _start) * 1000)
         print(f"[FLOW:POSTPROCESS] ERROR uid={uid} conv={conv_short} error={e} latency={_elapsed}ms", flush=True)
+        if synchronous:
+            raise
     except Exception as e:
         print(f"[FLOW:POSTPROCESS] UNEXPECTED uid={uid} conv={conv_short} error={e}", flush=True)
+        if synchronous:
+            raise

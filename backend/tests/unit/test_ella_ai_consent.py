@@ -46,12 +46,12 @@ def _service(repository=None):
     )
 
 
-def test_policy_matches_exact_managed_cloud_v8_contract():
+def test_policy_matches_exact_managed_cloud_v10_artwork_contract():
     policy = consent.AiConsentService.policy()
 
-    assert policy["version"] == "ai-data-processors-v8"
+    assert policy["version"] == "ai-data-processors-v10"
     assert policy["processor_set_hash"] == consent.CURRENT_PROCESSOR_SET_HASH
-    assert policy["scope_version"] == "managed-cloud-internal-pilot-v2"
+    assert policy["scope_version"] == "managed-cloud-internal-pilot-v4"
     assert policy["scope_hash"] == consent.CURRENT_SCOPE_HASH
     assert (
         "|".join(
@@ -65,7 +65,7 @@ def test_policy_matches_exact_managed_cloud_v8_contract():
                 "ella-self-hosted-tts:tts",
                 "nous-hermes-cloud:managed-agent-runtime",
                 "hermes-profile-memory:profile-scoped-memory",
-                "openai-codex:managed-agent-model",
+                "openai-codex:managed-agent-model-memory-illustration",
                 "photon:messaging-delivery",
                 "openrouter:model-routing",
                 "google-gemini:language-live-voice",
@@ -79,6 +79,10 @@ def test_policy_matches_exact_managed_cloud_v8_contract():
         == policy["canonical_processor_set"]
     )
     assert consent.CURRENT_SCOPE_HASH == f"sha256:{hashlib.sha256(policy['canonical_scope'].encode()).hexdigest()}"
+    assert (
+        "artwork_provider=openai-codex/gpt-image-2-medium;reasoning_host=openai-codex/gpt-5.6-luna;"
+        "source=selected_memory_summary_only;raw_audio=false;source_photos=false"
+    ) in policy["canonical_scope"]
     processors = {processor["id"]: processor for processor in policy["processors"]}
     assert processors["nous-hermes-cloud"] == {
         "id": "nous-hermes-cloud",
@@ -92,6 +96,7 @@ def test_policy_matches_exact_managed_cloud_v8_contract():
         ],
         "third_party": True,
     }
+    assert "xai-imagine" not in processors
     assert "honcho-cloud" not in processors
     assert processors["hermes-profile-memory"] == {
         "id": "hermes-profile-memory",
@@ -174,8 +179,11 @@ def test_policy_matches_exact_managed_cloud_v8_contract():
         (
             "openai-codex",
             "OpenAI",
-            "Managed agent model processing",
-            "Model input and output through the approved OpenAI Codex OAuth route",
+            "Managed agent processing and saved-memory illustration",
+            (
+                "Model input and output, plus a selected memory title and summary for an illustration, through the "
+                "approved OpenAI Codex OAuth route; no raw microphone audio or source photos for artwork"
+            ),
             True,
         ),
         (
@@ -472,7 +480,7 @@ def test_v6_grant_is_rejected_and_cannot_pass_protected_route_gate(
         consent.assert_current_ai_consent("user-a")
 
     assert error.value.status_code == 403
-    assert error.value.detail["required_policy_version"] == ("ai-data-processors-v8")
+    assert error.value.detail["required_policy_version"] == ("ai-data-processors-v10")
 
 
 def test_revoke_supersedes_prior_grant():

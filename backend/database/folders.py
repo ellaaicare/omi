@@ -5,9 +5,8 @@ from typing import List, Optional, Dict, Any
 from google.cloud import firestore
 from google.cloud.firestore_v1 import FieldFilter
 
-from ._client import db
+from ._client import db, document_id_from_seed
 from models.folder import Folder
-
 
 # System folders that are created for new users
 SYSTEM_FOLDERS = [
@@ -226,7 +225,7 @@ def initialize_system_folders(uid: str) -> List[dict]:
     now = datetime.now(timezone.utc)
 
     for i, folder_config in enumerate(SYSTEM_FOLDERS):
-        folder_id = str(uuid.uuid4())
+        folder_id = document_id_from_seed(f"omi:system-folder:{uid}:{folder_config['category_mapping']}")
         folder_data = {
             'id': folder_id,
             'name': folder_config['name'],

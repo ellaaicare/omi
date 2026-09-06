@@ -18,6 +18,7 @@ import opuslib  # type: ignore
 import lc3  # lc3py
 
 from fastapi import APIRouter, Depends
+from starlette.concurrency import run_in_threadpool
 from fastapi.websockets import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 from websockets.exceptions import ConnectionClosed
@@ -72,6 +73,18 @@ from utils.conversations.process_conversation import (
     process_conversation_with_transcript_redelivery,
     retrieve_in_progress_conversation,
 )
+from utils.conversations.capture_protocol import (
+    CAPTURE_PROTOCOL_VERSION,
+    capture_drain_diagnostic_correlation_matches,
+    claim_capture_authority_for_reconnect,
+    complete_rotated_capture,
+    flush_capture_before_drained,
+    install_capture_authority,
+    mark_capture_drained,
+    renew_capture_authority,
+    require_capture_protocol_before_creation,
+    valid_capture_drain_body,
+)
 from utils.capture_buffer import (
     PusherTranscriptBatch,
     acknowledge_capture_persistence_batch,
@@ -80,6 +93,8 @@ from utils.capture_buffer import (
     prepare_conversation_bound_capture_batch,
     queue_pusher_transcript_batch,
 )
+from utils.ella.memory_artwork_storage import acquire_memory_artwork_publication_lock
+from utils.ella.account_diagnostics import CaptureDiagnosticCorrelation
 from utils.ella.scanner_keyterms import cache_status as scanner_keyterm_cache_status
 from utils.ella.scanner_keyterms import combine_deepgram_keyterms, get_scanner_keyterms
 from utils.notifications import send_credit_limit_notification, send_silent_user_notification
@@ -112,6 +127,10 @@ from ella.routers.auto_provision import (
     listen_runtime_gate,
 )
 from ella.services.ai_consent import assert_current_ai_consent, require_current_ai_consent, resolve_processor
+from ella.services.account_diagnostics import (
+    DiagnosticCorrelationAuthorityError,
+    validate_capture_diagnostic_correlation,
+)
 
 from utils.aac import AACDecoder
 from utils.audio import AudioRingBuffer
@@ -124,25 +143,47 @@ from utils.speaker_sample_migration import maybe_migrate_person_samples
 
 router = APIRouter()
 
-
+DIAGNOSTIC_CORRELATION_VALIDATION_TIMEOUT_SECONDS = 0.25
 PUSHER_ENABLED = bool(os.getenv('HOSTED_PUSHER_API_URL'))
 CAPTURE_CONVERSATION_ID_KEY = "_capture_conversation_id"
 
 
-def drain_capture_persistence_batches(uid: str, conversation_id: str, owner_id: str) -> int:
+def drain_capture_persistence_batches(
+    uid: str,
+    conversation_id: str,
+    owner_id: str,
+    capture_generation: Optional[str] = None,
+) -> int:
     batch_ids = conversations_db.list_capture_persistence_batches(uid, conversation_id)
     for batch_id in batch_ids:
-        result = conversations_db.commit_capture_persistence_batch(uid, conversation_id, batch_id, owner_id)
+        result = conversations_db.commit_capture_persistence_batch(
+            uid,
+            conversation_id,
+            batch_id,
+            owner_id,
+            capture_generation,
+        )
         if result.get("status") == "ownership_lost":
             raise RuntimeError("capture_persistence_ownership_lost")
     return len(batch_ids)
 
 
-def poll_capture_persistence_batches(uid: str, conversation_id: str, owner_id: str) -> Tuple[int, bool]:
+def poll_capture_persistence_batches(
+    uid: str,
+    conversation_id: str,
+    owner_id: str,
+    capture_generation: Optional[str] = None,
+) -> Tuple[int, bool]:
     """Commit one recovery scan and report whether the socket still owns the conversation."""
     batch_ids = conversations_db.list_capture_persistence_batches(uid, conversation_id)
     for batch_id in batch_ids:
-        result = conversations_db.commit_capture_persistence_batch(uid, conversation_id, batch_id, owner_id)
+        result = conversations_db.commit_capture_persistence_batch(
+            uid,
+            conversation_id,
+            batch_id,
+            owner_id,
+            capture_generation,
+        )
         if result.get("status") == "ownership_lost":
             return len(batch_ids), False
     return len(batch_ids), True
@@ -201,6 +242,44 @@ def _stt_service_value(service: Optional[STTService]) -> Optional[str]:
     return service.value if isinstance(service, STTService) else service
 
 
+def _consume_diagnostic_task_result(task) -> None:
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except Exception:
+        pass
+
+
+async def _validate_socket_diagnostic_correlation(
+    websocket: WebSocket,
+    uid: str,
+) -> Optional[CaptureDiagnosticCorrelation]:
+    """Validate evidence after auth without allowing diagnostics to block capture."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + DIAGNOSTIC_CORRELATION_VALIDATION_TIMEOUT_SECONDS
+    validation_task = asyncio.create_task(validate_capture_diagnostic_correlation(uid, websocket.headers))
+    completed, _ = await asyncio.wait(
+        {validation_task},
+        timeout=max(0.0, deadline - loop.time()),
+    )
+    if validation_task not in completed:
+        validation_task.cancel()
+        validation_task.add_done_callback(_consume_diagnostic_task_result)
+        return None
+
+    try:
+        return validation_task.result()
+    except DiagnosticCorrelationAuthorityError:
+        # A rejection is evidence-only. Do not attempt a best-effort WebSocket
+        # status here: an ASGI send that ignores cancellation could outlive the
+        # startup deadline and race the stream's socket writer. Capture must
+        # retain sole ownership of the socket once this boundary returns.
+        return None
+    except Exception:
+        return None
+
+
 async def _stream_handler(
     websocket: WebSocket,
     uid: str,
@@ -215,13 +294,19 @@ async def _stream_handler(
     custom_stt_mode: CustomSttMode = CustomSttMode.disabled,
     onboarding_mode: bool = False,
     speaker_auto_assign_enabled: bool = False,
+    capture_protocol: int = 0,
     socket_accepted_at: Optional[float] = None,
+    diagnostic_correlation: Optional[CaptureDiagnosticCorrelation] = None,
 ):
     """
     Core WebSocket streaming handler. Assumes websocket is already accepted and uid is validated.
     This function is called by both _listen (for app clients) and web_listen_handler (for web clients).
     """
     session_id = str(uuid.uuid4())
+    generation_id = str(uuid.uuid4())
+    owner_token = session_id
+    if not await require_capture_protocol_before_creation(websocket, capture_protocol):
+        return
     session_started_at = time.time()
     socket_accepted_at = socket_accepted_at or session_started_at
     if STT_FORCE_SERVICE:
@@ -236,6 +321,7 @@ async def _stream_handler(
     selected_stt_language: Optional[str] = None
     selected_stt_model: Optional[str] = None
     current_conversation_id = None
+    capture_drained = False
     conversation_finalize_tasks: set[asyncio.Task] = set()
     first_audio_frame_at: Optional[float] = None
     first_interim_result_at: Optional[float] = None
@@ -457,6 +543,7 @@ async def _stream_handler(
             translation_language = language
 
     websocket_active = True
+    accepting_capture = True
     websocket_close_code = 1001  # Going Away, don't close with good from backend
 
     # Initialize segment buffers early (before onboarding handler needs them)
@@ -647,6 +734,19 @@ async def _stream_handler(
                     websocket_close_code = 1001
                     websocket_active = False
                     break
+                if current_conversation_id and not renew_capture_authority(
+                    uid,
+                    current_conversation_id,
+                    generation_id,
+                    owner_token,
+                ):
+                    _latency_log(
+                        "capture_protocol_authority_lost",
+                        conversation_id=current_conversation_id,
+                    )
+                    websocket_close_code = 1008
+                    websocket_active = False
+                    break
 
                 # Inactivity timeout
                 if last_activity_time and time.time() - last_activity_time > inactivity_timeout_seconds:
@@ -702,6 +802,7 @@ async def _stream_handler(
     def on_conversation_processed(conversation_id: str):
         conversation_data = conversations_db.get_conversation(uid, conversation_id)
         if conversation_data:
+            complete_rotated_capture(uid, conversation_id, generation_id, owner_token)
             conversation = Conversation(**conversation_data)
             _send_message_event(ConversationEvent(event_type="memory_created", memory=conversation, messages=[]))
 
@@ -778,6 +879,48 @@ async def _stream_handler(
 
     send_last_conversation()
 
+    async def _publish_capture_protocol_ready(
+        conversation_id: str,
+        *,
+        expected_conversation_id: Optional[str] = None,
+        adopt: bool = False,
+    ) -> bool:
+        nonlocal websocket_active, websocket_close_code
+        installed = install_capture_authority(
+            uid,
+            conversation_id,
+            generation_id,
+            owner_token,
+            expected_conversation_id=expected_conversation_id,
+            adopt=adopt,
+            **({"diagnostic_correlation": diagnostic_correlation} if diagnostic_correlation is not None else {}),
+        )
+        if not installed:
+            _latency_log(
+                "capture_protocol_authority_install_failed",
+                conversation_id=conversation_id,
+                expected_conversation_id=expected_conversation_id,
+            )
+            websocket_close_code = 1008
+            websocket_active = False
+            return False
+        delivered = await _asend_message_event(
+            MessageServiceStatusEvent(
+                status="capture_protocol_ready",
+                protocol_version=CAPTURE_PROTOCOL_VERSION,
+                conversation_id=conversation_id,
+                generation=generation_id,
+                owner_token=owner_token,
+                **(diagnostic_correlation.receipt_fields() if diagnostic_correlation else {}),
+                evidence_only=True if diagnostic_correlation else None,
+            )
+        )
+        if not delivered:
+            websocket_close_code = 1008
+            websocket_active = False
+            return False
+        return True
+
     # Create new stub conversation for next batch
     async def _create_new_in_progress_conversation(
         *,
@@ -787,7 +930,7 @@ async def _stream_handler(
         new_owner_id: Optional[str] = session_id,
         adopt: bool = True,
     ) -> bool:
-        nonlocal current_conversation_id
+        nonlocal current_conversation_id, websocket_active
 
         conversation_source = ConversationSource.omi
         if source:
@@ -920,6 +1063,13 @@ async def _stream_handler(
         if adopt:
             current_conversation_id = new_conversation_id
 
+        predecessor_id = expected_conversation_id or replace_stale_conversation_id
+        if adopt and not await _publish_capture_protocol_ready(
+            new_conversation_id,
+            expected_conversation_id=predecessor_id,
+        ):
+            return False
+
         print(f"Created new stub conversation: {new_conversation_id}", uid, session_id)
         return True
 
@@ -982,7 +1132,14 @@ async def _stream_handler(
                     await _create_conversation_fallback(conversation)
             else:
                 print(f'Clean up the conversation {conversation_id}, reason: no content', uid, session_id)
-                conversations_db.delete_conversation(uid, conversation_id)
+                async with acquire_memory_artwork_publication_lock(uid) as artwork_lock_proof:
+                    await run_in_threadpool(
+                        conversations_db.delete_conversation,
+                        uid,
+                        conversation_id,
+                        artwork_lock_proof=artwork_lock_proof,
+                    )
+            complete_rotated_capture(uid, conversation_id, generation_id, owner_token)
         return True
 
     async def _process_conversation_after_rotation(conversation_id: str) -> None:
@@ -1032,7 +1189,7 @@ async def _stream_handler(
             )
             return
 
-        drain_capture_persistence_batches(uid, conversation_id, session_id)
+        drain_capture_persistence_batches(uid, conversation_id, session_id, generation_id)
 
         rotated = await _create_new_in_progress_conversation(
             expected_conversation_id=conversation_id,
@@ -1065,13 +1222,17 @@ async def _stream_handler(
             if candidate:
                 candidate_id = str(candidate.get('id') or '').strip()
                 candidate_owner_id = str(candidate.get('capture_owner_id') or '').strip() or None
-                rebound = bool(candidate_id) and conversations_db.rebind_capture_conversation_owner(
+                authority_claimed = bool(candidate_id) and claim_capture_authority_for_reconnect(
                     uid,
                     candidate_id,
+                    generation_id,
                     candidate_owner_id,
                     session_id,
+                    **(
+                        {"diagnostic_correlation": diagnostic_correlation} if diagnostic_correlation is not None else {}
+                    ),
                 )
-                if not rebound:
+                if not authority_claimed:
                     await asyncio.sleep(0)
                     continue
                 claimed = bool(candidate_id) and redis_db.claim_in_progress_conversation_id(
@@ -1085,16 +1246,11 @@ async def _stream_handler(
                         session_id,
                     )
                 if not claimed:
-                    conversations_db.rebind_capture_conversation_owner(
-                        uid,
-                        candidate_id,
-                        session_id,
-                        candidate_owner_id,
-                    )
+                    mark_capture_drained(uid, candidate_id, generation_id, session_id)
                     await asyncio.sleep(0)
                     continue
 
-                drain_capture_persistence_batches(uid, candidate_id, session_id)
+                drain_capture_persistence_batches(uid, candidate_id, session_id, generation_id)
 
                 finished_at = datetime.fromisoformat(candidate['finished_at'].isoformat())
                 seconds_since_last_segment = (datetime.now(timezone.utc) - finished_at).total_seconds()
@@ -1113,6 +1269,8 @@ async def _stream_handler(
                     return candidate_id
 
                 current_conversation_id = candidate_id
+                if not await _publish_capture_protocol_ready(candidate_id, adopt=True):
+                    return None
                 capture_recovery_conversation_ids.add(candidate_id)
                 print(
                     f"Resuming conversation {current_conversation_id}. Will timeout in {conversation_creation_timeout - seconds_since_last_segment:.1f}s",
@@ -1928,7 +2086,12 @@ async def _stream_handler(
                         conversation_id=conversation_id_to_process,
                     )
                     continue
-                drain_capture_persistence_batches(uid, conversation_id_to_process, session_id)
+                drain_capture_persistence_batches(
+                    uid,
+                    conversation_id_to_process,
+                    session_id,
+                    generation_id,
+                )
                 if not await _create_new_in_progress_conversation(
                     expected_conversation_id=conversation_id_to_process,
                     expected_owner_id=session_id,
@@ -2127,6 +2290,7 @@ async def _stream_handler(
                         uid,
                         recovery_conversation_id,
                         session_id,
+                        generation_id,
                     )
                     pending_batch_count += recovered_batch_count
                     if not recovery_owned:
@@ -2260,6 +2424,7 @@ async def _stream_handler(
                         finished_at,
                         session_id,
                         photos=photos_to_process,
+                        capture_generation=generation_id,
                     )
                 except Exception:
                     capture_recovery_conversation_ids.add(batch_conversation_id)
@@ -2535,6 +2700,7 @@ async def _stream_handler(
         nonlocal realtime_photo_buffers, speaker_to_person_map, first_audio_byte_timestamp, last_usage_record_timestamp
         nonlocal soniox_profile_socket, deepgram_profile_socket, audio_ring_buffer
         nonlocal first_audio_frame_at
+        nonlocal accepting_capture, capture_drained
 
         timer_start = time.time()
         last_audio_received_time = timer_start
@@ -2644,6 +2810,45 @@ async def _stream_handler(
             if speechmatics_sock is not None:
                 await speechmatics_sock.send(chunk)
 
+        async def finish_stt_inputs_for_drain() -> None:
+            await flush_stt_buffer(force=True)
+            if dg_socket is not None:
+                dg_socket.finish()
+            if dg_profile_socket is not None:
+                dg_profile_socket.finish()
+            if soniox_sock is not None:
+                await soniox_sock.close()
+            if soniox_profile_sock is not None:
+                await soniox_profile_sock.close()
+            if grok_sock is not None:
+                await grok_sock.close()
+            if speechmatics_sock is not None:
+                await speechmatics_sock.close()
+            await asyncio.sleep(0)
+
+        async def wait_for_capture_drain_quiescence(conversation_id: str, timeout_seconds: float = 10.0) -> bool:
+            deadline = asyncio.get_running_loop().time() + timeout_seconds
+            stable_since = None
+            while True:
+                drain_capture_persistence_batches(
+                    uid,
+                    conversation_id,
+                    session_id,
+                    generation_id,
+                )
+                buffers_pending = _capture_buffers_contain_conversation(conversation_id)
+                batches_pending = bool(conversations_db.list_capture_persistence_batches(uid, conversation_id))
+                now = asyncio.get_running_loop().time()
+                if not buffers_pending and not batches_pending:
+                    stable_since = stable_since or now
+                    if now - stable_since >= 1.0:
+                        return True
+                else:
+                    stable_since = None
+                if now >= deadline:
+                    return False
+                await asyncio.sleep(0.05)
+
         try:
             while websocket_active:
                 message = await websocket.receive()
@@ -2662,6 +2867,9 @@ async def _stream_handler(
                     break
 
                 if message.get("bytes") is not None:
+
+                    if not accepting_capture:
+                        continue
 
                     data = message.get("bytes")
                     if len(data) <= 2:  # Ping/keepalive, 0x8a 0x00
@@ -2732,7 +2940,82 @@ async def _stream_handler(
                         json_data = json.loads(message.get("text"))
                         if json_data.get('type') in {'client_latency_event', 'latency_event', 'timing_event'}:
                             _remember_client_latency_event(json_data)
-                        elif json_data.get('type') == 'image_chunk':
+                        elif json_data.get('type') == 'capture_drain':
+                            exact_conversation_id = str(current_conversation_id or '').strip()
+                            if not valid_capture_drain_body(
+                                json_data,
+                                exact_conversation_id,
+                                generation_id,
+                                owner_token,
+                            ):
+                                websocket_close_code = 1008
+                                break
+                            if not capture_drain_diagnostic_correlation_matches(
+                                json_data,
+                                diagnostic_correlation,
+                            ):
+                                try:
+                                    await websocket.send_json(
+                                        {
+                                            "type": "service_status",
+                                            "status": "diagnostic_correlation_rejected",
+                                            "status_text": "capture_diagnostic_correlation_mismatch",
+                                            "evidence_only": True,
+                                        }
+                                    )
+                                except Exception:
+                                    pass
+                            accepting_capture = False
+                            capture_drain_tasks: set[asyncio.Task] = set()
+                            capture_drain_complete = asyncio.Event()
+
+                            async def finish_and_schedule_durable_drain() -> None:
+                                await finish_stt_inputs_for_drain()
+
+                                async def await_durable_drain() -> None:
+                                    if await wait_for_capture_drain_quiescence(exact_conversation_id):
+                                        capture_drain_complete.set()
+
+                                capture_drain_tasks.add(asyncio.create_task(await_durable_drain()))
+
+                            if not await flush_capture_before_drained(
+                                finish_and_schedule_durable_drain,
+                                capture_drain_tasks,
+                                capture_drain_complete,
+                                timeout=10.0,
+                            ):
+                                websocket_close_code = 1011
+                                break
+                            if not mark_capture_drained(
+                                uid,
+                                exact_conversation_id,
+                                generation_id,
+                                owner_token,
+                            ):
+                                websocket_close_code = 1008
+                                break
+                            if not redis_db.release_owned_in_progress_conversation_id(
+                                uid,
+                                exact_conversation_id,
+                                session_id,
+                            ):
+                                websocket_close_code = 1008
+                                break
+                            capture_drained = True
+                            await _asend_message_event(
+                                MessageServiceStatusEvent(
+                                    status="capture_protocol_drained",
+                                    protocol_version=CAPTURE_PROTOCOL_VERSION,
+                                    conversation_id=exact_conversation_id,
+                                    generation=generation_id,
+                                    owner_token=owner_token,
+                                    **(diagnostic_correlation.receipt_fields() if diagnostic_correlation else {}),
+                                    evidence_only=True if diagnostic_correlation else None,
+                                )
+                            )
+                            websocket_active = False
+                            break
+                        elif json_data.get('type') == 'image_chunk' and accepting_capture:
                             capture_conversation_id = str(current_conversation_id or "").strip()
                             if not capture_conversation_id:
                                 raise RuntimeError("capture_conversation_not_ready")
@@ -2747,7 +3030,7 @@ async def _stream_handler(
                         elif json_data.get('type') == 'skip_question':
                             if onboarding_handler and not onboarding_handler.completed:
                                 await onboarding_handler.skip_current_question()
-                        elif json_data.get('type') == 'suggested_transcript':
+                        elif json_data.get('type') == 'suggested_transcript' and accepting_capture:
                             if use_custom_stt:
                                 suggested_segments = json_data.get('segments', [])
                                 stt_provider = json_data.get('stt_provider')
@@ -2912,15 +3195,21 @@ async def _stream_handler(
                 record_usage(uid, transcription_seconds=transcription_seconds, words_transcribed=words_to_record)
         websocket_active = False
 
-        try:
-            await _finalize_current_conversation_on_disconnect()
-        except Exception as e:
+        if capture_protocol != CAPTURE_PROTOCOL_VERSION:
+            try:
+                await _finalize_current_conversation_on_disconnect()
+            except Exception as e:
+                _latency_log(
+                    "capture_disconnect_finalize_error",
+                    conversation_id=str(current_conversation_id or "").strip() or None,
+                    error=str(e)[:300],
+                )
+                print(f"Error finalizing conversation after disconnect: {e}", uid, session_id)
+        elif not capture_drained:
             _latency_log(
-                "capture_disconnect_finalize_error",
+                "capture_protocol_disconnect_before_drain",
                 conversation_id=str(current_conversation_id or "").strip() or None,
-                error=str(e)[:300],
             )
-            print(f"Error finalizing conversation after disconnect: {e}", uid, session_id)
 
         await _await_conversation_finalize_tasks()
 
@@ -2991,6 +3280,7 @@ async def _listen(
     custom_stt_mode: CustomSttMode = CustomSttMode.disabled,
     onboarding_mode: bool = False,
     speaker_auto_assign_enabled: bool = False,
+    capture_protocol: int = 0,
 ):
     """
     WebSocket handler for app clients. Accepts the websocket connection and delegates to _stream_handler.
@@ -3008,6 +3298,8 @@ async def _listen(
         print(f"_listen: accept error {e}", uid)
         return
 
+    diagnostic_correlation = await _validate_socket_diagnostic_correlation(websocket, uid)
+
     await _stream_handler(
         websocket,
         uid,
@@ -3022,7 +3314,9 @@ async def _listen(
         custom_stt_mode=custom_stt_mode,
         onboarding_mode=onboarding_mode,
         speaker_auto_assign_enabled=speaker_auto_assign_enabled,
+        capture_protocol=capture_protocol,
         socket_accepted_at=socket_accepted_at,
+        diagnostic_correlation=diagnostic_correlation,
     )
     print("_listen ended", uid)
 
@@ -3042,6 +3336,7 @@ async def listen_handler(
     custom_stt: str = 'disabled',
     onboarding: str = 'disabled',
     speaker_auto_assign: str = 'disabled',
+    capture_protocol: int = 0,
 ):
     custom_stt_mode = CustomSttMode.enabled if custom_stt == 'enabled' else CustomSttMode.disabled
     onboarding_mode = onboarding == 'enabled'
@@ -3091,6 +3386,7 @@ async def listen_handler(
         custom_stt_mode=custom_stt_mode,
         onboarding_mode=onboarding_mode,
         speaker_auto_assign_enabled=speaker_auto_assign_enabled,
+        capture_protocol=capture_protocol,
     )
 
 
@@ -3106,6 +3402,7 @@ async def web_listen_handler(
     source: Optional[str] = None,
     custom_stt: str = 'disabled',
     onboarding: str = 'disabled',
+    capture_protocol: int = 0,
 ):
     """
     WebSocket endpoint for web browser clients using first-message authentication.
@@ -3181,6 +3478,8 @@ async def web_listen_handler(
     await websocket.send_json({"type": "auth_response", "success": True})
     print("web_listen_handler authenticated", uid)
 
+    diagnostic_correlation = await _validate_socket_diagnostic_correlation(websocket, uid)
+
     # Proceed with streaming (websocket already accepted, uid already validated)
     custom_stt_mode = CustomSttMode.enabled if custom_stt == 'enabled' else CustomSttMode.disabled
     onboarding_mode = onboarding == 'enabled'
@@ -3198,6 +3497,8 @@ async def web_listen_handler(
         source=source,
         custom_stt_mode=custom_stt_mode,
         onboarding_mode=onboarding_mode,
+        capture_protocol=capture_protocol,
         socket_accepted_at=socket_accepted_at,
+        diagnostic_correlation=diagnostic_correlation,
     )
     print("web_listen_handler ended", uid)

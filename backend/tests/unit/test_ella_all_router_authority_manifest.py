@@ -12,6 +12,33 @@ def _group(module, authority, disposition, *routes):
 
 ROUTE_GROUPS = (
     _group(
+        "account_diagnostics",
+        "firebase_exact_owner_with_consent",
+        "staged_public",
+        ("POST", "/v1/ella/diagnostics/events", "ingest_diagnostic_events"),
+        (
+            "GET",
+            "/v1/ella/diagnostics/projection/{diagnostic_session_id}",
+            "get_diagnostic_projection",
+        ),
+        ("POST", "/v1/ella/diagnostics/support-grants", "create_diagnostic_support_grant"),
+        (
+            "DELETE",
+            "/v1/ella/diagnostics/support-grants/{grant_id}",
+            "revoke_diagnostic_support_grant",
+        ),
+    ),
+    _group(
+        "account_diagnostics",
+        "diagnostic_operator_support_grant",
+        "internal_only",
+        (
+            "POST",
+            "/v1/ella/operator/diagnostics/support-code/exchange",
+            "exchange_diagnostic_support_code",
+        ),
+    ),
+    _group(
         "ai_consent",
         "public_metadata",
         "public",
@@ -44,6 +71,16 @@ ROUTE_GROUPS = (
         "public_metadata",
         "public",
         ("GET", "/v1/ella/health", "ella_health"),
+    ),
+    _group(
+        "callbacks",
+        "public_capability_metadata",
+        "public",
+        (
+            "GET",
+            "/v1/ella/conversation/summary/capabilities",
+            "conversation_summary_capabilities",
+        ),
     ),
     _group(
         "callbacks",
@@ -250,6 +287,27 @@ ROUTE_GROUPS = (
         ),
         ("GET", "/.well-known/oauth-protected-resource", "get_oauth_protected_resource"),
         ("GET", "/.well-known/oauth-authorization-server", "get_oauth_authorization_server"),
+    ),
+    _group(
+        "memory_artwork",
+        "firebase_exact_owner",
+        "staged_public",
+        ("GET", "/v1/ella/memory-artwork/libraries", "get_memory_artwork_libraries"),
+        ("GET", "/v1/ella/memory-artwork/preferences", "get_memory_artwork_preferences"),
+        ("PUT", "/v1/ella/memory-artwork/preferences", "put_memory_artwork_preferences"),
+        ("GET", "/v1/ella/memories/{memory_id}/artwork", "get_memory_artwork"),
+        ("POST", "/v1/ella/memories/{memory_id}/artwork", "retry_memory_artwork"),
+        ("POST", "/v1/ella/memory-artwork/backfill", "backfill_memory_artwork"),
+        ("POST", "/v1/ella/memory-artwork/reconciliation", "start_memory_artwork_reconciliation"),
+        ("GET", "/v1/ella/memory-artwork/reconciliation", "get_memory_artwork_reconciliation"),
+        ("GET", "/v1/ella/memory-artwork/queue", "get_memory_artwork_queue"),
+        ("POST", "/v1/ella/memory-artwork/queue/control", "control_memory_artwork_queue"),
+    ),
+    _group(
+        "memory_artwork",
+        "memory_artwork_service_exact_subject",
+        "internal_only",
+        ("POST", "/v1/ella/internal/memory-artwork/{memory_id}/process", "process_memory_artwork"),
     ),
     _group(
         "memory_reinterpretation",

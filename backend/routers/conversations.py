@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, BackgroundTasks
 from starlette.concurrency import run_in_threadpool
 from typing import Optional, List
 from datetime import datetime, timezone
+import threading
 import uuid
 
 import database.conversations as conversations_db
@@ -36,6 +37,16 @@ from utils.conversations.process_conversation import (
     process_conversation_with_outcome,
     retrieve_in_progress_conversation,
 )
+from utils.conversations.capture_protocol import (
+    CAPTURE_PROTOCOL_VERSION,
+    claim_capture_finalization,
+    claim_capture_finalization_effect,
+    complete_capture_finalization,
+    complete_capture_finalization_effect,
+    capture_diagnostic_correlation_matches,
+    renew_capture_finalization,
+    release_capture_finalization,
+)
 from utils.conversations.search import search_conversations
 from utils.llm.conversation_processing import generate_summary_with_prompt
 from utils.speaker_identification import extract_speaker_samples
@@ -44,7 +55,10 @@ from ella.services.ai_consent import require_current_ai_consent
 from ella.services.today_card_postgres import invalidate_deleted_conversation_source
 from utils.other.storage import get_conversation_recording_if_exists
 from utils.app_integrations import trigger_external_integrations
+from models.chat import Message
 from utils.conversations.location import get_google_maps_location
+from utils.ella.memory_artwork_storage import MemoryArtworkStorageError, acquire_memory_artwork_publication_lock
+from utils.ella.account_diagnostics import CaptureDiagnosticCorrelation, DiagnosticCorrelationError
 
 router = APIRouter()
 
@@ -63,6 +77,33 @@ def _get_valid_conversation_by_id(uid: str, conversation_id: str) -> dict:
 class ProcessConversationRequest(BaseModel):
     calendar_meeting_context: Optional[CalendarMeetingContext] = None
     conversation_id: Optional[str] = None
+    protocol_version: Optional[int] = None
+    generation: Optional[str] = None
+    owner_token: Optional[str] = None
+
+
+def _request_diagnostic_correlation(
+    diagnostic_session_id: Optional[str],
+    capture_attempt_id: Optional[str],
+    capture_attempt_ordinal: Optional[str],
+    account_binding_fingerprint: Optional[str],
+    authority_generation: Optional[str],
+) -> tuple[Optional[CaptureDiagnosticCorrelation], Optional[str]]:
+    headers = {
+        name: value
+        for name, value in {
+            "x-ella-diagnostic-session": diagnostic_session_id,
+            "x-ella-capture-attempt": capture_attempt_id,
+            "x-ella-capture-attempt-ordinal": capture_attempt_ordinal,
+            "x-ella-account-binding": account_binding_fingerprint,
+            "x-ella-authority-generation": authority_generation,
+        }.items()
+        if isinstance(value, str)
+    }
+    try:
+        return CaptureDiagnosticCorrelation.from_headers(headers), None
+    except DiagnosticCorrelationError as exc:
+        return None, exc.code
 
 
 @router.post(
@@ -72,22 +113,152 @@ class ProcessConversationRequest(BaseModel):
     dependencies=[Depends(require_current_ai_consent)],
 )
 def process_in_progress_conversation(
-    request: ProcessConversationRequest = None, uid: str = Depends(auth.get_current_user_uid)
+    request: ProcessConversationRequest = None,
+    uid: str = Depends(auth.get_current_user_uid),
+    x_ella_diagnostic_session: Optional[str] = Header(default=None, alias="X-Ella-Diagnostic-Session"),
+    x_ella_capture_attempt: Optional[str] = Header(default=None, alias="X-Ella-Capture-Attempt"),
+    x_ella_capture_attempt_ordinal: Optional[str] = Header(
+        default=None,
+        alias="X-Ella-Capture-Attempt-Ordinal",
+    ),
+    x_ella_account_binding: Optional[str] = Header(default=None, alias="X-Ella-Account-Binding"),
+    x_ella_authority_generation: Optional[str] = Header(default=None, alias="X-Ella-Authority-Generation"),
 ):
+    diagnostic_correlation, diagnostic_correlation_status = _request_diagnostic_correlation(
+        x_ella_diagnostic_session,
+        x_ella_capture_attempt,
+        x_ella_capture_attempt_ordinal,
+        x_ella_account_binding,
+        x_ella_authority_generation,
+    )
     requested_conversation_id = str(request.conversation_id or '').strip() if request else ''
     discovered_conversation = None if requested_conversation_id else retrieve_in_progress_conversation(uid)
     conversation_id = requested_conversation_id or str((discovered_conversation or {}).get('id') or '').strip()
     if not conversation_id:
         raise HTTPException(status_code=404, detail="Conversation in progress not found")
 
+    initial_conversation = conversations_db.get_conversation(uid, conversation_id)
+    if not initial_conversation:
+        raise HTTPException(status_code=404, detail="Conversation in progress not found")
+    if not capture_diagnostic_correlation_matches(
+        initial_conversation,
+        diagnostic_correlation,
+    ):
+        diagnostic_correlation = None
+        diagnostic_correlation_status = diagnostic_correlation_status or "capture_diagnostic_correlation_mismatch"
+    capture_claim_token = None
+    capture_finalization_claimed = False
+    is_capture_v2 = initial_conversation.get('capture_protocol_version') == CAPTURE_PROTOCOL_VERSION
+    if is_capture_v2:
+        if (
+            request is None
+            or request.protocol_version != CAPTURE_PROTOCOL_VERSION
+            or not str(request.generation or '').strip()
+            or not str(request.owner_token or '').strip()
+        ):
+            raise HTTPException(status_code=409, detail="Capture finalization protocol tuple is invalid")
+        capture_outcome, capture_claim_token = claim_capture_finalization(
+            uid,
+            conversation_id,
+            request.generation or '',
+            request.owner_token or '',
+        )
+        if capture_outcome == 'terminal':
+            return CreateConversationResponse(
+                conversation=Conversation(**initial_conversation),
+                messages=[],
+                **(diagnostic_correlation.receipt_fields() if diagnostic_correlation else {}),
+                diagnostic_correlation_status=diagnostic_correlation_status,
+                evidence_only=True if diagnostic_correlation or diagnostic_correlation_status else None,
+            )
+        if capture_outcome == 'not_found':
+            raise HTTPException(status_code=404, detail="Conversation in progress not found")
+        if capture_outcome in {'mismatch', 'not_drained'}:
+            raise HTTPException(status_code=409, detail="Conversation capture authority is not drained for this owner")
+        if capture_outcome == 'busy':
+            raise HTTPException(status_code=409, detail="Conversation finalization lease is active")
+        if capture_outcome != 'claimed':
+            raise HTTPException(status_code=409, detail="Conversation finalization claim was not acquired")
+        capture_finalization_claimed = True
+
     processing_fence_token = f'conversation-processing:{uuid.uuid4()}'
     if not redis_db.acquire_in_progress_processing_fence(uid, conversation_id, processing_fence_token):
+        if capture_finalization_claimed:
+            release_capture_finalization(
+                uid,
+                conversation_id,
+                request.generation or '',
+                request.owner_token or '',
+                capture_claim_token or '',
+            )
         raise HTTPException(
             status_code=409,
             detail="Capture transport is still active or finalization state changed; retry processing",
         )
 
     processing_fence_held = True
+    finalization_heartbeat_stop = threading.Event()
+    finalization_heartbeat_lost = threading.Event()
+    finalization_heartbeat = None
+
+    if is_capture_v2:
+
+        def _renew_finalization_lease() -> None:
+            while not finalization_heartbeat_stop.wait(10):
+                if not renew_capture_finalization(
+                    uid,
+                    conversation_id,
+                    request.generation or '',
+                    request.owner_token or '',
+                    capture_claim_token or '',
+                ):
+                    finalization_heartbeat_lost.set()
+                    return
+
+        finalization_heartbeat = threading.Thread(
+            target=_renew_finalization_lease,
+            name=f'capture-finalization-{conversation_id}',
+            daemon=True,
+        )
+        finalization_heartbeat.start()
+
+    def _complete_external_integration_effect(conversation: Conversation, dispatched: bool) -> List[Message]:
+        if not is_capture_v2:
+            return trigger_external_integrations(uid, conversation) if dispatched else []
+        if finalization_heartbeat_lost.is_set():
+            raise HTTPException(status_code=409, detail="Conversation finalization completion lost its lease")
+        effect = claim_capture_finalization_effect(
+            uid,
+            conversation_id,
+            request.generation or '',
+            request.owner_token or '',
+            capture_claim_token or '',
+            'integrations:external',
+        )
+        effect_outcome = str(effect.get('outcome') or '')
+        if effect_outcome == 'completed':
+            return [Message(**item) for item in (effect.get('result') or [])]
+        if effect_outcome != 'claimed':
+            raise HTTPException(status_code=409, detail="Conversation finalization effect lost its lease")
+        operation_token = str(effect.get('operation_token') or '')
+        if not operation_token:
+            raise HTTPException(status_code=409, detail="Conversation finalization effect token is unavailable")
+        messages = (
+            trigger_external_integrations(uid, conversation, idempotency_key=operation_token) if dispatched else []
+        )
+        if not complete_capture_finalization_effect(
+            uid,
+            conversation_id,
+            request.generation or '',
+            request.owner_token or '',
+            capture_claim_token or '',
+            'integrations:external',
+            operation_token,
+            [message.dict() for message in messages],
+        ):
+            raise HTTPException(status_code=409, detail="Conversation finalization effect completion lost its lease")
+        return messages
+
     try:
         conversation = conversations_db.get_conversation(uid, conversation_id)
         if not conversation:
@@ -128,6 +299,15 @@ def process_in_progress_conversation(
             force_process=True,
             _claim_already_held=claim_status == 'processing_claimed',
             _initial_processing_claim_token=str(claim_result.get('claim_token') or '') or None,
+            capture_finalization=(
+                (
+                    request.generation or '',
+                    request.owner_token or '',
+                    capture_claim_token or '',
+                )
+                if is_capture_v2
+                else None
+            ),
         )
         if outcome.status == 'capture_in_progress':
             raise HTTPException(
@@ -135,10 +315,43 @@ def process_in_progress_conversation(
                 detail="Capture transport acquired the conversation before processing; retry after it closes",
             )
         conversation = outcome.conversation
-        messages = trigger_external_integrations(uid, conversation) if outcome.dispatched else []
+        messages = _complete_external_integration_effect(conversation, outcome.dispatched)
 
-        return CreateConversationResponse(conversation=conversation, messages=messages)
+        if is_capture_v2:
+            if not complete_capture_finalization(
+                uid,
+                conversation_id,
+                request.generation or '',
+                request.owner_token or '',
+                capture_claim_token or '',
+            ):
+                raise HTTPException(status_code=409, detail="Conversation finalization completion lost its lease")
+            terminal_conversation = conversations_db.get_conversation(uid, conversation_id)
+            if not terminal_conversation or terminal_conversation.get('capture_state') != 'terminal':
+                raise HTTPException(status_code=409, detail="Conversation finalization terminal result is unavailable")
+            conversation = Conversation(**terminal_conversation)
+
+        return CreateConversationResponse(
+            conversation=conversation,
+            messages=messages,
+            **(diagnostic_correlation.receipt_fields() if diagnostic_correlation else {}),
+            diagnostic_correlation_status=diagnostic_correlation_status,
+            evidence_only=True if diagnostic_correlation or diagnostic_correlation_status else None,
+        )
+    except Exception:
+        if is_capture_v2 and capture_finalization_claimed:
+            release_capture_finalization(
+                uid,
+                conversation_id,
+                request.generation or '',
+                request.owner_token or '',
+                capture_claim_token or '',
+            )
+        raise
     finally:
+        finalization_heartbeat_stop.set()
+        if finalization_heartbeat is not None:
+            finalization_heartbeat.join(timeout=2)
         if processing_fence_held:
             redis_db.release_capture_commit_lease(uid, processing_fence_token)
 
@@ -255,7 +468,16 @@ async def delete_conversation(conversation_id: str, uid: str = Depends(auth.get_
         await invalidate_deleted_conversation_source(uid, conversation_id)
     except Exception as exc:
         raise HTTPException(status_code=503, detail={"code": "today_card_source_invalidation_failed"}) from exc
-    await run_in_threadpool(conversations_db.delete_conversation, uid, conversation_id)
+    try:
+        async with acquire_memory_artwork_publication_lock(uid) as artwork_lock_proof:
+            await run_in_threadpool(
+                conversations_db.delete_conversation,
+                uid,
+                conversation_id,
+                artwork_lock_proof=artwork_lock_proof,
+            )
+    except MemoryArtworkStorageError as exc:
+        raise HTTPException(status_code=503, detail={"code": str(exc), "retryable": True}) from exc
     await run_in_threadpool(delete_vector, uid, conversation_id)
     return {"status": "Ok"}
 

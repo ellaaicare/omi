@@ -586,13 +586,21 @@ async def update_entitlement_status(
             )
             row = await conn.fetchrow(
                 """
-                UPDATE voice_entitlements
+                UPDATE voice_entitlements entitlement
                 SET status = $2,
-                    revision = revision + 1,
+                    revision = entitlement.revision + 1,
                     operator_note = COALESCE($3, operator_note),
+                    consent_authority_revision = COALESCE(
+                        authority.revision,
+                        entitlement.consent_authority_revision
+                    ),
                     updated_at = NOW()
-                WHERE uid = $1
-                RETURNING *
+                FROM users account
+                LEFT JOIN ella_managed_cloud_consent_authority authority
+                  ON authority.user_id = account.id
+                WHERE entitlement.uid = $1
+                  AND account.omi_uid = $1
+                RETURNING entitlement.*
                 """,
                 uid,
                 status,

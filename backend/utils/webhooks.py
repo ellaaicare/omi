@@ -56,7 +56,7 @@ def _add_speaker_names_to_payload(uid, payload: dict):
             seg['speaker_name'] = f"Speaker {seg.get('speaker_id', 0)}"
 
 
-def conversation_created_webhook(uid, memory: Conversation):
+def conversation_created_webhook(uid, memory: Conversation, idempotency_key: str = None):
     toggled = user_webhook_status_db(uid, WebhookType.memory_created)
 
     if toggled:
@@ -68,15 +68,22 @@ def conversation_created_webhook(uid, memory: Conversation):
             payload = memory.as_dict_cleaned_dates()
             _add_speaker_names_to_payload(uid, payload)
             payload = _json_serialize_datetime(payload)
+            headers = {'Content-Type': 'application/json'}
+            if idempotency_key:
+                headers['Idempotency-Key'] = idempotency_key
             response = requests.post(
                 webhook_url,
                 json=payload,
-                headers={'Content-Type': 'application/json'},
+                headers=headers,
                 timeout=30,
             )
             print('memory_created_webhook:', webhook_url, response.status_code)
+            if idempotency_key:
+                response.raise_for_status()
         except Exception as e:
             print(f"Error sending memory created to developer webhook: {e}")
+            if idempotency_key:
+                raise
     else:
         return
 

@@ -2,6 +2,7 @@
 
 import asyncio
 import ast
+from contextlib import asynccontextmanager
 import importlib.util
 import json
 import re
@@ -9,7 +10,7 @@ import sys
 import types
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import ANY, AsyncMock, Mock
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.testclient import TestClient
@@ -295,8 +296,18 @@ def _load_delete_account_route():
     authenticated_uid = lambda: "uid-a"
     firestore_delete = Mock()
     firebase_delete = Mock()
+    prepare_artwork_deletion = Mock(return_value=0)
     unlink = AsyncMock()
     auth = types.SimpleNamespace(get_current_user_uid=authenticated_uid, delete_account=firebase_delete)
+
+    async def run_in_threadpool(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    @asynccontextmanager
+    async def acquire_publication_lock(uid):
+        assert uid == "uid-a"
+        yield object()
+
     namespace = {
         "Depends": Depends,
         "HTTPException": HTTPException,
@@ -304,10 +315,14 @@ def _load_delete_account_route():
         "delete_user_data": firestore_delete,
         "build_account_deletion_receipt": build_account_deletion_receipt,
         "unlink_self_owner_account_on_deletion": unlink,
+        "prepare_account_artwork_deletion": prepare_artwork_deletion,
+        "acquire_memory_artwork_publication_lock": acquire_publication_lock,
+        "run_in_threadpool": run_in_threadpool,
+        "MemoryArtworkStorageError": RuntimeError,
         "ManagedCloudAuthorityUnavailable": RuntimeError,
     }
     exec(compile(ast.Module(body=[function], type_ignores=[]), "backend/routers/users.py", "exec"), namespace)
-    return namespace["delete_account"], firestore_delete, firebase_delete, unlink
+    return namespace["delete_account"], firestore_delete, firebase_delete, prepare_artwork_deletion, unlink
 
 
 def test_account_deletion_completes_unlink_receipt_without_destructive_removal():
@@ -317,7 +332,7 @@ def test_account_deletion_completes_unlink_receipt_without_destructive_removal()
     # (users row / consent authority freed under the advisory lock) — so the
     # receipt is truthful and a relogin creates a fresh account. The deep
     # Firestore/Firebase wipe is deferred to the GC/retention pipeline.
-    route, firestore_delete, firebase_delete, unlink = _load_delete_account_route()
+    route, firestore_delete, firebase_delete, prepare_artwork_deletion, unlink = _load_delete_account_route()
     app = FastAPI()
     app.add_api_route("/v1/users/delete-account", route, methods=["DELETE"])
 
@@ -331,6 +346,7 @@ def test_account_deletion_completes_unlink_receipt_without_destructive_removal()
     assert body["deletion_receipt"]["scope"] == "account_and_user_data"
     assert re.match(r"^aidel_[A-Za-z0-9_-]{16,128}$", body["deletion_receipt"]["request_id"])
     assert "server_completed_at" in body["deletion_receipt"]
+    prepare_artwork_deletion.assert_called_once_with("uid-a", lock_proof=ANY)
     unlink.assert_called_once_with(uid="uid-a")
     firestore_delete.assert_not_called()
     firebase_delete.assert_not_called()

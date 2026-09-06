@@ -2374,6 +2374,11 @@ def test_summary_recovery_persists_generic_before_hermes_enrichment(monkeypatch)
         "record_conversation_processing_retry_enrichment",
         lambda *args, **kwargs: events.append(f"enrichment:{args[3]}") or True,
     )
+    monkeypatch.setattr(
+        summary_recovery,
+        "enqueue_after_terminal_enrichment",
+        lambda uid, conversation_id: _async_event(events, "artwork:queued"),
+    )
 
     outcome = asyncio.run(
         summary_recovery.recover_failed_conversation_summary(
@@ -2398,6 +2403,7 @@ def test_summary_recovery_persists_generic_before_hermes_enrichment(monkeypatch)
         "enrichment:canonical_completed",
         "vector:Enriched",
         "enrichment:completed",
+        "artwork:queued",
     ]
 
 
@@ -3194,8 +3200,8 @@ def test_strict_summary_writeback_fresh_trace_supersedes_legacy_pending_and_conf
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
-        "update_conversation",
-        lambda uid, cid, update: updates.append(update),
+        "update_conversation_if_active_summary_version",
+        lambda uid, cid, version_id, update: updates.append(update) or True,
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
@@ -3390,8 +3396,8 @@ def test_strict_summary_writeback_keeps_retryable_state_when_canonical_fails(mon
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
-        "update_conversation",
-        lambda uid, cid, update: updates.append(update),
+        "update_conversation_if_active_summary_version",
+        lambda uid, cid, expected, update: updates.append(update) or True,
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
@@ -4409,8 +4415,8 @@ def test_semantic_attestation_is_atomically_bound_to_new_version_and_canonical_e
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,
-        "update_conversation",
-        lambda uid, cid, update: updates.append(update),
+        "update_conversation_if_active_summary_version",
+        lambda uid, cid, expected, update: updates.append(update) or True,
     )
     monkeypatch.setattr(
         summary_writeback.conversations_db,

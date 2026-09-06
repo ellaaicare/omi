@@ -42,6 +42,168 @@ def _nested_function(relative_path: str, name: str, globals_: dict, closure_valu
     return types.FunctionType(code, {"__builtins__": __builtins__, **globals_}, name, closure=closure)
 
 
+def test_diagnostic_correlation_rejection_is_evidence_only_and_never_closes_capture():
+    class CorrelationError(RuntimeError):
+        def __init__(self):
+            self.code = "diagnostic_account_binding_stale"
+            self.retryable = False
+
+    async def reject(_uid, _headers):
+        raise CorrelationError
+
+    def consume_task_result(task):
+        if task.cancelled():
+            return
+        try:
+            task.exception()
+        except Exception:
+            pass
+
+    class Socket:
+        headers = {"x-ella-diagnostic-session": "session-a"}
+
+        def __init__(self):
+            self.messages = []
+            self.closed = False
+            self.send_calls = 0
+
+        async def send_json(self, payload):
+            self.send_calls += 1
+            self.messages.append(payload)
+
+        async def close(self, **_kwargs):
+            self.closed = True
+
+    validate = types.FunctionType(
+        _nested_code("routers/transcribe.py", "_validate_socket_diagnostic_correlation"),
+        {
+            "__builtins__": __builtins__,
+            "asyncio": asyncio,
+            "DiagnosticCorrelationAuthorityError": CorrelationError,
+            "DIAGNOSTIC_CORRELATION_VALIDATION_TIMEOUT_SECONDS": 0.05,
+            "_consume_diagnostic_task_result": consume_task_result,
+            "validate_capture_diagnostic_correlation": reject,
+        },
+        "_validate_socket_diagnostic_correlation",
+    )
+    assert "send_json" not in validate.__code__.co_names
+    socket = Socket()
+
+    assert asyncio.run(validate(socket, "uid-a")) is None
+    assert socket.closed is False
+    assert socket.send_calls == 0
+    assert socket.messages == []
+
+    async def stall(_uid, _headers):
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            await asyncio.sleep(60)
+
+    timeout_validate = types.FunctionType(
+        _nested_code("routers/transcribe.py", "_validate_socket_diagnostic_correlation"),
+        {
+            "__builtins__": __builtins__,
+            "asyncio": asyncio,
+            "DiagnosticCorrelationAuthorityError": CorrelationError,
+            "DIAGNOSTIC_CORRELATION_VALIDATION_TIMEOUT_SECONDS": 0.01,
+            "_consume_diagnostic_task_result": consume_task_result,
+            "validate_capture_diagnostic_correlation": stall,
+        },
+        "_validate_socket_diagnostic_correlation",
+    )
+    timeout_socket = Socket()
+    started_at = time.monotonic()
+
+    assert asyncio.run(timeout_validate(timeout_socket, "uid-a")) is None
+    assert time.monotonic() - started_at < 0.5
+    assert timeout_socket.closed is False
+    assert timeout_socket.messages == []
+
+    correlation = object()
+    streamed = []
+
+    class WebSocket:
+        headers = {"x-ella-diagnostic-session": "session-a"}
+
+        def __init__(self):
+            self.accepted = False
+            self.messages = []
+
+        async def accept(self):
+            self.accepted = True
+
+        async def receive(self):
+            return {"type": "auth", "token": "valid-token"}
+
+        async def send_json(self, payload):
+            self.messages.append(payload)
+
+        async def close(self, **_kwargs):
+            raise AssertionError("evidence-only diagnostic rejection must not close capture")
+
+    async def validate_after_auth(websocket, uid):
+        assert uid == "uid-a"
+        assert websocket.messages == [{"type": "auth_response", "success": True}]
+        await websocket.send_json(
+            {
+                "type": "service_status",
+                "status": "diagnostic_correlation_rejected",
+                "evidence_only": True,
+            }
+        )
+        return correlation
+
+    async def stream_handler(*_args, **kwargs):
+        streamed.append(kwargs["diagnostic_correlation"])
+
+    async def runtime_gate(_uid, _exists):
+        return {"required": False}
+
+    web_handler = types.FunctionType(
+        _nested_code("routers/transcribe.py", "web_listen_handler"),
+        {
+            "__builtins__": __builtins__,
+            "asyncio": asyncio,
+            "time": time,
+            "auth": SimpleNamespace(get_current_user_uid_from_ws_message=lambda _message: "uid-a"),
+            "InvalidIdTokenError": type("InvalidIdTokenError", (Exception,), {}),
+            "WebSocketDisconnect": type("WebSocketDisconnect", (Exception,), {}),
+            "HTTPException": type("HTTPException", (Exception,), {}),
+            "assert_current_ai_consent": lambda _uid: None,
+            "listen_runtime_gate": runtime_gate,
+            "user_db": SimpleNamespace(is_exists_user=lambda _uid: True),
+            "logging": MagicMock(),
+            "_validate_socket_diagnostic_correlation": validate_after_auth,
+            "CustomSttMode": SimpleNamespace(enabled="enabled", disabled="disabled"),
+            "_stream_handler": stream_handler,
+        },
+        "web_listen_handler",
+    )
+    web_socket = WebSocket()
+
+    asyncio.run(
+        web_handler(
+            web_socket,
+            language="en",
+            sample_rate=8000,
+            codec="pcm8",
+            channels=1,
+            include_speech_profile=False,
+            conversation_timeout=120,
+            source=None,
+            custom_stt="disabled",
+            onboarding="disabled",
+            capture_protocol=2,
+        )
+    )
+
+    assert web_socket.accepted is True
+    assert web_socket.messages[0] == {"type": "auth_response", "success": True}
+    assert web_socket.messages[1]["status"] == "diagnostic_correlation_rejected"
+    assert streamed == [correlation]
+
+
 @cache
 def _load_conversations_module():
     spec = importlib.util.spec_from_file_location(
@@ -60,6 +222,19 @@ def _load_conversations_module():
             "utils.other.storage": MagicMock(),
         },
     ):
+        spec.loader.exec_module(module)
+    return module
+
+
+@cache
+def _load_capture_protocol_module():
+    spec = importlib.util.spec_from_file_location(
+        "utils.conversations.capture_incident_1210_protocol",
+        BACKEND / "utils" / "conversations" / "capture_protocol.py",
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    with patch.dict(sys.modules, {"database._client": MagicMock(db=MagicMock())}):
         spec.loader.exec_module(module)
     return module
 
@@ -187,6 +362,7 @@ def test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing(
         "routers/transcribe.py",
         "_process_conversation",
         {
+            "complete_rotated_capture": lambda *_args: True,
             "drain_capture_persistence_batches": lambda *_args: None,
             "conversations_db": SimpleNamespace(
                 get_conversation=lambda *_args: {
@@ -202,7 +378,9 @@ def test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing(
             "_create_conversation_fallback": fallback,
             "_latency_log": lambda *_args, **_kwargs: None,
             "_wait_for_capture_buffers_to_drain": lambda _conversation_id: asyncio.sleep(0, result=True),
+            "generation_id": "generation-a",
             "on_conversation_processing_started": lambda _conversation_id: None,
+            "owner_token": "socket-a",
             "request_conversation_processing": request_processing,
             "session_id": "socket-a",
             "uid": "uid-a",
@@ -231,6 +409,7 @@ def test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing(
         "routers/transcribe.py",
         "_process_conversation",
         {
+            "complete_rotated_capture": lambda *_args: True,
             "drain_capture_persistence_batches": lambda *_args: None,
             "conversations_db": SimpleNamespace(
                 get_conversation=lambda *_args: {
@@ -246,7 +425,9 @@ def test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing(
             "_create_conversation_fallback": fallback,
             "_latency_log": lambda *_args, **_kwargs: None,
             "_wait_for_capture_buffers_to_drain": lambda _conversation_id: asyncio.sleep(0, result=True),
+            "generation_id": "generation-a",
             "on_conversation_processing_started": lambda _conversation_id: None,
+            "owner_token": "socket-a",
             "request_conversation_processing": terminal_request,
             "session_id": "socket-a",
             "uid": "uid-a",
@@ -417,7 +598,7 @@ def test_reconnect_keeps_polling_until_a_late_superseded_socket_batch_is_committ
 
     conversations_db = SimpleNamespace(
         list_capture_persistence_batches=lambda _uid, _conversation_id: list(pending_batch_ids),
-        commit_capture_persistence_batch=lambda _uid, _conversation_id, batch_id, _owner_id: (
+        commit_capture_persistence_batch=lambda _uid, _conversation_id, batch_id, _owner_id, _generation: (
             committed_batch_ids.append(batch_id) or {"status": "committed"}
         ),
     )
@@ -435,13 +616,13 @@ def test_reconnect_keeps_polling_until_a_late_superseded_socket_batch_is_committ
     )
 
     recovery_conversation_ids = {"conversation-a"}
-    recovered_count, still_owned = poll("uid-a", "conversation-a", "socket-new")
+    recovered_count, still_owned = poll("uid-a", "conversation-a", "socket-new", "generation-new")
     assert (recovered_count, still_owned) == (0, True)
     assert should_keep_polling("conversation-a", "conversation-a", True)
     assert recovery_conversation_ids == {"conversation-a"}
 
     pending_batch_ids.append("batch-from-old-socket")
-    recovered_count, still_owned = poll("uid-a", "conversation-a", "socket-new")
+    recovered_count, still_owned = poll("uid-a", "conversation-a", "socket-new", "generation-new")
     assert (recovered_count, still_owned) == (1, True)
     assert committed_batch_ids == ["batch-from-old-socket"]
 
@@ -552,6 +733,9 @@ def test_capture_owner_is_initialized_before_reconnect_preparation_uses_it():
         def remove_conversation_meeting_id(self, _conversation_id):
             raise AssertionError("an adopted stub must retain its meeting association")
 
+    async def publish_capture_protocol_ready(*_args, **_kwargs):
+        return True
+
     create_stub = _nested_function(
         "routers/transcribe.py",
         "_create_new_in_progress_conversation",
@@ -575,12 +759,14 @@ def test_capture_owner_is_initialized_before_reconnect_preparation_uses_it():
             "uuid": SimpleNamespace(uuid4=lambda: "stub-adopted"),
         },
         {
+            "_publish_capture_protocol_ready": publish_capture_protocol_ready,
             "current_conversation_id": "stale",
             "language": "en",
             "private_cloud_sync_enabled": False,
             "session_id": "socket-a",
             "source": None,
             "uid": "uid-a",
+            "websocket_active": True,
         },
     )
 
@@ -598,6 +784,152 @@ def test_capture_owner_is_initialized_before_reconnect_preparation_uses_it():
     )
     assert upserted[0]["id"] == "stub-adopted"
     assert abandoned == [("stub-adopted", "socket-a")]
+
+
+def test_production_reconnect_path_does_not_let_overlapping_socket_steal_authority():
+    capture_protocol = _load_capture_protocol_module()
+    now = datetime.now(timezone.utc)
+
+    class Document:
+        def __init__(self, data):
+            self.data = data
+
+        def get(self, transaction=None):
+            return SimpleNamespace(exists=self.data is not None, to_dict=lambda: dict(self.data or {}))
+
+    class Transaction:
+        def __init__(self):
+            self.sets = []
+            self.updates = []
+
+        def set(self, ref, payload):
+            self.sets.append((ref, payload))
+
+        def update(self, ref, payload):
+            self.updates.append((ref, payload))
+
+        def apply(self):
+            for ref, payload in self.sets:
+                ref.data = dict(payload)
+            for ref, payload in self.updates:
+                ref.data.update(payload)
+
+    authority_ref = Document(
+        {
+            "protocol_version": 2,
+            "conversation_id": "conversation-a",
+            "generation": "generation-a",
+            "owner_token": "socket-a",
+            "state": "active",
+            "lease_expires_at": now - timedelta(seconds=1),
+        }
+    )
+    conversation_ref = Document(
+        {
+            "id": "conversation-a",
+            "status": "in_progress",
+            "capture_owner_id": "socket-a",
+            "capture_protocol_version": 2,
+            "capture_generation": "generation-a",
+            "capture_owner_token": "socket-a",
+            "capture_state": "active",
+            "capture_lease_expires_at": now - timedelta(seconds=1),
+            "finished_at": now,
+        }
+    )
+
+    def claim_capture_authority_for_reconnect(
+        _uid,
+        conversation_id,
+        generation,
+        expected_owner_token,
+        owner_token,
+    ):
+        transaction = Transaction()
+        claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+            transaction,
+            authority_ref,
+            conversation_ref,
+            conversation_id,
+            generation,
+            expected_owner_token,
+            owner_token,
+            now,
+        )
+        if claimed:
+            transaction.apply()
+        return claimed
+
+    class Redis:
+        def __init__(self):
+            self.claims = []
+
+        def get_in_progress_conversation_id(self, _uid):
+            return "conversation-a"
+
+        def claim_in_progress_conversation_id(self, _uid, conversation_id, owner_token):
+            self.claims.append((conversation_id, owner_token))
+            return True
+
+        def replace_stale_in_progress_conversation_id(self, *_args):
+            raise AssertionError("the exact active conversation must be claimed in place")
+
+    redis = Redis()
+    ready_receipts = []
+
+    def make_prepare(session_id, generation_id):
+        async def publish_capture_protocol_ready(conversation_id, **_kwargs):
+            ready_receipts.append((conversation_id, generation_id, session_id))
+            return True
+
+        return _nested_function(
+            "routers/transcribe.py",
+            "_prepare_in_progess_conversations",
+            {
+                "asyncio": asyncio,
+                "claim_capture_authority_for_reconnect": claim_capture_authority_for_reconnect,
+                "conversations_db": SimpleNamespace(),
+                "datetime": datetime,
+                "drain_capture_persistence_batches": lambda *_args: None,
+                "mark_capture_drained": lambda *_args: True,
+                "redis_db": redis,
+                "retrieve_in_progress_conversation": lambda _uid: dict(conversation_ref.data),
+                "timezone": timezone,
+            },
+            {
+                "_create_new_in_progress_conversation": lambda **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("a current conversation must not create a replacement")
+                ),
+                "_publish_capture_protocol_ready": publish_capture_protocol_ready,
+                "capture_recovery_conversation_ids": set(),
+                "conversation_creation_timeout": 120,
+                "current_conversation_id": None,
+                "diagnostic_correlation": None,
+                "generation_id": generation_id,
+                "session_id": session_id,
+                "uid": "uid-a",
+            },
+        )
+
+    first_prepare = make_prepare("socket-b", "generation-b")
+    assert asyncio.run(first_prepare()) is None
+    assert authority_ref.data["owner_token"] == "socket-b"
+    assert conversation_ref.data["capture_owner_id"] == "socket-b"
+    assert redis.claims == [("conversation-a", "socket-b")]
+    assert ready_receipts == [("conversation-a", "generation-b", "socket-b")]
+
+    overlapping_prepare = make_prepare("socket-c", "generation-c")
+    try:
+        asyncio.run(overlapping_prepare())
+    except RuntimeError as exc:
+        assert str(exc) == "active conversation ownership changed during reconnect"
+    else:
+        raise AssertionError("the overlapping production reconnect must fail closed")
+
+    assert authority_ref.data["owner_token"] == "socket-b"
+    assert conversation_ref.data["capture_owner_id"] == "socket-b"
+    assert redis.claims == [("conversation-a", "socket-b")]
+    assert ready_receipts == [("conversation-a", "generation-b", "socket-b")]
 
 
 def test_failed_stub_publication_abandons_only_the_still_owned_firestore_generation():
@@ -683,15 +1015,16 @@ def test_stale_processing_claim_without_a_lease_can_be_recovered():
     assert transaction.updates[0]["initial_processing_claim_token"] == result["claim_token"]
 
 
-def test_reconnect_rebinds_firestore_before_publishing_redis_owner():
+def test_reconnect_claims_firestore_authority_before_publishing_redis_owner():
     source = (BACKEND / "routers" / "transcribe.py").read_text()
     preparation = source.split("async def _prepare_in_progess_conversations():", maxsplit=1)[1].split(
         "timed_out_conversation_id = await _prepare_in_progess_conversations()", maxsplit=1
     )[0]
 
-    assert preparation.index("rebind_capture_conversation_owner(") < preparation.index(
+    assert preparation.index("claim_capture_authority_for_reconnect(") < preparation.index(
         "claim_in_progress_conversation_id("
     )
+    assert "rebind_capture_conversation_owner(" not in preparation
     assert "conversations_db.bind_capture_conversation_owner(" not in preparation
 
 

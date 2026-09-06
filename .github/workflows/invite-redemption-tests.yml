@@ -28,6 +28,7 @@ on:
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
+      - "backend/migrations/017_add_voice_entitlement_consent_revision.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/synthetic_invite_admin.py"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
@@ -69,6 +70,7 @@ on:
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
+      - "backend/migrations/017_add_voice_entitlement_consent_revision.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/synthetic_invite_admin.py"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
@@ -109,6 +111,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Assert immutable checkout
+        env:
+          EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          echo "expected SHA == git rev-parse HEAD: ${EXPECTED_SHA} == ${actual_sha}"
+          test "${EXPECTED_SHA}" = "${actual_sha}"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -170,7 +182,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 190
+          test "$collected" -eq 196
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
@@ -190,6 +202,7 @@ jobs:
             "tests/unit/test_pilot_invite_admin.py::test_operator_examples_never_embed_plaintext_email_or_legacy_email_argument"
             "tests/unit/test_ella_onboarding_contract.py::test_onboarding_ensure_requires_current_ai_consent_dependency"
             "tests/unit/test_ella_provisioning_service.py::test_self_hosted_invitation_admission_precedes_identity_and_job_writes"
+            "tests/unit/test_ella_provisioning_service.py::test_self_hosted_schema_preflight_requires_consent_revision_migration"
             "tests/unit/test_ella_provisioning_service.py::test_self_hosted_authority_drift_blocks_before_provider_call"
             "tests/unit/test_ella_provisioning_service.py::test_invitation_runtime_requires_persisted_profile_local_honcho_proof"
             "tests/unit/test_ella_provisioning_service.py::test_authenticated_honcho_attestation_rejects_replay_swaps_staleness_and_partial_proofs"
@@ -213,6 +226,8 @@ jobs:
             "tests/unit/test_ella_provisioning_service.py::test_post_provider_attestation_rejections_retry_and_reconcile_one_binding"
             "tests/unit/test_ella_provisioning_service.py::test_retained_owner_identity_is_exact_and_requires_server_configuration"
             "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_activation_does_not_require_invitation_target"
+            "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_preserves_exact_active_retained_runtime"
+            "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_still_rejects_missing_isolated_binding"
             "tests/unit/test_ella_provisioning_service.py::test_resolve_self_hosted_active_direct_positive_healthy_active"
             "tests/unit/test_ella_provisioning_service.py::test_resolve_self_hosted_active_direct_negative_disabled_unhealthy"
             "tests/unit/test_ella_provisioning_service.py::test_resolve_self_hosted_active_direct_no_row_returns_none"
@@ -231,6 +246,7 @@ jobs:
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_post_provider_revoke_race_cannot_publish_or_retry"
             "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_015_upgrades_multi_redemption_app_review_history_atomically"
+            "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_017_prerequisite_failure_rolls_back_added_column"
           )
           for required_id in "${required_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$collected_ids"

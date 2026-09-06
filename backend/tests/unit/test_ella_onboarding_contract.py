@@ -15,6 +15,9 @@ class _NonInvitationRepository:
     async def has_invitation_owned_self_hosted_runtime(self, _uid):
         return False
 
+    async def has_active_retained_runtime(self, _uid):
+        return False
+
 
 def _configure_hermes_authority(monkeypatch):
     token = "onboarding-hermes-test-token"
@@ -150,24 +153,23 @@ def test_disabled_endpoint_returns_without_touching_database(monkeypatch):
 
 
 def test_disabled_endpoint_allows_existing_retained_account_without_provisioning(monkeypatch):
-    async def coordinator():
-        return SimpleNamespace(repository=_NonInvitationRepository())
+    class RetainedRepository(_NonInvitationRepository):
+        async def has_active_retained_runtime(self, uid):
+            assert uid == "retained-user"
+            return True
 
-    async def retained_receipt(uid, target_schema_version):
-        assert uid == "retained-user"
-        assert target_schema_version == "hermes-user-v1"
-        return {
-            "state": "ready",
-            "stage": "ready",
-            "binding_state": "active",
-            "binding_revision": 1,
-            "effective_policy_revision": "retained-compatibility-v1",
-        }
+    class Coordinator:
+        repository = RetainedRepository()
+
+        async def ensure_job(self, **_kwargs):
+            raise AssertionError("retained compatibility must not reacquire a stale provisioning job")
+
+    async def coordinator():
+        return Coordinator()
 
     monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "false")
     monkeypatch.delenv("ELLA_HERMES_PROVISIONING_ENABLED_UIDS", raising=False)
     monkeypatch.setattr(onboarding, "_coordinator", coordinator)
-    monkeypatch.setattr(onboarding, "_retained_receipt", retained_receipt)
     monkeypatch.setattr(
         onboarding.auth,
         "get_user",
@@ -186,12 +188,63 @@ def test_disabled_endpoint_allows_existing_retained_account_without_provisioning
     assert result["state"] == "ready"
     assert result["binding_state"] == "active"
 
+    # A globally enabled provisioner must not reacquire this account's stale,
+    # consent-quarantined job when its retained cluster is already active.
+    _configure_hermes_authority(monkeypatch)
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    enabled = asyncio.run(
+        onboarding.ensure_onboarding(
+            onboarding.OnboardingEnsureRequest(),
+            BackgroundTasks(),
+            Response(),
+            uid="retained-user",
+        )
+    )
+
+    assert enabled["state"] == "ready"
+    assert enabled["binding_state"] == "active"
+
+    class InvitationRepository:
+        async def has_invitation_owned_self_hosted_runtime(self, uid):
+            assert uid == "invited-user"
+            return True
+
+        async def has_active_retained_runtime(self, _uid):
+            raise AssertionError("invitation-owned accounts must never borrow retained compatibility")
+
+        async def get_self_hosted_invitation_admission(self, uid):
+            assert uid == "invited-user"
+            return None
+
+    async def coordinator():
+        return SimpleNamespace(repository=InvitationRepository())
+
+    monkeypatch.setattr(onboarding, "_coordinator", coordinator)
+
+    with pytest.raises(onboarding.HTTPException) as error:
+        asyncio.run(
+            onboarding.ensure_onboarding(
+                onboarding.OnboardingEnsureRequest(),
+                BackgroundTasks(),
+                Response(),
+                uid="invited-user",
+            )
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail == {"code": "invitation_authority_required"}
+
 
 def test_disabled_status_allows_existing_retained_account(monkeypatch):
     class RetainedRepository:
         async def has_invitation_owned_self_hosted_runtime(self, uid):
             assert uid == "retained-user"
             return False
+
+        async def has_active_retained_runtime(self, uid):
+            assert uid == "retained-user"
+            return True
 
     async def retained_repository(**_kwargs):
         return RetainedRepository()
@@ -208,7 +261,19 @@ def test_disabled_status_allows_existing_retained_account(monkeypatch):
 
     result = asyncio.run(onboarding.onboarding_status(uid="retained-user"))
 
-    assert result == {"state": "ready", "binding_state": "active", "binding_revision": 1}
+    assert result["state"] == "ready"
+    assert result["binding_state"] == "active"
+    assert result["effective_policy_revision"] == "retained-compatibility-v1"
+
+    # The same retained account must remain ready when global provisioning is
+    # enabled, without consulting isolated invitation admission.
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    enabled = asyncio.run(onboarding.onboarding_status(uid="retained-user"))
+
+    assert enabled["state"] == "ready"
+    assert enabled["binding_state"] == "active"
+    assert enabled["effective_policy_revision"] == "retained-compatibility-v1"
 
     class InvitationRepository:
         async def assert_schema_ready(self):
@@ -482,6 +547,9 @@ def test_authority_rejection_precedes_identity_and_repository_side_effects(monke
 
         async def has_invitation_owned_self_hosted_runtime(self, uid):
             return bool(self.admission and self.admission["omi_uid"] == uid)
+
+        async def has_active_retained_runtime(self, _uid):
+            return False
 
         async def get_self_hosted_invitation_admission(self, uid):
             return self.admission if self.admission and self.admission["omi_uid"] == uid else None

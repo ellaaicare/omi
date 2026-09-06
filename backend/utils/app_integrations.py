@@ -1,5 +1,5 @@
 import threading
-from typing import List, Any
+from typing import List, Any, Optional
 from datetime import datetime
 import os
 import requests
@@ -85,7 +85,11 @@ def get_github_docs_content(repo="BasedHardware/omi", path="docs/doc"):
 # **************************************************
 
 
-def trigger_external_integrations(uid: str, conversation: Conversation) -> list:
+def trigger_external_integrations(
+    uid: str,
+    conversation: Conversation,
+    idempotency_key: Optional[str] = None,
+) -> list:
     """ON CONVERSATION CREATED"""
     if not conversation or conversation.discarded:
         return []
@@ -119,6 +123,7 @@ def trigger_external_integrations(uid: str, conversation: Conversation) -> list:
             response = requests.post(
                 url,
                 json=payload,
+                headers=({'Idempotency-Key': f'{idempotency_key}:{app.id}'} if idempotency_key else None),
                 timeout=30,
             )  # TODO: failing?
             if response.status_code != 200:
@@ -155,7 +160,15 @@ def trigger_external_integrations(uid: str, conversation: Conversation) -> list:
     for key, message in results.items():
         if not message:
             continue
-        messages.append(add_app_message(message, key, uid, conversation.id))
+        messages.append(
+            add_app_message(
+                message,
+                key,
+                uid,
+                conversation.id,
+                idempotency_key=f'{idempotency_key}:{key}' if idempotency_key else None,
+            )
+        )
     return messages
 
 
@@ -303,6 +316,7 @@ def _trigger_realtime_integrations(uid: str, segments: List[dict], conversation_
     mentor_results = {}
     if os.getenv("ELLA_MENTOR_NOTIFICATIONS_ENABLED"):
         from utils.mentor_notifications import process_mentor_notification
+
         mentor_notification = process_mentor_notification(uid, segments)
         if mentor_notification:
             mentor_app = App(
@@ -314,13 +328,12 @@ def _trigger_realtime_integrations(uid: str, segments: List[dict], conversation_
                 image='https://raw.githubusercontent.com/BasedHardware/Omi/main/assets/images/app_logo.png',
                 capabilities={'proactive_notification'},
                 enabled=True,
-                proactive_notification_scopes=['user_name', 'user_facts', 'user_context', 'user_chat']
+                proactive_notification_scopes=['user_name', 'user_facts', 'user_context', 'user_chat'],
             )
             mentor_message = _process_proactive_notification(uid, mentor_app, mentor_notification)
             if mentor_message:
                 mentor_results['mentor'] = mentor_message
                 print(f"Sent mentor notification to user {uid}")
-
 
     apps: List[App] = get_available_apps(uid)
     filtered_apps = [app for app in apps if app.triggers_realtime() and app.enabled]
