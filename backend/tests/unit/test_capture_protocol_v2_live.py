@@ -440,8 +440,23 @@ def test_terminal_authority_for_other_capture_rejects_ambiguous_drained_conversa
     authority['finalization_lease_expires_at'] = now + timedelta(seconds=30)
     variants.append((authority, conversation))
     authority, conversation = valid_documents()
+    authority['finalization_lease_expires_at'] = 'invalid'
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    authority['lease_expires_at'] = 'invalid'
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
     conversation['capture_state'] = 'active'
     conversation['capture_owner_id'] = None
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    authority['state'] = 'active'
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    authority['state'] = 'finalizing'
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    conversation['capture_state'] = 'finalizing'
     variants.append((authority, conversation))
     authority, conversation = valid_documents()
     conversation['capture_lease_expires_at'] = now + timedelta(seconds=30)
@@ -460,6 +475,18 @@ def test_terminal_authority_for_other_capture_rejects_ambiguous_drained_conversa
     variants.append((authority, conversation))
     authority, conversation = valid_documents()
     conversation['capture_finalization_lease_expires_at'] = now + timedelta(seconds=30)
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    conversation['capture_finalization_lease_expires_at'] = 'invalid'
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    authority['protocol_version'] = 1
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    conversation['capture_protocol_version'] = 1
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    conversation.pop('capture_generation')
     variants.append((authority, conversation))
     authority, conversation = valid_documents()
     conversation.pop('capture_owner_token')

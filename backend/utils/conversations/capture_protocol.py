@@ -156,6 +156,11 @@ def _strict_lease_expired(data: Dict[str, Any], now: datetime, field: str) -> bo
     return isinstance(expires_at, datetime) and _aware(expires_at) <= now
 
 
+def _optional_lease_absent_or_expired(data: Dict[str, Any], now: datetime, field: str) -> bool:
+    expires_at = data.get(field)
+    return expires_at is None or (isinstance(expires_at, datetime) and _aware(expires_at) <= now)
+
+
 def _durable_capture_side_is_quiescent(
     data: Dict[str, Any],
     now: datetime,
@@ -302,7 +307,7 @@ def _claim_reconnect_authority_transaction(
             )
             and _strict_lease_expired(authority, now, 'lease_expires_at')
             and not authority.get('finalization_claim_token')
-            and _lease_expired(
+            and _optional_lease_absent_or_expired(
                 authority,
                 now,
                 field='finalization_lease_expires_at',
@@ -318,7 +323,7 @@ def _claim_reconnect_authority_transaction(
             and conversation.get('capture_state') == 'drained'
             and _strict_lease_expired(conversation, now, 'capture_lease_expires_at')
             and not conversation.get('capture_finalization_claim_token')
-            and _lease_expired(
+            and _optional_lease_absent_or_expired(
                 conversation,
                 now,
                 field='capture_finalization_lease_expires_at',

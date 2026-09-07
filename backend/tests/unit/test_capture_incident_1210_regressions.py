@@ -771,6 +771,7 @@ def test_production_reconnect_path_does_not_let_overlapping_socket_steal_authori
 
 def test_production_reconnect_rotates_expired_drained_candidate_behind_terminal_authority():
     capture_protocol = _load_capture_protocol_module()
+    conversations = _load_conversations_module()
     now = datetime.now(timezone.utc)
 
     class Document:
@@ -797,29 +798,33 @@ def test_production_reconnect_rotates_expired_drained_candidate_behind_terminal_
             for ref, payload in self.updates:
                 ref.data.update(payload)
 
-    authority_ref = Document(
-        {
-            "protocol_version": 2,
-            "conversation_id": "completed-capture",
-            "generation": "completed-generation",
-            "owner_token": "completed-owner",
-            "state": "terminal",
-            "lease_expires_at": now - timedelta(minutes=5),
-        }
-    )
-    conversation_ref = Document(
-        {
-            "id": "drained-capture",
-            "status": "in_progress",
-            "capture_owner_id": None,
-            "capture_protocol_version": 2,
-            "capture_generation": "drained-generation",
-            "capture_owner_token": "drained-owner",
-            "capture_state": "drained",
-            "capture_lease_expires_at": now - timedelta(minutes=10),
-            "finished_at": now - timedelta(minutes=3),
-        }
-    )
+    completed_authority = {
+        "protocol_version": 2,
+        "conversation_id": "completed-capture",
+        "generation": "completed-generation",
+        "owner_token": "completed-owner",
+        "state": "terminal",
+        "lease_expires_at": now - timedelta(minutes=5),
+    }
+    authority_ref = Document(dict(completed_authority))
+    documents = {
+        "drained-capture": Document(
+            {
+                "id": "drained-capture",
+                "status": "in_progress",
+                "capture_owner_id": None,
+                "capture_protocol_version": 2,
+                "capture_generation": "drained-generation",
+                "capture_owner_token": "drained-owner",
+                "capture_state": "drained",
+                "capture_lease_expires_at": now - timedelta(minutes=10),
+                "finished_at": now - timedelta(minutes=3),
+                "transcript_segments": [{"id": "segment-a", "text": "fixture-content"}],
+                "photos": [],
+            }
+        )
+    }
+    preserved_segments = list(documents["drained-capture"].data["transcript_segments"])
 
     def claim_capture_authority_for_reconnect(
         _uid,
@@ -832,7 +837,7 @@ def test_production_reconnect_rotates_expired_drained_candidate_behind_terminal_
         claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
             transaction,
             authority_ref,
-            conversation_ref,
+            documents[conversation_id],
             conversation_id,
             generation,
             expected_owner_token,
@@ -843,26 +848,209 @@ def test_production_reconnect_rotates_expired_drained_candidate_behind_terminal_
             transaction.apply()
         return claimed
 
+    def install_capture_authority(
+        _uid,
+        conversation_id,
+        generation,
+        owner_token,
+        *,
+        expected_conversation_id=None,
+        adopt=False,
+    ):
+        transaction = Transaction()
+        installed = capture_protocol._install_authority_transaction.to_wrap(
+            transaction,
+            authority_ref,
+            documents[conversation_id],
+            conversation_id,
+            generation,
+            owner_token,
+            now,
+            expected_conversation_id,
+            documents.get(expected_conversation_id),
+            adopt,
+        )
+        if installed:
+            transaction.apply()
+        return installed
+
+    def complete_rotated_capture(_uid, conversation_id, generation, owner_token):
+        transaction = Transaction()
+        completed = capture_protocol._complete_rotated_capture_transaction.to_wrap(
+            transaction,
+            documents[conversation_id],
+            conversation_id,
+            generation,
+            owner_token,
+            now,
+        )
+        if completed:
+            transaction.apply()
+        return completed
+
     class Redis:
         def __init__(self):
-            self.claims = []
+            self.active_id = ""
+            self.owner_id = ""
 
         def get_in_progress_conversation_id(self, _uid):
-            return ""
+            return self.active_id
 
         def claim_in_progress_conversation_id(self, _uid, conversation_id, owner_token):
-            self.claims.append((conversation_id, owner_token))
+            if self.active_id and self.active_id != conversation_id:
+                return False
+            self.active_id = conversation_id
+            self.owner_id = owner_token
+            return True
+
+        def rotate_in_progress_conversation_id(
+            self,
+            _uid,
+            expected_conversation_id,
+            expected_owner_id,
+            new_conversation_id,
+            new_owner_id,
+        ):
+            if self.active_id != expected_conversation_id or self.owner_id != expected_owner_id:
+                return False
+            self.active_id = new_conversation_id
+            self.owner_id = new_owner_id or ""
             return True
 
         def replace_stale_in_progress_conversation_id(self, *_args):
-            raise AssertionError("the drained candidate must be claimed without replacing another id")
+            raise AssertionError("the exact drained candidate must be claimed in place")
+
+        def remove_conversation_meeting_id(self, *_args):
+            raise AssertionError("the OMI capture path must not create a meeting binding")
 
     redis = Redis()
-    rotations = []
+    deleted = []
+    processed = []
+
+    class Conversation:
+        def __init__(self, **values):
+            self.values = values
+
+        def dict(self):
+            return dict(self.values)
+
+    class ConversationRepository:
+        @staticmethod
+        def upsert_conversation(_uid, conversation_data):
+            documents[conversation_data["id"]] = Document(dict(conversation_data))
+
+        @staticmethod
+        def transfer_capture_conversation_owner(
+            _uid,
+            previous_conversation_id,
+            expected_previous_owner_id,
+            next_conversation_id,
+            next_owner_id,
+        ):
+            transaction = Transaction()
+            transferred = conversations._transfer_capture_conversation_owner_transaction(
+                transaction,
+                documents[previous_conversation_id],
+                documents[next_conversation_id],
+                expected_previous_owner_id,
+                next_owner_id,
+            )
+            if transferred:
+                transaction.apply()
+            return transferred
+
+        @staticmethod
+        def get_conversation(_uid, conversation_id):
+            return dict(documents[conversation_id].data)
+
+        @staticmethod
+        def delete_conversation(_uid, conversation_id, **_kwargs):
+            deleted.append(conversation_id)
+            documents.pop(conversation_id, None)
+
+        @staticmethod
+        def rollback_capture_conversation_owner_transfer(*_args):
+            raise AssertionError("the successful rotation must not roll back")
+
+        @staticmethod
+        def abandon_capture_conversation_if_owned(*_args):
+            raise AssertionError("the successful rotation must not abandon a conversation")
+
+    repository = ConversationRepository()
+    ready_receipts = []
+
+    class ReadyEvent:
+        def __init__(self, **values):
+            self.values = values
+
+    async def send_ready(event):
+        ready_receipts.append(dict(event.values))
+        return True
+
+    publish_ready_impl = _nested_function(
+        "routers/transcribe.py",
+        "_publish_capture_protocol_ready",
+        {
+            "CAPTURE_PROTOCOL_VERSION": 2,
+            "MessageServiceStatusEvent": ReadyEvent,
+            "install_capture_authority": install_capture_authority,
+        },
+        {
+            "_asend_message_event": send_ready,
+            "_latency_log": lambda *_args, **_kwargs: None,
+            "generation_id": "replacement-generation",
+            "owner_token": "replacement-owner",
+            "uid": "uid-a",
+            "websocket_active": True,
+            "websocket_close_code": 1000,
+        },
+    )
+
+    async def publish_ready(conversation_id, *, expected_conversation_id=None, adopt=False):
+        return await publish_ready_impl(
+            conversation_id,
+            expected_conversation_id=expected_conversation_id,
+            adopt=adopt,
+        )
+
+    create_stub = _nested_function(
+        "routers/transcribe.py",
+        "_create_new_in_progress_conversation",
+        {
+            "Conversation": Conversation,
+            "ConversationSource": SimpleNamespace(omi="omi", desktop="desktop"),
+            "ConversationStatus": SimpleNamespace(in_progress="in_progress"),
+            "Structured": dict,
+            "calendar_db": SimpleNamespace(get_meetings_in_time_range=lambda *_args: []),
+            "conversations_db": repository,
+            "datetime": datetime,
+            "redis_db": redis,
+            "timedelta": timedelta,
+            "timezone": timezone,
+            "uuid": SimpleNamespace(uuid4=lambda: "fresh-capture"),
+        },
+        {
+            "_publish_capture_protocol_ready": publish_ready,
+            "current_conversation_id": None,
+            "language": "en",
+            "private_cloud_sync_enabled": False,
+            "session_id": "replacement-owner",
+            "source": None,
+            "uid": "uid-a",
+            "websocket_active": True,
+        },
+    )
 
     async def create_new_in_progress_conversation(**kwargs):
-        rotations.append(kwargs)
-        return True
+        options = {
+            "expected_conversation_id": None,
+            "expected_owner_id": None,
+            "replace_stale_conversation_id": None,
+            "new_owner_id": "replacement-owner",
+            "adopt": True,
+        }
+        options.update(kwargs)
+        return await create_stub(**options)
 
     prepare = _nested_function(
         "routers/transcribe.py",
@@ -870,19 +1058,17 @@ def test_production_reconnect_rotates_expired_drained_candidate_behind_terminal_
         {
             "asyncio": asyncio,
             "claim_capture_authority_for_reconnect": claim_capture_authority_for_reconnect,
-            "conversations_db": SimpleNamespace(),
+            "conversations_db": repository,
             "datetime": datetime,
             "drain_capture_persistence_batches": lambda *_args: None,
             "mark_capture_drained": lambda *_args: True,
             "redis_db": redis,
-            "retrieve_in_progress_conversation": lambda _uid: dict(conversation_ref.data),
+            "retrieve_in_progress_conversation": lambda _uid: dict(documents["drained-capture"].data),
             "timezone": timezone,
         },
         {
             "_create_new_in_progress_conversation": create_new_in_progress_conversation,
-            "_publish_capture_protocol_ready": lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("the expired capture must rotate before a ready receipt is published")
-            ),
+            "_publish_capture_protocol_ready": publish_ready,
             "capture_recovery_conversation_ids": set(),
             "conversation_creation_timeout": 120,
             "current_conversation_id": None,
@@ -893,16 +1079,63 @@ def test_production_reconnect_rotates_expired_drained_candidate_behind_terminal_
     )
 
     assert asyncio.run(prepare()) == "drained-capture"
-    assert redis.claims == [("drained-capture", "replacement-owner")]
-    assert rotations == [
+    assert redis.active_id == "fresh-capture"
+    assert redis.owner_id == "replacement-owner"
+    assert ready_receipts == [
         {
-            "expected_conversation_id": "drained-capture",
-            "expected_owner_id": "replacement-owner",
+            "status": "capture_protocol_ready",
+            "protocol_version": 2,
+            "conversation_id": "fresh-capture",
+            "generation": "replacement-generation",
+            "owner_token": "replacement-owner",
         }
     ]
-    assert authority_ref.data["conversation_id"] == "drained-capture"
+    assert authority_ref.data["conversation_id"] == "fresh-capture"
     assert authority_ref.data["generation"] == "replacement-generation"
-    assert conversation_ref.data["capture_owner_id"] == "replacement-owner"
+    assert authority_ref.data["state"] == "active"
+    assert documents["fresh-capture"].data["capture_state"] == "active"
+    assert documents["drained-capture"].data["capture_state"] == "drained"
+
+    async def process_fallback(conversation):
+        processed.append(conversation["id"])
+        documents[conversation["id"]].data["status"] = "completed"
+
+    async def buffers_drained(_conversation_id):
+        return True
+
+    async def unused_provider_processing(_conversation_id):
+        raise AssertionError("local processing is required for this regression")
+
+    process = _nested_function(
+        "routers/transcribe.py",
+        "_process_conversation",
+        {
+            "PUSHER_ENABLED": False,
+            "complete_rotated_capture": complete_rotated_capture,
+            "conversations_db": repository,
+            "drain_capture_persistence_batches": lambda *_args: None,
+        },
+        {
+            "_create_conversation_fallback": process_fallback,
+            "_latency_log": lambda *_args, **_kwargs: None,
+            "_wait_for_capture_buffers_to_drain": buffers_drained,
+            "generation_id": "replacement-generation",
+            "on_conversation_processing_started": lambda *_args: None,
+            "owner_token": "replacement-owner",
+            "request_conversation_processing": unused_provider_processing,
+            "session_id": "replacement-owner",
+            "uid": "uid-a",
+        },
+    )
+
+    assert asyncio.run(process("drained-capture", wait_for_buffers=True)) is True
+    assert processed == ["drained-capture"]
+    assert deleted == []
+    assert documents["drained-capture"].data["transcript_segments"] == preserved_segments
+    assert documents["drained-capture"].data["status"] == "completed"
+    assert documents["drained-capture"].data["capture_state"] == "terminal"
+    assert authority_ref.data["conversation_id"] == "fresh-capture"
+    assert completed_authority["conversation_id"] == "completed-capture"
 
 
 def test_failed_stub_publication_abandons_only_the_still_owned_firestore_generation():
