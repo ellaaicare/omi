@@ -254,6 +254,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   MemoryArtworkLibraries? _homeArtworkLibraries;
   MemoryArtworkQueueStatus? _homeArtworkQueueStatus;
   BtDevice? _resumeNecklaceAfterPhoneCapture;
+  bool _resumeNecklaceWithFreshSessionAfterPhoneCapture = false;
   EllaCaptureSource? _selectedCaptureSource;
 
   static const _artworkBackfillComplete = '__complete__';
@@ -357,6 +358,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _homeCaptureAuthorityGeneration++;
     final authorityGeneration = _homeCaptureAuthorityGeneration;
     _resumeNecklaceAfterPhoneCapture = null;
+    _resumeNecklaceWithFreshSessionAfterPhoneCapture = false;
     _externalCaptureFinalizationSource = null;
     _todayCardController.invalidateAuthority();
     _homeArtworkBackfillPollTimer?.cancel();
@@ -1411,13 +1413,18 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
 
   Future<void> _resumeAmbientNecklace() async {
     final device = _resumeNecklaceAfterPhoneCapture;
+    final forceFreshBleSession = _resumeNecklaceWithFreshSessionAfterPhoneCapture;
     _resumeNecklaceAfterPhoneCapture = null;
+    _resumeNecklaceWithFreshSessionAfterPhoneCapture = false;
     if (device == null || !mounted) return;
     final deviceProvider = context.read<DeviceProvider>();
     final currentDevice = deviceProvider.presentationConnectedDevice;
     if (currentDevice?.id != device.id) return;
     try {
-      await deviceProvider.reconnectKnownDeviceForCapture(reason: 'resume after iPhone capture');
+      await deviceProvider.reconnectKnownDeviceForCapture(
+        reason: 'resume after iPhone capture',
+        forceFreshBleSession: forceFreshBleSession,
+      );
     } catch (_) {
       // The phone-owned moment is already finalized. Necklace recovery remains
       // visible through device status and must not turn that successful action
@@ -1631,6 +1638,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       if (necklaceTransportOwned) {
         if (necklaceConnected && connectedDevice != null) {
           _resumeNecklaceAfterPhoneCapture = connectedDevice;
+          final failure = capture.captureDiagnostics.failure;
+          _resumeNecklaceWithFreshSessionAfterPhoneCapture =
+              failure == CaptureDiagnosticFailure.necklaceAudioSubscriptionUnavailable ||
+                  failure == CaptureDiagnosticFailure.physicalAudioUnavailable ||
+                  failure == CaptureDiagnosticFailure.necklaceConnectionUnavailable;
         }
         if (capture.recordingState == RecordingState.deviceRecord || capture.recordingState == RecordingState.pause) {
           final hadCapturableContent = capture.captureDiagnostics.hasPhysicalAudio || capture.hasCapturableContent;

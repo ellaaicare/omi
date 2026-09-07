@@ -416,7 +416,7 @@ class _FakeDeviceProvider extends DeviceProvider {
   int reconnects = 0;
 
   @override
-  Future<bool> reconnectKnownDeviceForCapture({required String reason}) async {
+  Future<bool> reconnectKnownDeviceForCapture({required String reason, bool forceFreshBleSession = false}) async {
     reconnects++;
     return true;
   }

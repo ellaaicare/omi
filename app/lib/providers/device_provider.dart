@@ -803,7 +803,10 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   /// capture transport is active. Unlike the background watchdog, this is a
   /// user-initiated operation and also repairs a connected BLE session whose
   /// audio capture failed to start.
-  Future<bool> reconnectKnownDeviceForCapture({required String reason}) async {
+  Future<bool> reconnectKnownDeviceForCapture({
+    required String reason,
+    bool forceFreshBleSession = false,
+  }) async {
     if (!_deviceServiceReady) return false;
     final stored = _rememberedDeviceForCurrentAuthority();
     if (stored == null) return false;
@@ -816,11 +819,13 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     _automaticReconnectCooldownUntil = null;
     _automaticReconnectExhausted = false;
     updateConnectingStatus(true);
+    var reconnectFailed = false;
 
     try {
       final activeDevice = connectedDevice;
       final failure = captureProvider?.captureDiagnostics.failure;
-      final requiresFreshBleSession = failure == CaptureDiagnosticFailure.necklaceAudioSubscriptionUnavailable ||
+      final requiresFreshBleSession = forceFreshBleSession ||
+          failure == CaptureDiagnosticFailure.necklaceAudioSubscriptionUnavailable ||
           failure == CaptureDiagnosticFailure.physicalAudioUnavailable ||
           failure == CaptureDiagnosticFailure.necklaceConnectionUnavailable;
       if (requiresFreshBleSession && isConnected && activeDevice?.id == stored.id) {
@@ -834,6 +839,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         await scanAndConnectToDevice(operationGeneration: generation, startCaptureWhenConnected: true);
       }
     } catch (error) {
+      reconnectFailed = true;
       Logger.debug('User-initiated necklace reconnect failed ($reason): $error');
     } finally {
       if (_isDeviceOperationCurrent(generation)) updateConnectingStatus(false);
@@ -843,7 +849,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     final captureReady = isConnected &&
         connectedDevice?.id == stored.id &&
         captureProvider?.recordingState == RecordingState.deviceRecord;
-    if (!captureReady && !isConnected) {
+    if (!captureReady && !isConnected && !reconnectFailed) {
       unawaited(periodicConnect('$reason follow-up', boundDeviceOnly: true, operationGeneration: generation));
     }
     return captureReady;
@@ -857,8 +863,20 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     _clearDeferredDeviceCapture();
 
     final teardown = _teardownCaptureForDevice(stored.id);
-    await _deviceService.disconnectDevice();
-    await teardown;
+    Object? resetFailure;
+    StackTrace? resetFailureStack;
+    try {
+      await _deviceService.disconnectDevice();
+    } catch (error, stack) {
+      resetFailure = error;
+      resetFailureStack = stack;
+    }
+    try {
+      await teardown;
+    } catch (error, stack) {
+      resetFailure ??= error;
+      resetFailureStack ??= stack;
+    }
     if (!_isDeviceOperationCurrent(generation)) return;
 
     connectedDevice = null;
@@ -867,6 +885,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     isDeviceStorageSupport = false;
     batteryLevel = -1;
     notifyListeners();
+    if (resetFailure != null) Error.throwWithStackTrace(resetFailure, resetFailureStack!);
   }
 
   /// Commits the one explicit Home confirmation for a device saved by builds

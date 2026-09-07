@@ -431,6 +431,7 @@ void main() {
 
     expect(harness.capture.phoneStops, 1);
     expect(device.reconnects, 1);
+    expect(device.freshSessionRequests, [isFalse]);
     expect(harness.capture.deviceStarts, 1);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
@@ -482,6 +483,7 @@ void main() {
     expect(harness.capture.phoneStops, 1, reason: 'retry must not stop the phone transport twice');
     expect(harness.capture.finalizationCalls, 3);
     expect(device.reconnects, 1);
+    expect(device.freshSessionRequests, [isFalse]);
     expect(harness.capture.deviceStarts, 1, reason: 'ambient necklace resumes only after the phone moment succeeds');
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
@@ -737,10 +739,18 @@ void main() {
       conversations: const [],
       device: device,
       initialRecordingState: RecordingState.error,
+      initialCaptureDiagnostics: const CaptureDiagnostics(
+        source: CaptureDiagnosticSource.necklace,
+        phase: CaptureDiagnosticPhase.failed,
+        failure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+      ),
     );
     addTearDown(harness.dispose);
     device.capture = harness.capture;
 
+    expect(find.text('Necklace recording needs attention'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('today-capture-source-phone')));
+    await tester.pump();
     expect(find.text('iPhone recording needs attention'), findsOneWidget);
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
@@ -756,6 +766,12 @@ void main() {
 
     expect(harness.capture.phoneStops, 1);
     expect(device.reconnects, 1);
+    expect(device.freshSessionRequests, [isTrue]);
+    expect(
+      harness.capture.captureDiagnostics.source,
+      CaptureDiagnosticSource.phone,
+      reason: 'the stale-session decision must survive phone diagnostics replacing the necklace failure',
+    );
     expect(harness.capture.deviceStarts, 1);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
@@ -882,6 +898,7 @@ void main() {
     expect(harness.capture.deviceStops, 1);
     expect(harness.capture.phoneStarts, 1);
     expect(device.reconnects, 1);
+    expect(device.freshSessionRequests, [isFalse]);
     expect(harness.capture.deviceStarts, 1);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
     expect(find.text('Necklace is recording · iPhone selected'), findsOneWidget);
@@ -2167,11 +2184,14 @@ class _ReconnectTrackingDeviceProvider extends DeviceProvider {
   int reconnects = 0;
 
   @override
-  Future<bool> reconnectKnownDeviceForCapture({required String reason}) async {
+  Future<bool> reconnectKnownDeviceForCapture({required String reason, bool forceFreshBleSession = false}) async {
     reconnects++;
+    freshSessionRequests.add(forceFreshBleSession);
     await capture?.streamDeviceRecording(device: presentationConnectedDevice);
     return true;
   }
+
+  final List<bool> freshSessionRequests = [];
 }
 
 class _MutableExactAuthority implements ExactAccountAuthorityVerifier {
@@ -2475,6 +2495,7 @@ Future<_HomeHarness> _pumpHome(
   bool captureHasDeviceBoundaryEvidence = false,
   List<bool> finalizationResults = const [],
   Completer<void>? finalizationGate,
+  CaptureDiagnostics? initialCaptureDiagnostics,
   TodayCardTalkRouteOpener? todayCardTalkRouteOpener,
   List<ActionItemWithMetadata> actionItems = const [],
   List<List<ServerConversation>> olderConversationPages = const [],
@@ -2496,6 +2517,7 @@ Future<_HomeHarness> _pumpHome(
     hasDeviceBoundaryEvidence: captureHasDeviceBoundaryEvidence,
     finalizationResults: finalizationResults,
     finalizationGate: finalizationGate,
+    captureDiagnosticsOverride: initialCaptureDiagnostics,
   );
   final actionItemsProvider = _FixtureActionsProvider(actionItems);
   final conversationProvider = _FixtureConversationProvider(
@@ -2663,6 +2685,7 @@ class _FakeCaptureProvider extends CaptureProvider {
     required this.hasDeviceBoundaryEvidence,
     required List<bool> finalizationResults,
     this.finalizationGate,
+    this.captureDiagnosticsOverride,
   }) : finalizationResults = List<bool>.of(finalizationResults) {
     recordingState = initialState;
   }
@@ -2673,6 +2696,7 @@ class _FakeCaptureProvider extends CaptureProvider {
   final bool hasDeviceBoundaryEvidence;
   final List<bool> finalizationResults;
   final Completer<void>? finalizationGate;
+  CaptureDiagnostics? captureDiagnosticsOverride;
 
   int phoneStarts = 0;
   int phoneStops = 0;
@@ -2682,6 +2706,9 @@ class _FakeCaptureProvider extends CaptureProvider {
   int finishes = 0;
   int finalizationCalls = 0;
   int finalContentChecks = 0;
+
+  @override
+  CaptureDiagnostics get captureDiagnostics => captureDiagnosticsOverride ?? super.captureDiagnostics;
 
   @override
   bool get hasCapturableContent => hasContent;
@@ -2723,6 +2750,12 @@ class _FakeCaptureProvider extends CaptureProvider {
   @override
   Future<PhoneCaptureStartResult> streamRecording() async {
     phoneStarts++;
+    if (captureDiagnosticsOverride != null) {
+      captureDiagnosticsOverride = const CaptureDiagnostics(
+        source: CaptureDiagnosticSource.phone,
+        phase: CaptureDiagnosticPhase.streaming,
+      );
+    }
     updateRecordingState(
       phoneStartResult == PhoneCaptureStartResult.started ? RecordingState.record : RecordingState.stop,
     );

@@ -31,6 +31,7 @@ class _FakeDeviceService implements IDeviceService {
   DeviceServiceStatus status;
   int ensureConnectionCalls = 0;
   int disconnectCalls = 0;
+  Object? disconnectError;
   final Map<Object, IDeviceServiceSubsciption> _subscriptions = {};
 
   void publish(DeviceServiceStatus next) {
@@ -79,6 +80,8 @@ class _FakeDeviceService implements IDeviceService {
   @override
   Future<void> disconnectDevice() async {
     disconnectCalls++;
+    final error = disconnectError;
+    if (error != null) throw error;
   }
 }
 
@@ -879,6 +882,63 @@ void main() {
     expect(service.disconnectCalls, 0);
     expect(capture.deviceStarts, 1);
     expect(capture.recordingState, RecordingState.deviceRecord);
+  });
+
+  test('failed native disconnect joins capture teardown and leaves explicit retry usable', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final disconnectGate = Completer<void>();
+    final service = _FakeDeviceService(DeviceServiceStatus.ready)
+      ..disconnectError = StateError('synthetic native disconnect failure');
+    final capture = _RecordingCaptureProvider(
+      disconnectGate: disconnectGate,
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+    )..updateRecordingState(RecordingState.error);
+    var scans = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scans++;
+        return necklace;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      deviceCaptureRetryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+    provider
+      ..connectedDevice = necklace
+      ..pairedDevice = necklace
+      ..setIsConnected(true);
+
+    var firstRetryCompleted = false;
+    final firstRetry = provider
+        .reconnectKnownDeviceForCapture(reason: 'test native disconnect failure', forceFreshBleSession: true)
+        .whenComplete(() => firstRetryCompleted = true);
+    await pumpEventQueue();
+
+    expect(capture.disconnectedDeviceIds, [necklace.id]);
+    expect(firstRetryCompleted, isFalse, reason: 'native failure must not release the capture teardown early');
+    expect(provider.isConnecting, isTrue);
+
+    disconnectGate.complete();
+    expect(await firstRetry, isFalse);
+    expect(provider.isConnecting, isFalse);
+    expect(provider.presentationIsConnected, isFalse);
+    expect(provider.presentationConnectedDevice, isNull);
+    expect(scans, 0, reason: 'a failed reset must not start a hidden reconnect attempt');
+
+    service.disconnectError = null;
+    final recovered = await provider.reconnectKnownDeviceForCapture(reason: 'test retry after native failure');
+    await pumpEventQueue();
+
+    expect(recovered, isTrue);
+    expect(scans, 1);
+    expect(capture.deviceStarts, 1);
+    expect(provider.presentationConnectedDevice?.id, necklace.id);
+    expect(provider.isConnecting, isFalse);
   });
 
   test('in-flight connected resolution cannot repopulate after stop', () async {
