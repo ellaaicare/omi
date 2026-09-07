@@ -216,6 +216,11 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         requirement.authorityGeneration == _rememberedDeviceAuthorityGeneration;
   }
 
+  bool _hasPendingFreshBleSessionRequirement() {
+    final device = _rememberedDeviceForCurrentAuthority();
+    return device != null && _requiresFreshBleSessionFor(device);
+  }
+
   void _markFreshBleSessionRequired(BtDevice device) {
     final ownerBinding = _rememberedDeviceOwnerBinding();
     if (ownerBinding == null) return;
@@ -315,7 +320,9 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
 
   Future<void> _resumeBoundDeviceAfterTeardown(int generation) async {
     await _captureTeardown;
-    if (!_isDeviceOperationCurrent(generation) || pairedDevice == null) return;
+    if (!_isDeviceOperationCurrent(generation) || pairedDevice == null || _hasPendingFreshBleSessionRequirement()) {
+      return;
+    }
     await periodicConnect('device service resumed', boundDeviceOnly: true, operationGeneration: generation);
   }
 
@@ -609,11 +616,16 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     final generation = operationGeneration ?? _deviceOperationGeneration;
     if (!_isDeviceOperationCurrent(generation)) return;
     _reconnectionTimer?.cancel();
+    if (_hasPendingFreshBleSessionRequirement()) return;
     _automaticReconnectAttempts = 0;
     _automaticReconnectExhausted = false;
     _automaticReconnectCooldownUntil = null;
     scan(t) async {
       if (!_isDeviceOperationCurrent(generation)) {
+        t.cancel();
+        return;
+      }
+      if (_hasPendingFreshBleSessionRequirement()) {
         t.cancel();
         return;
       }
@@ -817,9 +829,9 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   Future<void> resumeKnownDeviceConnection({required String reason}) async {
     if (!_deviceServiceReady || isConnected) return;
     final stored = _rememberedDeviceForCurrentAuthority();
-    if (stored == null) return;
+    if (stored == null || _requiresFreshBleSessionFor(stored)) return;
     await _captureTeardown;
-    if (!_deviceServiceReady || isConnected) return;
+    if (!_deviceServiceReady || isConnected || _requiresFreshBleSessionFor(stored)) return;
     final generation = ++_deviceOperationGeneration;
     pairedDevice = stored;
     _automaticReconnectCooldownUntil = null;

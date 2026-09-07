@@ -890,7 +890,7 @@ void main() {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await bindRememberedDeviceForCurrentTestAuthority(necklace);
     final disconnectGate = Completer<void>();
-    final service = _FakeDeviceService(DeviceServiceStatus.ready)
+    final service = _FakeDeviceService(DeviceServiceStatus.init)
       ..disconnectError = StateError('synthetic native disconnect failure')
       ..nativeSessionRetained = true;
     final capture = _RecordingCaptureProvider(
@@ -907,7 +907,6 @@ void main() {
       connectionResolver: (_) async => necklace,
       storageListResolver: (_) async => const [],
       deviceCaptureRetryDelay: Duration.zero,
-      automaticallyReconnectOnReady: false,
     )..setProviders(capture);
     addTearDown(provider.dispose);
     addTearDown(capture.dispose);
@@ -915,6 +914,9 @@ void main() {
       ..connectedDevice = necklace
       ..pairedDevice = necklace
       ..setIsConnected(true);
+    service.publish(DeviceServiceStatus.ready);
+    await pumpEventQueue();
+    expect(scans, 0, reason: 'the initial ready event must preserve the connected session');
 
     var firstRetryCompleted = false;
     final firstRetry = provider
@@ -933,6 +935,15 @@ void main() {
     expect(provider.presentationConnectedDevice, isNull);
     expect(service.nativeSessionRetained, isTrue, reason: 'the failed native disconnect retains the stale session');
     expect(scans, 0, reason: 'a failed reset must not start a hidden reconnect attempt');
+
+    service.publish(DeviceServiceStatus.ready);
+    provider.didChangeAppLifecycleState(AppLifecycleState.resumed);
+    await pumpEventQueue();
+
+    expect(scans, 0, reason: 'service-ready and app-resume must not reuse a retained native session');
+    expect(service.ensureConnectionCalls, 0);
+    expect(capture.deviceStarts, 0);
+    expect(service.disconnectCalls, 1, reason: 'automatic recovery must wait for explicit user retry');
 
     service.disconnectError = null;
     final recovered = await provider.reconnectKnownDeviceForCapture(reason: 'test retry after native failure');
