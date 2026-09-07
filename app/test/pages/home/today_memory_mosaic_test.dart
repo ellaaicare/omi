@@ -404,7 +404,7 @@ void main() {
   ) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
-    final device = DeviceProvider()
+    final device = _ReconnectTrackingDeviceProvider()
       ..pairedDevice = necklace
       ..connectedDevice = necklace
       ..isConnected = true;
@@ -415,6 +415,7 @@ void main() {
       initialRecordingState: RecordingState.deviceRecord,
     );
     addTearDown(harness.dispose);
+    device.capture = harness.capture;
 
     expect(find.text('Necklace is recording · iPhone selected'), findsOneWidget);
     await tester.tap(find.byKey(const Key('today-record-moment')));
@@ -429,6 +430,7 @@ void main() {
     await tester.pump();
 
     expect(harness.capture.phoneStops, 1);
+    expect(device.reconnects, 1);
     expect(harness.capture.deviceStarts, 1);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
@@ -438,7 +440,7 @@ void main() {
   ) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
-    final device = DeviceProvider()
+    final device = _ReconnectTrackingDeviceProvider()
       ..pairedDevice = necklace
       ..connectedDevice = necklace
       ..isConnected = true;
@@ -450,6 +452,7 @@ void main() {
       finalizationResults: [true, false, true],
     );
     addTearDown(harness.dispose);
+    device.capture = harness.capture;
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
@@ -478,6 +481,7 @@ void main() {
     expect(harness.capture.phoneStarts, 1, reason: 'retry must not create a replacement phone capture');
     expect(harness.capture.phoneStops, 1, reason: 'retry must not stop the phone transport twice');
     expect(harness.capture.finalizationCalls, 3);
+    expect(device.reconnects, 1);
     expect(harness.capture.deviceStarts, 1, reason: 'ambient necklace resumes only after the phone moment succeeds');
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
@@ -724,7 +728,7 @@ void main() {
 
   testWidgets('necklace transport error is cleaned before an iPhone retry', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
-    final device = DeviceProvider()
+    final device = _ReconnectTrackingDeviceProvider()
       ..pairedDevice = necklace
       ..connectedDevice = necklace
       ..isConnected = true;
@@ -735,6 +739,7 @@ void main() {
       initialRecordingState: RecordingState.error,
     );
     addTearDown(harness.dispose);
+    device.capture = harness.capture;
 
     expect(find.text('iPhone recording needs attention'), findsOneWidget);
     await tester.tap(find.byKey(const Key('today-record-moment')));
@@ -750,6 +755,7 @@ void main() {
     await tester.pump();
 
     expect(harness.capture.phoneStops, 1);
+    expect(device.reconnects, 1);
     expect(harness.capture.deviceStarts, 1);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
@@ -856,7 +862,7 @@ void main() {
 
   testWidgets('failed phone start restores the ambient necklace stream', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
-    final device = DeviceProvider()
+    final device = _ReconnectTrackingDeviceProvider()
       ..pairedDevice = necklace
       ..connectedDevice = necklace
       ..isConnected = true;
@@ -868,12 +874,14 @@ void main() {
       phoneStartResult: PhoneCaptureStartResult.transcriptionUnavailable,
     );
     addTearDown(harness.dispose);
+    device.capture = harness.capture;
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
 
     expect(harness.capture.deviceStops, 1);
     expect(harness.capture.phoneStarts, 1);
+    expect(device.reconnects, 1);
     expect(harness.capture.deviceStarts, 1);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
     expect(find.text('Necklace is recording · iPhone selected'), findsOneWidget);
@@ -2151,6 +2159,18 @@ class _HomeHarness {
     device.dispose();
     home.dispose();
     authorityChanges.dispose();
+  }
+}
+
+class _ReconnectTrackingDeviceProvider extends DeviceProvider {
+  CaptureProvider? capture;
+  int reconnects = 0;
+
+  @override
+  Future<bool> reconnectKnownDeviceForCapture({required String reason}) async {
+    reconnects++;
+    await capture?.streamDeviceRecording(device: presentationConnectedDevice);
+    return true;
   }
 }
 

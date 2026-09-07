@@ -1325,7 +1325,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       final isCurrent = authorityGeneration == _homeCaptureAuthorityGeneration;
       if (finalized && isCurrent && mounted) {
         if (source == _HomeCaptureSource.phone) {
-          await _resumeAmbientNecklace(capture);
+          await _resumeAmbientNecklace();
         }
         if (!mounted || authorityGeneration != _homeCaptureAuthorityGeneration) return false;
         setState(() {
@@ -1379,7 +1379,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (transportFinalized != null) {
       if (transportFinalized) {
         if (source == _HomeCaptureSource.phone) {
-          await _resumeAmbientNecklace(capture);
+          await _resumeAmbientNecklace();
         }
         if (!mounted || authorityGeneration != _homeCaptureAuthorityGeneration) return false;
         if (mounted) {
@@ -1409,14 +1409,15 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     return finalized && isCurrent;
   }
 
-  Future<void> _resumeAmbientNecklace(CaptureProvider capture) async {
+  Future<void> _resumeAmbientNecklace() async {
     final device = _resumeNecklaceAfterPhoneCapture;
     _resumeNecklaceAfterPhoneCapture = null;
     if (device == null || !mounted) return;
-    final currentDevice = context.read<DeviceProvider>().presentationConnectedDevice;
+    final deviceProvider = context.read<DeviceProvider>();
+    final currentDevice = deviceProvider.presentationConnectedDevice;
     if (currentDevice?.id != device.id) return;
     try {
-      await capture.streamDeviceRecording(device: currentDevice);
+      await deviceProvider.reconnectKnownDeviceForCapture(reason: 'resume after iPhone capture');
     } catch (_) {
       // The phone-owned moment is already finalized. Necklace recovery remains
       // visible through device status and must not turn that successful action
@@ -1660,13 +1661,13 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         _homeCaptureSource = started ? _HomeCaptureSource.phone : null;
       });
       if (!started) {
-        await _resumeAmbientNecklace(capture);
+        await _resumeAmbientNecklace();
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_phoneCaptureFailureMessage(result))));
       }
     } catch (_) {
       if (!mounted) return;
-      await _resumeAmbientNecklace(capture);
+      await _resumeAmbientNecklace();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
     } finally {

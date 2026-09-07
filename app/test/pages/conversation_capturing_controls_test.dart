@@ -105,6 +105,34 @@ void main() {
     expect(find.byKey(const Key('conversation-capture-error-close')), findsOneWidget);
   });
 
+  testWidgets('necklace recovery remains scrollable at large text and constrained height', (tester) async {
+    tester.view.physicalSize = const Size(320, 480);
+    tester.view.devicePixelRatio = 1;
+    tester.platformDispatcher.textScaleFactorTestValue = 2;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    final capture = _FakeCaptureProvider(
+      RecordingState.error,
+      transcriptReady: false,
+      diagnostics: const CaptureDiagnostics(
+        source: CaptureDiagnosticSource.necklace,
+        phase: CaptureDiagnosticPhase.failed,
+        failure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+      ),
+    );
+    await _pumpCapturePage(tester, capture, preferredCaptureSource: EllaCaptureSource.necklace);
+
+    expect(tester.takeException(), isNull);
+    expect(find.byType(SingleChildScrollView), findsOneWidget);
+    await tester.ensureVisible(find.byKey(const Key('conversation-capture-error-close')));
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.byKey(const Key('conversation-capture-error-close')));
+    await tester.pumpAndSettle();
+    expect(find.byType(ConversationCapturingPage), findsNothing);
+  });
+
   testWidgets('phone diagnostics outrank a retained necklace reference during Retry', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final capture = _FakeCaptureProvider(

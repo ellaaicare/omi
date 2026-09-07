@@ -896,55 +896,60 @@ class _CaptureErrorRecovery extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
+    return LayoutBuilder(
+      builder: (context, constraints) => SingleChildScrollView(
         padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            EllaCardSurface(
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    const Icon(Icons.mic_off_outlined, color: EllaColors.error, size: 36),
-                    const SizedBox(height: 12),
-                    Text(
-                      context.l10n.todayRecordingUnavailable,
-                      textAlign: TextAlign.center,
-                      style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w700),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: constraints.maxHeight > 48 ? constraints.maxHeight - 48 : 0),
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                EllaCardSurface(
+                  child: Padding(
+                    padding: const EdgeInsets.all(20),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const Icon(Icons.mic_off_outlined, color: EllaColors.error, size: 36),
+                        const SizedBox(height: 12),
+                        Text(
+                          context.l10n.todayRecordingUnavailable,
+                          textAlign: TextAlign.center,
+                          style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w700),
+                        ),
+                        const SizedBox(height: 16),
+                        FilledButton.icon(
+                          key: Key(
+                            source == EllaCaptureSource.necklace
+                                ? 'conversation-capture-retry-necklace'
+                                : 'conversation-capture-retry-phone',
+                          ),
+                          onPressed: onRetry,
+                          icon: Icon(
+                            source == EllaCaptureSource.necklace
+                                ? Icons.bluetooth_searching_rounded
+                                : Icons.mic_none_rounded,
+                          ),
+                          label: Text(context.l10n.tryAgain),
+                        ),
+                        TextButton(
+                          key: const Key('conversation-capture-error-close'),
+                          onPressed: onClose,
+                          style: TextButton.styleFrom(foregroundColor: EllaColors.tealDeep),
+                          child: Text(context.l10n.close),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 16),
-                    FilledButton.icon(
-                      key: Key(
-                        source == EllaCaptureSource.necklace
-                            ? 'conversation-capture-retry-necklace'
-                            : 'conversation-capture-retry-phone',
-                      ),
-                      onPressed: onRetry,
-                      icon: Icon(
-                        source == EllaCaptureSource.necklace
-                            ? Icons.bluetooth_searching_rounded
-                            : Icons.mic_none_rounded,
-                      ),
-                      label: Text(context.l10n.tryAgain),
-                    ),
-                    TextButton(
-                      key: const Key('conversation-capture-error-close'),
-                      onPressed: onClose,
-                      style: TextButton.styleFrom(foregroundColor: EllaColors.tealDeep),
-                      child: Text(context.l10n.close),
-                    ),
-                  ],
+                  ),
                 ),
-              ),
+                const SizedBox(height: 12),
+                CaptureDiagnosticsPanel(diagnostics: diagnostics),
+              ],
             ),
-            const SizedBox(height: 12),
-            CaptureDiagnosticsPanel(diagnostics: diagnostics),
-          ],
+          ),
         ),
       ),
     );
