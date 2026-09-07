@@ -250,6 +250,283 @@ def test_expired_authority_recovers_conversation_after_clean_drain(capture_proto
     assert _updated(conversation, transaction, conversation_ref)['capture_owner_id'] == 'owner-b'
 
 
+def test_terminal_authority_for_other_capture_reclaims_expired_drained_conversation(capture_protocol):
+    now = datetime.now(timezone.utc)
+    authority = _authority(
+        conversation_id='completed-capture',
+        generation='completed-generation',
+        owner='completed-owner',
+        state='terminal',
+    )
+    authority['lease_expires_at'] = now - timedelta(minutes=5)
+    authority_ref = _Document(authority)
+    conversation = _conversation(
+        conversation_id='drained-capture',
+        generation='drained-generation',
+        owner='drained-owner',
+        state='drained',
+    )
+    conversation['capture_lease_expires_at'] = now - timedelta(minutes=10)
+    conversation_ref = _Document(conversation)
+    transaction = _Transaction()
+
+    claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+        transaction,
+        authority_ref,
+        conversation_ref,
+        'drained-capture',
+        'replacement-generation',
+        None,
+        'replacement-owner',
+        now,
+    )
+
+    assert claimed is True
+    claimed_authority = _updated(authority, transaction, authority_ref)
+    claimed_conversation = _updated(conversation, transaction, conversation_ref)
+    assert claimed_authority['conversation_id'] == 'drained-capture'
+    assert claimed_authority['generation'] == 'replacement-generation'
+    assert claimed_authority['owner_token'] == 'replacement-owner'
+    assert claimed_conversation['capture_owner_id'] == 'replacement-owner'
+    assert claimed_conversation['capture_state'] == 'active'
+
+
+def test_terminal_authority_recovery_preserves_and_terminalizes_exact_drained_capture(capture_protocol):
+    now = datetime.now(timezone.utc)
+    transcript_sha256 = 'a' * 64
+    authority = _authority(
+        conversation_id='completed-capture',
+        generation='completed-generation',
+        owner='completed-owner',
+        state='terminal',
+    )
+    authority['lease_expires_at'] = now - timedelta(minutes=5)
+    authority_ref = _Document(authority)
+    predecessor = _conversation(
+        conversation_id='drained-capture',
+        generation='drained-generation',
+        owner='drained-owner',
+        state='drained',
+    )
+    predecessor['capture_lease_expires_at'] = now - timedelta(minutes=10)
+    predecessor['transcript_sha256'] = transcript_sha256
+    predecessor_ref = _Document(predecessor)
+    untouched_older = dict(
+        _conversation(
+            conversation_id='older-capture',
+            generation='older-generation',
+            owner='older-owner',
+            state='drained',
+        )
+    )
+
+    claim = _Transaction()
+    assert capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+        claim,
+        authority_ref,
+        predecessor_ref,
+        'drained-capture',
+        'replacement-generation',
+        None,
+        'replacement-owner',
+        now,
+    )
+    authority_ref.data = _updated(authority, claim, authority_ref)
+    predecessor_ref.data = _updated(predecessor, claim, predecessor_ref)
+
+    losing_claim = _Transaction()
+    assert not capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+        losing_claim,
+        authority_ref,
+        predecessor_ref,
+        'drained-capture',
+        'losing-generation',
+        'replacement-owner',
+        'losing-owner',
+        now,
+    )
+    assert losing_claim.sets == []
+    assert losing_claim.updates == []
+
+    successor_ref = _Document(
+        {
+            'id': 'fresh-capture',
+            'status': 'in_progress',
+            'capture_owner_id': 'replacement-owner',
+        }
+    )
+    rotation = _Transaction()
+    assert capture_protocol._install_authority_transaction.to_wrap(
+        rotation,
+        authority_ref,
+        successor_ref,
+        'fresh-capture',
+        'replacement-generation',
+        'replacement-owner',
+        now,
+        'drained-capture',
+        predecessor_ref,
+        False,
+    )
+    authority_ref.data = _updated(authority_ref.data, rotation, authority_ref)
+    predecessor_ref.data = _updated(predecessor_ref.data, rotation, predecessor_ref)
+    successor_ref.data = _updated(successor_ref.data, rotation, successor_ref)
+
+    predecessor_ref.data['status'] = 'completed'
+    completion = _Transaction()
+    assert capture_protocol._complete_rotated_capture_transaction.to_wrap(
+        completion,
+        predecessor_ref,
+        'drained-capture',
+        'replacement-generation',
+        'replacement-owner',
+        now,
+    )
+    predecessor_ref.data = _updated(predecessor_ref.data, completion, predecessor_ref)
+
+    assert predecessor_ref.data['transcript_sha256'] == transcript_sha256
+    assert predecessor_ref.data['capture_state'] == 'terminal'
+    assert authority_ref.data['conversation_id'] == 'fresh-capture'
+    assert authority_ref.data['state'] == 'active'
+    assert successor_ref.data['capture_state'] == 'active'
+    assert untouched_older == _conversation(
+        conversation_id='older-capture',
+        generation='older-generation',
+        owner='older-owner',
+        state='drained',
+    )
+
+
+def test_terminal_authority_for_other_capture_rejects_ambiguous_drained_conversation(capture_protocol):
+    now = datetime.now(timezone.utc)
+
+    def valid_documents():
+        authority = _authority(
+            conversation_id='completed-capture',
+            generation='completed-generation',
+            owner='completed-owner',
+            state='terminal',
+        )
+        authority['lease_expires_at'] = now - timedelta(minutes=5)
+        conversation = _conversation(
+            conversation_id='drained-capture',
+            generation='drained-generation',
+            owner='drained-owner',
+            state='drained',
+        )
+        conversation['capture_lease_expires_at'] = now - timedelta(minutes=10)
+        return authority, conversation
+
+    variants = []
+    authority, conversation = valid_documents()
+    authority['state'] = 'drained'
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    authority['conversation_id'] = 'drained-capture'
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    authority.pop('owner_token')
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    authority['lease_expires_at'] = now + timedelta(seconds=30)
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    authority.pop('lease_expires_at')
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    authority['finalization_claim_token'] = 'unfinished-claim'
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    authority['finalization_lease_expires_at'] = now + timedelta(seconds=30)
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    authority['finalization_lease_expires_at'] = 'invalid'
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    authority['lease_expires_at'] = 'invalid'
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    conversation['capture_state'] = 'active'
+    conversation['capture_owner_id'] = None
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    authority['state'] = 'active'
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    authority['state'] = 'finalizing'
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    conversation['capture_state'] = 'finalizing'
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    conversation['capture_lease_expires_at'] = now + timedelta(seconds=30)
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    conversation['capture_lease_expires_at'] = 'invalid'
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    conversation.pop('capture_lease_expires_at')
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    conversation['capture_owner_id'] = 'unfinished-owner'
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    conversation['capture_finalization_claim_token'] = 'unfinished-claim'
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    conversation['capture_finalization_lease_expires_at'] = now + timedelta(seconds=30)
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    conversation['capture_finalization_lease_expires_at'] = 'invalid'
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    authority['protocol_version'] = 1
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    conversation['capture_protocol_version'] = 1
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    conversation.pop('capture_generation')
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    conversation.pop('capture_owner_token')
+    variants.append((authority, conversation))
+
+    for authority, conversation in variants:
+        transaction = _Transaction()
+        claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+            transaction,
+            _Document(authority),
+            _Document(conversation),
+            'drained-capture',
+            'replacement-generation',
+            None,
+            'replacement-owner',
+            now,
+        )
+
+        assert claimed is False
+        assert transaction.sets == []
+        assert transaction.updates == []
+
+    authority, conversation = valid_documents()
+    conversation['capture_owner_id'] = 'unfinished-owner'
+    transaction = _Transaction()
+    claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+        transaction,
+        _Document(authority),
+        _Document(conversation),
+        'drained-capture',
+        'replacement-generation',
+        'unfinished-owner',
+        'replacement-owner',
+        now,
+    )
+    assert claimed is False
+    assert transaction.sets == []
+    assert transaction.updates == []
+
+
 def test_live_finalization_blocks_reconnect_after_capture_lease_expires(capture_protocol):
     now = datetime.now(timezone.utc)
     authority = _authority(state='finalizing')

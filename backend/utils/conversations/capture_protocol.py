@@ -156,6 +156,11 @@ def _strict_lease_expired(data: Dict[str, Any], now: datetime, field: str) -> bo
     return isinstance(expires_at, datetime) and _aware(expires_at) <= now
 
 
+def _optional_lease_absent_or_expired(data: Dict[str, Any], now: datetime, field: str) -> bool:
+    expires_at = data.get(field)
+    return expires_at is None or (isinstance(expires_at, datetime) and _aware(expires_at) <= now)
+
+
 def _durable_capture_side_is_quiescent(
     data: Dict[str, Any],
     now: datetime,
@@ -262,26 +267,69 @@ def _claim_reconnect_authority_transaction(
     if authority or conversation_has_v2_state:
         prior_generation = str(authority.get('generation') or '')
         prior_owner_token = str(authority.get('owner_token') or '')
-        if (
-            not prior_generation
-            or not prior_owner_token
-            or not _authority_tuple_matches(authority, conversation_id, prior_generation, prior_owner_token)
-            or not _conversation_tuple_matches(conversation, conversation_id, prior_generation, prior_owner_token)
-            or not _durable_capture_side_is_quiescent(
+        same_lineage_is_quiescent = bool(
+            prior_generation
+            and prior_owner_token
+            and _authority_tuple_matches(authority, conversation_id, prior_generation, prior_owner_token)
+            and _conversation_tuple_matches(conversation, conversation_id, prior_generation, prior_owner_token)
+            and _durable_capture_side_is_quiescent(
                 authority,
                 now,
                 state_field='state',
                 lease_field='lease_expires_at',
                 finalization_lease_field='finalization_lease_expires_at',
             )
-            or not _durable_capture_side_is_quiescent(
+            and _durable_capture_side_is_quiescent(
                 conversation,
                 now,
                 state_field='capture_state',
                 lease_field='capture_lease_expires_at',
                 finalization_lease_field='capture_finalization_lease_expires_at',
             )
-        ):
+        )
+
+        candidate_generation = str(conversation.get('capture_generation') or '')
+        candidate_owner_token = str(conversation.get('capture_owner_token') or '')
+        authority_conversation_id = str(authority.get('conversation_id') or '')
+        terminal_authority_releases_drained_candidate = bool(
+            not str(expected_owner_token or '')
+            and not str(conversation.get('capture_owner_id') or '')
+            and authority.get('state') == 'terminal'
+            and authority_conversation_id
+            and authority_conversation_id != conversation_id
+            and prior_generation
+            and prior_owner_token
+            and _authority_tuple_matches(
+                authority,
+                authority_conversation_id,
+                prior_generation,
+                prior_owner_token,
+            )
+            and _strict_lease_expired(authority, now, 'lease_expires_at')
+            and not authority.get('finalization_claim_token')
+            and _optional_lease_absent_or_expired(
+                authority,
+                now,
+                field='finalization_lease_expires_at',
+            )
+            and candidate_generation
+            and candidate_owner_token
+            and _conversation_tuple_matches(
+                conversation,
+                conversation_id,
+                candidate_generation,
+                candidate_owner_token,
+            )
+            and conversation.get('capture_state') == 'drained'
+            and _strict_lease_expired(conversation, now, 'capture_lease_expires_at')
+            and not conversation.get('capture_finalization_claim_token')
+            and _optional_lease_absent_or_expired(
+                conversation,
+                now,
+                field='capture_finalization_lease_expires_at',
+            )
+        )
+        if not same_lineage_is_quiescent and not terminal_authority_releases_drained_candidate:
             return False
 
     lease_expires_at = now + timedelta(seconds=CAPTURE_AUTHORITY_LEASE_SECONDS)
