@@ -147,6 +147,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   bool _authorityReconciliationPending = false;
   String? _lastDeviceOwnerBinding;
   int? _activeDeviceConnectionSession;
+  ({String deviceId, String ownerBinding, int authorityGeneration})? _freshBleSessionRequirement;
   bool _disposed = false;
 
   void Function(BtDevice device)? onDeviceConnected;
@@ -205,11 +206,36 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     return boundDevice != null && boundDevice.id == deviceId;
   }
 
+  bool _requiresFreshBleSessionFor(BtDevice device) {
+    final requirement = _freshBleSessionRequirement;
+    final ownerBinding = _rememberedDeviceOwnerBinding();
+    return requirement != null &&
+        ownerBinding != null &&
+        requirement.deviceId == device.id &&
+        requirement.ownerBinding == ownerBinding &&
+        requirement.authorityGeneration == _rememberedDeviceAuthorityGeneration;
+  }
+
+  void _markFreshBleSessionRequired(BtDevice device) {
+    final ownerBinding = _rememberedDeviceOwnerBinding();
+    if (ownerBinding == null) return;
+    _freshBleSessionRequirement = (
+      deviceId: device.id,
+      ownerBinding: ownerBinding,
+      authorityGeneration: _rememberedDeviceAuthorityGeneration,
+    );
+  }
+
+  void _clearFreshBleSessionRequirement(BtDevice device) {
+    if (_requiresFreshBleSessionFor(device)) _freshBleSessionRequirement = null;
+  }
+
   void _handleAccountAuthorityChanged() {
     // The notifier can fire immediately before a replacement UID/profile is
     // persisted. Fence callbacks now, then reconcile settled preferences.
     _rememberedDeviceAuthorityGeneration++;
     _deviceOperationGeneration++;
+    _freshBleSessionRequirement = null;
     _requiresExplicitDeviceSelectionAfterAuthorityChange = true;
     _connectDebouncer.cancel();
     _authorityReconciliationPending = true;
@@ -768,6 +794,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     _authorityReconciliationGeneration++;
     _authorityReconciliationPending = false;
     _activeDeviceConnectionSession = null;
+    _freshBleSessionRequirement = null;
     WidgetsBinding.instance.removeObserver(this);
     _accountAuthorityChanges.removeListener(_handleAccountAuthorityChanged);
     captureProvider?.removeListener(_onCaptureProviderChanged);
@@ -824,11 +851,14 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     try {
       final activeDevice = connectedDevice;
       final failure = captureProvider?.captureDiagnostics.failure;
+      final pendingFreshBleSession = _requiresFreshBleSessionFor(stored);
       final requiresFreshBleSession = forceFreshBleSession ||
+          pendingFreshBleSession ||
           failure == CaptureDiagnosticFailure.necklaceAudioSubscriptionUnavailable ||
           failure == CaptureDiagnosticFailure.physicalAudioUnavailable ||
           failure == CaptureDiagnosticFailure.necklaceConnectionUnavailable;
-      if (requiresFreshBleSession && isConnected && activeDevice?.id == stored.id) {
+      final resettableConnectedSession = isConnected && (activeDevice == null || activeDevice.id == stored.id);
+      if (requiresFreshBleSession && (pendingFreshBleSession || resettableConnectedSession)) {
         await _resetConnectedDeviceForCaptureRetry(stored, generation);
         if (!_isDeviceOperationCurrent(generation)) return false;
         await scanAndConnectToDevice(operationGeneration: generation, startCaptureWhenConnected: true);
@@ -856,6 +886,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   }
 
   Future<void> _resetConnectedDeviceForCaptureRetry(BtDevice stored, int generation) async {
+    _markFreshBleSessionRequired(stored);
     _activeDeviceConnectionSession = null;
     _disconnectDebouncer.cancel();
     _connectDebouncer.cancel();
@@ -867,6 +898,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     StackTrace? resetFailureStack;
     try {
       await _deviceService.disconnectDevice();
+      _clearFreshBleSessionRequirement(stored);
     } catch (error, stack) {
       resetFailure = error;
       resetFailureStack = stack;

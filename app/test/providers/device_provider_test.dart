@@ -32,6 +32,7 @@ class _FakeDeviceService implements IDeviceService {
   int ensureConnectionCalls = 0;
   int disconnectCalls = 0;
   Object? disconnectError;
+  bool nativeSessionRetained = false;
   final Map<Object, IDeviceServiceSubsciption> _subscriptions = {};
 
   void publish(DeviceServiceStatus next) {
@@ -82,6 +83,7 @@ class _FakeDeviceService implements IDeviceService {
     disconnectCalls++;
     final error = disconnectError;
     if (error != null) throw error;
+    nativeSessionRetained = false;
   }
 }
 
@@ -889,7 +891,8 @@ void main() {
     await bindRememberedDeviceForCurrentTestAuthority(necklace);
     final disconnectGate = Completer<void>();
     final service = _FakeDeviceService(DeviceServiceStatus.ready)
-      ..disconnectError = StateError('synthetic native disconnect failure');
+      ..disconnectError = StateError('synthetic native disconnect failure')
+      ..nativeSessionRetained = true;
     final capture = _RecordingCaptureProvider(
       disconnectGate: disconnectGate,
       forcedDiagnosticFailure: CaptureDiagnosticFailure.physicalAudioUnavailable,
@@ -899,7 +902,7 @@ void main() {
       deviceService: service,
       scanConnector: () async {
         scans++;
-        return necklace;
+        return service.nativeSessionRetained ? null : necklace;
       },
       connectionResolver: (_) async => necklace,
       storageListResolver: (_) async => const [],
@@ -928,6 +931,7 @@ void main() {
     expect(provider.isConnecting, isFalse);
     expect(provider.presentationIsConnected, isFalse);
     expect(provider.presentationConnectedDevice, isNull);
+    expect(service.nativeSessionRetained, isTrue, reason: 'the failed native disconnect retains the stale session');
     expect(scans, 0, reason: 'a failed reset must not start a hidden reconnect attempt');
 
     service.disconnectError = null;
@@ -935,6 +939,8 @@ void main() {
     await pumpEventQueue();
 
     expect(recovered, isTrue);
+    expect(service.disconnectCalls, 2, reason: 'the next retry must prove native disconnect before reconnecting');
+    expect(service.nativeSessionRetained, isFalse);
     expect(scans, 1);
     expect(capture.deviceStarts, 1);
     expect(provider.presentationConnectedDevice?.id, necklace.id);
