@@ -745,6 +745,13 @@ void main() {
     expect(harness.capture.deviceStarts, 0);
     expect(harness.capture.recordingState, RecordingState.record);
     expect(find.text('Recording on this iPhone'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.phoneStops, 1);
+    expect(harness.capture.deviceStarts, 1);
+    expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
 
   testWidgets('stuck necklace startup can switch to iPhone and starts the real phone recorder', (tester) async {

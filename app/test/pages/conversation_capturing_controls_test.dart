@@ -86,6 +86,25 @@ void main() {
     expect(capture.phoneStarts, 0);
   });
 
+  testWidgets('necklace error exposes the exact content-free capture stage', (tester) async {
+    final capture = _FakeCaptureProvider(
+      RecordingState.error,
+      transcriptReady: false,
+      diagnostics: const CaptureDiagnostics(
+        source: CaptureDiagnosticSource.necklace,
+        phase: CaptureDiagnosticPhase.failed,
+        failure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+      ),
+    );
+    await _pumpCapturePage(tester, capture, preferredCaptureSource: EllaCaptureSource.necklace);
+
+    expect(find.byKey(const Key('device-capture-diagnostics-panel')), findsOneWidget);
+    expect(find.byKey(const Key('device-capture-failure-proof')), findsOneWidget);
+    expect(find.byKey(const Key('device-capture-audio-proof')), findsOneWidget);
+    expect(find.byKey(const Key('device-capture-delivery-proof')), findsOneWidget);
+    expect(find.byKey(const Key('conversation-capture-error-close')), findsOneWidget);
+  });
+
   testWidgets('phone diagnostics outrank a retained necklace reference during Retry', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final capture = _FakeCaptureProvider(

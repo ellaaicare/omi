@@ -11,6 +11,7 @@ import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/message_event.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/models/capture_source.dart';
+import 'package:omi/ella/widgets/capture_diagnostics_panel.dart';
 import 'package:omi/pages/capture/widgets/widgets.dart';
 import 'package:omi/pages/conversation_detail/widgets/name_speaker_sheet.dart';
 import 'package:omi/providers/capture_provider.dart';
@@ -409,6 +410,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                                 provider.photos.isEmpty
                             ? _CaptureErrorRecovery(
                                 source: _captureSource(provider),
+                                diagnostics: provider.captureDiagnostics,
                                 onRetry: () => _retryCapture(provider, deviceProvider),
                                 onClose: () => Navigator.of(context).pop(),
                               )
@@ -880,9 +882,15 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
 }
 
 class _CaptureErrorRecovery extends StatelessWidget {
-  const _CaptureErrorRecovery({required this.source, required this.onRetry, required this.onClose});
+  const _CaptureErrorRecovery({
+    required this.source,
+    required this.diagnostics,
+    required this.onRetry,
+    required this.onClose,
+  });
 
   final EllaCaptureSource source;
+  final CaptureDiagnostics diagnostics;
   final VoidCallback onRetry;
   final VoidCallback onClose;
 
@@ -891,41 +899,52 @@ class _CaptureErrorRecovery extends StatelessWidget {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24),
-        child: EllaCardSurface(
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Icon(Icons.mic_off_outlined, color: EllaColors.error, size: 36),
-                const SizedBox(height: 12),
-                Text(
-                  context.l10n.todayRecordingUnavailable,
-                  textAlign: TextAlign.center,
-                  style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w700),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            EllaCardSurface(
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Icon(Icons.mic_off_outlined, color: EllaColors.error, size: 36),
+                    const SizedBox(height: 12),
+                    Text(
+                      context.l10n.todayRecordingUnavailable,
+                      textAlign: TextAlign.center,
+                      style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 16),
+                    FilledButton.icon(
+                      key: Key(
+                        source == EllaCaptureSource.necklace
+                            ? 'conversation-capture-retry-necklace'
+                            : 'conversation-capture-retry-phone',
+                      ),
+                      onPressed: onRetry,
+                      icon: Icon(
+                        source == EllaCaptureSource.necklace
+                            ? Icons.bluetooth_searching_rounded
+                            : Icons.mic_none_rounded,
+                      ),
+                      label: Text(context.l10n.tryAgain),
+                    ),
+                    TextButton(
+                      key: const Key('conversation-capture-error-close'),
+                      onPressed: onClose,
+                      style: TextButton.styleFrom(foregroundColor: EllaColors.tealDeep),
+                      child: Text(context.l10n.close),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 16),
-                FilledButton.icon(
-                  key: Key(
-                    source == EllaCaptureSource.necklace
-                        ? 'conversation-capture-retry-necklace'
-                        : 'conversation-capture-retry-phone',
-                  ),
-                  onPressed: onRetry,
-                  icon: Icon(
-                    source == EllaCaptureSource.necklace ? Icons.bluetooth_searching_rounded : Icons.mic_none_rounded,
-                  ),
-                  label: Text(context.l10n.tryAgain),
-                ),
-                TextButton(
-                  key: const Key('conversation-capture-error-close'),
-                  onPressed: onClose,
-                  child: Text(context.l10n.close),
-                ),
-              ],
+              ),
             ),
-          ),
+            const SizedBox(height: 12),
+            CaptureDiagnosticsPanel(diagnostics: diagnostics),
+          ],
         ),
       ),
     );

@@ -1628,9 +1628,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       final necklaceTransportOwned =
           necklaceTransportState && (capture.havingRecordingDevice || necklaceConnected || connectedDevice != null);
       if (necklaceTransportOwned) {
-        final shouldResumeAmbient =
-            capture.recordingState == RecordingState.deviceRecord || capture.recordingState == RecordingState.pause;
-        if (shouldResumeAmbient && necklaceConnected && connectedDevice != null) {
+        if (necklaceConnected && connectedDevice != null) {
           _resumeNecklaceAfterPhoneCapture = connectedDevice;
         }
         if (capture.recordingState == RecordingState.deviceRecord || capture.recordingState == RecordingState.pause) {

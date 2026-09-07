@@ -819,7 +819,15 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
 
     try {
       final activeDevice = connectedDevice;
-      if (isConnected && activeDevice != null) {
+      final failure = captureProvider?.captureDiagnostics.failure;
+      final requiresFreshBleSession = failure == CaptureDiagnosticFailure.necklaceAudioSubscriptionUnavailable ||
+          failure == CaptureDiagnosticFailure.physicalAudioUnavailable ||
+          failure == CaptureDiagnosticFailure.necklaceConnectionUnavailable;
+      if (requiresFreshBleSession && isConnected && activeDevice?.id == stored.id) {
+        await _resetConnectedDeviceForCaptureRetry(stored, generation);
+        if (!_isDeviceOperationCurrent(generation)) return false;
+        await scanAndConnectToDevice(operationGeneration: generation, startCaptureWhenConnected: true);
+      } else if (isConnected && activeDevice != null) {
         if (activeDevice.id != stored.id) return false;
         await _onDeviceConnected(activeDevice, generation, explicitlyAuthorized: true);
       } else {
@@ -839,6 +847,26 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       unawaited(periodicConnect('$reason follow-up', boundDeviceOnly: true, operationGeneration: generation));
     }
     return captureReady;
+  }
+
+  Future<void> _resetConnectedDeviceForCaptureRetry(BtDevice stored, int generation) async {
+    _activeDeviceConnectionSession = null;
+    _disconnectDebouncer.cancel();
+    _connectDebouncer.cancel();
+    _reconnectionTimer?.cancel();
+    _clearDeferredDeviceCapture();
+
+    final teardown = _teardownCaptureForDevice(stored.id);
+    await _deviceService.disconnectDevice();
+    await teardown;
+    if (!_isDeviceOperationCurrent(generation)) return;
+
+    connectedDevice = null;
+    pairedDevice = stored;
+    isConnected = false;
+    isDeviceStorageSupport = false;
+    batteryLevel = -1;
+    notifyListeners();
   }
 
   /// Commits the one explicit Home confirmation for a device saved by builds

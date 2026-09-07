@@ -30,6 +30,7 @@ class _FakeDeviceService implements IDeviceService {
 
   DeviceServiceStatus status;
   int ensureConnectionCalls = 0;
+  int disconnectCalls = 0;
   final Map<Object, IDeviceServiceSubsciption> _subscriptions = {};
 
   void publish(DeviceServiceStatus next) {
@@ -76,7 +77,9 @@ class _FakeDeviceService implements IDeviceService {
   void setWifiSyncInProgress(bool value) {}
 
   @override
-  Future<void> disconnectDevice() async {}
+  Future<void> disconnectDevice() async {
+    disconnectCalls++;
+  }
 }
 
 class _RecordingCaptureProvider extends CaptureProvider {
@@ -810,6 +813,72 @@ void main() {
     expect(capture.deviceStarts, 2);
     expect(capture.recordingState, RecordingState.deviceRecord);
     expect(provider.connectedDevice?.id, necklace.id);
+  });
+
+  test('explicit silent-necklace retry replaces the stale BLE session before capture', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider(
+      failuresBeforeStart: 1,
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+    );
+    var scans = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scans++;
+        return necklace;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      deviceCaptureRetryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await pumpEventQueue();
+    expect(capture.recordingState, RecordingState.error);
+
+    final recovered = await provider.reconnectKnownDeviceForCapture(reason: 'test silent retry');
+    await pumpEventQueue();
+
+    expect(recovered, isTrue);
+    expect(service.disconnectCalls, 1);
+    expect(scans, 1);
+    expect(capture.deviceStarts, 2);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+  });
+
+  test('transcription-only retry preserves the healthy BLE session', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider(
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.transcriptionUnavailable,
+    )..updateRecordingState(RecordingState.error);
+    final provider = DeviceProvider(
+      deviceService: service,
+      storageListResolver: (_) async => const [],
+      deviceCaptureRetryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+    provider.connectedDevice = necklace;
+    provider.pairedDevice = necklace;
+    provider.setIsConnected(true);
+
+    final recovered = await provider.reconnectKnownDeviceForCapture(reason: 'test transcription retry');
+    await pumpEventQueue();
+
+    expect(recovered, isTrue);
+    expect(service.disconnectCalls, 0);
+    expect(capture.deviceStarts, 1);
+    expect(capture.recordingState, RecordingState.deviceRecord);
   });
 
   test('in-flight connected resolution cannot repopulate after stop', () async {
