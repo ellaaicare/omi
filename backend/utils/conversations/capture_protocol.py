@@ -287,7 +287,9 @@ def _claim_reconnect_authority_transaction(
         candidate_owner_token = str(conversation.get('capture_owner_token') or '')
         authority_conversation_id = str(authority.get('conversation_id') or '')
         terminal_authority_releases_drained_candidate = bool(
-            authority.get('state') == 'terminal'
+            not str(expected_owner_token or '')
+            and not str(conversation.get('capture_owner_id') or '')
+            and authority.get('state') == 'terminal'
             and authority_conversation_id
             and authority_conversation_id != conversation_id
             and prior_generation
@@ -297,6 +299,13 @@ def _claim_reconnect_authority_transaction(
                 authority_conversation_id,
                 prior_generation,
                 prior_owner_token,
+            )
+            and _strict_lease_expired(authority, now, 'lease_expires_at')
+            and not authority.get('finalization_claim_token')
+            and _lease_expired(
+                authority,
+                now,
+                field='finalization_lease_expires_at',
             )
             and candidate_generation
             and candidate_owner_token
@@ -308,6 +317,12 @@ def _claim_reconnect_authority_transaction(
             )
             and conversation.get('capture_state') == 'drained'
             and _strict_lease_expired(conversation, now, 'capture_lease_expires_at')
+            and not conversation.get('capture_finalization_claim_token')
+            and _lease_expired(
+                conversation,
+                now,
+                field='capture_finalization_lease_expires_at',
+            )
         )
         if not same_lineage_is_quiescent and not terminal_authority_releases_drained_candidate:
             return False
