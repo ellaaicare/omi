@@ -769,6 +769,142 @@ def test_production_reconnect_path_does_not_let_overlapping_socket_steal_authori
     assert ready_receipts == [("conversation-a", "generation-b", "socket-b")]
 
 
+def test_production_reconnect_rotates_expired_drained_candidate_behind_terminal_authority():
+    capture_protocol = _load_capture_protocol_module()
+    now = datetime.now(timezone.utc)
+
+    class Document:
+        def __init__(self, data):
+            self.data = data
+
+        def get(self, transaction=None):
+            return SimpleNamespace(exists=self.data is not None, to_dict=lambda: dict(self.data or {}))
+
+    class Transaction:
+        def __init__(self):
+            self.sets = []
+            self.updates = []
+
+        def set(self, ref, payload):
+            self.sets.append((ref, payload))
+
+        def update(self, ref, payload):
+            self.updates.append((ref, payload))
+
+        def apply(self):
+            for ref, payload in self.sets:
+                ref.data = dict(payload)
+            for ref, payload in self.updates:
+                ref.data.update(payload)
+
+    authority_ref = Document(
+        {
+            "protocol_version": 2,
+            "conversation_id": "completed-capture",
+            "generation": "completed-generation",
+            "owner_token": "completed-owner",
+            "state": "terminal",
+            "lease_expires_at": now - timedelta(minutes=5),
+        }
+    )
+    conversation_ref = Document(
+        {
+            "id": "drained-capture",
+            "status": "in_progress",
+            "capture_owner_id": None,
+            "capture_protocol_version": 2,
+            "capture_generation": "drained-generation",
+            "capture_owner_token": "drained-owner",
+            "capture_state": "drained",
+            "capture_lease_expires_at": now - timedelta(minutes=10),
+            "finished_at": now - timedelta(minutes=3),
+        }
+    )
+
+    def claim_capture_authority_for_reconnect(
+        _uid,
+        conversation_id,
+        generation,
+        expected_owner_token,
+        owner_token,
+    ):
+        transaction = Transaction()
+        claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+            transaction,
+            authority_ref,
+            conversation_ref,
+            conversation_id,
+            generation,
+            expected_owner_token,
+            owner_token,
+            now,
+        )
+        if claimed:
+            transaction.apply()
+        return claimed
+
+    class Redis:
+        def __init__(self):
+            self.claims = []
+
+        def get_in_progress_conversation_id(self, _uid):
+            return ""
+
+        def claim_in_progress_conversation_id(self, _uid, conversation_id, owner_token):
+            self.claims.append((conversation_id, owner_token))
+            return True
+
+        def replace_stale_in_progress_conversation_id(self, *_args):
+            raise AssertionError("the drained candidate must be claimed without replacing another id")
+
+    redis = Redis()
+    rotations = []
+
+    async def create_new_in_progress_conversation(**kwargs):
+        rotations.append(kwargs)
+        return True
+
+    prepare = _nested_function(
+        "routers/transcribe.py",
+        "_prepare_in_progess_conversations",
+        {
+            "asyncio": asyncio,
+            "claim_capture_authority_for_reconnect": claim_capture_authority_for_reconnect,
+            "conversations_db": SimpleNamespace(),
+            "datetime": datetime,
+            "drain_capture_persistence_batches": lambda *_args: None,
+            "mark_capture_drained": lambda *_args: True,
+            "redis_db": redis,
+            "retrieve_in_progress_conversation": lambda _uid: dict(conversation_ref.data),
+            "timezone": timezone,
+        },
+        {
+            "_create_new_in_progress_conversation": create_new_in_progress_conversation,
+            "_publish_capture_protocol_ready": lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("the expired capture must rotate before a ready receipt is published")
+            ),
+            "capture_recovery_conversation_ids": set(),
+            "conversation_creation_timeout": 120,
+            "current_conversation_id": None,
+            "generation_id": "replacement-generation",
+            "session_id": "replacement-owner",
+            "uid": "uid-a",
+        },
+    )
+
+    assert asyncio.run(prepare()) == "drained-capture"
+    assert redis.claims == [("drained-capture", "replacement-owner")]
+    assert rotations == [
+        {
+            "expected_conversation_id": "drained-capture",
+            "expected_owner_id": "replacement-owner",
+        }
+    ]
+    assert authority_ref.data["conversation_id"] == "drained-capture"
+    assert authority_ref.data["generation"] == "replacement-generation"
+    assert conversation_ref.data["capture_owner_id"] == "replacement-owner"
+
+
 def test_failed_stub_publication_abandons_only_the_still_owned_firestore_generation():
     conversations = _load_conversations_module()
 
