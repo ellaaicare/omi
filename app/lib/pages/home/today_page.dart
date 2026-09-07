@@ -254,6 +254,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   MemoryArtworkLibraries? _homeArtworkLibraries;
   MemoryArtworkQueueStatus? _homeArtworkQueueStatus;
   BtDevice? _resumeNecklaceAfterPhoneCapture;
+  bool _resumeNecklaceWithFreshSessionAfterPhoneCapture = false;
   EllaCaptureSource? _selectedCaptureSource;
 
   static const _artworkBackfillComplete = '__complete__';
@@ -357,6 +358,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _homeCaptureAuthorityGeneration++;
     final authorityGeneration = _homeCaptureAuthorityGeneration;
     _resumeNecklaceAfterPhoneCapture = null;
+    _resumeNecklaceWithFreshSessionAfterPhoneCapture = false;
     _externalCaptureFinalizationSource = null;
     _todayCardController.invalidateAuthority();
     _homeArtworkBackfillPollTimer?.cancel();
@@ -1325,7 +1327,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       final isCurrent = authorityGeneration == _homeCaptureAuthorityGeneration;
       if (finalized && isCurrent && mounted) {
         if (source == _HomeCaptureSource.phone) {
-          await _resumeAmbientNecklace(capture);
+          await _resumeAmbientNecklace();
         }
         if (!mounted || authorityGeneration != _homeCaptureAuthorityGeneration) return false;
         setState(() {
@@ -1379,7 +1381,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (transportFinalized != null) {
       if (transportFinalized) {
         if (source == _HomeCaptureSource.phone) {
-          await _resumeAmbientNecklace(capture);
+          await _resumeAmbientNecklace();
         }
         if (!mounted || authorityGeneration != _homeCaptureAuthorityGeneration) return false;
         if (mounted) {
@@ -1409,14 +1411,20 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     return finalized && isCurrent;
   }
 
-  Future<void> _resumeAmbientNecklace(CaptureProvider capture) async {
+  Future<void> _resumeAmbientNecklace() async {
     final device = _resumeNecklaceAfterPhoneCapture;
+    final forceFreshBleSession = _resumeNecklaceWithFreshSessionAfterPhoneCapture;
     _resumeNecklaceAfterPhoneCapture = null;
+    _resumeNecklaceWithFreshSessionAfterPhoneCapture = false;
     if (device == null || !mounted) return;
-    final currentDevice = context.read<DeviceProvider>().presentationConnectedDevice;
+    final deviceProvider = context.read<DeviceProvider>();
+    final currentDevice = deviceProvider.presentationConnectedDevice;
     if (currentDevice?.id != device.id) return;
     try {
-      await capture.streamDeviceRecording(device: currentDevice);
+      await deviceProvider.reconnectKnownDeviceForCapture(
+        reason: 'resume after iPhone capture',
+        forceFreshBleSession: forceFreshBleSession,
+      );
     } catch (_) {
       // The phone-owned moment is already finalized. Necklace recovery remains
       // visible through device status and must not turn that successful action
@@ -1628,10 +1636,13 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       final necklaceTransportOwned =
           necklaceTransportState && (capture.havingRecordingDevice || necklaceConnected || connectedDevice != null);
       if (necklaceTransportOwned) {
-        final shouldResumeAmbient =
-            capture.recordingState == RecordingState.deviceRecord || capture.recordingState == RecordingState.pause;
-        if (shouldResumeAmbient && necklaceConnected && connectedDevice != null) {
+        if (necklaceConnected && connectedDevice != null) {
           _resumeNecklaceAfterPhoneCapture = connectedDevice;
+          final failure = capture.captureDiagnostics.failure;
+          _resumeNecklaceWithFreshSessionAfterPhoneCapture =
+              failure == CaptureDiagnosticFailure.necklaceAudioSubscriptionUnavailable ||
+                  failure == CaptureDiagnosticFailure.physicalAudioUnavailable ||
+                  failure == CaptureDiagnosticFailure.necklaceConnectionUnavailable;
         }
         if (capture.recordingState == RecordingState.deviceRecord || capture.recordingState == RecordingState.pause) {
           final hadCapturableContent = capture.captureDiagnostics.hasPhysicalAudio || capture.hasCapturableContent;
@@ -1662,13 +1673,13 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         _homeCaptureSource = started ? _HomeCaptureSource.phone : null;
       });
       if (!started) {
-        await _resumeAmbientNecklace(capture);
+        await _resumeAmbientNecklace();
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_phoneCaptureFailureMessage(result))));
       }
     } catch (_) {
       if (!mounted) return;
-      await _resumeAmbientNecklace(capture);
+      await _resumeAmbientNecklace();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
     } finally {

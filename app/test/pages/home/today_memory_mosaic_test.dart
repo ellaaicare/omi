@@ -404,7 +404,7 @@ void main() {
   ) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
-    final device = DeviceProvider()
+    final device = _ReconnectTrackingDeviceProvider()
       ..pairedDevice = necklace
       ..connectedDevice = necklace
       ..isConnected = true;
@@ -415,6 +415,7 @@ void main() {
       initialRecordingState: RecordingState.deviceRecord,
     );
     addTearDown(harness.dispose);
+    device.capture = harness.capture;
 
     expect(find.text('Necklace is recording · iPhone selected'), findsOneWidget);
     await tester.tap(find.byKey(const Key('today-record-moment')));
@@ -429,6 +430,8 @@ void main() {
     await tester.pump();
 
     expect(harness.capture.phoneStops, 1);
+    expect(device.reconnects, 1);
+    expect(device.freshSessionRequests, [isFalse]);
     expect(harness.capture.deviceStarts, 1);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
@@ -438,7 +441,7 @@ void main() {
   ) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
-    final device = DeviceProvider()
+    final device = _ReconnectTrackingDeviceProvider()
       ..pairedDevice = necklace
       ..connectedDevice = necklace
       ..isConnected = true;
@@ -450,6 +453,7 @@ void main() {
       finalizationResults: [true, false, true],
     );
     addTearDown(harness.dispose);
+    device.capture = harness.capture;
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
@@ -478,6 +482,8 @@ void main() {
     expect(harness.capture.phoneStarts, 1, reason: 'retry must not create a replacement phone capture');
     expect(harness.capture.phoneStops, 1, reason: 'retry must not stop the phone transport twice');
     expect(harness.capture.finalizationCalls, 3);
+    expect(device.reconnects, 1);
+    expect(device.freshSessionRequests, [isFalse]);
     expect(harness.capture.deviceStarts, 1, reason: 'ambient necklace resumes only after the phone moment succeeds');
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
@@ -724,7 +730,7 @@ void main() {
 
   testWidgets('necklace transport error is cleaned before an iPhone retry', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
-    final device = DeviceProvider()
+    final device = _ReconnectTrackingDeviceProvider()
       ..pairedDevice = necklace
       ..connectedDevice = necklace
       ..isConnected = true;
@@ -733,9 +739,18 @@ void main() {
       conversations: const [],
       device: device,
       initialRecordingState: RecordingState.error,
+      initialCaptureDiagnostics: const CaptureDiagnostics(
+        source: CaptureDiagnosticSource.necklace,
+        phase: CaptureDiagnosticPhase.failed,
+        failure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+      ),
     );
     addTearDown(harness.dispose);
+    device.capture = harness.capture;
 
+    expect(find.text('Necklace recording needs attention'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('today-capture-source-phone')));
+    await tester.pump();
     expect(find.text('iPhone recording needs attention'), findsOneWidget);
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
@@ -745,6 +760,20 @@ void main() {
     expect(harness.capture.deviceStarts, 0);
     expect(harness.capture.recordingState, RecordingState.record);
     expect(find.text('Recording on this iPhone'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(harness.capture.phoneStops, 1);
+    expect(device.reconnects, 1);
+    expect(device.freshSessionRequests, [isTrue]);
+    expect(
+      harness.capture.captureDiagnostics.source,
+      CaptureDiagnosticSource.phone,
+      reason: 'the stale-session decision must survive phone diagnostics replacing the necklace failure',
+    );
+    expect(harness.capture.deviceStarts, 1);
+    expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
 
   testWidgets('stuck necklace startup can switch to iPhone and starts the real phone recorder', (tester) async {
@@ -849,7 +878,7 @@ void main() {
 
   testWidgets('failed phone start restores the ambient necklace stream', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
-    final device = DeviceProvider()
+    final device = _ReconnectTrackingDeviceProvider()
       ..pairedDevice = necklace
       ..connectedDevice = necklace
       ..isConnected = true;
@@ -861,12 +890,15 @@ void main() {
       phoneStartResult: PhoneCaptureStartResult.transcriptionUnavailable,
     );
     addTearDown(harness.dispose);
+    device.capture = harness.capture;
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
 
     expect(harness.capture.deviceStops, 1);
     expect(harness.capture.phoneStarts, 1);
+    expect(device.reconnects, 1);
+    expect(device.freshSessionRequests, [isFalse]);
     expect(harness.capture.deviceStarts, 1);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
     expect(find.text('Necklace is recording · iPhone selected'), findsOneWidget);
@@ -2147,6 +2179,21 @@ class _HomeHarness {
   }
 }
 
+class _ReconnectTrackingDeviceProvider extends DeviceProvider {
+  CaptureProvider? capture;
+  int reconnects = 0;
+
+  @override
+  Future<bool> reconnectKnownDeviceForCapture({required String reason, bool forceFreshBleSession = false}) async {
+    reconnects++;
+    freshSessionRequests.add(forceFreshBleSession);
+    await capture?.streamDeviceRecording(device: presentationConnectedDevice);
+    return true;
+  }
+
+  final List<bool> freshSessionRequests = [];
+}
+
 class _MutableExactAuthority implements ExactAccountAuthorityVerifier {
   _MutableExactAuthority(this.uid);
 
@@ -2448,6 +2495,7 @@ Future<_HomeHarness> _pumpHome(
   bool captureHasDeviceBoundaryEvidence = false,
   List<bool> finalizationResults = const [],
   Completer<void>? finalizationGate,
+  CaptureDiagnostics? initialCaptureDiagnostics,
   TodayCardTalkRouteOpener? todayCardTalkRouteOpener,
   List<ActionItemWithMetadata> actionItems = const [],
   List<List<ServerConversation>> olderConversationPages = const [],
@@ -2469,6 +2517,7 @@ Future<_HomeHarness> _pumpHome(
     hasDeviceBoundaryEvidence: captureHasDeviceBoundaryEvidence,
     finalizationResults: finalizationResults,
     finalizationGate: finalizationGate,
+    captureDiagnosticsOverride: initialCaptureDiagnostics,
   );
   final actionItemsProvider = _FixtureActionsProvider(actionItems);
   final conversationProvider = _FixtureConversationProvider(
@@ -2636,6 +2685,7 @@ class _FakeCaptureProvider extends CaptureProvider {
     required this.hasDeviceBoundaryEvidence,
     required List<bool> finalizationResults,
     this.finalizationGate,
+    this.captureDiagnosticsOverride,
   }) : finalizationResults = List<bool>.of(finalizationResults) {
     recordingState = initialState;
   }
@@ -2646,6 +2696,7 @@ class _FakeCaptureProvider extends CaptureProvider {
   final bool hasDeviceBoundaryEvidence;
   final List<bool> finalizationResults;
   final Completer<void>? finalizationGate;
+  CaptureDiagnostics? captureDiagnosticsOverride;
 
   int phoneStarts = 0;
   int phoneStops = 0;
@@ -2655,6 +2706,9 @@ class _FakeCaptureProvider extends CaptureProvider {
   int finishes = 0;
   int finalizationCalls = 0;
   int finalContentChecks = 0;
+
+  @override
+  CaptureDiagnostics get captureDiagnostics => captureDiagnosticsOverride ?? super.captureDiagnostics;
 
   @override
   bool get hasCapturableContent => hasContent;
@@ -2696,6 +2750,12 @@ class _FakeCaptureProvider extends CaptureProvider {
   @override
   Future<PhoneCaptureStartResult> streamRecording() async {
     phoneStarts++;
+    if (captureDiagnosticsOverride != null) {
+      captureDiagnosticsOverride = const CaptureDiagnostics(
+        source: CaptureDiagnosticSource.phone,
+        phase: CaptureDiagnosticPhase.streaming,
+      );
+    }
     updateRecordingState(
       phoneStartResult == PhoneCaptureStartResult.started ? RecordingState.record : RecordingState.stop,
     );
