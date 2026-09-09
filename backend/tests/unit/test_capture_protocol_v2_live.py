@@ -291,6 +291,140 @@ def test_terminal_authority_for_other_capture_reclaims_expired_drained_conversat
     assert claimed_conversation['capture_state'] == 'active'
 
 
+def test_expired_active_authority_releases_owner_bound_legacy_candidate_without_touching_content(capture_protocol):
+    now = datetime.now(timezone.utc)
+    authority = _authority(
+        conversation_id='prior-capture',
+        generation='prior-generation',
+        owner='prior-owner',
+    )
+    authority['lease_expires_at'] = now - timedelta(minutes=5)
+    authority_ref = _Document(authority)
+    prior_conversation = _conversation(
+        conversation_id='prior-capture',
+        generation='prior-generation',
+        owner='prior-owner',
+    )
+    prior_conversation['capture_owner_id'] = None
+    prior_conversation['capture_lease_expires_at'] = now - timedelta(minutes=5)
+    prior_conversation_ref = _Document(prior_conversation)
+    candidate = {
+        'id': 'legacy-successor',
+        'status': 'in_progress',
+        'capture_owner_id': 'successor-owner',
+        'transcript_segments': [{'id': 'segment-a', 'text': 'preserved-content'}],
+        'structured': {'title': 'preserved-title'},
+        'photos': ['preserved-photo'],
+    }
+    candidate_ref = _Document(candidate)
+    transaction = _Transaction()
+
+    claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+        transaction,
+        authority_ref,
+        candidate_ref,
+        'legacy-successor',
+        'replacement-generation',
+        'successor-owner',
+        'replacement-owner',
+        now,
+        lambda conversation_id: {'prior-capture': prior_conversation_ref}[conversation_id],
+    )
+
+    assert claimed is True
+    claimed_candidate = _updated(candidate, transaction, candidate_ref)
+    assert claimed_candidate['capture_owner_id'] == 'replacement-owner'
+    assert claimed_candidate['capture_generation'] == 'replacement-generation'
+    assert claimed_candidate['capture_state'] == 'active'
+    assert claimed_candidate['transcript_segments'] == candidate['transcript_segments']
+    assert claimed_candidate['structured'] == candidate['structured']
+    assert claimed_candidate['photos'] == candidate['photos']
+    claimed_authority = _updated(authority, transaction, authority_ref)
+    assert claimed_authority['conversation_id'] == 'legacy-successor'
+    assert claimed_authority['owner_token'] == 'replacement-owner'
+
+
+@pytest.mark.parametrize(
+    'unsafe_state',
+    (
+        'live_authority',
+        'live_prior_conversation',
+        'authority_finalizing',
+        'authority_finalization_claim',
+        'prior_finalization_claim',
+        'candidate_owner_mismatch',
+        'candidate_missing_owner',
+        'candidate_partial_v2',
+        'prior_tuple_mismatch',
+        'missing_prior_lookup',
+    ),
+)
+def test_owner_bound_legacy_candidate_adoption_rejects_unsafe_or_ambiguous_state(capture_protocol, unsafe_state):
+    now = datetime.now(timezone.utc)
+    authority = _authority(
+        conversation_id='prior-capture',
+        generation='prior-generation',
+        owner='prior-owner',
+    )
+    authority['lease_expires_at'] = now - timedelta(minutes=5)
+    prior_conversation = _conversation(
+        conversation_id='prior-capture',
+        generation='prior-generation',
+        owner='prior-owner',
+    )
+    prior_conversation['capture_owner_id'] = None
+    prior_conversation['capture_lease_expires_at'] = now - timedelta(minutes=5)
+    candidate = {
+        'id': 'legacy-successor',
+        'status': 'in_progress',
+        'capture_owner_id': 'successor-owner',
+        'transcript_segments': [{'id': 'segment-a'}],
+    }
+    expected_owner = 'successor-owner'
+    prior_lookup = lambda _conversation_id: _Document(prior_conversation)
+
+    if unsafe_state == 'live_authority':
+        authority['lease_expires_at'] = now + timedelta(seconds=30)
+    elif unsafe_state == 'live_prior_conversation':
+        prior_conversation['capture_lease_expires_at'] = now + timedelta(seconds=30)
+    elif unsafe_state == 'authority_finalizing':
+        authority['state'] = 'finalizing'
+    elif unsafe_state == 'authority_finalization_claim':
+        authority['finalization_claim_token'] = 'live-or-ambiguous-claim'
+    elif unsafe_state == 'prior_finalization_claim':
+        prior_conversation['capture_finalization_claim_token'] = 'live-or-ambiguous-claim'
+    elif unsafe_state == 'candidate_owner_mismatch':
+        expected_owner = 'different-owner'
+    elif unsafe_state == 'candidate_missing_owner':
+        candidate['capture_owner_id'] = None
+        expected_owner = None
+    elif unsafe_state == 'candidate_partial_v2':
+        candidate['capture_state'] = 'active'
+    elif unsafe_state == 'prior_tuple_mismatch':
+        prior_conversation['capture_generation'] = 'different-generation'
+    elif unsafe_state == 'missing_prior_lookup':
+        prior_lookup = None
+
+    candidate_ref = _Document(candidate)
+    transaction = _Transaction()
+    claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+        transaction,
+        _Document(authority),
+        candidate_ref,
+        'legacy-successor',
+        'replacement-generation',
+        expected_owner,
+        'replacement-owner',
+        now,
+        prior_lookup,
+    )
+
+    assert claimed is False
+    assert transaction.sets == []
+    assert transaction.updates == []
+    assert candidate_ref.data['transcript_segments'] == [{'id': 'segment-a'}]
+
+
 def test_terminal_authority_recovery_preserves_and_terminalizes_exact_drained_capture(capture_protocol):
     now = datetime.now(timezone.utc)
     transcript_sha256 = 'a' * 64
@@ -993,6 +1127,58 @@ def test_adoption_rejects_another_live_authority_without_writes(capture_protocol
     assert installed is False
     assert transaction.updates == []
     assert transaction.sets == []
+
+
+def test_install_authority_retries_expired_firestore_transaction_once_with_fresh_transaction(
+    capture_protocol,
+    monkeypatch,
+):
+    transactions = [object(), object()]
+    calls = []
+    monkeypatch.setattr(capture_protocol.db, 'transaction', lambda: transactions.pop(0))
+    monkeypatch.setattr(capture_protocol, '_authority_ref', lambda _uid: object())
+    monkeypatch.setattr(capture_protocol, '_conversation_ref', lambda _uid, _conversation_id: object())
+
+    def install(transaction, *_args):
+        calls.append(transaction)
+        if len(calls) == 1:
+            raise capture_protocol.InvalidArgument('The referenced transaction has expired or is no longer valid.')
+        return True
+
+    monkeypatch.setattr(capture_protocol, '_install_authority_transaction', install)
+
+    assert capture_protocol.install_capture_authority(
+        'uid-a',
+        'capture-a',
+        'generation-a',
+        'owner-a',
+        adopt=True,
+    )
+    assert len(calls) == 2
+    assert calls[0] is not calls[1]
+
+
+def test_install_authority_does_not_retry_other_invalid_argument(capture_protocol, monkeypatch):
+    calls = []
+    monkeypatch.setattr(capture_protocol.db, 'transaction', lambda: object())
+    monkeypatch.setattr(capture_protocol, '_authority_ref', lambda _uid: object())
+    monkeypatch.setattr(capture_protocol, '_conversation_ref', lambda _uid, _conversation_id: object())
+
+    def install(transaction, *_args):
+        calls.append(transaction)
+        raise capture_protocol.InvalidArgument('Malformed write precondition')
+
+    monkeypatch.setattr(capture_protocol, '_install_authority_transaction', install)
+
+    with pytest.raises(capture_protocol.InvalidArgument, match='Malformed write precondition'):
+        capture_protocol.install_capture_authority(
+            'uid-a',
+            'capture-a',
+            'generation-a',
+            'owner-a',
+            adopt=True,
+        )
+    assert len(calls) == 1
 
 
 def test_drain_and_finalization_require_exact_tuple_and_reach_terminal(capture_protocol):

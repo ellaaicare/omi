@@ -1138,6 +1138,224 @@ def test_production_reconnect_rotates_expired_drained_candidate_behind_terminal_
     assert completed_authority["conversation_id"] == "completed-capture"
 
 
+def test_production_reconnect_adopts_owner_bound_legacy_successor_behind_expired_authority():
+    capture_protocol = _load_capture_protocol_module()
+    now = datetime.now(timezone.utc)
+
+    class Document:
+        def __init__(self, data):
+            self.data = data
+
+        def get(self, transaction=None):
+            return SimpleNamespace(exists=self.data is not None, to_dict=lambda: dict(self.data or {}))
+
+    class Transaction:
+        def __init__(self):
+            self.sets = []
+            self.updates = []
+
+        def set(self, ref, payload):
+            self.sets.append((ref, payload))
+
+        def update(self, ref, payload):
+            self.updates.append((ref, payload))
+
+        def apply(self):
+            for ref, payload in self.sets:
+                ref.data = dict(payload)
+            for ref, payload in self.updates:
+                ref.data.update(payload)
+
+    authority_ref = Document(
+        {
+            "protocol_version": 2,
+            "conversation_id": "prior-capture",
+            "generation": "prior-generation",
+            "owner_token": "prior-owner",
+            "state": "active",
+            "lease_expires_at": now - timedelta(minutes=5),
+        }
+    )
+    documents = {
+        "prior-capture": Document(
+            {
+                "id": "prior-capture",
+                "status": "in_progress",
+                "capture_owner_id": None,
+                "capture_protocol_version": 2,
+                "capture_generation": "prior-generation",
+                "capture_owner_token": "prior-owner",
+                "capture_state": "active",
+                "capture_lease_expires_at": now - timedelta(minutes=5),
+            }
+        ),
+        "legacy-successor": Document(
+            {
+                "id": "legacy-successor",
+                "status": "in_progress",
+                "capture_owner_id": "successor-owner",
+                "finished_at": now,
+                "transcript_segments": [{"id": "segment-a", "text": "preserved-content"}],
+                "structured": {"title": "preserved-title"},
+                "photos": ["preserved-photo"],
+            }
+        ),
+    }
+    preserved_content = {
+        key: documents["legacy-successor"].data[key] for key in ("transcript_segments", "structured", "photos")
+    }
+
+    def claim_capture_authority_for_reconnect(
+        _uid,
+        conversation_id,
+        generation,
+        expected_owner_token,
+        owner_token,
+    ):
+        transaction = Transaction()
+        claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+            transaction,
+            authority_ref,
+            documents[conversation_id],
+            conversation_id,
+            generation,
+            expected_owner_token,
+            owner_token,
+            now,
+            lambda prior_conversation_id: documents[prior_conversation_id],
+        )
+        if claimed:
+            transaction.apply()
+        return claimed
+
+    def install_capture_authority(
+        _uid,
+        conversation_id,
+        generation,
+        owner_token,
+        *,
+        expected_conversation_id=None,
+        adopt=False,
+    ):
+        transaction = Transaction()
+        installed = capture_protocol._install_authority_transaction.to_wrap(
+            transaction,
+            authority_ref,
+            documents[conversation_id],
+            conversation_id,
+            generation,
+            owner_token,
+            now,
+            expected_conversation_id,
+            documents.get(expected_conversation_id),
+            adopt,
+        )
+        if installed:
+            transaction.apply()
+        return installed
+
+    class Redis:
+        def __init__(self):
+            self.active_id = ""
+            self.owner_id = ""
+
+        def get_in_progress_conversation_id(self, _uid):
+            return self.active_id
+
+        def claim_in_progress_conversation_id(self, _uid, conversation_id, owner_token):
+            if self.active_id and self.active_id != conversation_id:
+                return False
+            self.active_id = conversation_id
+            self.owner_id = owner_token
+            return True
+
+        def replace_stale_in_progress_conversation_id(self, *_args):
+            raise AssertionError("the exact adopted candidate must be claimed in place")
+
+    class ReadyEvent:
+        def __init__(self, **values):
+            self.values = values
+
+    ready_receipts = []
+
+    async def send_ready(event):
+        ready_receipts.append(dict(event.values))
+        return True
+
+    publish_ready_impl = _nested_function(
+        "routers/transcribe.py",
+        "_publish_capture_protocol_ready",
+        {
+            "CAPTURE_PROTOCOL_VERSION": 2,
+            "MessageServiceStatusEvent": ReadyEvent,
+            "install_capture_authority": install_capture_authority,
+        },
+        {
+            "_asend_message_event": send_ready,
+            "_latency_log": lambda *_args, **_kwargs: None,
+            "generation_id": "replacement-generation",
+            "owner_token": "replacement-owner",
+            "uid": "uid-a",
+            "websocket_active": True,
+            "websocket_close_code": 1000,
+        },
+    )
+
+    async def publish_ready(conversation_id, *, expected_conversation_id=None, adopt=False):
+        return await publish_ready_impl(
+            conversation_id,
+            expected_conversation_id=expected_conversation_id,
+            adopt=adopt,
+        )
+
+    redis = Redis()
+    prepare = _nested_function(
+        "routers/transcribe.py",
+        "_prepare_in_progess_conversations",
+        {
+            "asyncio": asyncio,
+            "claim_capture_authority_for_reconnect": claim_capture_authority_for_reconnect,
+            "conversations_db": SimpleNamespace(),
+            "datetime": datetime,
+            "drain_capture_persistence_batches": lambda *_args: None,
+            "mark_capture_drained": lambda *_args: True,
+            "redis_db": redis,
+            "retrieve_in_progress_conversation": lambda _uid: dict(documents["legacy-successor"].data),
+            "timezone": timezone,
+        },
+        {
+            "_create_new_in_progress_conversation": lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("the recoverable candidate must not be replaced")
+            ),
+            "_publish_capture_protocol_ready": publish_ready,
+            "capture_recovery_conversation_ids": set(),
+            "conversation_creation_timeout": 120,
+            "current_conversation_id": None,
+            "generation_id": "replacement-generation",
+            "session_id": "replacement-owner",
+            "uid": "uid-a",
+        },
+    )
+
+    assert asyncio.run(prepare()) is None
+    assert redis.active_id == "legacy-successor"
+    assert redis.owner_id == "replacement-owner"
+    assert authority_ref.data["conversation_id"] == "legacy-successor"
+    assert authority_ref.data["generation"] == "replacement-generation"
+    assert documents["legacy-successor"].data["capture_owner_id"] == "replacement-owner"
+    assert documents["legacy-successor"].data["capture_state"] == "active"
+    assert {key: documents["legacy-successor"].data[key] for key in preserved_content} == preserved_content
+    assert ready_receipts == [
+        {
+            "status": "capture_protocol_ready",
+            "protocol_version": 2,
+            "conversation_id": "legacy-successor",
+            "generation": "replacement-generation",
+            "owner_token": "replacement-owner",
+        }
+    ]
+
+
 def test_failed_stub_publication_abandons_only_the_still_owned_firestore_generation():
     conversations = _load_conversations_module()
 
