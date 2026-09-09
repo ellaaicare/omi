@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, Optional, Set
 
+from google.api_core.exceptions import InvalidArgument
 from google.cloud.firestore_v1 import transactional
 
 from database._client import db
@@ -17,6 +18,10 @@ CAPTURE_AUTHORITY_COLLECTION = 'capture_authority'
 CAPTURE_AUTHORITY_DOCUMENT = 'current'
 CAPTURE_AUTHORITY_LEASE_SECONDS = 30
 CAPTURE_FINALIZATION_LEASE_SECONDS = 30
+_EXPIRED_TRANSACTION_MARKERS = (
+    'referenced transaction has expired',
+    'transaction has expired or is no longer valid',
+)
 
 
 def capture_protocol_v2_rollout_enabled() -> bool:
@@ -161,6 +166,11 @@ def _optional_lease_absent_or_expired(data: Dict[str, Any], now: datetime, field
     return expires_at is None or (isinstance(expires_at, datetime) and _aware(expires_at) <= now)
 
 
+def _is_expired_transaction_error(error: InvalidArgument) -> bool:
+    message = str(error).lower()
+    return any(marker in message for marker in _EXPIRED_TRANSACTION_MARKERS)
+
+
 def _durable_capture_side_is_quiescent(
     data: Dict[str, Any],
     now: datetime,
@@ -224,6 +234,7 @@ def _claim_reconnect_authority_transaction(
     expected_owner_token: Optional[str],
     owner_token: str,
     now: datetime,
+    conversation_ref_for_id: Optional[Callable[[str], Any]] = None,
 ) -> bool:
     """Atomically fence an expired capture generation before reconnect publication."""
     conversation_snapshot = conversation_ref.get(transaction=transaction)
@@ -254,13 +265,15 @@ def _claim_reconnect_authority_transaction(
         return True
 
     conversation_has_v2_state = any(
-        field in conversation
+        conversation.get(field) is not None
         for field in (
             'capture_protocol_version',
             'capture_generation',
             'capture_owner_token',
             'capture_state',
             'capture_lease_expires_at',
+            'capture_drained_at',
+            'capture_finalization_claim_token',
             'capture_finalization_lease_expires_at',
         )
     )
@@ -329,7 +342,60 @@ def _claim_reconnect_authority_transaction(
                 field='capture_finalization_lease_expires_at',
             )
         )
-        if not same_lineage_is_quiescent and not terminal_authority_releases_drained_candidate:
+
+        expired_authority_releases_owned_legacy_candidate = False
+        if (
+            expected_owner_token
+            and not conversation_has_v2_state
+            and authority.get('protocol_version') == CAPTURE_PROTOCOL_VERSION
+            and authority.get('state') in {'active', 'drained', 'terminal'}
+            and authority_conversation_id
+            and authority_conversation_id != conversation_id
+            and prior_generation
+            and prior_owner_token
+            and _authority_tuple_matches(
+                authority,
+                authority_conversation_id,
+                prior_generation,
+                prior_owner_token,
+            )
+            and _strict_lease_expired(authority, now, 'lease_expires_at')
+            and not authority.get('finalization_claim_token')
+            and _optional_lease_absent_or_expired(
+                authority,
+                now,
+                field='finalization_lease_expires_at',
+            )
+            and conversation_ref_for_id is not None
+        ):
+            prior_conversation_ref = conversation_ref_for_id(authority_conversation_id)
+            prior_conversation_snapshot = prior_conversation_ref.get(transaction=transaction)
+            prior_conversation = (
+                (prior_conversation_snapshot.to_dict() or {}) if prior_conversation_snapshot.exists else {}
+            )
+            expired_authority_releases_owned_legacy_candidate = bool(
+                _status_value(prior_conversation.get('status')) == 'in_progress'
+                and _conversation_tuple_matches(
+                    prior_conversation,
+                    authority_conversation_id,
+                    prior_generation,
+                    prior_owner_token,
+                )
+                and prior_conversation.get('capture_state') in {'active', 'drained', 'terminal'}
+                and _strict_lease_expired(prior_conversation, now, 'capture_lease_expires_at')
+                and not prior_conversation.get('capture_finalization_claim_token')
+                and _optional_lease_absent_or_expired(
+                    prior_conversation,
+                    now,
+                    field='capture_finalization_lease_expires_at',
+                )
+            )
+
+        if (
+            not same_lineage_is_quiescent
+            and not terminal_authority_releases_drained_candidate
+            and not expired_authority_releases_owned_legacy_candidate
+        ):
             return False
 
     lease_expires_at = now + timedelta(seconds=CAPTURE_AUTHORITY_LEASE_SECONDS)
@@ -377,6 +443,7 @@ def claim_capture_authority_for_reconnect(
         expected_owner_token,
         owner_token,
         datetime.now(timezone.utc),
+        lambda prior_conversation_id: _conversation_ref(uid, prior_conversation_id),
     )
 
 
@@ -540,18 +607,26 @@ def install_capture_authority(
     adopt: bool = False,
 ) -> bool:
     predecessor_ref = _conversation_ref(uid, expected_conversation_id) if expected_conversation_id is not None else None
-    return _install_authority_transaction(
-        db.transaction(),
-        _authority_ref(uid),
-        _conversation_ref(uid, conversation_id),
-        conversation_id,
-        generation,
-        owner_token,
-        datetime.now(timezone.utc),
-        expected_conversation_id,
-        predecessor_ref,
-        adopt,
-    )
+    authority_ref = _authority_ref(uid)
+    conversation_ref = _conversation_ref(uid, conversation_id)
+    for attempt in range(2):
+        try:
+            return _install_authority_transaction(
+                db.transaction(),
+                authority_ref,
+                conversation_ref,
+                conversation_id,
+                generation,
+                owner_token,
+                datetime.now(timezone.utc),
+                expected_conversation_id,
+                predecessor_ref,
+                adopt,
+            )
+        except InvalidArgument as error:
+            if attempt > 0 or not _is_expired_transaction_error(error):
+                raise
+    raise AssertionError('capture authority transaction retry exhausted')
 
 
 @transactional
