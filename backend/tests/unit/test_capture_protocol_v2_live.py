@@ -312,6 +312,8 @@ def test_expired_active_authority_releases_owner_bound_legacy_candidate_without_
         'id': 'legacy-successor',
         'status': 'in_progress',
         'capture_owner_id': 'successor-owner',
+        'capture_protocol_version': None,
+        'capture_state': None,
         'transcript_segments': [{'id': 'segment-a', 'text': 'preserved-content'}],
         'structured': {'title': 'preserved-title'},
         'photos': ['preserved-photo'],
@@ -378,6 +380,8 @@ def test_owner_bound_legacy_candidate_adoption_rejects_unsafe_or_ambiguous_state
         'id': 'legacy-successor',
         'status': 'in_progress',
         'capture_owner_id': 'successor-owner',
+        'capture_protocol_version': None,
+        'capture_state': None,
         'transcript_segments': [{'id': 'segment-a'}],
     }
     expected_owner = 'successor-owner'

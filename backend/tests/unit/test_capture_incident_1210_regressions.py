@@ -1194,6 +1194,8 @@ def test_production_reconnect_adopts_owner_bound_legacy_successor_behind_expired
                 "id": "legacy-successor",
                 "status": "in_progress",
                 "capture_owner_id": "successor-owner",
+                "capture_protocol_version": None,
+                "capture_state": None,
                 "finished_at": now,
                 "transcript_segments": [{"id": "segment-a", "text": "preserved-content"}],
                 "structured": {"title": "preserved-title"},

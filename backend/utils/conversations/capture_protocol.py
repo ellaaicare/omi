@@ -265,7 +265,7 @@ def _claim_reconnect_authority_transaction(
         return True
 
     conversation_has_v2_state = any(
-        field in conversation
+        conversation.get(field) is not None
         for field in (
             'capture_protocol_version',
             'capture_generation',
