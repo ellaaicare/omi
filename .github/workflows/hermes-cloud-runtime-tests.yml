@@ -673,6 +673,7 @@ jobs:
             "tests/unit/test_capture_incident_1210_regressions.py::test_stock_summary_commit_rejects_transcript_appended_after_processing_snapshot"
             "tests/unit/test_capture_incident_1210_regressions.py::test_production_reconnect_path_does_not_let_overlapping_socket_steal_authority"
             "tests/unit/test_capture_incident_1210_regressions.py::test_production_reconnect_rotates_expired_drained_candidate_behind_terminal_authority"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_production_reconnect_adopts_owner_bound_legacy_successor_behind_expired_authority"
             "tests/unit/test_capture_incident_1210_regressions.py::test_reconnect_claims_firestore_authority_before_publishing_redis_owner"
             "tests/unit/test_capture_protocol_v2_live.py::test_capture_ready_receipt_is_complete_for_each_production_codec[opus_fs320]"
             "tests/unit/test_capture_protocol_v2_live.py::test_capture_ready_receipt_is_complete_for_each_production_codec[pcm16]"
@@ -690,6 +691,19 @@ jobs:
             "tests/unit/test_capture_protocol_v2_live.py::test_terminal_authority_for_other_capture_reclaims_expired_drained_conversation"
             "tests/unit/test_capture_protocol_v2_live.py::test_terminal_authority_recovery_preserves_and_terminalizes_exact_drained_capture"
             "tests/unit/test_capture_protocol_v2_live.py::test_terminal_authority_for_other_capture_rejects_ambiguous_drained_conversation"
+            "tests/unit/test_capture_protocol_v2_live.py::test_expired_active_authority_releases_owner_bound_legacy_candidate_without_touching_content"
+            "tests/unit/test_capture_protocol_v2_live.py::test_owner_bound_legacy_candidate_adoption_rejects_unsafe_or_ambiguous_state[live_authority]"
+            "tests/unit/test_capture_protocol_v2_live.py::test_owner_bound_legacy_candidate_adoption_rejects_unsafe_or_ambiguous_state[live_prior_conversation]"
+            "tests/unit/test_capture_protocol_v2_live.py::test_owner_bound_legacy_candidate_adoption_rejects_unsafe_or_ambiguous_state[authority_finalizing]"
+            "tests/unit/test_capture_protocol_v2_live.py::test_owner_bound_legacy_candidate_adoption_rejects_unsafe_or_ambiguous_state[authority_finalization_claim]"
+            "tests/unit/test_capture_protocol_v2_live.py::test_owner_bound_legacy_candidate_adoption_rejects_unsafe_or_ambiguous_state[prior_finalization_claim]"
+            "tests/unit/test_capture_protocol_v2_live.py::test_owner_bound_legacy_candidate_adoption_rejects_unsafe_or_ambiguous_state[candidate_owner_mismatch]"
+            "tests/unit/test_capture_protocol_v2_live.py::test_owner_bound_legacy_candidate_adoption_rejects_unsafe_or_ambiguous_state[candidate_missing_owner]"
+            "tests/unit/test_capture_protocol_v2_live.py::test_owner_bound_legacy_candidate_adoption_rejects_unsafe_or_ambiguous_state[candidate_partial_v2]"
+            "tests/unit/test_capture_protocol_v2_live.py::test_owner_bound_legacy_candidate_adoption_rejects_unsafe_or_ambiguous_state[prior_tuple_mismatch]"
+            "tests/unit/test_capture_protocol_v2_live.py::test_owner_bound_legacy_candidate_adoption_rejects_unsafe_or_ambiguous_state[missing_prior_lookup]"
+            "tests/unit/test_capture_protocol_v2_live.py::test_install_authority_retries_expired_firestore_transaction_once_with_fresh_transaction"
+            "tests/unit/test_capture_protocol_v2_live.py::test_install_authority_does_not_retry_other_invalid_argument"
             "tests/unit/test_capture_protocol_v2_live.py::test_live_finalization_blocks_reconnect_after_capture_lease_expires"
             "tests/unit/test_capture_protocol_v2_live.py::test_reconnect_claim_rejects_live_conversation_capture_lease_when_authority_expired"
             "tests/unit/test_capture_protocol_v2_live.py::test_reconnect_claim_rejects_live_conversation_finalizer_when_authority_finalizer_expired"
@@ -700,7 +714,7 @@ jobs:
             "tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[todoist]"
             "tests/unit/test_capture_webhook_delivery.py::test_capture_developer_webhook_failure_is_not_acknowledged"
           )
-          test "$(grep -c '::' <<<"$capture_ids")" -eq 70
+          test "$(grep -c '::' <<<"$capture_ids")" -eq 84
           for required_id in "${required_capture_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$capture_ids"
           done
