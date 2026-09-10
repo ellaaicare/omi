@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/status.dart' as socket_channel_status;
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -48,15 +49,24 @@ class PureSocket implements IPureSocket {
     return _channel!;
   }
 
-  PureSocketStatus _status = PureSocketStatus.notConnected;
+  PureSocketStatus _status;
   @override
   PureSocketStatus get status => _status;
 
   IPureSocketListener? _listener;
+  bool _closeNotified = false;
+  final Duration _disconnectCloseTimeout;
+  Future<void>? _disconnectFence;
 
   String url;
 
-  PureSocket(this.url);
+  PureSocket(
+    this.url, {
+    @visibleForTesting WebSocketChannel? connectedChannel,
+    @visibleForTesting Duration disconnectCloseTimeout = const Duration(seconds: 3),
+  })  : _channel = connectedChannel,
+        _status = connectedChannel == null ? PureSocketStatus.notConnected : PureSocketStatus.connected,
+        _disconnectCloseTimeout = disconnectCloseTimeout;
 
   void setListener(IPureSocketListener listener) {
     _listener = listener;
@@ -68,6 +78,8 @@ class PureSocket implements IPureSocket {
       return false;
     }
 
+    _closeNotified = false;
+    _disconnectFence = null;
     Logger.debug("request wss ${url}");
     final headers = await buildHeaders(requireAuthCheck: true);
 
@@ -146,9 +158,25 @@ class PureSocket implements IPureSocket {
       'url': url,
       'current_status': _status.toString(),
     });
-    if (_status == PureSocketStatus.connected) {
-      // Warn: should not use await cause dead end by socket closed.
-      _channel?.sink.close(socket_channel_status.normalClosure);
+    if (_disconnectFence == null && _status == PureSocketStatus.connected) {
+      final close = _channel?.sink.close(socket_channel_status.normalClosure) ?? Future<void>.value();
+      _disconnectFence = close.then((_) {
+        _status = PureSocketStatus.disconnected;
+        Logger.debug("[Socket] disconnect");
+        onClosed(_channel?.closeCode);
+      });
+    }
+    final disconnectFence = _disconnectFence;
+    if (disconnectFence != null) {
+      try {
+        await disconnectFence.timeout(_disconnectCloseTimeout);
+      } on TimeoutException {
+        await DebugLogManager.logWarning('pure_socket_close_timeout', {
+          'url': url,
+        });
+        rethrow;
+      }
+      return;
     }
     _status = PureSocketStatus.disconnected;
     Logger.debug("[Socket] disconnect");
@@ -166,6 +194,8 @@ class PureSocket implements IPureSocket {
   @override
   void onClosed([int? closeCode]) {
     _status = PureSocketStatus.disconnected;
+    if (_closeNotified) return;
+    _closeNotified = true;
     final closeReason = _getCloseCodeReason(closeCode);
     Logger.debug("Socket closed with code: $closeCode ($closeReason)");
 

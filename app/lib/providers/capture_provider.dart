@@ -604,7 +604,7 @@ class CaptureProvider extends ChangeNotifier
     PhoneTranscriptionPreparer? phoneTranscriptionPreparer,
     PhoneAudioSender? phoneAudioSender,
     PhoneMicrophonePermissionChecker? phoneMicrophonePermissionChecker,
-    @visibleForTesting Duration captureStartProofTimeout = const Duration(seconds: 5),
+    @visibleForTesting Duration captureStartProofTimeout = const Duration(seconds: 8),
     @visibleForTesting Duration devicePhysicalFrameTimeout = const Duration(seconds: 5),
     @visibleForTesting Duration captureAuthorityWaitTimeout = const Duration(seconds: 3),
     @visibleForTesting Duration captureAuthorityPollInterval = const Duration(milliseconds: 100),

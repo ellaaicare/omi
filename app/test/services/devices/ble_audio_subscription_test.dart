@@ -103,13 +103,16 @@ class _FakeBleNotificationEndpoint implements BleNotificationEndpoint {
 BleTransport _testBleTransport(
   _FakeBleNotificationEndpoint endpoint, {
   BleAudioLivenessRecovery? recovery,
+  BleNotificationEndpointResolver? endpointResolver,
+  BleServiceRefresher? serviceRefresher,
   bool Function()? connectionProbe,
   Stream<BluetoothConnectionState>? connectionStates,
 }) {
   return BleTransport(
     BluetoothDevice.fromId('00000000-0000-0000-0000-000000000001'),
     audioLivenessRecovery: recovery,
-    notificationEndpointResolver: (_, __) async => endpoint,
+    notificationEndpointResolver: endpointResolver ?? (_, __) async => endpoint,
+    serviceRefresher: serviceRefresher,
     connectionProbe: connectionProbe ?? () => true,
     disconnectRegistrar: (_) {},
     connectionStateStream: connectionStates ?? const Stream<BluetoothConnectionState>.empty(),
@@ -141,6 +144,7 @@ void main() {
     expect(stream, isNotNull);
     expect(endpoint.notifyCalls, [
       (true, bleNotificationEnableTimeoutSeconds),
+      (false, bleNotificationResetTimeoutSeconds),
       (true, bleNotificationEnableTimeoutSeconds),
     ]);
     expect(endpoint.freshValueRequests, 2);
@@ -175,8 +179,55 @@ void main() {
       [4, 5, 6],
     ]);
     final worstCaseRecovery = bleAudioLivenessWindow +
-        const Duration(seconds: bleNotificationResetTimeoutSeconds + bleNotificationEnableTimeoutSeconds);
-    expect(worstCaseRecovery, lessThan(const Duration(seconds: 5)));
+        const Duration(
+          seconds: bleNotificationResetTimeoutSeconds +
+              bleServiceRediscoveryTimeoutSeconds +
+              bleNotificationEnableTimeoutSeconds,
+        );
+    expect(worstCaseRecovery, lessThan(const Duration(seconds: 8)));
+  });
+
+  test('Omi production entrypoint rediscovers a silent audio characteristic before forwarding bytes', () async {
+    final staleEndpoint = _FakeBleNotificationEndpoint();
+    final freshEndpoint = _FakeBleNotificationEndpoint();
+    BleNotificationEndpoint activeEndpoint = staleEndpoint;
+    var serviceRefreshes = 0;
+    final transport = _testBleTransport(
+      staleEndpoint,
+      recovery: BleAudioLivenessRecovery(window: const Duration(milliseconds: 1)),
+      endpointResolver: (_, __) async => activeEndpoint,
+      serviceRefresher: () async {
+        serviceRefreshes++;
+        activeEndpoint = freshEndpoint;
+      },
+    );
+    final connection = OmiDeviceConnection(necklace(), transport);
+    addTearDown(staleEndpoint.dispose);
+    addTearDown(freshEndpoint.dispose);
+    addTearDown(transport.dispose);
+
+    final received = <List<int>>[];
+    final subscription = await connection.performGetBleAudioBytesListener(onAudioBytesReceived: received.add);
+    addTearDown(() => subscription?.cancel());
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    while (freshEndpoint.notifyCalls.isEmpty) {
+      await pumpEventQueue();
+    }
+
+    staleEndpoint.fresh.add([9, 9, 9]);
+    freshEndpoint.fresh.add([4, 5, 6]);
+    await pumpEventQueue();
+
+    expect(subscription, isNotNull);
+    expect(serviceRefreshes, 1);
+    expect(staleEndpoint.notifyCalls, [
+      (true, bleNotificationEnableTimeoutSeconds),
+      (false, bleNotificationResetTimeoutSeconds),
+    ]);
+    expect(freshEndpoint.notifyCalls, [(true, bleNotificationEnableTimeoutSeconds)]);
+    expect(received, [
+      [4, 5, 6],
+    ]);
   });
 
   test('production BLE setup fails closed when the account/device connection generation drifts', () async {
