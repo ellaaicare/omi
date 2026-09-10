@@ -24,6 +24,9 @@ const bleNotificationResetTimeoutSeconds = 1;
 @visibleForTesting
 const bleNotificationSetupRetryDelay = Duration(milliseconds: 100);
 
+@visibleForTesting
+const bleServiceRediscoveryTimeoutSeconds = 2;
+
 const _maxPendingCharacteristicBytes = 256 * 1024;
 
 @visibleForTesting
@@ -55,6 +58,9 @@ typedef BleNotificationEndpointResolver = Future<BleNotificationEndpoint?> Funct
   String serviceUuid,
   String characteristicUuid,
 );
+
+@visibleForTesting
+typedef BleServiceRefresher = Future<void> Function();
 
 @visibleForTesting
 bool bleCharacteristicUsesFreshNotifications(String characteristicUuid) =>
@@ -104,6 +110,7 @@ class BleTransport extends DeviceTransport {
   final Map<String, int> _readyCharacteristicHandoffGenerations = {};
   final BleAudioLivenessRecovery _audioLivenessRecovery;
   final BleNotificationEndpointResolver? _notificationEndpointResolver;
+  final BleServiceRefresher? _serviceRefresher;
   final bool Function()? _connectionProbe;
   final void Function(StreamSubscription<List<int>>)? _disconnectRegistrar;
 
@@ -119,12 +126,14 @@ class BleTransport extends DeviceTransport {
     this._bleDevice, {
     @visibleForTesting BleAudioLivenessRecovery? audioLivenessRecovery,
     @visibleForTesting BleNotificationEndpointResolver? notificationEndpointResolver,
+    @visibleForTesting BleServiceRefresher? serviceRefresher,
     @visibleForTesting bool Function()? connectionProbe,
     @visibleForTesting void Function(StreamSubscription<List<int>>)? disconnectRegistrar,
     @visibleForTesting Stream<BluetoothConnectionState>? connectionStateStream,
   })  : _connectionStateController = StreamController<DeviceTransportState>.broadcast(),
         _audioLivenessRecovery = audioLivenessRecovery ?? BleAudioLivenessRecovery(),
         _notificationEndpointResolver = notificationEndpointResolver,
+        _serviceRefresher = serviceRefresher,
         _connectionProbe = connectionProbe,
         _disconnectRegistrar = disconnectRegistrar {
     _bleConnectionSubscription = (connectionStateStream ?? _bleDevice.connectionState).listen((state) {
@@ -162,6 +171,7 @@ class BleTransport extends DeviceTransport {
   @override
   Future<void> connect() async {
     if (_state == DeviceTransportState.connected) {
+      if (_services.isEmpty) await _refreshServices();
       return;
     }
 
@@ -181,7 +191,7 @@ class BleTransport extends DeviceTransport {
       }
 
       // Discover services
-      _services = await _bleDevice.discoverServices();
+      await _refreshServices();
 
       _updateState(DeviceTransportState.connected);
     } catch (e) {
@@ -258,7 +268,13 @@ class BleTransport extends DeviceTransport {
         _endReadyCharacteristicHandoff(key, generation: requestGeneration);
         return null;
       }
-      ready = await _ensureCharacteristicListener(serviceUuid, characteristicUuid, key, force: true);
+      ready = await _ensureCharacteristicListener(
+        serviceUuid,
+        characteristicUuid,
+        key,
+        force: true,
+        resetNotifications: true,
+      );
     }
     if (!ready || !_isSetupCurrent(requestGeneration) || !identical(_streamControllers[key], controller)) {
       _endReadyCharacteristicHandoff(key, generation: requestGeneration);
@@ -426,21 +442,36 @@ class BleTransport extends DeviceTransport {
       } else if (_characteristicSubscriptions.containsKey(key)) {
         return true;
       }
-      final endpoint = await _getNotificationEndpoint(serviceUuid, characteristicUuid);
+      var endpoint = await _getNotificationEndpoint(serviceUuid, characteristicUuid);
+
+      if (resetNotifications) {
+        if (endpoint != null) {
+          try {
+            await endpoint.setNotifyValue(false, timeout: bleNotificationResetTimeoutSeconds);
+          } catch (error) {
+            Logger.debug('BLE Transport: Could not clear stale notification state before retry: $error');
+          }
+          if (!isCurrent()) return false;
+        }
+
+        // A connected iOS peripheral can retain stale GATT objects that no
+        // longer deliver notifications. Resolve a new characteristic before
+        // re-enabling the audio CCCD.
+        try {
+          await _refreshServices();
+        } catch (error) {
+          Logger.debug('BLE Transport: Could not rediscover services before audio retry: $error');
+          return false;
+        }
+        if (!isCurrent()) return false;
+        endpoint = await _getNotificationEndpoint(serviceUuid, characteristicUuid);
+      }
+
       if (endpoint == null) {
         Logger.debug('BLE Transport: Characteristic not found: $serviceUuid:$characteristicUuid');
         return false;
       }
       if (!isCurrent()) return false;
-
-      if (resetNotifications) {
-        try {
-          await endpoint.setNotifyValue(false, timeout: bleNotificationResetTimeoutSeconds);
-        } catch (error) {
-          Logger.debug('BLE Transport: Could not clear stale notification state before retry: $error');
-        }
-        if (!isCurrent()) return false;
-      }
 
       final values = _isAudioCharacteristic(characteristicUuid) ? endpoint.freshValues : endpoint.replayingValues;
       final subscription = values.listen(
@@ -548,6 +579,17 @@ class BleTransport extends DeviceTransport {
     if (resolver != null) return resolver(serviceUuid, characteristicUuid);
     final characteristic = await _getCharacteristic(serviceUuid, characteristicUuid);
     return characteristic == null ? null : _FlutterBlueNotificationEndpoint(characteristic);
+  }
+
+  Future<void> _refreshServices() async {
+    final refresher = _serviceRefresher;
+    if (refresher != null) {
+      await refresher();
+      return;
+    }
+    // Resolver-based tests do not own a platform BluetoothDevice.
+    if (_notificationEndpointResolver != null) return;
+    _services = await _bleDevice.discoverServices(timeout: bleServiceRediscoveryTimeoutSeconds);
   }
 
   Future<void> _closeCharacteristicState(
