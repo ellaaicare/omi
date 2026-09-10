@@ -458,7 +458,7 @@ class BleTransport extends DeviceTransport {
         // longer deliver notifications. Resolve a new characteristic before
         // re-enabling the audio CCCD.
         try {
-          await _refreshServices();
+          await _refreshServices(isRecovery: true);
         } catch (error) {
           Logger.debug('BLE Transport: Could not rediscover services before audio retry: $error');
           return false;
@@ -581,7 +581,7 @@ class BleTransport extends DeviceTransport {
     return characteristic == null ? null : _FlutterBlueNotificationEndpoint(characteristic);
   }
 
-  Future<void> _refreshServices() async {
+  Future<void> _refreshServices({bool isRecovery = false}) async {
     final refresher = _serviceRefresher;
     if (refresher != null) {
       await refresher();
@@ -589,7 +589,9 @@ class BleTransport extends DeviceTransport {
     }
     // Resolver-based tests do not own a platform BluetoothDevice.
     if (_notificationEndpointResolver != null) return;
-    _services = await _bleDevice.discoverServices(timeout: bleServiceRediscoveryTimeoutSeconds);
+    _services = isRecovery
+        ? await _bleDevice.discoverServices(timeout: bleServiceRediscoveryTimeoutSeconds)
+        : await _bleDevice.discoverServices();
   }
 
   Future<void> _closeCharacteristicState(

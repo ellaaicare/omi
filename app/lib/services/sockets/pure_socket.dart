@@ -56,6 +56,7 @@ class PureSocket implements IPureSocket {
   IPureSocketListener? _listener;
   bool _closeNotified = false;
   final Duration _disconnectCloseTimeout;
+  Future<void>? _disconnectFence;
 
   String url;
 
@@ -78,6 +79,7 @@ class PureSocket implements IPureSocket {
     }
 
     _closeNotified = false;
+    _disconnectFence = null;
     Logger.debug("request wss ${url}");
     final headers = await buildHeaders(requireAuthCheck: true);
 
@@ -156,19 +158,25 @@ class PureSocket implements IPureSocket {
       'url': url,
       'current_status': _status.toString(),
     });
-    if (_status == PureSocketStatus.connected) {
-      _status = PureSocketStatus.disconnected;
-      final close = _channel?.sink.close(socket_channel_status.normalClosure);
-      if (close != null) {
-        try {
-          await close.timeout(_disconnectCloseTimeout);
-        } on TimeoutException {
-          await DebugLogManager.logWarning('pure_socket_close_timeout', {
-            'url': url,
-          });
-          rethrow;
-        }
+    if (_disconnectFence == null && _status == PureSocketStatus.connected) {
+      final close = _channel?.sink.close(socket_channel_status.normalClosure) ?? Future<void>.value();
+      _disconnectFence = close.then((_) {
+        _status = PureSocketStatus.disconnected;
+        Logger.debug("[Socket] disconnect");
+        onClosed(_channel?.closeCode);
+      });
+    }
+    final disconnectFence = _disconnectFence;
+    if (disconnectFence != null) {
+      try {
+        await disconnectFence.timeout(_disconnectCloseTimeout);
+      } on TimeoutException {
+        await DebugLogManager.logWarning('pure_socket_close_timeout', {
+          'url': url,
+        });
+        rethrow;
       }
+      return;
     }
     _status = PureSocketStatus.disconnected;
     Logger.debug("[Socket] disconnect");

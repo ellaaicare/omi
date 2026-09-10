@@ -51,17 +51,21 @@ void main() {
     final listener = _CloseListener();
     socket.setListener(listener);
     var disconnectCompleted = false;
+    var overlappingDisconnectCompleted = false;
 
     final disconnect = socket.disconnect().then((_) => disconnectCompleted = true);
+    final overlappingDisconnect = socket.disconnect().then((_) => overlappingDisconnectCompleted = true);
     await pumpEventQueue();
 
     expect(sink.closeCalls, 1);
     expect(disconnectCompleted, isFalse);
+    expect(overlappingDisconnectCompleted, isFalse);
     expect(listener.closeCalls, 0);
 
     sink.closeBarrier.complete();
-    await disconnect;
+    await Future.wait([disconnect, overlappingDisconnect]);
     expect(disconnectCompleted, isTrue);
+    expect(overlappingDisconnectCompleted, isTrue);
     expect(listener.closeCalls, 1);
 
     socket.onClosed(1000);
@@ -79,8 +83,13 @@ void main() {
     socket.setListener(listener);
 
     await expectLater(socket.disconnect(), throwsA(isA<TimeoutException>()));
+    await expectLater(socket.disconnect(), throwsA(isA<TimeoutException>()));
 
-    expect(sink.closeCalls, 1);
+    expect(sink.closeCalls, 1, reason: 'a subsequent stop must remain behind the original close fence');
     expect(listener.closeCalls, 0, reason: 'a timed-out old socket cannot authorize a replacement retry');
+
+    sink.closeBarrier.complete();
+    await socket.disconnect();
+    expect(listener.closeCalls, 1);
   });
 }
