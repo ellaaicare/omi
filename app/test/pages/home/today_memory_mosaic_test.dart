@@ -19,6 +19,7 @@ import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
 import 'package:omi/ella/services/memory_artwork_api.dart';
 import 'package:omi/ella/services/today_card_repository.dart';
+import 'package:omi/ella/widgets/memory_artwork_image.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/pages/conversation_capturing/page.dart';
 import 'package:omi/pages/home/today_page.dart';
@@ -1019,6 +1020,97 @@ void main() {
     await tester.tap(find.byKey(const Key('home-artwork-queue-summary')));
     await tester.pump(const Duration(milliseconds: 400));
     expect(find.text('Artwork studio'), findsOneWidget);
+  });
+
+  testWidgets('Home Days repairs only the newest visible day and keeps older days read-only', (tester) async {
+    MemoryArtworkImage.resetAutomaticGenerationBudgetForTesting();
+    addTearDown(MemoryArtworkImage.resetAutomaticGenerationBudgetForTesting);
+    final authority = await _installArtworkAuthority();
+    await SharedPreferencesUtil().saveMemoryGalleryLayout(MemoryGalleryLayout.days.name);
+    final artwork = _FakeMemoryArtworkApi(
+      displayResult: const MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.unavailable,
+        failureCode: 'memory_artwork_object_missing',
+      ),
+      automaticResult: const MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.unavailable,
+        failureCode: 'memory_artwork_automatic_attempt_exhausted',
+      ),
+    );
+    final conversations = [
+      for (var index = 0; index < 3; index++)
+        ServerConversation(
+          id: 'newest-$index',
+          createdAt: DateTime(2026, 8, 8, 12 - index),
+          startedAt: DateTime(2026, 8, 8, 12 - index),
+          structured: Structured('Newest memory $index', 'A complete recent memory $index.'),
+        ),
+      for (var index = 0; index < 2; index++)
+        ServerConversation(
+          id: 'older-$index',
+          createdAt: DateTime(2026, 8, 7, 12 - index),
+          startedAt: DateTime(2026, 8, 7, 12 - index),
+          structured: Structured('Older memory $index', 'An older memory $index.'),
+        ),
+    ];
+    final harness = await _pumpHome(
+      tester,
+      conversations: conversations,
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('home-memory-day-newest-0')),
+      500,
+      scrollable: find.descendant(
+        of: find.byKey(const Key('today-scroll')),
+        matching: find.byType(Scrollable),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final newestArtworkWidgets = tester
+        .widgetList<MemoryArtworkImage>(
+          find.descendant(
+            of: find.byKey(const Key('home-memory-day-newest-0')),
+            matching: find.byType(MemoryArtworkImage),
+          ),
+        )
+        .toList(growable: false);
+    expect(newestArtworkWidgets, hasLength(3));
+    expect(newestArtworkWidgets.every((widget) => widget.enqueueIfMissing), isTrue);
+    final newestRepairRequests = artwork.displayRequests
+        .where((request) => request.enqueueIfMissing && request.memoryId.startsWith('newest-'))
+        .map((request) => request.memoryId);
+    expect(newestRepairRequests, containsAll(<String>['newest-0', 'newest-1', 'newest-2']));
+    expect(artwork.automaticDisplayRequests, isEmpty);
+    expect(find.text('Try artwork again'), findsWidgets);
+
+    final requestsBeforeRetry = artwork.displayRequests.length;
+    await tester.tap(find.byKey(const Key('memory-artwork-placeholder-newest-0')));
+    await tester.pump();
+
+    expect(artwork.displayRequests.length, requestsBeforeRetry + 1);
+    expect(artwork.displayRequests.last, (memoryId: 'newest-0', enqueueIfMissing: true));
+
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('home-memory-day-older-0')),
+      500,
+      scrollable: find.descendant(
+        of: find.byKey(const Key('today-scroll')),
+        matching: find.byType(Scrollable),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byKey(const Key('home-memory-day-older-0')), findsOneWidget);
+    expect(
+      artwork.displayRequests.where((request) => request.enqueueIfMissing && request.memoryId.startsWith('older-')),
+      isEmpty,
+    );
   });
 
   testWidgets('Home keeps a running full-history artwork queue indeterminate', (tester) async {
@@ -2242,6 +2334,11 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
     this.failStyleUpdates = false,
     this.queue,
     this.libraryInventory,
+    this.displayResult = const MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.unavailable,
+      failureCode: 'memory_artwork_enrichment_not_terminal',
+    ),
+    this.automaticResult = const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating),
   })  : _backfillPages = List<MemoryArtworkBackfillPage>.of(backfillPages),
         _authorityThrowRequests = Set<int>.of(authorityThrowRequests),
         _failedBackfillRequests = Set<int>.of(failedBackfillRequests),
@@ -2266,12 +2363,15 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
   final bool failStyleUpdates;
   MemoryArtworkQueueStatus? queue;
   final MemoryArtworkLibraries? libraryInventory;
+  final MemoryArtworkResult displayResult;
+  final MemoryArtworkResult automaticResult;
   final List<MemoryArtworkQueueAction> queueActions = [];
   final List<bool> queueAutoContinue = [];
   int _backfillRequests = 0;
   int _styleRequests = 0;
   int queueStatusRequests = 0;
   final List<({String memoryId, bool enqueueIfMissing})> displayRequests = [];
+  final List<String> automaticDisplayRequests = [];
 
   void failNextQueueStatus() => _failedQueueStatusRequests.add(queueStatusRequests);
 
@@ -2281,6 +2381,10 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
   }
 
   @override
+  String automaticGenerationKey({required String memoryId, required String sourceRevision}) =>
+      'automatic-generation-$memoryId-$sourceRevision';
+
+  @override
   Future<MemoryArtworkResult> loadForDisplay(
     String memoryId, {
     bool enqueueIfMissing = false,
@@ -2288,10 +2392,19 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
     Duration pollInterval = const Duration(seconds: 3),
   }) async {
     displayRequests.add((memoryId: memoryId, enqueueIfMissing: enqueueIfMissing));
-    return const MemoryArtworkResult(
-      status: MemoryArtworkResultStatus.unavailable,
-      failureCode: 'memory_artwork_enrichment_not_terminal',
-    );
+    return displayResult;
+  }
+
+  @override
+  Future<MemoryArtworkResult> loadAutomaticallyForDisplay(
+    String memoryId, {
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+    void Function()? onEnqueueAttempt,
+  }) async {
+    automaticDisplayRequests.add(memoryId);
+    onEnqueueAttempt?.call();
+    return automaticResult;
   }
 
   @override

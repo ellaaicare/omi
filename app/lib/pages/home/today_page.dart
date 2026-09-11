@@ -2000,17 +2000,22 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (memories.isEmpty) return const [];
     if (_homeMemoryLayout == MemoryGalleryLayout.days) {
       final groups = groupMemoryConversationsByDay(context, memories, now: now);
+      final entries = groups.entries.toList(growable: false);
       return [
-        for (final entry in groups.entries)
+        for (var index = 0; index < entries.length; index++)
           SliverPadding(
             padding: const EdgeInsets.fromLTRB(EllaSizes.screenPadding, 18, EllaSizes.screenPadding, 0),
             sliver: SliverToBoxAdapter(
               child: MemoryDayGalleryCard(
-                dayLabel: entry.key,
-                memories: entry.value,
+                key: Key('home-memory-day-${entries[index].value.first.id}'),
+                dayLabel: entries[index].key,
+                memories: entries[index].value,
                 artworkApi: _memoryArtworkApi,
                 artworkRefreshEpoch: _homeArtworkDisplayEpoch,
                 artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
+                enqueueArtworkIfMissing: index == 0 &&
+                    _homeMemorySort == MemoryGallerySort.recent &&
+                    _homeArtworkPreferences?.releaseEnabled == true,
                 onOpen: () {
                   final authority = _memoryArtworkAuthorityProvider();
                   if (SharedPreferencesUtil.isPublicBuild && (authority == null || !authority.isExactCurrent())) {
@@ -2019,8 +2024,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                   Navigator.of(context).push(
                     MaterialPageRoute(
                       builder: (_) => EllaMemoryDayPage(
-                        dayLabel: entry.key,
-                        memories: entry.value,
+                        dayLabel: entries[index].key,
+                        memories: entries[index].value,
                         artworkApi: _memoryArtworkApi,
                         artworkRefreshEpoch: _homeArtworkDisplayEpoch,
                         artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,

@@ -304,14 +304,28 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         if (MemoryArtworkImage.beginAutomaticGeneration(automaticKey)) {
           var enqueueAttempted = false;
           try {
-            result = await api.loadAutomaticallyForDisplay(
-              widget.conversation.id,
-              pollAttempts: 0,
-              onEnqueueAttempt: () {
-                enqueueAttempted = true;
-                MemoryArtworkImage.commitAutomaticGeneration(automaticKey);
-              },
-            );
+            if (result.failureCode == 'memory_artwork_object_missing') {
+              // The read route has proved that a previously completed object
+              // cannot be served. Use the retry-capable reservation exactly
+              // once for this visible source revision; ordinary automatic
+              // failures retain the server's stricter no-repeat budget.
+              enqueueAttempted = true;
+              MemoryArtworkImage.commitAutomaticGeneration(automaticKey);
+              result = await api.loadForDisplay(
+                widget.conversation.id,
+                enqueueIfMissing: true,
+                pollAttempts: 0,
+              );
+            } else {
+              result = await api.loadAutomaticallyForDisplay(
+                widget.conversation.id,
+                pollAttempts: 0,
+                onEnqueueAttempt: () {
+                  enqueueAttempted = true;
+                  MemoryArtworkImage.commitAutomaticGeneration(automaticKey);
+                },
+              );
+            }
           } finally {
             if (!enqueueAttempted) MemoryArtworkImage.releaseAutomaticGeneration(automaticKey);
           }

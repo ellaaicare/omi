@@ -118,6 +118,42 @@ class _AutomaticGenerationArtworkApi extends MemoryArtworkApi {
   }
 }
 
+class _MissingObjectRepairArtworkApi extends MemoryArtworkApi {
+  _MissingObjectRepairArtworkApi() : super(authorityProvider: () => null);
+
+  final List<bool> enqueueRequests = [];
+  int automaticRequests = 0;
+
+  @override
+  String automaticGenerationKey({required String memoryId, required String sourceRevision}) =>
+      'missing-object-repair-$memoryId-$sourceRevision';
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    enqueueRequests.add(enqueueIfMissing);
+    return MemoryArtworkResult(
+      status: enqueueIfMissing ? MemoryArtworkResultStatus.generating : MemoryArtworkResultStatus.unavailable,
+      failureCode: enqueueIfMissing ? '' : 'memory_artwork_object_missing',
+    );
+  }
+
+  @override
+  Future<MemoryArtworkResult> loadAutomaticallyForDisplay(
+    String memoryId, {
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+    void Function()? onEnqueueAttempt,
+  }) async {
+    automaticRequests += 1;
+    return const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating);
+  }
+}
+
 class _RecycledArtworkApi extends MemoryArtworkApi {
   _RecycledArtworkApi() : super(authorityProvider: () => null);
 
@@ -1327,6 +1363,47 @@ void main() {
       api.enqueueRequests.where((enqueue) => enqueue).length,
       2,
       reason: 'the explicit person-initiated retry remains available and bounded to one tap',
+    );
+  });
+
+  testWidgets('a visible completed artwork with a missing object gets one retry-capable repair', (tester) async {
+    final api = _MissingObjectRepairArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-missing-object',
+      createdAt: DateTime(2026, 9, 11),
+      activeSummaryVersionId: 'summary-version-1',
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+    );
+
+    Widget buildArtwork(int refreshEpoch) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MemoryArtworkImage(
+            conversation: conversation,
+            api: api,
+            cachedFileLookup: (_) async => null,
+            enqueueIfMissing: true,
+            allowManualGeneration: true,
+            refreshEpoch: refreshEpoch,
+            maxTransientRetries: 0,
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(0));
+    await tester.pump();
+    expect(api.enqueueRequests, [false, true]);
+    expect(api.automaticRequests, 0, reason: 'the no-repeat automatic route cannot repair a missing completed object');
+    expect(find.byKey(const Key('memory-artwork-generation-progress-memory-missing-object')), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    await tester.pumpWidget(buildArtwork(1));
+    await tester.pump();
+
+    expect(
+      api.enqueueRequests.where((enqueue) => enqueue),
+      hasLength(1),
+      reason: 'recreation must not create another repair for the same owner-bound source revision',
     );
   });
 
