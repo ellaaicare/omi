@@ -1404,6 +1404,64 @@ void main() {
     expect(sentPostRequests, 1, reason: 'response loss after egress must keep the one-shot claim committed');
   });
 
+  testWidgets('pre-egress retry budget survives card recycling and parent refreshes', (tester) async {
+    final authority = _MutableArtworkAuthority();
+    var postAttempts = 0;
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => authority,
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+        onSendAttempt,
+      }) async {
+        if (method == 'POST') {
+          postAttempts++;
+          return null;
+        }
+        return http.Response(
+          jsonEncode({'schema_version': memoryArtworkSchemaVersion, 'status': 'unavailable'}),
+          200,
+        );
+      },
+    );
+    final conversation = ServerConversation(
+      id: 'memory-recycled-pre-egress-budget',
+      createdAt: DateTime(2026, 9, 11),
+      activeSummaryVersionId: 'summary-version-1',
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+    );
+
+    for (var refresh = 0; refresh < 5; refresh++) {
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MemoryArtworkImage(
+            key: ValueKey(refresh),
+            conversation: conversation,
+            api: api,
+            cachedFileLookup: (_) async => null,
+            enqueueIfMissing: true,
+            maxTransientRetries: 0,
+            refreshEpoch: refresh,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+    }
+
+    expect(postAttempts, 3, reason: 'one owner/profile/source revision has a process-wide pre-egress budget');
+  });
+
   testWidgets('hero automatic generation stays one-shot across recreation and leaves one manual retry', (tester) async {
     final api = _AutomaticGenerationArtworkApi();
     final conversation = ServerConversation(

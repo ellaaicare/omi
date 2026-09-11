@@ -84,11 +84,16 @@ class MemoryArtworkImage extends StatefulWidget {
   final bool allowManualGeneration;
 
   static const _automaticGenerationBudgetCapacity = 256;
+  static const _automaticPreEgressAttemptLimit = 3;
   static final LinkedHashSet<String> _automaticGenerationAttempts = LinkedHashSet<String>();
   static final Set<String> _automaticGenerationInFlight = <String>{};
+  static final LinkedHashMap<String, int> _automaticPreEgressAttempts = LinkedHashMap<String, int>();
 
   static bool beginAutomaticGeneration(String key) {
-    if (key.isEmpty || _automaticGenerationAttempts.contains(key) || !_automaticGenerationInFlight.add(key)) {
+    if (key.isEmpty ||
+        _automaticGenerationAttempts.contains(key) ||
+        (_automaticPreEgressAttempts[key] ?? 0) >= _automaticPreEgressAttemptLimit ||
+        !_automaticGenerationInFlight.add(key)) {
       return false;
     }
     return true;
@@ -96,18 +101,28 @@ class MemoryArtworkImage extends StatefulWidget {
 
   static void commitAutomaticGeneration(String key) {
     _automaticGenerationInFlight.remove(key);
+    _automaticPreEgressAttempts.remove(key);
     if (key.isEmpty || !_automaticGenerationAttempts.add(key)) return;
     while (_automaticGenerationAttempts.length > _automaticGenerationBudgetCapacity) {
       _automaticGenerationAttempts.remove(_automaticGenerationAttempts.first);
     }
   }
 
-  static void releaseAutomaticGeneration(String key) => _automaticGenerationInFlight.remove(key);
+  static void releaseAutomaticGeneration(String key, {bool countPreEgressFailure = false}) {
+    _automaticGenerationInFlight.remove(key);
+    if (!countPreEgressFailure || key.isEmpty) return;
+    final attempts = (_automaticPreEgressAttempts.remove(key) ?? 0) + 1;
+    _automaticPreEgressAttempts[key] = attempts;
+    while (_automaticPreEgressAttempts.length > _automaticGenerationBudgetCapacity) {
+      _automaticPreEgressAttempts.remove(_automaticPreEgressAttempts.keys.first);
+    }
+  }
 
   @visibleForTesting
   static void resetAutomaticGenerationBudgetForTesting() {
     _automaticGenerationAttempts.clear();
     _automaticGenerationInFlight.clear();
+    _automaticPreEgressAttempts.clear();
   }
 
   @override
@@ -328,7 +343,12 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
               );
             }
           } finally {
-            if (!enqueueAttempted) MemoryArtworkImage.releaseAutomaticGeneration(automaticKey);
+            if (!enqueueAttempted) {
+              MemoryArtworkImage.releaseAutomaticGeneration(
+                automaticKey,
+                countPreEgressFailure: result.failureCode == 'memory_artwork_transport_unavailable',
+              );
+            }
           }
         }
       }
