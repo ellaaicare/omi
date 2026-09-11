@@ -2,9 +2,13 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
+import 'package:omi/backend/http/http_pool_manager.dart';
+import 'package:omi/backend/http/shared.dart';
 import 'package:omi/ella/services/memory_artwork_api.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
+import 'package:omi/utils/platform/platform_manager.dart';
 
 class _Authority implements ExactAccountAuthorityVerifier {
   _Authority(this.uid);
@@ -18,7 +22,74 @@ class _Authority implements ExactAccountAuthorityVerifier {
   bool isExactCurrent() => current;
 }
 
+class _ExpiringAuthority implements ExactAccountAuthorityVerifier {
+  _ExpiringAuthority(this.uid, {required this.allowedChecks});
+
+  @override
+  final String uid;
+
+  final int allowedChecks;
+  int checks = 0;
+
+  @override
+  bool isExactCurrent() => ++checks <= allowedChecks;
+}
+
 void main() {
+  PlatformManager.initializeForTesting();
+
+  test('makeApiCall reports the mutation boundary only immediately before real HTTP egress', () async {
+    var sendBoundaryCalls = 0;
+    var clientCalls = 0;
+    final expiringAuthority = _ExpiringAuthority('owner-a', allowedChecks: 2);
+    HttpPoolManager.instance.replaceClientForTesting(
+      MockClient((_) async {
+        clientCalls++;
+        return http.Response('{}', 200);
+      }),
+    );
+
+    await expectLater(
+      makeApiCall(
+        url: 'https://api.example/v1/ella/memories/memory-a/artwork',
+        headers: const {},
+        body: '{}',
+        method: 'POST',
+        retries: 0,
+        requireAuthCheck: false,
+        exactAuthority: expiringAuthority,
+        onSendAttempt: () => sendBoundaryCalls++,
+      ),
+      throwsA(isA<ExactAccountAuthorityChangedException>()),
+    );
+    expect(sendBoundaryCalls, 0, reason: 'authority/header failure before egress must not consume a claim');
+    expect(clientCalls, 0);
+
+    sendBoundaryCalls = 0;
+    clientCalls = 0;
+    HttpPoolManager.instance.replaceClientForTesting(
+      MockClient((request) async {
+        clientCalls++;
+        throw http.ClientException('response lost after send', request.url);
+      }),
+    );
+
+    final result = await makeApiCall(
+      url: 'https://api.example/v1/ella/memories/memory-a/artwork',
+      headers: const {},
+      body: '{}',
+      method: 'POST',
+      retries: 0,
+      requireAuthCheck: false,
+      exactAuthority: _Authority('owner-a'),
+      onSendAttempt: () => sendBoundaryCalls++,
+    );
+
+    expect(result, isNull);
+    expect(sendBoundaryCalls, 1, reason: 'post-egress response loss must leave the mutation claim committed');
+    expect(clientCalls, 1);
+  });
+
   test('fetch binds the signed artwork request to the exact authenticated authority', () async {
     final authority = _Authority('owner-a');
     late String requestedUrl;
@@ -37,6 +108,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async {
         requestedUrl = url;
         expectedUid = expectedAuthenticatedUid!;
@@ -81,6 +153,7 @@ void main() {
             requireAuthCheck,
             expectedAuthenticatedUid,
             exactAuthority,
+            onSendAttempt,
           }) async {
             urlRevision += 1;
             return http.Response(
@@ -121,6 +194,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async =>
           http.Response(
         jsonEncode({
@@ -191,6 +265,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async {
         if (method == 'POST') {
           requestBodies.add(jsonDecode(body) as Map<String, dynamic>);
@@ -231,6 +306,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async {
         methods.add(method);
         if (method == 'POST') {
@@ -288,6 +364,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async {
         methods.add(method);
         if (method == 'POST') {
@@ -348,6 +425,7 @@ void main() {
           requireAuthCheck,
           expectedAuthenticatedUid,
           exactAuthority,
+          onSendAttempt,
         }) async {
           methods.add(method);
           reads += 1;
@@ -393,6 +471,7 @@ void main() {
           requireAuthCheck,
           expectedAuthenticatedUid,
           exactAuthority,
+          onSendAttempt,
         }) async {
           methods.add(method);
           return http.Response(
@@ -429,6 +508,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async {
         methods.add(method);
         return http.Response(
@@ -464,6 +544,7 @@ void main() {
           requireAuthCheck,
           expectedAuthenticatedUid,
           exactAuthority,
+          onSendAttempt,
         }) async {
           methods.add(method);
           return http.Response(
@@ -500,6 +581,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async {
         methods.add(method);
         getCalls += 1;
@@ -543,6 +625,7 @@ void main() {
           requireAuthCheck,
           expectedAuthenticatedUid,
           exactAuthority,
+          onSendAttempt,
         }) async {
           methods.add(method);
           if (method == 'POST') {
@@ -596,6 +679,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async =>
           http.Response(
         jsonEncode({
@@ -634,6 +718,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async {
         calls++;
         return http.Response(
@@ -672,6 +757,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async =>
           http.Response(
         jsonEncode({
@@ -705,6 +791,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async {
         calls++;
         return http.Response('{}', 200);
@@ -734,6 +821,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async {
         methods.add(method);
         urls.add(url);
@@ -788,6 +876,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async =>
           http.Response(
         jsonEncode({
@@ -820,6 +909,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async {
         expect(url, 'https://api.example/v1/ella/memory-artwork/libraries');
         expect(method, 'GET');
@@ -873,6 +963,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async {
         requestBody = body;
         return http.Response(
@@ -914,6 +1005,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async =>
           http.Response(
         jsonEncode({
@@ -946,6 +1038,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async {
         expect(timeout, const Duration(seconds: 30));
         return http.Response(
@@ -1029,6 +1122,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async {
         expect(url, 'https://api.example/v1/ella/memory-artwork/queue/control');
         expect(method, 'POST');
@@ -1100,6 +1194,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async =>
           http.Response(
         jsonEncode({
@@ -1154,6 +1249,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async =>
           http.Response(
         jsonEncode({
@@ -1199,6 +1295,7 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async =>
           http.Response(
         jsonEncode({
