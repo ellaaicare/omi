@@ -118,6 +118,54 @@ class _AutomaticGenerationArtworkApi extends MemoryArtworkApi {
   }
 }
 
+class _MissingObjectRepairArtworkApi extends MemoryArtworkApi {
+  _MissingObjectRepairArtworkApi() : super(authorityProvider: () => null);
+
+  final List<bool> enqueueRequests = [];
+  int automaticRequests = 0;
+
+  @override
+  String automaticGenerationKey({required String memoryId, required String sourceRevision}) =>
+      'missing-object-repair-$memoryId-$sourceRevision';
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    enqueueRequests.add(enqueueIfMissing);
+    return MemoryArtworkResult(
+      status: enqueueIfMissing ? MemoryArtworkResultStatus.generating : MemoryArtworkResultStatus.unavailable,
+      failureCode: enqueueIfMissing ? '' : 'memory_artwork_object_missing',
+    );
+  }
+
+  @override
+  Future<MemoryArtworkResult> loadRetryForDisplay(
+    String memoryId, {
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+    void Function()? onEnqueueAttempt,
+  }) async {
+    enqueueRequests.add(true);
+    onEnqueueAttempt?.call();
+    return const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating);
+  }
+
+  @override
+  Future<MemoryArtworkResult> loadAutomaticallyForDisplay(
+    String memoryId, {
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+    void Function()? onEnqueueAttempt,
+  }) async {
+    automaticRequests += 1;
+    return const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating);
+  }
+}
+
 class _RecycledArtworkApi extends MemoryArtworkApi {
   _RecycledArtworkApi() : super(authorityProvider: () => null);
 
@@ -1275,6 +1323,73 @@ void main() {
     expect(postRequests, 1, reason: 'only the retry that reaches the POST boundary consumes the automatic claim');
   });
 
+  testWidgets('missing-object repair commits its one-shot claim only at the POST boundary', (tester) async {
+    final authority = _MutableArtworkAuthority();
+    var getRequests = 0;
+    var postRequests = 0;
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => authority,
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async {
+        expect(requireAuthCheck, isTrue);
+        expect(expectedAuthenticatedUid, authority.uid);
+        expect(exactAuthority, same(authority));
+        if (method == 'POST') {
+          postRequests++;
+          expect(jsonDecode(body), {'request_mode': 'manual'});
+          return http.Response(jsonEncode({'status': 'generating'}), 202);
+        }
+        getRequests++;
+        if (getRequests == 3) throw StateError('safety read unavailable');
+        return http.Response(
+          jsonEncode({
+            'schema_version': memoryArtworkSchemaVersion,
+            'status': 'unavailable',
+            'failure_code': 'memory_artwork_object_missing',
+          }),
+          200,
+        );
+      },
+    );
+    final conversation = ServerConversation(
+      id: 'memory-object-preflight-retry',
+      createdAt: DateTime(2026, 9, 11),
+      activeSummaryVersionId: 'summary-version-1',
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => null,
+          enqueueIfMissing: true,
+          retryDelay: const Duration(milliseconds: 1),
+          maxTransientRetries: 1,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 1));
+    await tester.pump();
+
+    expect(getRequests, 6, reason: 'the failed safety read must leave one retryable repair attempt');
+    expect(postRequests, 1, reason: 'only reaching the authenticated POST boundary consumes the one-shot claim');
+  });
+
   testWidgets('hero automatic generation stays one-shot across recreation and leaves one manual retry', (tester) async {
     final api = _AutomaticGenerationArtworkApi();
     final conversation = ServerConversation(
@@ -1327,6 +1442,47 @@ void main() {
       api.enqueueRequests.where((enqueue) => enqueue).length,
       2,
       reason: 'the explicit person-initiated retry remains available and bounded to one tap',
+    );
+  });
+
+  testWidgets('a visible completed artwork with a missing object gets one retry-capable repair', (tester) async {
+    final api = _MissingObjectRepairArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-missing-object',
+      createdAt: DateTime(2026, 9, 11),
+      activeSummaryVersionId: 'summary-version-1',
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+    );
+
+    Widget buildArtwork(int refreshEpoch) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MemoryArtworkImage(
+            conversation: conversation,
+            api: api,
+            cachedFileLookup: (_) async => null,
+            enqueueIfMissing: true,
+            allowManualGeneration: true,
+            refreshEpoch: refreshEpoch,
+            maxTransientRetries: 0,
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(0));
+    await tester.pump();
+    expect(api.enqueueRequests, [false, true]);
+    expect(api.automaticRequests, 0, reason: 'the no-repeat automatic route cannot repair a missing completed object');
+    expect(find.byKey(const Key('memory-artwork-generation-progress-memory-missing-object')), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    await tester.pumpWidget(buildArtwork(1));
+    await tester.pump();
+
+    expect(
+      api.enqueueRequests.where((enqueue) => enqueue),
+      hasLength(1),
+      reason: 'recreation must not create another repair for the same owner-bound source revision',
     );
   });
 
