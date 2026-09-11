@@ -124,6 +124,7 @@ Future<http.Response?> makeApiCall({
   bool? requireAuthCheck,
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
+  void Function()? onSendAttempt,
 }) async {
   try {
     final effectiveTimeout =
@@ -146,6 +147,7 @@ Future<http.Response?> makeApiCall({
       retries: effectiveRetries,
       exactAuthority: exactAuthority,
       absoluteDeadline: absoluteDeadline,
+      onSendAttempt: onSendAttempt,
     );
 
     if (retryOnUnauthorized && shouldCheckAuth && response.statusCode == 401) {
@@ -164,6 +166,7 @@ Future<http.Response?> makeApiCall({
           retries: 0,
           exactAuthority: exactAuthority,
           absoluteDeadline: absoluteDeadline,
+          onSendAttempt: onSendAttempt,
         );
         Logger.log('Token refreshed and request retried');
         if (response.statusCode == 401) {

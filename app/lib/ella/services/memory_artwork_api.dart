@@ -26,6 +26,7 @@ typedef MemoryArtworkHttpCall = Future<http.Response?> Function({
   bool? requireAuthCheck,
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
+  void Function()? onSendAttempt,
 });
 typedef MemoryArtworkAuthorityProvider = ExactAccountAuthorityVerifier? Function();
 
@@ -388,7 +389,8 @@ class MemoryArtworkApi {
       path: 'v1/ella/memories/${Uri.encodeComponent(memoryId)}/artwork',
     );
     if (!authority.isExactCurrent()) return _unavailable('memory_artwork_authority_changed');
-    if (response == null || response.statusCode != 200) return _unavailable(_safeFailureCode(response?.body));
+    if (response == null) return _unavailable('memory_artwork_transport_unavailable');
+    if (response.statusCode != 200) return _unavailable(_safeFailureCode(response.body));
     final payload = _jsonObject(response.body);
     if (payload == null || payload['schema_version'] != memoryArtworkSchemaVersion) {
       return _unavailable('memory_artwork_response_invalid');
@@ -428,16 +430,17 @@ class MemoryArtworkApi {
     void Function()? onEnqueueAttempt,
   }) async {
     if (!authority.isExactCurrent()) return _unavailable('memory_artwork_authority_changed');
-    onEnqueueAttempt?.call();
     final response = await _call(
       authority,
       method: 'POST',
       path: 'v1/ella/memories/${Uri.encodeComponent(memoryId)}/artwork',
       body: jsonEncode({'request_mode': generationMode.name}),
+      onSendAttempt: onEnqueueAttempt,
     );
     if (!authority.isExactCurrent()) return _unavailable('memory_artwork_authority_changed');
-    if (response == null || response.statusCode < 200 || response.statusCode >= 300) {
-      return _unavailable(_safeFailureCode(response?.body));
+    if (response == null) return _unavailable('memory_artwork_transport_unavailable');
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return _unavailable(_safeFailureCode(response.body));
     }
     final payload = _jsonObject(response.body);
     final status = MemoryArtworkResultStatus.values.asNameMap()[payload?['status']?.toString() ?? ''];
@@ -613,6 +616,7 @@ class MemoryArtworkApi {
     required String path,
     String body = '',
     Duration timeout = const Duration(seconds: 15),
+    void Function()? onSendAttempt,
   }) {
     final normalizedBase = _resolvedBaseUrl();
     if (normalizedBase.isEmpty) return Future<http.Response?>.value(null);
@@ -627,6 +631,7 @@ class MemoryArtworkApi {
       requireAuthCheck: true,
       expectedAuthenticatedUid: authority.uid,
       exactAuthority: authority,
+      onSendAttempt: onSendAttempt,
     );
   }
 
