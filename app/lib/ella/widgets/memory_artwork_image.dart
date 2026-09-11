@@ -309,12 +309,13 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
               // cannot be served. Use the retry-capable reservation exactly
               // once for this visible source revision; ordinary automatic
               // failures retain the server's stricter no-repeat budget.
-              enqueueAttempted = true;
-              MemoryArtworkImage.commitAutomaticGeneration(automaticKey);
-              result = await api.loadForDisplay(
+              result = await api.loadRetryForDisplay(
                 widget.conversation.id,
-                enqueueIfMissing: true,
                 pollAttempts: 0,
+                onEnqueueAttempt: () {
+                  enqueueAttempted = true;
+                  MemoryArtworkImage.commitAutomaticGeneration(automaticKey);
+                },
               );
             } else {
               result = await api.loadAutomaticallyForDisplay(

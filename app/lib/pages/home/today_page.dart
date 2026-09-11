@@ -2001,6 +2001,21 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (_homeMemoryLayout == MemoryGalleryLayout.days) {
       final groups = groupMemoryConversationsByDay(context, memories, now: now);
       final entries = groups.entries.toList(growable: false);
+      final newestDay = memories
+          .map((memory) => (memory.startedAt ?? memory.createdAt).toLocal())
+          .map((value) => DateTime(value.year, value.month, value.day))
+          .reduce((current, candidate) => candidate.isAfter(current) ? candidate : current);
+      final automaticRepairMemoryIds =
+          _homeMemorySort == MemoryGallerySort.recent && _homeArtworkPreferences?.releaseEnabled == true
+              ? memories
+                  .where((memory) {
+                    final value = (memory.startedAt ?? memory.createdAt).toLocal();
+                    return DateUtils.isSameDay(DateTime(value.year, value.month, value.day), newestDay);
+                  })
+                  .take(4)
+                  .map((memory) => memory.id)
+                  .toSet()
+              : const <String>{};
       return [
         for (var index = 0; index < entries.length; index++)
           SliverPadding(
@@ -2013,9 +2028,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                 artworkApi: _memoryArtworkApi,
                 artworkRefreshEpoch: _homeArtworkDisplayEpoch,
                 artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
-                enqueueArtworkIfMissing: index == 0 &&
-                    _homeMemorySort == MemoryGallerySort.recent &&
-                    _homeArtworkPreferences?.releaseEnabled == true,
+                automaticRepairMemoryIds: automaticRepairMemoryIds,
                 onOpen: () {
                   final authority = _memoryArtworkAuthorityProvider();
                   if (SharedPreferencesUtil.isPublicBuild && (authority == null || !authority.isExactCurrent())) {

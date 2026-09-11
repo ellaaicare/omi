@@ -143,6 +143,18 @@ class _MissingObjectRepairArtworkApi extends MemoryArtworkApi {
   }
 
   @override
+  Future<MemoryArtworkResult> loadRetryForDisplay(
+    String memoryId, {
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+    void Function()? onEnqueueAttempt,
+  }) async {
+    enqueueRequests.add(true);
+    onEnqueueAttempt?.call();
+    return const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating);
+  }
+
+  @override
   Future<MemoryArtworkResult> loadAutomaticallyForDisplay(
     String memoryId, {
     int pollAttempts = 10,
@@ -1309,6 +1321,73 @@ void main() {
 
     expect(getRequests, 6, reason: 'the scheduled retry must repeat both safety reads after the first one fails');
     expect(postRequests, 1, reason: 'only the retry that reaches the POST boundary consumes the automatic claim');
+  });
+
+  testWidgets('missing-object repair commits its one-shot claim only at the POST boundary', (tester) async {
+    final authority = _MutableArtworkAuthority();
+    var getRequests = 0;
+    var postRequests = 0;
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => authority,
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async {
+        expect(requireAuthCheck, isTrue);
+        expect(expectedAuthenticatedUid, authority.uid);
+        expect(exactAuthority, same(authority));
+        if (method == 'POST') {
+          postRequests++;
+          expect(jsonDecode(body), {'request_mode': 'manual'});
+          return http.Response(jsonEncode({'status': 'generating'}), 202);
+        }
+        getRequests++;
+        if (getRequests == 3) throw StateError('safety read unavailable');
+        return http.Response(
+          jsonEncode({
+            'schema_version': memoryArtworkSchemaVersion,
+            'status': 'unavailable',
+            'failure_code': 'memory_artwork_object_missing',
+          }),
+          200,
+        );
+      },
+    );
+    final conversation = ServerConversation(
+      id: 'memory-object-preflight-retry',
+      createdAt: DateTime(2026, 9, 11),
+      activeSummaryVersionId: 'summary-version-1',
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => null,
+          enqueueIfMissing: true,
+          retryDelay: const Duration(milliseconds: 1),
+          maxTransientRetries: 1,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 1));
+    await tester.pump();
+
+    expect(getRequests, 6, reason: 'the failed safety read must leave one retryable repair attempt');
+    expect(postRequests, 1, reason: 'only reaching the authenticated POST boundary consumes the one-shot claim');
   });
 
   testWidgets('hero automatic generation stays one-shot across recreation and leaves one manual retry', (tester) async {

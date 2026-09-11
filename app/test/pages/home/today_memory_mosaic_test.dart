@@ -1038,20 +1038,26 @@ void main() {
       ),
     );
     final conversations = [
-      for (var index = 0; index < 3; index++)
+      for (var index = 0; index < 2; index++)
         ServerConversation(
           id: 'newest-$index',
-          createdAt: DateTime(2026, 8, 8, 12 - index),
-          startedAt: DateTime(2026, 8, 8, 12 - index),
+          createdAt: DateTime(2026, 8, 6, 12 - index),
+          startedAt: DateTime(2026, 8, 6, 12 - index),
           structured: Structured('Newest memory $index', 'A complete recent memory $index.'),
         ),
       for (var index = 0; index < 2; index++)
         ServerConversation(
           id: 'older-$index',
-          createdAt: DateTime(2026, 8, 7, 12 - index),
-          startedAt: DateTime(2026, 8, 7, 12 - index),
+          createdAt: DateTime(2026, 8, 5, 12 - index),
+          startedAt: DateTime(2026, 8, 5, 12 - index),
           structured: Structured('Older memory $index', 'An older memory $index.'),
         ),
+      ServerConversation(
+        id: 'same-label-prior-year',
+        createdAt: DateTime(2020, 8, 6, 12),
+        startedAt: DateTime(2020, 8, 6, 12),
+        structured: Structured('Prior-year memory', 'A memory sharing the newest yearless day label.'),
+      ),
     ];
     final harness = await _pumpHome(
       tester,
@@ -1082,11 +1088,27 @@ void main() {
         )
         .toList(growable: false);
     expect(newestArtworkWidgets, hasLength(3));
-    expect(newestArtworkWidgets.every((widget) => widget.enqueueIfMissing), isTrue);
+    expect(
+      newestArtworkWidgets
+          .where((widget) => widget.conversation.id.startsWith('newest-'))
+          .every((widget) => widget.enqueueIfMissing),
+      isTrue,
+    );
+    expect(
+      newestArtworkWidgets.singleWhere((widget) => widget.conversation.id == 'same-label-prior-year').enqueueIfMissing,
+      isFalse,
+      reason: 'a matching yearless label must not make a prior-year memory eligible for automatic repair',
+    );
     final newestRepairRequests = artwork.displayRequests
         .where((request) => request.enqueueIfMissing && request.memoryId.startsWith('newest-'))
         .map((request) => request.memoryId);
-    expect(newestRepairRequests, containsAll(<String>['newest-0', 'newest-1', 'newest-2']));
+    expect(newestRepairRequests, containsAll(<String>['newest-0', 'newest-1']));
+    expect(
+      artwork.displayRequests.where(
+        (request) => request.enqueueIfMissing && request.memoryId == 'same-label-prior-year',
+      ),
+      isEmpty,
+    );
     expect(artwork.automaticDisplayRequests, isEmpty);
     expect(find.text('Try artwork again'), findsWidgets);
 
@@ -2403,6 +2425,18 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
     void Function()? onEnqueueAttempt,
   }) async {
     automaticDisplayRequests.add(memoryId);
+    onEnqueueAttempt?.call();
+    return automaticResult;
+  }
+
+  @override
+  Future<MemoryArtworkResult> loadRetryForDisplay(
+    String memoryId, {
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+    void Function()? onEnqueueAttempt,
+  }) async {
+    displayRequests.add((memoryId: memoryId, enqueueIfMissing: true));
     onEnqueueAttempt?.call();
     return automaticResult;
   }

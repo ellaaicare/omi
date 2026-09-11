@@ -310,6 +310,21 @@ class MemoryArtworkApi {
         onEnqueueAttempt: onEnqueueAttempt,
       );
 
+  Future<MemoryArtworkResult> loadRetryForDisplay(
+    String memoryId, {
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+    void Function()? onEnqueueAttempt,
+  }) =>
+      _loadForDisplay(
+        memoryId,
+        enqueueIfMissing: true,
+        generationMode: MemoryArtworkGenerationMode.manual,
+        pollAttempts: pollAttempts,
+        pollInterval: pollInterval,
+        onEnqueueAttempt: onEnqueueAttempt,
+      );
+
   Future<MemoryArtworkResult> _loadForDisplay(
     String memoryId, {
     required bool enqueueIfMissing,

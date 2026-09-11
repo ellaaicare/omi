@@ -601,7 +601,7 @@ class MemoryDayGalleryCard extends StatelessWidget {
     this.artworkApi,
     this.artworkRefreshEpoch = 0,
     this.artworkAuthorityEpoch = 0,
-    this.enqueueArtworkIfMissing = false,
+    this.automaticRepairMemoryIds = const <String>{},
   });
 
   final String dayLabel;
@@ -610,7 +610,7 @@ class MemoryDayGalleryCard extends StatelessWidget {
   final MemoryArtworkApi? artworkApi;
   final int artworkRefreshEpoch;
   final int artworkAuthorityEpoch;
-  final bool enqueueArtworkIfMissing;
+  final Set<String> automaticRepairMemoryIds;
 
   @override
   Widget build(BuildContext context) {
@@ -639,7 +639,7 @@ class MemoryDayGalleryCard extends StatelessWidget {
                   artworkApi: artworkApi,
                   artworkRefreshEpoch: artworkRefreshEpoch,
                   artworkAuthorityEpoch: artworkAuthorityEpoch,
-                  enqueueArtworkIfMissing: enqueueArtworkIfMissing,
+                  automaticRepairMemoryIds: automaticRepairMemoryIds,
                 ),
               ),
               Padding(
@@ -679,21 +679,21 @@ class _MemoryDayArtworkCollage extends StatelessWidget {
     this.artworkApi,
     this.artworkRefreshEpoch = 0,
     this.artworkAuthorityEpoch = 0,
-    this.enqueueArtworkIfMissing = false,
+    this.automaticRepairMemoryIds = const <String>{},
   });
 
   final List<ServerConversation> memories;
   final MemoryArtworkApi? artworkApi;
   final int artworkRefreshEpoch;
   final int artworkAuthorityEpoch;
-  final bool enqueueArtworkIfMissing;
+  final Set<String> automaticRepairMemoryIds;
 
   Widget _art(ServerConversation memory) => MemoryArtworkImage(
         conversation: memory,
         api: artworkApi,
         refreshEpoch: artworkRefreshEpoch,
         authorityEpoch: artworkAuthorityEpoch,
-        enqueueIfMissing: enqueueArtworkIfMissing,
+        enqueueIfMissing: automaticRepairMemoryIds.contains(memory.id),
         allowManualGeneration: true,
       );
 
