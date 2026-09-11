@@ -32,6 +32,7 @@ class HttpPoolManager {
     int retries = 1,
     ExactAccountAuthorityVerifier? exactAuthority,
     MonotonicRequestDeadline? absoluteDeadline,
+    void Function()? onSendAttempt,
   }) async {
     final totalTimeout = MonotonicRequestDeadline.budgetFor(timeout: timeout, retries: retries);
     final deadline = absoluteDeadline ?? MonotonicRequestDeadline(totalTimeout);
@@ -48,7 +49,7 @@ class HttpPoolManager {
     final admissionTimeout = deadline.remaining < totalTimeout ? deadline.remaining : totalTimeout;
     final future = _pool.withResource(() async {
       deadline.throwIfExpired('before pooled request construction');
-      return _executeWithRetry(requestBuilder, timeout, retries, exactAuthority, deadline);
+      return _executeWithRetry(requestBuilder, timeout, retries, exactAuthority, deadline, onSendAttempt);
     }).timeout(admissionTimeout);
 
     if (isGet && exactAuthority == null) {
@@ -65,6 +66,7 @@ class HttpPoolManager {
     int retries,
     ExactAccountAuthorityVerifier? exactAuthority,
     MonotonicRequestDeadline deadline,
+    void Function()? onSendAttempt,
   ) async {
     http.Response? lastResponse;
     Object? lastError;
@@ -78,6 +80,8 @@ class HttpPoolManager {
           final request = requestBuilder();
           _verifyExactAuthority(exactAuthority, 'immediately before HTTP egress');
           deadline.throwIfExpired('immediately before HTTP egress');
+          // A caller may commit a one-shot mutation only when client.send is next.
+          onSendAttempt?.call();
           final streamed = await _client.send(request);
           _verifyExactAuthority(exactAuthority, 'after HTTP response headers');
           final response = await http.Response.fromStream(streamed);

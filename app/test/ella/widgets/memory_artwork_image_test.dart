@@ -1274,11 +1274,13 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async {
         expect(requireAuthCheck, isTrue);
         expect(expectedAuthenticatedUid, authority.uid);
         expect(exactAuthority, same(authority));
         if (method == 'POST') {
+          onSendAttempt?.call();
           postRequests++;
           expect(jsonDecode(body), {'request_mode': 'automatic'});
           return http.Response(
@@ -1287,7 +1289,7 @@ void main() {
           );
         }
         getRequests++;
-        if (getRequests == 3) throw StateError('safety read unavailable');
+        if (getRequests == 3) return null;
         return http.Response(
           jsonEncode({'schema_version': memoryArtworkSchemaVersion, 'status': 'unavailable'}),
           200,
@@ -1323,10 +1325,11 @@ void main() {
     expect(postRequests, 1, reason: 'only the retry that reaches the POST boundary consumes the automatic claim');
   });
 
-  testWidgets('missing-object repair commits its one-shot claim only at the POST boundary', (tester) async {
+  testWidgets('pre-egress failure retries once and post-egress loss keeps the one-shot claim', (tester) async {
     final authority = _MutableArtworkAuthority();
     var getRequests = 0;
-    var postRequests = 0;
+    var postAttempts = 0;
+    var sentPostRequests = 0;
     final api = MemoryArtworkApi(
       baseUrl: 'https://api.example/',
       authorityProvider: () => authority,
@@ -1340,17 +1343,25 @@ void main() {
         requireAuthCheck,
         expectedAuthenticatedUid,
         exactAuthority,
+        onSendAttempt,
       }) async {
         expect(requireAuthCheck, isTrue);
         expect(expectedAuthenticatedUid, authority.uid);
         expect(exactAuthority, same(authority));
         if (method == 'POST') {
-          postRequests++;
+          postAttempts++;
           expect(jsonDecode(body), {'request_mode': 'manual'});
-          return http.Response(jsonEncode({'status': 'generating'}), 202);
+          if (postAttempts == 1) {
+            // Production makeApiCall returns null when auth/header construction
+            // fails before HttpPoolManager reaches the send boundary.
+            return null;
+          }
+          onSendAttempt?.call();
+          sentPostRequests++;
+          // Losing the response after egress must not permit a second mutation.
+          return null;
         }
         getRequests++;
-        if (getRequests == 3) throw StateError('safety read unavailable');
         return http.Response(
           jsonEncode({
             'schema_version': memoryArtworkSchemaVersion,
@@ -1378,16 +1389,19 @@ void main() {
           cachedFileLookup: (_) async => null,
           enqueueIfMissing: true,
           retryDelay: const Duration(milliseconds: 1),
-          maxTransientRetries: 1,
+          maxTransientRetries: 2,
         ),
       ),
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 1));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 1));
+    await tester.pump();
 
-    expect(getRequests, 6, reason: 'the failed safety read must leave one retryable repair attempt');
-    expect(postRequests, 1, reason: 'only reaching the authenticated POST boundary consumes the one-shot claim');
+    expect(getRequests, 7, reason: 'the final passive read must reconcile the ambiguous sent request');
+    expect(postAttempts, 2, reason: 'the pre-egress failure must leave exactly one retryable mutation attempt');
+    expect(sentPostRequests, 1, reason: 'response loss after egress must keep the one-shot claim committed');
   });
 
   testWidgets('hero automatic generation stays one-shot across recreation and leaves one manual retry', (tester) async {

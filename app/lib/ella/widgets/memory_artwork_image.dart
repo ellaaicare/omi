@@ -496,7 +496,8 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   bool _shouldRetry(MemoryArtworkResult result) {
     return result.refreshPending ||
         result.status == MemoryArtworkResultStatus.generating ||
-        _isAuthorityUnavailable(result);
+        _isAuthorityUnavailable(result) ||
+        _isTransportUnavailable(result);
   }
 
   bool _isAuthorityUnavailable(MemoryArtworkResult? result) {
@@ -505,6 +506,9 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       'memory_artwork_runtime_authority_unavailable',
     }.contains(result?.failureCode);
   }
+
+  bool _isTransportUnavailable(MemoryArtworkResult? result) =>
+      result?.failureCode == 'memory_artwork_transport_unavailable';
 
   void _scheduleRetry(
     MemoryArtworkApi api,
@@ -521,6 +525,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       }
       _authorityUnavailableRetries++;
     } else if (transientTransportFailure ||
+        _isTransportUnavailable(result) ||
         result?.refreshPending == true ||
         result?.status == MemoryArtworkResultStatus.generating) {
       if (_transientRetries >= widget.maxTransientRetries) return;
