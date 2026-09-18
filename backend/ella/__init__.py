@@ -21,10 +21,31 @@ See ella/README.md for full documentation.
 import os
 from typing import Optional, Callable, Dict
 
-from database.account_diagnostics import PostgresAccountDiagnosticsRepository
-from ella.routers.account_diagnostics import create_account_diagnostics_router
 from ella.routers.canonical_events import _get_pool
 from ella.routers.invites import router as invite_router
+
+_ACCOUNT_DIAGNOSTICS_IMPORT_ERROR = None
+try:
+    from database.account_diagnostics import PostgresAccountDiagnosticsRepository
+    from ella.routers.account_diagnostics import create_account_diagnostics_router
+    from utils.ella.account_diagnostics_retention import (
+        DiagnosticRetentionWorker,
+        start_diagnostic_retention_worker,
+        stop_diagnostic_retention_worker,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name not in {
+        "database.account_diagnostics",
+        "ella.routers.account_diagnostics",
+        "utils.ella.account_diagnostics_retention",
+    }:
+        raise
+    PostgresAccountDiagnosticsRepository = None
+    create_account_diagnostics_router = None
+    DiagnosticRetentionWorker = None
+    start_diagnostic_retention_worker = None
+    stop_diagnostic_retention_worker = None
+    _ACCOUNT_DIAGNOSTICS_IMPORT_ERROR = exc
 
 try:
     from ella.routers.imessage_enrollment import router as imessage_enrollment_router
@@ -44,11 +65,6 @@ from ella.routers.onboarding import configure_firestore_db, router as onboarding
 from ella.routers.today_cards import create_today_cards_router
 from ella.services.today_card import TodayCardMaterializer
 from ella.services.today_card_postgres import PostgresTodayCardRepository
-from utils.ella.account_diagnostics_retention import (
-    DiagnosticRetentionWorker,
-    start_diagnostic_retention_worker,
-    stop_diagnostic_retention_worker,
-)
 
 # =============================================================================
 # CONFIGURATION
@@ -326,6 +342,8 @@ def _register_routers(app) -> None:
 
     # Account-bound, content-free diagnostic evidence and support projection.
     try:
+        if PostgresAccountDiagnosticsRepository is None:
+            raise _ACCOUNT_DIAGNOSTICS_IMPORT_ERROR
         diagnostics_repository = PostgresAccountDiagnosticsRepository()
         app.include_router(
             create_account_diagnostics_router(diagnostics_repository),
@@ -462,6 +480,20 @@ def _register_routers(app) -> None:
         print("  🌐 /v1/ella/settings* - Server-backed app settings", flush=True)
     except ImportError as e:
         print(f"  ⚠️ Ella settings not available: {e}", flush=True)
+
+    # Owner-scoped generated artwork for enriched memory cards. This remains
+    # optional so the W2 overlay preserves W1 releases that carry the feature
+    # without making it a dependency of installations that do not.
+    try:
+        from ella.routers.memory_artwork import router as memory_artwork_router
+        from ella.services.memory_artwork import start_memory_artwork_worker, stop_memory_artwork_worker
+
+        app.include_router(memory_artwork_router, tags=["Ella Memory Artwork"])
+        app.add_event_handler("startup", start_memory_artwork_worker)
+        app.add_event_handler("shutdown", stop_memory_artwork_worker)
+        print("  🌐 /v1/ella/memory-artwork/* - Private generated memory artwork", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella memory artwork not available: {e}", flush=True)
 
     # Token-authenticated first-party adapter for the persistent Photon sidecar.
     try:

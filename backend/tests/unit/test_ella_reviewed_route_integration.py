@@ -295,20 +295,49 @@ def _load_delete_account_route():
     authenticated_uid = lambda: "uid-a"
     firestore_delete = Mock()
     firebase_delete = Mock()
-    unlink = AsyncMock()
-    imessage_cleanup = AsyncMock(
-        return_value={
+    lifecycle = []
+
+    async def unlink_account(*, uid):
+        lifecycle.append(("unlink", uid))
+
+    unlink = AsyncMock(side_effect=unlink_account)
+
+    def prepare_artwork(uid, *, lock_proof):
+        lifecycle.append(("artwork_prepare", uid, lock_proof))
+
+    artwork_prepare = Mock(side_effect=prepare_artwork)
+
+    class ArtworkLock:
+        async def __aenter__(self):
+            lifecycle.append(("artwork_lock", "uid-a"))
+            return "artwork-lock-proof"
+
+        async def __aexit__(self, *_args):
+            return False
+
+    artwork_lock = Mock(return_value=ArtworkLock())
+
+    async def run_in_threadpool(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    async def cleanup_imessage(*, uid):
+        lifecycle.append(("imessage_cleanup", uid))
+        return {
             "local_absence_proven": True,
             "provider_disposition": "provider_user_retained_unbound",
             "operator_action_required": True,
         }
-    )
+
+    imessage_cleanup = AsyncMock(side_effect=cleanup_imessage)
 
     class ImessageCleanupError(RuntimeError):
         def __init__(self, code, *, status_code):
             super().__init__(code)
             self.code = code
             self.status_code = status_code
+
+    class MemoryArtworkCleanupError(RuntimeError):
+        pass
 
     auth = types.SimpleNamespace(get_current_user_uid=authenticated_uid, delete_account=firebase_delete)
     namespace = {
@@ -320,10 +349,24 @@ def _load_delete_account_route():
         "unlink_self_owner_account_on_deletion": unlink,
         "cleanup_imessage_for_account_deletion": imessage_cleanup,
         "ImessageEnrollmentError": ImessageCleanupError,
+        "MemoryArtworkStorageError": MemoryArtworkCleanupError,
+        "acquire_memory_artwork_publication_lock": artwork_lock,
+        "prepare_account_artwork_deletion": artwork_prepare,
+        "run_in_threadpool": run_in_threadpool,
         "ManagedCloudAuthorityUnavailable": RuntimeError,
     }
     exec(compile(ast.Module(body=[function], type_ignores=[]), "backend/routers/users.py", "exec"), namespace)
-    return namespace["delete_account"], firestore_delete, firebase_delete, unlink, imessage_cleanup
+    return (
+        namespace["delete_account"],
+        firestore_delete,
+        firebase_delete,
+        unlink,
+        imessage_cleanup,
+        artwork_lock,
+        artwork_prepare,
+        lifecycle,
+        MemoryArtworkCleanupError,
+    )
 
 
 def test_account_deletion_completes_unlink_receipt_without_destructive_removal():
@@ -333,7 +376,17 @@ def test_account_deletion_completes_unlink_receipt_without_destructive_removal()
     # (users row / consent authority freed under the advisory lock) — so the
     # receipt is truthful and a relogin creates a fresh account. The deep
     # Firestore/Firebase wipe is deferred to the GC/retention pipeline.
-    route, firestore_delete, firebase_delete, unlink, imessage_cleanup = _load_delete_account_route()
+    (
+        route,
+        firestore_delete,
+        firebase_delete,
+        unlink,
+        imessage_cleanup,
+        artwork_lock,
+        artwork_prepare,
+        lifecycle,
+        _memory_artwork_error,
+    ) = _load_delete_account_route()
     app = FastAPI()
     app.add_api_route("/v1/users/delete-account", route, methods=["DELETE"])
 
@@ -353,18 +406,41 @@ def test_account_deletion_completes_unlink_receipt_without_destructive_removal()
         "operator_action_required": True,
     }
     imessage_cleanup.assert_awaited_once_with(uid="uid-a")
+    artwork_lock.assert_called_once_with("uid-a")
+    artwork_prepare.assert_called_once_with("uid-a", lock_proof="artwork-lock-proof")
     unlink.assert_called_once_with(uid="uid-a")
+    assert lifecycle == [
+        ("artwork_lock", "uid-a"),
+        ("artwork_prepare", "uid-a", "artwork-lock-proof"),
+        ("imessage_cleanup", "uid-a"),
+        ("unlink", "uid-a"),
+    ]
     firestore_delete.assert_not_called()
     firebase_delete.assert_not_called()
 
 
 def test_account_deletion_refuses_before_unlink_when_imessage_absence_is_unproven():
-    route, firestore_delete, firebase_delete, unlink, imessage_cleanup = _load_delete_account_route()
-    imessage_cleanup.return_value = {
-        "local_absence_proven": False,
-        "provider_disposition": "provider_user_retained_unbound",
-        "operator_action_required": True,
-    }
+    (
+        route,
+        firestore_delete,
+        firebase_delete,
+        unlink,
+        imessage_cleanup,
+        artwork_lock,
+        artwork_prepare,
+        lifecycle,
+        _memory_artwork_error,
+    ) = _load_delete_account_route()
+
+    async def cleanup_unproven(*, uid):
+        lifecycle.append(("imessage_cleanup", uid))
+        return {
+            "local_absence_proven": False,
+            "provider_disposition": "provider_user_retained_unbound",
+            "operator_action_required": True,
+        }
+
+    imessage_cleanup.side_effect = cleanup_unproven
     app = FastAPI()
     app.add_api_route("/v1/users/delete-account", route, methods=["DELETE"])
 
@@ -378,6 +454,89 @@ def test_account_deletion_refuses_before_unlink_when_imessage_absence_is_unprove
             "retryable": True,
         }
     }
+    artwork_lock.assert_called_once_with("uid-a")
+    artwork_prepare.assert_called_once_with("uid-a", lock_proof="artwork-lock-proof")
     unlink.assert_not_awaited()
+    assert lifecycle == [
+        ("artwork_lock", "uid-a"),
+        ("artwork_prepare", "uid-a", "artwork-lock-proof"),
+        ("imessage_cleanup", "uid-a"),
+    ]
     firestore_delete.assert_not_called()
     firebase_delete.assert_not_called()
+
+
+def test_account_deletion_refuses_before_imessage_cleanup_when_artwork_cleanup_fails():
+    (
+        route,
+        firestore_delete,
+        firebase_delete,
+        unlink,
+        imessage_cleanup,
+        artwork_lock,
+        artwork_prepare,
+        lifecycle,
+        memory_artwork_error,
+    ) = _load_delete_account_route()
+    artwork_prepare.side_effect = memory_artwork_error("memory_artwork_cleanup_unavailable")
+    app = FastAPI()
+    app.add_api_route("/v1/users/delete-account", route, methods=["DELETE"])
+
+    with TestClient(app) as client:
+        response = client.delete("/v1/users/delete-account")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": {
+            "code": "memory_artwork_cleanup_unavailable",
+            "retryable": True,
+        }
+    }
+    artwork_lock.assert_called_once_with("uid-a")
+    artwork_prepare.assert_called_once_with("uid-a", lock_proof="artwork-lock-proof")
+    imessage_cleanup.assert_not_awaited()
+    unlink.assert_not_awaited()
+    assert lifecycle == [("artwork_lock", "uid-a")]
+    firestore_delete.assert_not_called()
+    firebase_delete.assert_not_called()
+
+
+def test_w2_overlay_keeps_w1_optional_routes_and_cleanup_imports():
+    ella_tree = ast.parse((_BACKEND / "ella" / "__init__.py").read_text(encoding="utf-8"))
+    diagnostic_try = next(
+        node
+        for node in ella_tree.body
+        if isinstance(node, ast.Try)
+        and any(
+            isinstance(child, ast.ImportFrom) and child.module == "database.account_diagnostics" for child in node.body
+        )
+    )
+    assert any(
+        isinstance(handler.type, ast.Name) and handler.type.id == "ModuleNotFoundError"
+        for handler in diagnostic_try.handlers
+    )
+    register = next(
+        node for node in ella_tree.body if isinstance(node, ast.FunctionDef) and node.name == "_register_routers"
+    )
+    register_imports = {
+        node.module for node in ast.walk(register) if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    assert {
+        "ella.routers.memory_artwork",
+        "ella.services.memory_artwork",
+    } <= register_imports
+
+    users_tree = ast.parse((_BACKEND / "routers" / "users.py").read_text(encoding="utf-8"))
+    storage_try = next(
+        node
+        for node in users_tree.body
+        if isinstance(node, ast.Try)
+        and any(
+            isinstance(child, ast.ImportFrom) and child.module == "utils.ella.memory_artwork_storage"
+            for child in node.body
+        )
+    )
+    assert any(
+        isinstance(handler.type, ast.Name) and handler.type.id == "ModuleNotFoundError"
+        for handler in storage_try.handlers
+    )

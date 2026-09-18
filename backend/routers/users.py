@@ -7,6 +7,7 @@ import os
 import pytz
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from database import (
     conversations as conversations_db,
@@ -66,6 +67,24 @@ from ella.services.imessage_enrollment import (
     ImessageEnrollmentError,
     cleanup_imessage_for_account_deletion,
 )
+
+
+class _MemoryArtworkStorageUnavailable(RuntimeError):
+    pass
+
+
+try:
+    from utils.ella.memory_artwork_storage import (
+        MemoryArtworkStorageError,
+        acquire_memory_artwork_publication_lock,
+        prepare_account_artwork_deletion,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "utils.ella.memory_artwork_storage":
+        raise
+    MemoryArtworkStorageError = _MemoryArtworkStorageUnavailable
+    acquire_memory_artwork_publication_lock = None
+    prepare_account_artwork_deletion = None
 from utils.other.storage import (
     delete_all_conversation_recordings,
     get_speech_sample_signed_urls,
@@ -117,10 +136,25 @@ async def delete_account(uid: str = Depends(auth.get_current_user_uid)):
     Hermes/honcho data persists until the GC/retention pass.
     """
     try:
+        if acquire_memory_artwork_publication_lock is not None:
+            async with acquire_memory_artwork_publication_lock(uid) as artwork_lock_proof:
+                await run_in_threadpool(
+                    prepare_account_artwork_deletion,
+                    uid,
+                    lock_proof=artwork_lock_proof,
+                )
         imessage_cleanup = await cleanup_imessage_for_account_deletion(uid=uid)
         if imessage_cleanup.get('local_absence_proven') is not True:
             raise ImessageEnrollmentError('imessage_account_cleanup_unproven', status_code=503)
         await unlink_self_owner_account_on_deletion(uid=uid)
+    except MemoryArtworkStorageError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                'code': str(exc),
+                'retryable': True,
+            },
+        ) from exc
     except ImessageEnrollmentError:
         raise HTTPException(
             status_code=503,
