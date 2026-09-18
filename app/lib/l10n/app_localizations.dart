@@ -16064,6 +16064,264 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Summary enriched by Ella'**
   String get conversationEllaEnrichedLabel;
+
+  /// No description provided for @ellaMessagingSection.
+  ///
+  /// In en, this message translates to:
+  /// **'MESSAGING'**
+  String get ellaMessagingSection;
+
+  /// No description provided for @ellaImessageTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'iMessage with Ella'**
+  String get ellaImessageTitle;
+
+  /// No description provided for @ellaImessageSettingsSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Verify this iPhone for private text messages'**
+  String get ellaImessageSettingsSubtitle;
+
+  /// No description provided for @ellaImessageIntro.
+  ///
+  /// In en, this message translates to:
+  /// **'Connect this iPhone to your private Ella workspace. Registration alone never makes messaging ready; Ella confirms readiness only after a message from this handset is verified.'**
+  String get ellaImessageIntro;
+
+  /// No description provided for @ellaImessageNotConnectedTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Not connected'**
+  String get ellaImessageNotConnectedTitle;
+
+  /// No description provided for @ellaImessageNotConnectedBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Set up this iPhone before using iMessage with Ella.'**
+  String get ellaImessageNotConnectedBody;
+
+  /// No description provided for @ellaImessageSetUp.
+  ///
+  /// In en, this message translates to:
+  /// **'Set up iMessage'**
+  String get ellaImessageSetUp;
+
+  /// No description provided for @ellaImessagePendingTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Verification pending'**
+  String get ellaImessagePendingTitle;
+
+  /// No description provided for @ellaImessagePendingBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Open Messages and send the one-time verification message from this iPhone. Then return here to check verification.'**
+  String get ellaImessagePendingBody;
+
+  /// No description provided for @ellaImessageAssignedDestination.
+  ///
+  /// In en, this message translates to:
+  /// **'Verification destination: {destination}'**
+  String ellaImessageAssignedDestination(String destination);
+
+  /// No description provided for @ellaImessageOpenMessages.
+  ///
+  /// In en, this message translates to:
+  /// **'Open Messages'**
+  String get ellaImessageOpenMessages;
+
+  /// No description provided for @ellaImessageStartAgain.
+  ///
+  /// In en, this message translates to:
+  /// **'Start again'**
+  String get ellaImessageStartAgain;
+
+  /// No description provided for @ellaImessageCheckVerification.
+  ///
+  /// In en, this message translates to:
+  /// **'Check verification'**
+  String get ellaImessageCheckVerification;
+
+  /// No description provided for @ellaImessageReadyTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Ready for private messages'**
+  String get ellaImessageReadyTitle;
+
+  /// No description provided for @ellaImessageReadyBody.
+  ///
+  /// In en, this message translates to:
+  /// **'This verified iPhone can send private text messages to your Ella workspace.'**
+  String get ellaImessageReadyBody;
+
+  /// No description provided for @ellaImessageLastVerified.
+  ///
+  /// In en, this message translates to:
+  /// **'Last verified {dateTime}'**
+  String ellaImessageLastVerified(String dateTime);
+
+  /// No description provided for @ellaImessageTextOnly.
+  ///
+  /// In en, this message translates to:
+  /// **'Text messages only. Group messages, attachments, and caregiver delivery are not enabled.'**
+  String get ellaImessageTextOnly;
+
+  /// No description provided for @ellaImessageDisconnect.
+  ///
+  /// In en, this message translates to:
+  /// **'Disconnect this iPhone'**
+  String get ellaImessageDisconnect;
+
+  /// No description provided for @ellaImessageUnavailableTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'iMessage is unavailable'**
+  String get ellaImessageUnavailableTitle;
+
+  /// No description provided for @ellaImessageUnavailableBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella could not verify private messaging right now. Pull down or try again without changing your other alert channels.'**
+  String get ellaImessageUnavailableBody;
+
+  /// No description provided for @ellaImessageFeatureUnavailableBody.
+  ///
+  /// In en, this message translates to:
+  /// **'The server has not enabled private text messages for this binding. Ella will not show it as ready.'**
+  String get ellaImessageFeatureUnavailableBody;
+
+  /// No description provided for @ellaImessageRetry.
+  ///
+  /// In en, this message translates to:
+  /// **'Try again'**
+  String get ellaImessageRetry;
+
+  /// No description provided for @ellaImessageSupportCode.
+  ///
+  /// In en, this message translates to:
+  /// **'Support code: {supportCode}'**
+  String ellaImessageSupportCode(String supportCode);
+
+  /// No description provided for @ellaImessageRevokedTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Disconnected'**
+  String get ellaImessageRevokedTitle;
+
+  /// No description provided for @ellaImessageRevokedBody.
+  ///
+  /// In en, this message translates to:
+  /// **'This iPhone is no longer authorized for iMessage with Ella.'**
+  String get ellaImessageRevokedBody;
+
+  /// No description provided for @ellaImessageReconnect.
+  ///
+  /// In en, this message translates to:
+  /// **'Connect again'**
+  String get ellaImessageReconnect;
+
+  /// No description provided for @ellaImessageConsentTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Before you connect'**
+  String get ellaImessageConsentTitle;
+
+  /// No description provided for @ellaImessageConsentFlow.
+  ///
+  /// In en, this message translates to:
+  /// **'{recipients} process your private text-message flow for your Ella workspace.'**
+  String ellaImessageConsentFlow(String recipients);
+
+  /// No description provided for @ellaImessageConsentData.
+  ///
+  /// In en, this message translates to:
+  /// **'Data included by the current policy: {dataClasses}. Nothing is connected or sent until you agree.'**
+  String ellaImessageConsentData(String dataClasses);
+
+  /// No description provided for @ellaImessagePhoneLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'This iPhone phone number'**
+  String get ellaImessagePhoneLabel;
+
+  /// No description provided for @ellaImessagePhoneHint.
+  ///
+  /// In en, this message translates to:
+  /// **'+12025550123'**
+  String get ellaImessagePhoneHint;
+
+  /// No description provided for @ellaImessagePhoneHelp.
+  ///
+  /// In en, this message translates to:
+  /// **'Include + and the country code. Ella does not reuse a phone number saved by another account.'**
+  String get ellaImessagePhoneHelp;
+
+  /// No description provided for @ellaImessagePhoneInvalid.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter a valid phone number with country code'**
+  String get ellaImessagePhoneInvalid;
+
+  /// No description provided for @ellaImessageConsentAgreement.
+  ///
+  /// In en, this message translates to:
+  /// **'I agree to share this data with {recipients} for private text messages.'**
+  String ellaImessageConsentAgreement(String recipients);
+
+  /// No description provided for @ellaImessageAgreeContinue.
+  ///
+  /// In en, this message translates to:
+  /// **'Agree and continue'**
+  String get ellaImessageAgreeContinue;
+
+  /// No description provided for @ellaImessageNotNow.
+  ///
+  /// In en, this message translates to:
+  /// **'Not now'**
+  String get ellaImessageNotNow;
+
+  /// No description provided for @ellaImessageErrorSignIn.
+  ///
+  /// In en, this message translates to:
+  /// **'Sign in again before connecting iMessage.'**
+  String get ellaImessageErrorSignIn;
+
+  /// No description provided for @ellaImessageErrorRateLimited.
+  ///
+  /// In en, this message translates to:
+  /// **'Too many setup attempts. Wait before trying again.'**
+  String get ellaImessageErrorRateLimited;
+
+  /// No description provided for @ellaImessageErrorConsentUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella cannot record the required iMessage consent yet. Nothing was connected or sent.'**
+  String get ellaImessageErrorConsentUnavailable;
+
+  /// No description provided for @ellaImessageErrorProofExpired.
+  ///
+  /// In en, this message translates to:
+  /// **'The one-time verification message expired. Start setup again.'**
+  String get ellaImessageErrorProofExpired;
+
+  /// No description provided for @ellaImessageErrorAccountChanged.
+  ///
+  /// In en, this message translates to:
+  /// **'The signed-in account changed. This response was discarded; reload before continuing.'**
+  String get ellaImessageErrorAccountChanged;
+
+  /// No description provided for @ellaImessageErrorMessages.
+  ///
+  /// In en, this message translates to:
+  /// **'Messages could not be opened. No verification message was sent.'**
+  String get ellaImessageErrorMessages;
+
+  /// No description provided for @ellaImessageErrorGeneric.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella could not update iMessage setup. Nothing was connected or sent.'**
+  String get ellaImessageErrorGeneric;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

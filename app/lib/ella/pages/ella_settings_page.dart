@@ -18,6 +18,7 @@ import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/pages/debug_event_log_page.dart';
 import 'package:omi/ella/pages/guardian_alert_history_page.dart';
 import 'package:omi/ella/pages/guardian_mode_page.dart';
+import 'package:omi/ella/pages/imessage_enrollment_page.dart';
 import 'package:omi/ella/services/caregiver_api.dart' as caregiver_api;
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
 import 'package:omi/ella/widgets/ella_settings_row.dart';
@@ -225,6 +226,16 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
                 },
               ),
             ],
+
+            _buildSectionHeader(context.l10n.ellaMessagingSection),
+            EllaSettingsRow(
+              icon: Icons.chat_bubble_outline,
+              title: context.l10n.ellaImessageTitle,
+              subtitle: context.l10n.ellaImessageSettingsSubtitle,
+              onTap: () {
+                Navigator.push(context, MaterialPageRoute(builder: (context) => const ImessageEnrollmentPage()));
+              },
+            ),
 
             // CARE TEAM section
             _buildSectionHeader(context.l10n.ellaCareTeamSection),

@@ -10212,5 +10212,90 @@
   "conversationEllaEnrichedLabel": "Summary enriched by Ella",
   "@conversationEllaEnrichedLabel": {
     "description": "Accessible label and tooltip for the Ella-enriched memory badge"
+  },
+  "ellaMessagingSection": "MESSAGING",
+  "ellaImessageTitle": "iMessage with Ella",
+  "ellaImessageSettingsSubtitle": "Verify this iPhone for private text messages",
+  "ellaImessageIntro": "Connect this iPhone to your private Ella workspace. Registration alone never makes messaging ready; Ella confirms readiness only after a message from this handset is verified.",
+  "ellaImessageNotConnectedTitle": "Not connected",
+  "ellaImessageNotConnectedBody": "Set up this iPhone before using iMessage with Ella.",
+  "ellaImessageSetUp": "Set up iMessage",
+  "ellaImessagePendingTitle": "Verification pending",
+  "ellaImessagePendingBody": "Open Messages and send the one-time verification message from this iPhone. Then return here to check verification.",
+  "ellaImessageAssignedDestination": "Verification destination: {destination}",
+  "@ellaImessageAssignedDestination": {
+    "placeholders": {
+      "destination": {
+        "type": "String"
+      }
+    }
+  },
+  "ellaImessageOpenMessages": "Open Messages",
+  "ellaImessageStartAgain": "Start again",
+  "ellaImessageCheckVerification": "Check verification",
+  "ellaImessageReadyTitle": "Ready for private messages",
+  "ellaImessageReadyBody": "This verified iPhone can send private text messages to your Ella workspace.",
+  "ellaImessageLastVerified": "Last verified {dateTime}",
+  "@ellaImessageLastVerified": {
+    "placeholders": {
+      "dateTime": {
+        "type": "String"
+      }
+    }
+  },
+  "ellaImessageTextOnly": "Text messages only. Group messages, attachments, and caregiver delivery are not enabled.",
+  "ellaImessageDisconnect": "Disconnect this iPhone",
+  "ellaImessageUnavailableTitle": "iMessage is unavailable",
+  "ellaImessageUnavailableBody": "Ella could not verify private messaging right now. Pull down or try again without changing your other alert channels.",
+  "ellaImessageFeatureUnavailableBody": "The server has not enabled private text messages for this binding. Ella will not show it as ready.",
+  "ellaImessageRetry": "Try again",
+  "ellaImessageSupportCode": "Support code: {supportCode}",
+  "@ellaImessageSupportCode": {
+    "placeholders": {
+      "supportCode": {
+        "type": "String"
+      }
+    }
+  },
+  "ellaImessageRevokedTitle": "Disconnected",
+  "ellaImessageRevokedBody": "This iPhone is no longer authorized for iMessage with Ella.",
+  "ellaImessageReconnect": "Connect again",
+  "ellaImessageConsentTitle": "Before you connect",
+  "ellaImessageConsentFlow": "{recipients} process your private text-message flow for your Ella workspace.",
+  "ellaImessageConsentData": "Data included by the current policy: {dataClasses}. Nothing is connected or sent until you agree.",
+  "ellaImessagePhoneLabel": "This iPhone phone number",
+  "ellaImessagePhoneHint": "+12025550123",
+  "ellaImessagePhoneHelp": "Include + and the country code. Ella does not reuse a phone number saved by another account.",
+  "ellaImessagePhoneInvalid": "Enter a valid phone number with country code",
+  "ellaImessageConsentAgreement": "I agree to share this data with {recipients} for private text messages.",
+  "ellaImessageAgreeContinue": "Agree and continue",
+  "ellaImessageNotNow": "Not now",
+  "ellaImessageErrorSignIn": "Sign in again before connecting iMessage.",
+  "ellaImessageErrorRateLimited": "Too many setup attempts. Wait before trying again.",
+  "ellaImessageErrorConsentUnavailable": "Ella cannot record the required iMessage consent yet. Nothing was connected or sent.",
+  "ellaImessageErrorProofExpired": "The one-time verification message expired. Start setup again.",
+  "ellaImessageErrorAccountChanged": "The signed-in account changed. This response was discarded; reload before continuing.",
+  "ellaImessageErrorMessages": "Messages could not be opened. No verification message was sent.",
+  "ellaImessageErrorGeneric": "Ella could not update iMessage setup. Nothing was connected or sent.",
+  "@ellaImessageConsentFlow": {
+    "placeholders": {
+      "recipients": {
+        "type": "String"
+      }
+    }
+  },
+  "@ellaImessageConsentData": {
+    "placeholders": {
+      "dataClasses": {
+        "type": "String"
+      }
+    }
+  },
+  "@ellaImessageConsentAgreement": {
+    "placeholders": {
+      "recipients": {
+        "type": "String"
+      }
+    }
   }
 }

@@ -1,0 +1,115 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:omi/ella/models/imessage_enrollment.dart';
+
+void main() {
+  test('decodes every authoritative enrollment state', () {
+    for (final state in ImessageEnrollmentState.values) {
+      final status = ImessageEnrollmentStatus.fromJson(_statusJson(state: state));
+
+      expect(status.state, state);
+      expect(status.authorityGeneration, 4);
+      expect(status.assignedDestination, '+12025550123');
+      expect(status.features.groups, isFalse);
+      expect(status.features.attachments, isFalse);
+      expect(status.features.caregiverDelivery, isFalse);
+    }
+  });
+
+  test('requires both server ready state and text DM capability', () {
+    final ready = ImessageEnrollmentStatus.fromJson(
+      _statusJson(state: ImessageEnrollmentState.ready, textDm: true),
+    );
+    final disabled = ImessageEnrollmentStatus.fromJson(
+      _statusJson(state: ImessageEnrollmentState.ready, textDm: false),
+    );
+
+    expect(ready.isReady, isTrue);
+    expect(disabled.isReady, isFalse);
+  });
+
+  test('rejects unknown schema and unknown state instead of guessing', () {
+    expect(
+      () => ImessageEnrollmentStatus.fromJson({..._statusJson(), 'schema_version': 'legacy'}),
+      throwsFormatException,
+    );
+    expect(
+      () => ImessageEnrollmentStatus.fromJson({..._statusJson(), 'state': 'connected'}),
+      throwsFormatException,
+    );
+  });
+
+  test('consent policy and receipt must match the immutable text-DM scope', () {
+    final policy = ImessageConsentPolicy.fromJson(_policyJson());
+    final receipt = ImessageConsentReceipt.fromJson(_receiptJson());
+
+    expect(policy.recipients, ['Photon', 'Ella self-hosted Hermes', 'OpenAI']);
+    expect(receipt.matches(policy, ImessageConsentDecision.granted), isTrue);
+    expect(receipt.matches(policy, ImessageConsentDecision.declined), isFalse);
+  });
+
+  test('consent parsing fails closed for a different scope or malformed hash', () {
+    expect(
+      () => ImessageConsentPolicy.fromJson({..._policyJson(), 'scope_version': 'legacy'}),
+      throwsFormatException,
+    );
+    expect(
+      () => ImessageConsentPolicy.fromJson({..._policyJson(), 'processor_set_hash': 'sha256:nope'}),
+      throwsFormatException,
+    );
+  });
+}
+
+String _hash(String character) => 'sha256:${List.filled(64, character).join()}';
+
+Map<String, dynamic> _policyJson() => {
+      'policy_version': ImessageConsentPolicy.supportedPolicyVersion,
+      'processor_set_hash': _hash('a'),
+      'scope_version': ImessageConsentPolicy.supportedScopeVersion,
+      'scope_hash': _hash('b'),
+      'recipients': ['Photon', 'Ella self-hosted Hermes', 'OpenAI'],
+      'data_classes': ['phone number', 'message text'],
+      'text_dm_only': true,
+    };
+
+Map<String, dynamic> _receiptJson() => {
+      'schema_version': ImessageConsentReceipt.schema,
+      'receipt_id': '00000000-0000-4000-8000-000000000005',
+      'decision': 'granted',
+      'policy_version': ImessageConsentPolicy.supportedPolicyVersion,
+      'processor_set_hash': _hash('a'),
+      'scope_version': ImessageConsentPolicy.supportedScopeVersion,
+      'scope_hash': _hash('b'),
+      'authority_revision': 1,
+      'decided_at': '2026-09-18T08:00:00Z',
+    };
+
+Map<String, dynamic> _statusJson({
+  ImessageEnrollmentState state = ImessageEnrollmentState.notConnected,
+  bool textDm = false,
+}) {
+  final reason = switch (state) {
+    ImessageEnrollmentState.notConnected => ImessageEnrollmentReason.notEnrolled,
+    ImessageEnrollmentState.verificationPending => ImessageEnrollmentReason.verificationPending,
+    ImessageEnrollmentState.ready => ImessageEnrollmentReason.ready,
+    ImessageEnrollmentState.temporarilyUnavailable => ImessageEnrollmentReason.transportUnhealthy,
+    ImessageEnrollmentState.revoked => ImessageEnrollmentReason.bindingRevoked,
+  };
+  return {
+    'schema_version': ImessageEnrollmentStatus.schema,
+    'state': state.wireValue,
+    'reason_code': reason.wireValue,
+    'authority_generation': 4,
+    'binding_revision': 2,
+    'binding_fingerprint': '0123456789abcdef',
+    'assigned_destination': '+12025550123',
+    'last_verified_at': '2026-09-18T08:00:00Z',
+    'verification_expires_at': '2026-09-18T08:05:00Z',
+    'support_code': 'ELLA-ABCDEF12',
+    'features': {
+      'text_dm': textDm,
+      'groups': false,
+      'attachments': false,
+      'caregiver_delivery': false,
+    },
+  };
+}
