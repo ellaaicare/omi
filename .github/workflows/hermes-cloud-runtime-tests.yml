@@ -1081,11 +1081,13 @@ jobs:
             "tests/unit/test_ella_reviewed_route_integration.py::test_legacy_history_proxy_unexpected_failure_logs_no_runtime_material"
             "tests/unit/test_ella_reviewed_route_integration.py::test_account_deletion_completes_unlink_receipt_without_destructive_removal"
             "tests/unit/test_ella_reviewed_route_integration.py::test_account_deletion_refuses_before_unlink_when_imessage_absence_is_unproven"
+            "tests/unit/test_ella_reviewed_route_integration.py::test_account_deletion_refuses_before_imessage_cleanup_when_artwork_cleanup_fails"
+            "tests/unit/test_ella_reviewed_route_integration.py::test_w2_overlay_keeps_w1_optional_routes_and_cleanup_imports"
           )
           for required_id in "${required_reviewed_route_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$reviewed_route_ids"
           done
-          test "$(grep -c '::' <<<"$reviewed_route_ids")" -eq 8
+          test "$(grep -c '::' <<<"$reviewed_route_ids")" -eq 10
           pytest tests/unit/test_ella_reviewed_route_integration.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_listen_runtime_gate.py | grep -c '::')" -eq 7
           pytest tests/unit/test_ella_listen_runtime_gate.py -v

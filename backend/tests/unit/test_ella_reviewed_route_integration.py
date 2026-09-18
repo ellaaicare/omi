@@ -518,13 +518,32 @@ def test_w2_overlay_keeps_w1_optional_routes_and_cleanup_imports():
     register = next(
         node for node in ella_tree.body if isinstance(node, ast.FunctionDef) and node.name == "_register_routers"
     )
-    register_imports = {
-        node.module for node in ast.walk(register) if isinstance(node, ast.ImportFrom) and node.module is not None
-    }
-    assert {
-        "ella.routers.memory_artwork",
-        "ella.services.memory_artwork",
-    } <= register_imports
+    artwork_try = next(
+        node
+        for node in ella_tree.body
+        if isinstance(node, ast.Try)
+        and any(
+            isinstance(child, ast.ImportFrom) and child.module == "ella.routers.memory_artwork" for child in node.body
+        )
+    )
+    assert any(
+        isinstance(handler.type, ast.Name) and handler.type.id == "ModuleNotFoundError"
+        for handler in artwork_try.handlers
+    )
+    assert not any(
+        isinstance(node, ast.ImportFrom)
+        and node.module in {"ella.routers.memory_artwork", "ella.services.memory_artwork"}
+        for node in ast.walk(register)
+    )
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "include_router"
+        and node.args
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "memory_artwork_router"
+        for node in ast.walk(register)
+    )
 
     users_tree = ast.parse((_BACKEND / "routers" / "users.py").read_text(encoding="utf-8"))
     storage_try = next(

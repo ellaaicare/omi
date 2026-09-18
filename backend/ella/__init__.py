@@ -47,6 +47,21 @@ except ModuleNotFoundError as exc:
     stop_diagnostic_retention_worker = None
     _ACCOUNT_DIAGNOSTICS_IMPORT_ERROR = exc
 
+_MEMORY_ARTWORK_IMPORT_ERROR = None
+try:
+    from ella.routers.memory_artwork import router as memory_artwork_router
+    from ella.services.memory_artwork import start_memory_artwork_worker, stop_memory_artwork_worker
+except ModuleNotFoundError as exc:
+    if exc.name not in {
+        "ella.routers.memory_artwork",
+        "ella.services.memory_artwork",
+    }:
+        raise
+    memory_artwork_router = None
+    start_memory_artwork_worker = None
+    stop_memory_artwork_worker = None
+    _MEMORY_ARTWORK_IMPORT_ERROR = exc
+
 try:
     from ella.routers.imessage_enrollment import router as imessage_enrollment_router
 except ImportError as exc:
@@ -484,16 +499,13 @@ def _register_routers(app) -> None:
     # Owner-scoped generated artwork for enriched memory cards. This remains
     # optional so the W2 overlay preserves W1 releases that carry the feature
     # without making it a dependency of installations that do not.
-    try:
-        from ella.routers.memory_artwork import router as memory_artwork_router
-        from ella.services.memory_artwork import start_memory_artwork_worker, stop_memory_artwork_worker
-
+    if memory_artwork_router is not None:
         app.include_router(memory_artwork_router, tags=["Ella Memory Artwork"])
         app.add_event_handler("startup", start_memory_artwork_worker)
         app.add_event_handler("shutdown", stop_memory_artwork_worker)
         print("  🌐 /v1/ella/memory-artwork/* - Private generated memory artwork", flush=True)
-    except ImportError as e:
-        print(f"  ⚠️ Ella memory artwork not available: {e}", flush=True)
+    else:
+        print(f"  ⚠️ Ella memory artwork not available: {_MEMORY_ARTWORK_IMPORT_ERROR}", flush=True)
 
     # Token-authenticated first-party adapter for the persistent Photon sidecar.
     try:
