@@ -77,6 +77,12 @@ class RegistrarResult:
     assigned_destination: str
 
 
+@dataclass(frozen=True)
+class RegistrarCleanupResult:
+    provider_disposition: str
+    operator_action_required: bool
+
+
 class Registrar(Protocol):
     async def register(
         self,
@@ -85,6 +91,8 @@ class Registrar(Protocol):
         provider_request_id: str,
     ) -> RegistrarResult: ...
 
+    async def cleanup(self, *, provider_request_id: str) -> RegistrarCleanupResult: ...
+
 
 class UnavailableRegistrar:
     def __init__(self, code: str = "imessage_registrar_not_configured") -> None:
@@ -92,6 +100,10 @@ class UnavailableRegistrar:
 
     async def register(self, *, handset_e164: str, provider_request_id: str) -> RegistrarResult:
         del handset_e164, provider_request_id
+        raise RegistrarError(self.code, ambiguous=False)
+
+    async def cleanup(self, *, provider_request_id: str) -> RegistrarCleanupResult:
+        del provider_request_id
         raise RegistrarError(self.code, ambiguous=False)
 
 
@@ -170,6 +182,59 @@ class PhotonRegistrarClient:
         return RegistrarResult(
             registration_ref=registration_ref,
             assigned_destination=assigned_destination,
+        )
+
+    async def cleanup(self, *, provider_request_id: str) -> RegistrarCleanupResult:
+        try:
+            request_id = str(uuid.UUID(provider_request_id))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise RegistrarError("imessage_registrar_cleanup_invalid", ambiguous=False) from exc
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._timeout,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                async with client.stream(
+                    "DELETE",
+                    f"{self._endpoint}/{request_id}",
+                    headers={"Authorization": f"Bearer {self._token}"},
+                ) as response:
+                    if response.status_code != 202:
+                        ambiguous = response.status_code >= 500
+                        raise RegistrarError(
+                            (
+                                "imessage_registrar_cleanup_uncertain"
+                                if ambiguous
+                                else "imessage_registrar_cleanup_rejected"
+                            ),
+                            ambiguous=ambiguous,
+                        )
+                    chunks: list[bytes] = []
+                    response_size = 0
+                    async for chunk in response.aiter_bytes():
+                        response_size += len(chunk)
+                        if response_size > 32_768:
+                            raise RegistrarError("imessage_registrar_cleanup_response_invalid", ambiguous=True)
+                        chunks.append(chunk)
+                    response_content = b"".join(chunks)
+        except httpx.HTTPError as exc:
+            raise RegistrarError("imessage_registrar_cleanup_transport_uncertain", ambiguous=True) from exc
+        try:
+            body = json.loads(response_content)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise RegistrarError("imessage_registrar_cleanup_response_invalid", ambiguous=True) from exc
+        if (
+            not isinstance(body, dict)
+            or body.get("status") != "local_cleanup_complete_provider_retained"
+            or body.get("provider_disposition") != "provider_user_retained_unbound"
+            or body.get("operator_action_required") is not True
+            or body.get("absence_proof") != {"registrations": 0, "inbound_events": 0, "deliveries": 0}
+        ):
+            raise RegistrarError("imessage_registrar_cleanup_response_invalid", ambiguous=True)
+        return RegistrarCleanupResult(
+            provider_disposition="provider_user_retained_unbound",
+            operator_action_required=True,
         )
 
 
@@ -270,6 +335,8 @@ class ImessageEnrollmentService:
             )
         except ImessageAuthorityError as exc:
             raise self._authority_error(exc) from exc
+        if decision != "granted":
+            await self._cleanup_provider_requests(uid=uid, error_prefix="imessage_consent_cleanup")
         return self._receipt(receipt)
 
     async def status(self, *, uid: str) -> dict[str, Any]:
@@ -315,6 +382,7 @@ class ImessageEnrollmentService:
                     )
                 except ImessageAuthorityError as exc:
                     raise self._authority_error(exc) from exc
+                await self._cleanup_provider_requests(uid=uid, error_prefix="imessage_expired_cleanup")
                 if str(binding.get("status") or "") == "quarantined":
                     return self._binding_status(
                         binding,
@@ -400,6 +468,7 @@ class ImessageEnrollmentService:
                     )
                 except ImessageAuthorityError as exc:
                     raise self._authority_error(exc) from exc
+                await self._cleanup_provider_requests(uid=uid, error_prefix="imessage_expired_cleanup")
                 raise ImessageEnrollmentError("imessage_registration_proof_window_expired", status_code=409)
             code = self._challenge_code(attempt["id"])
             return (
@@ -581,7 +650,66 @@ class ImessageEnrollmentService:
             raise self._authority_error(exc) from exc
         if not binding:
             return self._status(state="not_connected", reason="not_enrolled")
-        return self._binding_status(binding, status="revoked", reason="binding_revoked")
+        provider_request_id = str(binding.get("provider_request_id") or "")
+        try:
+            cleanup = await self.registrar.cleanup(provider_request_id=provider_request_id)
+        except RegistrarError as exc:
+            raise ImessageEnrollmentError(
+                "imessage_local_cleanup_uncertain" if exc.ambiguous else "imessage_local_cleanup_failed",
+                status_code=503,
+            ) from exc
+        response = self._binding_status(binding, status="revoked", reason="binding_revoked")
+        response["cleanup"] = {
+            "local_absence_proven": True,
+            "provider_disposition": cleanup.provider_disposition,
+            "operator_action_required": cleanup.operator_action_required,
+        }
+        return response
+
+    async def cleanup_for_account_deletion(self, *, uid: str) -> dict[str, Any]:
+        """Fence iMessage writes and prove exact local transport absence before unlink."""
+        await self._require_schema()
+        try:
+            fence = await self.repository.begin_account_deletion_cleanup(
+                uid=uid,
+                request_id=uuid.uuid4(),
+            )
+        except ImessageAuthorityError as exc:
+            raise self._authority_error(exc) from exc
+        request_id = uuid.UUID(str(fence["request_id"]))
+        if str(fence["state"]) != "cleaned":
+            for provider_request_id in fence.get("provider_request_ids") or []:
+                try:
+                    await self.registrar.cleanup(provider_request_id=str(provider_request_id))
+                except RegistrarError as exc:
+                    raise ImessageEnrollmentError(
+                        "imessage_account_cleanup_uncertain" if exc.ambiguous else "imessage_account_cleanup_failed",
+                        status_code=503,
+                    ) from exc
+            try:
+                fence = await self.repository.complete_account_deletion_cleanup(
+                    uid=uid,
+                    request_id=request_id,
+                )
+            except ImessageAuthorityError as exc:
+                raise self._authority_error(exc) from exc
+        return {
+            "local_absence_proven": str(fence["state"]) == "cleaned",
+            "provider_disposition": "provider_user_retained_unbound",
+            "operator_action_required": bool(fence.get("provider_request_ids")),
+        }
+
+    async def _cleanup_provider_requests(self, *, uid: str, error_prefix: str) -> None:
+        try:
+            provider_request_ids = await self.repository.provider_request_ids_for_owner(uid=uid)
+        except ImessageAuthorityError as exc:
+            raise self._authority_error(exc) from exc
+        for provider_request_id in provider_request_ids:
+            try:
+                await self.registrar.cleanup(provider_request_id=str(provider_request_id))
+            except RegistrarError as exc:
+                suffix = "uncertain" if exc.ambiguous else "failed"
+                raise ImessageEnrollmentError(f"{error_prefix}_{suffix}", status_code=503) from exc
 
     async def _runtime(self, uid: str) -> tuple[IsolatedRuntime, ImessageRuntimeSnapshot, Any]:
         try:
@@ -724,3 +852,8 @@ class ImessageEnrollmentService:
         if exc.code == "imessage_enrollment_rate_limited":
             return ImessageEnrollmentError(exc.code, status_code=429)
         return ImessageEnrollmentError(exc.code, status_code=503)
+
+
+async def cleanup_imessage_for_account_deletion(*, uid: str) -> dict[str, Any]:
+    service = await ImessageEnrollmentService.create()
+    return await service.cleanup_for_account_deletion(uid=uid)

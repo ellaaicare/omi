@@ -351,6 +351,19 @@ components:
           pattern: "^ELLA-[A-F0-9]{8}$"
         features:
           $ref: "#/components/schemas/EnrollmentFeatures"
+        cleanup:
+          $ref: "#/components/schemas/EnrollmentCleanup"
+    EnrollmentCleanup:
+      type: object
+      additionalProperties: false
+      required: [local_absence_proven, provider_disposition, operator_action_required]
+      properties:
+        local_absence_proven:
+          const: true
+        provider_disposition:
+          const: provider_user_retained_unbound
+        operator_action_required:
+          const: true
     EnrollmentStartRequest:
       type: object
       additionalProperties: false

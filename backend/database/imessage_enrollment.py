@@ -74,7 +74,8 @@ class ImessageEnrollmentRepository:
                 to_regclass('ella_imessage_consent_authority') IS NOT NULL AS consent_authority,
                 to_regclass('ella_imessage_registration_attempts') IS NOT NULL AS attempts,
                 to_regclass('ella_imessage_channel_bindings') IS NOT NULL AS bindings,
-                to_regclass('ella_imessage_proof_receipts') IS NOT NULL AS proof_receipts
+                to_regclass('ella_imessage_proof_receipts') IS NOT NULL AS proof_receipts,
+                to_regclass('ella_imessage_account_deletion_fences') IS NOT NULL AS deletion_fences
             """
         )
         if not row or not all(row.values()):
@@ -863,12 +864,14 @@ class ImessageEnrollmentRepository:
                 )
                 binding = await connection.fetchrow(
                     """
-                    SELECT *
-                    FROM ella_imessage_channel_bindings
-                    WHERE user_id = $1
-                    ORDER BY generation DESC, created_at DESC
+                    SELECT b.*, a.provider_request_id
+                    FROM ella_imessage_channel_bindings b
+                    JOIN ella_imessage_registration_attempts a
+                      ON a.user_id = b.user_id AND a.id = b.registration_attempt_id
+                    WHERE b.user_id = $1
+                    ORDER BY b.generation DESC, b.created_at DESC
                     LIMIT 1
-                    FOR UPDATE
+                    FOR UPDATE OF b
                     """,
                     user_id,
                 )
@@ -893,7 +896,149 @@ class ImessageEnrollmentRepository:
                     binding["id"],
                     idempotency_key,
                 )
-                return dict(revoked)
+                result = dict(revoked)
+                result["provider_request_id"] = binding["provider_request_id"]
+                return result
+
+    async def provider_request_ids_for_owner(self, *, uid: str) -> list[uuid.UUID]:
+        rows = await self.pool.fetch(
+            """
+            SELECT a.provider_request_id
+            FROM ella_imessage_registration_attempts a
+            JOIN users u ON u.id = a.user_id
+            WHERE u.omi_uid = $1
+            ORDER BY a.created_at, a.id
+            """,
+            uid,
+        )
+        return [row["provider_request_id"] for row in rows]
+
+    async def begin_account_deletion_cleanup(
+        self,
+        *,
+        uid: str,
+        request_id: uuid.UUID,
+    ) -> dict[str, Any]:
+        async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(connection, uid=uid)
+            async with connection.transaction():
+                proof = await authority_advisory_lock.acquire_authority_lock(connection, owner=owner)
+                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=proof,
+                )
+                existing = await connection.fetchrow(
+                    """
+                    SELECT *
+                    FROM ella_imessage_account_deletion_fences
+                    WHERE user_id = $1
+                    FOR UPDATE
+                    """,
+                    user_id,
+                )
+                if existing:
+                    return dict(existing)
+                provider_request_ids = [
+                    row["provider_request_id"]
+                    for row in await connection.fetch(
+                        """
+                        SELECT provider_request_id
+                        FROM ella_imessage_registration_attempts
+                        WHERE user_id = $1
+                        ORDER BY created_at, id
+                        FOR UPDATE
+                        """,
+                        user_id,
+                    )
+                ]
+                fence = await connection.fetchrow(
+                    """
+                    INSERT INTO ella_imessage_account_deletion_fences (
+                        user_id, request_id, provider_request_ids
+                    ) VALUES ($1, $2, $3::uuid[])
+                    RETURNING *
+                    """,
+                    user_id,
+                    request_id,
+                    provider_request_ids,
+                )
+                await connection.execute(
+                    """
+                    UPDATE ella_imessage_channel_bindings
+                    SET status = 'revoked',
+                        generation = generation + 1,
+                        revision = revision + 1,
+                        revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP),
+                        transport_connection_ref_hmac = NULL,
+                        transport_connected_at = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = $1
+                      AND status IN ('verification_pending', 'active')
+                    """,
+                    user_id,
+                )
+                await connection.execute(
+                    """
+                    UPDATE ella_imessage_registration_attempts
+                    SET state = 'quarantined',
+                        error_code = 'imessage_account_deletion_pending',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = $1
+                      AND state IN ('provider_accepted', 'finalized')
+                    """,
+                    user_id,
+                )
+                await connection.execute(
+                    """
+                    UPDATE ella_imessage_message_receipts
+                    SET status = CASE WHEN status = 'sending' THEN 'uncertain' ELSE 'quarantined' END,
+                        reconciliation_status = 'manual_required',
+                        error_code = 'imessage_account_deletion_pending',
+                        lease_token = NULL,
+                        lease_expires_at = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = $1
+                      AND status IN ('claimed', 'running', 'awaiting_delivery', 'sending')
+                    """,
+                    user_id,
+                )
+                return dict(fence)
+
+    async def complete_account_deletion_cleanup(
+        self,
+        *,
+        uid: str,
+        request_id: uuid.UUID,
+    ) -> dict[str, Any]:
+        async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(connection, uid=uid)
+            async with connection.transaction():
+                proof = await authority_advisory_lock.acquire_authority_lock(connection, owner=owner)
+                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=proof,
+                )
+                row = await connection.fetchrow(
+                    """
+                    UPDATE ella_imessage_account_deletion_fences
+                    SET state = 'cleaned',
+                        cleaned_at = COALESCE(cleaned_at, CURRENT_TIMESTAMP),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = $1
+                      AND request_id = $2
+                      AND state IN ('pending', 'cleaned')
+                    RETURNING *
+                    """,
+                    user_id,
+                    request_id,
+                )
+                if not row:
+                    raise ImessageAuthorityError("imessage_account_cleanup_conflict")
+                return dict(row)
 
     async def _set_attempt_terminal(
         self,
@@ -931,7 +1076,19 @@ class ImessageEnrollmentRepository:
     async def _active_user(connection: asyncpg.Connection, *, user_id: uuid.UUID) -> bool:
         return bool(
             await connection.fetchval(
-                "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND status = 'ACTIVE')",
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM users u
+                    WHERE u.id = $1
+                      AND u.status = 'ACTIVE'
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM ella_imessage_account_deletion_fences deletion
+                          WHERE deletion.user_id = u.id
+                      )
+                )
+                """,
                 user_id,
             )
         )

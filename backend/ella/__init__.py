@@ -33,6 +33,13 @@ except ImportError as exc:
     _IMESSAGE_ENROLLMENT_IMPORT_ERROR = exc
 else:
     _IMESSAGE_ENROLLMENT_IMPORT_ERROR = None
+try:
+    from ella.routers.imessage_runtime import router as imessage_runtime_router
+except ImportError as exc:
+    imessage_runtime_router = None
+    _IMESSAGE_RUNTIME_IMPORT_ERROR = exc
+else:
+    _IMESSAGE_RUNTIME_IMPORT_ERROR = None
 from ella.routers.onboarding import configure_firestore_db, router as onboarding_router
 from ella.routers.today_cards import create_today_cards_router
 from ella.services.today_card import TodayCardMaterializer
@@ -474,6 +481,13 @@ def _register_routers(app) -> None:
         print("  🌐 /v1/ella/imessage/* - Owner-scoped iMessage enrollment", flush=True)
     else:
         print(f"  ⚠️ iMessage enrollment not available: {_IMESSAGE_ENROLLMENT_IMPORT_ERROR}", flush=True)
+
+    # Transport-only self-hosted iMessage runtime and fenced delivery outbox.
+    if imessage_runtime_router is not None:
+        app.include_router(imessage_runtime_router, tags=["iMessage Runtime"])
+        print("  🌐 /v1/ella/internal/imessage/* - Verified iMessage runtime", flush=True)
+    else:
+        print(f"  ⚠️ iMessage runtime not available: {_IMESSAGE_RUNTIME_IMPORT_ERROR}", flush=True)
 
     # Loopback-only OMI enrichment handoff into the bound Hermes Cloud runtime.
     try:

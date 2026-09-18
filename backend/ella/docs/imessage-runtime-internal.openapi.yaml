@@ -1,0 +1,473 @@
+openapi: 3.1.0
+info:
+  title: Ella Self-hosted iMessage Runtime Transport
+  version: 1.0.0
+  description: >
+    Internal transport-only contract for one-to-one text DMs after owner
+    enrollment and handset proof. The transport supplies opaque line, contact,
+    connection, and provider-message identities. Ella derives the owner and
+    exact authorized hermes-chat runtime from the active channel binding.
+servers:
+  - url: https://api.ella-ai-care.com
+security:
+  - imessageTransport: []
+x-ella-contract-id: ella.imessage_runtime_transport.v1
+x-ella-cache-policy: no-store
+x-ella-authority:
+  owner-source: server-binding
+  runtime-mode: hermes-chat
+  fallback: none
+  groups: false
+  attachments: false
+  transport-can-select-owner: false
+paths:
+  /v1/ella/internal/imessage/heartbeat:
+    post:
+      tags: [Ella iMessage Runtime]
+      summary: Prove the active bridge connection for an exact verified binding.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransportIdentity"
+      responses:
+        "200":
+          description: Binding readiness without owner or runtime coordinates.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HeartbeatResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/ella/internal/imessage/inbound:
+    post:
+      tags: [Ella iMessage Runtime]
+      summary: Claim one inbound text DM before bounded model execution.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InboundMessage"
+      responses:
+        "200":
+          description: Durable receipt state; model output is never returned here.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboundResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/ella/internal/imessage/delivery/start:
+    post:
+      tags: [Ella iMessage Runtime]
+      summary: Persist send-start before releasing the exact reply to the bridge.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeliveryIdentity"
+      responses:
+        "200":
+          description: Reply text released only after send-start is durable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryStartResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/ella/internal/imessage/delivery/ack:
+    post:
+      tags: [Ella iMessage Runtime]
+      summary: Record the provider acknowledgement for one started delivery.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeliveryAck"
+      responses:
+        "200":
+          description: Delivery is complete and idempotently acknowledged.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReceiptResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/ella/internal/imessage/delivery/uncertain:
+    post:
+      tags: [Ella iMessage Runtime]
+      summary: Quarantine an ambiguous provider send for manual reconciliation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeliveryUncertain"
+      responses:
+        "200":
+          description: Delivery is uncertain and must not be retried blindly.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReceiptResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/ella/internal/imessage/delivery/reconcile:
+    post:
+      tags: [Ella iMessage Runtime]
+      summary: Terminally reconcile one persisted pre-send intent without releasing reply text.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeliveryIdentity"
+      responses:
+        "200":
+          description: The old intent is terminal and requires no provider send.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReceiptResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/ella/internal/imessage/deregister:
+    post:
+      tags: [Ella iMessage Runtime]
+      summary: Quarantine the exact active transport binding and open receipts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransportIdentity"
+      responses:
+        "200":
+          description: Exact binding is absent or quarantined.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeregisterResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+components:
+  securitySchemes:
+    imessageTransport:
+      type: apiKey
+      in: header
+      name: X-Ella-Imessage-Transport-Token
+  responses:
+    Unauthorized:
+      description: Missing or invalid dedicated transport credential.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ContractError"
+    Conflict:
+      description: Binding, consent, runtime, generation, replay, or delivery state conflicts.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ContractError"
+    Unavailable:
+      description: Runtime is disabled, unconfigured, unhealthy, or has an ambiguous outcome.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ContractError"
+  schemas:
+    TransportIdentity:
+      type: object
+      additionalProperties: false
+      required: [line_identity, contact_identity, connection_id]
+      properties:
+        line_identity:
+          type: string
+          minLength: 1
+          maxLength: 512
+        contact_identity:
+          type: string
+          minLength: 1
+          maxLength: 512
+        connection_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+    InboundMessage:
+      type: object
+      additionalProperties: false
+      required: [line_identity, contact_identity, connection_id, provider_message_id, text, occurred_at]
+      properties:
+        line_identity:
+          type: string
+          minLength: 1
+          maxLength: 512
+        contact_identity:
+          type: string
+          minLength: 1
+          maxLength: 512
+        connection_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+        provider_message_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+        text:
+          type: string
+          minLength: 1
+          maxLength: 32768
+        occurred_at:
+          type: string
+          format: date-time
+        attachment_count:
+          type: integer
+          minimum: 0
+          maximum: 100
+          default: 0
+        group_message:
+          type: boolean
+          default: false
+    DeliveryIdentity:
+      type: object
+      additionalProperties: false
+      required:
+        - line_identity
+        - contact_identity
+        - connection_id
+        - receipt_id
+        - delivery_idempotency_key
+        - binding_generation
+      properties:
+        line_identity:
+          type: string
+          minLength: 1
+          maxLength: 512
+        contact_identity:
+          type: string
+          minLength: 1
+          maxLength: 512
+        connection_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+        receipt_id:
+          type: string
+          format: uuid
+        delivery_idempotency_key:
+          type: string
+          format: uuid
+        binding_generation:
+          type: integer
+          minimum: 1
+    DeliveryAck:
+      type: object
+      additionalProperties: false
+      required:
+        - line_identity
+        - contact_identity
+        - connection_id
+        - receipt_id
+        - delivery_idempotency_key
+        - binding_generation
+        - outbound_provider_message_id
+      properties:
+        line_identity:
+          type: string
+          minLength: 1
+          maxLength: 512
+        contact_identity:
+          type: string
+          minLength: 1
+          maxLength: 512
+        connection_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+        receipt_id:
+          type: string
+          format: uuid
+        delivery_idempotency_key:
+          type: string
+          format: uuid
+        binding_generation:
+          type: integer
+          minimum: 1
+        outbound_provider_message_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+    DeliveryUncertain:
+      type: object
+      additionalProperties: false
+      required:
+        - line_identity
+        - contact_identity
+        - connection_id
+        - receipt_id
+        - delivery_idempotency_key
+        - binding_generation
+        - error_code
+      properties:
+        line_identity:
+          type: string
+          minLength: 1
+          maxLength: 512
+        contact_identity:
+          type: string
+          minLength: 1
+          maxLength: 512
+        connection_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+        receipt_id:
+          type: string
+          format: uuid
+        delivery_idempotency_key:
+          type: string
+          format: uuid
+        binding_generation:
+          type: integer
+          minimum: 1
+        error_code:
+          type: string
+          pattern: "^[a-z0-9_]+$"
+          minLength: 1
+          maxLength: 120
+    HeartbeatResult:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ready, unknown_sender]
+        binding_generation:
+          type: integer
+          minimum: 1
+        text_dm_only:
+          const: true
+        model_invoked:
+          const: false
+    InboundResult:
+      type: object
+      additionalProperties: false
+      required: [status, model_invoked]
+      properties:
+        status:
+          type: string
+          enum:
+            - claimed
+            - running
+            - awaiting_delivery
+            - sending
+            - delivered
+            - failed
+            - uncertain
+            - quarantined
+            - unknown_sender
+        receipt_id:
+          type: string
+          format: uuid
+        delivery_idempotency_key:
+          type: string
+          format: uuid
+        binding_generation:
+          type: integer
+          minimum: 1
+        duplicate:
+          type: boolean
+        model_invoked:
+          type: boolean
+    DeliveryStartResult:
+      type: object
+      additionalProperties: false
+      required: [status, receipt_id, delivery_idempotency_key, binding_generation, text]
+      properties:
+        status:
+          const: sending
+        receipt_id:
+          type: string
+          format: uuid
+        delivery_idempotency_key:
+          type: string
+          format: uuid
+        binding_generation:
+          type: integer
+          minimum: 1
+        text:
+          type: string
+          minLength: 1
+          maxLength: 8000
+    ReceiptResult:
+      type: object
+      additionalProperties: false
+      required: [status, receipt_id]
+      properties:
+        status:
+          type: string
+          enum: [delivered, uncertain]
+        receipt_id:
+          type: string
+          format: uuid
+        retryable:
+          type: boolean
+    DeregisterResult:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [not_connected, quarantined]
+        binding_generation:
+          type: integer
+          minimum: 1
+    ContractError:
+      type: object
+      additionalProperties: false
+      required: [detail]
+      properties:
+        detail:
+          type: object
+          additionalProperties: false
+          required: [code]
+          properties:
+            code:
+              type: string
+            retryable:
+              type: boolean

@@ -19,6 +19,7 @@ from ella.services.imessage_enrollment import (
     CONSENT_SCOPE_VERSION,
     ImessageEnrollmentError,
     ImessageEnrollmentService,
+    RegistrarCleanupResult,
     RegistrarError,
     RegistrarResult,
     consent_policy,
@@ -82,6 +83,11 @@ class FakeRepository:
             "user_status": "ACTIVE",
             "consent_decision": "granted",
             "binding_status": None,
+        }
+        self.deletion_fence = {
+            "request_id": uuid.UUID("99999999-9999-4999-8999-999999999999"),
+            "state": "pending",
+            "provider_request_ids": [REQUEST_ID],
         }
 
     async def assert_schema_ready(self):
@@ -159,7 +165,25 @@ class FakeRepository:
 
     async def revoke_binding(self, **kwargs):
         self.events.append(("revoke", kwargs))
-        return {**self.binding, "status": "revoked", "generation": 2}
+        return {
+            **self.binding,
+            "status": "revoked",
+            "generation": 2,
+            "provider_request_id": REQUEST_ID,
+        }
+
+    async def provider_request_ids_for_owner(self, **kwargs):
+        self.events.append(("provider_request_ids", kwargs))
+        return [REQUEST_ID]
+
+    async def begin_account_deletion_cleanup(self, **kwargs):
+        self.events.append(("deletion_cleanup_begin", kwargs))
+        return dict(self.deletion_fence)
+
+    async def complete_account_deletion_cleanup(self, **kwargs):
+        self.events.append(("deletion_cleanup_complete", kwargs))
+        self.deletion_fence["state"] = "cleaned"
+        return dict(self.deletion_fence)
 
 
 class FakeRegistrar:
@@ -174,6 +198,15 @@ class FakeRegistrar:
         return RegistrarResult(
             registration_ref="provider-registration-a",
             assigned_destination="+15555550100",
+        )
+
+    async def cleanup(self, **kwargs):
+        self.events.append(("cleanup", kwargs))
+        if self.error:
+            raise self.error
+        return RegistrarCleanupResult(
+            provider_disposition="provider_user_retained_unbound",
+            operator_action_required=True,
         )
 
 
@@ -205,6 +238,53 @@ def test_consent_policy_is_dedicated_text_dm_disclosure():
         ],
         "text_dm_only": True,
     }
+
+
+def test_revoke_requires_exact_local_cleanup_and_reports_retained_provider_user(monkeypatch):
+    monkeypatch.setenv("ELLA_IMESSAGE_ENROLLMENT_ENABLED", "true")
+    repository = FakeRepository()
+    registrar = FakeRegistrar(repository.events)
+    service = _service(repository, registrar)
+
+    result = asyncio.run(
+        service.revoke(
+            uid="owner-a",
+            expected_generation=1,
+            idempotency_key=IDEMPOTENCY_KEY,
+        )
+    )
+
+    assert result["state"] == "revoked"
+    assert result["cleanup"] == {
+        "local_absence_proven": True,
+        "provider_disposition": "provider_user_retained_unbound",
+        "operator_action_required": True,
+    }
+    assert [event[0] for event in repository.events] == ["schema", "revoke", "cleanup"]
+    assert repository.events[-1][1] == {"provider_request_id": str(REQUEST_ID)}
+
+
+def test_revoke_stays_typed_unavailable_when_local_cleanup_is_ambiguous(monkeypatch):
+    monkeypatch.setenv("ELLA_IMESSAGE_ENROLLMENT_ENABLED", "true")
+    repository = FakeRepository()
+    registrar = FakeRegistrar(
+        repository.events,
+        error=RegistrarError("imessage_registrar_cleanup_transport_uncertain", ambiguous=True),
+    )
+    service = _service(repository, registrar)
+
+    with pytest.raises(ImessageEnrollmentError) as failure:
+        asyncio.run(
+            service.revoke(
+                uid="owner-a",
+                expected_generation=1,
+                idempotency_key=IDEMPOTENCY_KEY,
+            )
+        )
+
+    assert failure.value.code == "imessage_local_cleanup_uncertain"
+    assert failure.value.status_code == 503
+    assert [event[0] for event in repository.events] == ["schema", "revoke", "cleanup"]
 
 
 def test_previous_policy_consent_is_rejected_before_authority_write(monkeypatch):
@@ -491,7 +571,13 @@ def test_status_atomically_retires_expired_pending_challenge(monkeypatch):
     assert status["state"] == "temporarily_unavailable"
     assert status["reason_code"] == "binding_quarantined"
     assert status["verification_expires_at"] == repository.binding["challenge_expires_at"].isoformat()
-    assert [event[0] for event in repository.events] == ["schema", "state", "retire_expired"]
+    assert [event[0] for event in repository.events] == [
+        "schema",
+        "state",
+        "retire_expired",
+        "provider_request_ids",
+        "cleanup",
+    ]
 
 
 def test_consent_authority_conflicts_use_documented_http_409_semantics():
@@ -566,7 +652,74 @@ def test_finalized_retry_retires_expired_proof_instead_of_reissuing(monkeypatch)
         "prepare",
         "binding_for_attempt",
         "retire_expired",
+        "provider_request_ids",
+        "cleanup",
     ]
+
+
+def test_consent_withdrawal_revokes_then_proves_exact_local_cleanup(monkeypatch):
+    monkeypatch.setenv("ELLA_IMESSAGE_ENROLLMENT_ENABLED", "true")
+    events = []
+    repository = FakeRepository(events)
+    service = _service(repository, FakeRegistrar(events))
+
+    receipt = asyncio.run(
+        service.submit_consent(
+            uid="owner-a",
+            decision="revoked",
+            policy_version=CONSENT_POLICY_VERSION,
+            processor_set_hash=CONSENT_PROCESSOR_SET_HASH,
+            scope_version=CONSENT_SCOPE_VERSION,
+            scope_hash=CONSENT_SCOPE_HASH,
+            request_id=REQUEST_ID,
+            app_version="1.0",
+            build_number="1",
+        )
+    )
+
+    assert receipt["decision"] == "revoked"
+    assert [event[0] for event in events] == [
+        "schema",
+        "consent",
+        "provider_request_ids",
+        "cleanup",
+    ]
+
+
+def test_account_deletion_cleanup_fences_before_exact_local_absence_proof():
+    events = []
+    repository = FakeRepository(events)
+    registrar = FakeRegistrar(events)
+    service = _service(repository, registrar)
+
+    result = asyncio.run(service.cleanup_for_account_deletion(uid="owner-a"))
+
+    assert result == {
+        "local_absence_proven": True,
+        "provider_disposition": "provider_user_retained_unbound",
+        "operator_action_required": True,
+    }
+    assert [event[0] for event in events] == [
+        "schema",
+        "deletion_cleanup_begin",
+        "cleanup",
+        "deletion_cleanup_complete",
+    ]
+    assert events[2][1] == {"provider_request_id": str(REQUEST_ID)}
+
+
+def test_account_deletion_cleanup_failure_keeps_durable_fence_pending():
+    events = []
+    repository = FakeRepository(events)
+    registrar = FakeRegistrar(events, error=RegistrarError("cleanup unavailable", ambiguous=True))
+    service = _service(repository, registrar)
+
+    with pytest.raises(ImessageEnrollmentError) as failure:
+        asyncio.run(service.cleanup_for_account_deletion(uid="owner-a"))
+
+    assert failure.value.code == "imessage_account_cleanup_uncertain"
+    assert repository.deletion_fence["state"] == "pending"
+    assert [event[0] for event in events] == ["schema", "deletion_cleanup_begin", "cleanup"]
 
 
 class RouteService:
@@ -651,7 +804,7 @@ def test_mounted_transport_proof_denies_before_service(monkeypatch, configured, 
         monkeypatch.setenv("ELLA_IMESSAGE_TRANSPORT_TOKEN", configured)
     service = RouteService()
     client = _route_client(service)
-    headers = {"X-Ella-Imessage-Transport": provided} if provided is not None else {}
+    headers = {"X-Ella-Imessage-Transport-Token": provided} if provided is not None else {}
 
     response = client.post(
         "/v1/ella/internal/imessage/proof",
@@ -677,7 +830,7 @@ def test_mounted_transport_proof_has_no_uid_selector(monkeypatch):
 
     response = client.post(
         "/v1/ella/internal/imessage/proof",
-        headers={"X-Ella-Imessage-Transport": TRANSPORT_TOKEN},
+        headers={"X-Ella-Imessage-Transport-Token": TRANSPORT_TOKEN},
         json={
             "uid": "owner-b",
             "assigned_destination": "+15555550100",
@@ -700,7 +853,7 @@ def test_mounted_transport_proof_accepts_configured_transport_without_owner_sele
 
     response = client.post(
         "/v1/ella/internal/imessage/proof",
-        headers={"X-Ella-Imessage-Transport": TRANSPORT_TOKEN},
+        headers={"X-Ella-Imessage-Transport-Token": TRANSPORT_TOKEN},
         json={
             "assigned_destination": "+15555550100",
             "handset_e164": "+15555550123",
@@ -752,7 +905,7 @@ def test_mounted_enrollment_surfaces_are_no_store_including_start_json_response(
         ),
         client.post(
             "/v1/ella/internal/imessage/proof",
-            headers={"X-Ella-Imessage-Transport": TRANSPORT_TOKEN},
+            headers={"X-Ella-Imessage-Transport-Token": TRANSPORT_TOKEN},
             json={
                 "assigned_destination": "+15555550100",
                 "handset_e164": "+15555550123",

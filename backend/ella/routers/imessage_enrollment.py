@@ -69,7 +69,7 @@ async def get_imessage_enrollment_service() -> ImessageEnrollmentService:
 
 
 def require_imessage_transport(
-    provided: Annotated[str | None, Header(alias="X-Ella-Imessage-Transport")] = None,
+    provided: Annotated[str | None, Header(alias="X-Ella-Imessage-Transport-Token")] = None,
 ) -> None:
     configured = authority_credential("ELLA_IMESSAGE_TRANSPORT_TOKEN", strip=False) or ""
     if len(configured) < 32 or configured != configured.strip():
