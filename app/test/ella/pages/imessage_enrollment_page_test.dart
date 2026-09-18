@@ -109,8 +109,101 @@ void main() {
     await _scrollTo(tester, find.text('Open Messages'));
     await tester.tap(find.text('Open Messages'));
     await tester.pump();
-    expect(launched.single.scheme, 'sms');
-    expect(launched.single.queryParameters['body'], '123456');
+    expect(launched.single.toString(), 'sms:+12025550123&body=123456');
+  });
+
+  testWidgets('reconstructed page keeps the original pending proof without another grant', (tester) async {
+    final gateway = _FakeGateway();
+    final sessionStore = ImessageEnrollmentSessionStore();
+    final first = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => 'owner-a',
+      messagesLauncher: (_) async => true,
+      idGenerator: () => 'request-1',
+      appInfoReader: _appInfo,
+      sessionStore: sessionStore,
+      now: () => DateTime.utc(2026, 9, 18, 8),
+    );
+    await first.loadConsentPolicy();
+    await first.start('+12025550123');
+    await tester.pumpWidget(_TestApp(controller: first));
+    await tester.pumpAndSettle();
+    expect(find.text('Open Messages'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    first.dispose();
+    final reconstructed = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => 'owner-a',
+      messagesLauncher: (_) async => true,
+      idGenerator: () => 'unexpected-new-id',
+      appInfoReader: _appInfo,
+      sessionStore: sessionStore,
+      now: () => DateTime.utc(2026, 9, 18, 8),
+    );
+    await tester.pumpWidget(_TestApp(controller: reconstructed));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Verification pending'), findsOneWidget);
+    expect(find.text('Open Messages'), findsOneWidget);
+    expect(find.text('Start again'), findsNothing);
+    expect(gateway.startCalls, 1);
+    expect(gateway.consentDecisions, [ImessageConsentDecision.granted]);
+  });
+
+  testWidgets('every server state with a live binding exposes owner disconnect', (tester) async {
+    for (final status in [
+      _status(ImessageEnrollmentState.verificationPending, destination: '+12025550123'),
+      _status(ImessageEnrollmentState.ready, textDm: false),
+      _status(ImessageEnrollmentState.temporarilyUnavailable),
+    ]) {
+      final gateway = _FakeGateway()..status = status;
+      final controller = ImessageEnrollmentController(
+        gateway: gateway,
+        consentGateway: gateway,
+        authorityReader: () => 'owner-a',
+        messagesLauncher: (_) async => true,
+        idGenerator: () => 'request-1',
+        appInfoReader: _appInfo,
+      );
+
+      await tester.pumpWidget(_TestApp(controller: controller));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Disconnect this iPhone'), findsOneWidget, reason: '${status.state} must be revocable');
+      await tester.pumpWidget(const SizedBox.shrink());
+      controller.dispose();
+    }
+  });
+
+  testWidgets('failed consent cleanup stays visibly retryable after binding close', (tester) async {
+    final gateway = _FakeGateway()..revokedConsentFailuresRemaining = 1;
+    final controller = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => 'owner-a',
+      messagesLauncher: (_) async => true,
+      idGenerator: () => 'request-1',
+      appInfoReader: _appInfo,
+      now: () => DateTime.utc(2026, 9, 18, 8),
+    );
+    await controller.loadConsentPolicy();
+    await controller.start('+12025550123');
+    await controller.revoke();
+
+    await tester.pumpWidget(_TestApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Finish disconnecting'), findsOneWidget);
+    expect(find.textContaining('still needs to finish withdrawing'), findsOneWidget);
+    await tester.tap(find.text('Finish disconnecting'));
+    await tester.pumpAndSettle();
+
+    expect(gateway.revokeCalls, 1);
+    expect(gateway.revokedConsentCalls, 2);
+    expect(find.text('Connect again'), findsOneWidget);
   });
 
   testWidgets('server ready without text DM capability is presented unavailable', (tester) async {
@@ -200,6 +293,9 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
   ImessageEnrollmentStatus status = _status(ImessageEnrollmentState.notConnected);
   int fetchStatusCalls = 0;
   int startCalls = 0;
+  int revokeCalls = 0;
+  int revokedConsentCalls = 0;
+  int revokedConsentFailuresRemaining = 0;
   final consentDecisions = <ImessageConsentDecision>[];
 
   @override
@@ -213,6 +309,13 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
     required String appVersion,
     required String buildNumber,
   }) async {
+    if (decision == ImessageConsentDecision.revoked) {
+      revokedConsentCalls += 1;
+      if (revokedConsentFailuresRemaining > 0) {
+        revokedConsentFailuresRemaining -= 1;
+        throw const ImessageEnrollmentFailure(ImessageEnrollmentFailureKind.transport);
+      }
+    }
     consentDecisions.add(decision);
     return _receipt(policy, decision);
   }
@@ -225,6 +328,7 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
 
   @override
   Future<ImessageEnrollmentStatus> revoke({required int expectedGeneration, required String idempotencyKey}) async {
+    revokeCalls += 1;
     status = _status(ImessageEnrollmentState.revoked);
     return status;
   }

@@ -16215,6 +16215,18 @@ abstract class AppLocalizations {
   /// **'This iPhone is no longer authorized for iMessage with Ella.'**
   String get ellaImessageRevokedBody;
 
+  /// No description provided for @ellaImessageConsentRevocationPendingBody.
+  ///
+  /// In en, this message translates to:
+  /// **'This iPhone is disconnected. Ella still needs to finish withdrawing iMessage data-sharing consent.'**
+  String get ellaImessageConsentRevocationPendingBody;
+
+  /// No description provided for @ellaImessageFinishDisconnect.
+  ///
+  /// In en, this message translates to:
+  /// **'Finish disconnecting'**
+  String get ellaImessageFinishDisconnect;
+
   /// No description provided for @ellaImessageReconnect.
   ///
   /// In en, this message translates to:

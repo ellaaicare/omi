@@ -10259,6 +10259,8 @@
   },
   "ellaImessageRevokedTitle": "Disconnected",
   "ellaImessageRevokedBody": "This iPhone is no longer authorized for iMessage with Ella.",
+  "ellaImessageConsentRevocationPendingBody": "This iPhone is disconnected. Ella still needs to finish withdrawing iMessage data-sharing consent.",
+  "ellaImessageFinishDisconnect": "Finish disconnecting",
   "ellaImessageReconnect": "Connect again",
   "ellaImessageConsentTitle": "Before you connect",
   "ellaImessageConsentFlow": "{recipients} process your private text-message flow for your Ella workspace.",

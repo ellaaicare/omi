@@ -8746,6 +8746,13 @@ class AppLocalizationsCa extends AppLocalizations {
   String get ellaImessageRevokedBody => 'This iPhone is no longer authorized for iMessage with Ella.';
 
   @override
+  String get ellaImessageConsentRevocationPendingBody =>
+      'This iPhone is disconnected. Ella still needs to finish withdrawing iMessage data-sharing consent.';
+
+  @override
+  String get ellaImessageFinishDisconnect => 'Finish disconnecting';
+
+  @override
   String get ellaImessageReconnect => 'Connect again';
 
   @override

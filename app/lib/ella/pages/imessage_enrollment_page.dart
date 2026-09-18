@@ -17,6 +17,9 @@ bool isImessageEnrollmentSupportedPlatform({TargetPlatform? platform, bool? isWe
   return !(isWeb ?? kIsWeb) && (platform ?? defaultTargetPlatform) == TargetPlatform.iOS;
 }
 
+final _imessageEnrollmentSessionStore = ImessageEnrollmentSessionStore();
+ImessageEnrollmentController? _imessageEnrollmentController;
+
 class ImessageEnrollmentPage extends StatefulWidget {
   const ImessageEnrollmentPage({
     super.key,
@@ -37,7 +40,7 @@ class _ImessageEnrollmentPageState extends State<ImessageEnrollmentPage> {
   static final _e164 = RegExp(r'^\+[1-9][0-9]{7,14}$');
 
   late final ImessageEnrollmentController _controller;
-  late final bool _ownsController;
+  late final bool _usesDefaultController;
   late final bool _platformSupported;
   final _phoneController = TextEditingController();
   StreamSubscription<String?>? _authoritySubscription;
@@ -49,26 +52,30 @@ class _ImessageEnrollmentPageState extends State<ImessageEnrollmentPage> {
     super.initState();
     _platformSupported = widget.platformSupported ?? isImessageEnrollmentSupportedPlatform();
     if (!_platformSupported) {
-      _ownsController = false;
+      _usesDefaultController = false;
       return;
     }
-    _ownsController = widget.controller == null;
+    _usesDefaultController = widget.controller == null;
     _controller = widget.controller ?? _createController();
     _controller.addListener(_onControllerChanged);
+    _controller.handleAuthorityChanged();
     final authorityChanges = widget.authorityChanges ??
-        (_ownsController ? FirebaseAuth.instance.authStateChanges().map((user) => user?.uid).distinct() : null);
+        (_usesDefaultController ? FirebaseAuth.instance.authStateChanges().map((user) => user?.uid).distinct() : null);
     _authoritySubscription = authorityChanges?.listen(_onAuthorityChanged);
     unawaited(_controller.load());
   }
 
   ImessageEnrollmentController _createController() {
+    final existing = _imessageEnrollmentController;
+    if (existing != null) return existing;
     const api = ImessageEnrollmentApi();
-    return ImessageEnrollmentController(
+    return _imessageEnrollmentController = ImessageEnrollmentController(
       gateway: api,
       consentGateway: api,
       authorityReader: () => FirebaseAuth.instance.currentUser?.uid,
       messagesLauncher: (uri) => launchUrl(uri, mode: LaunchMode.externalApplication),
       idGenerator: () => const Uuid().v4(),
+      sessionStore: _imessageEnrollmentSessionStore,
       appInfoReader: () async {
         final info = await PackageInfo.fromPlatform();
         return (version: info.version, buildNumber: info.buildNumber);
@@ -81,7 +88,6 @@ class _ImessageEnrollmentPageState extends State<ImessageEnrollmentPage> {
     if (_platformSupported) {
       unawaited(_authoritySubscription?.cancel());
       _controller.removeListener(_onControllerChanged);
-      if (_ownsController) _controller.dispose();
     }
     _phoneController.dispose();
     super.dispose();
@@ -149,7 +155,10 @@ class _ImessageEnrollmentPageState extends State<ImessageEnrollmentPage> {
             ),
             const SizedBox(height: 20),
             _buildStatusCard(),
-            if (_controller.failure != null) ...[const SizedBox(height: 12), _buildFailureCard(_controller.failure!)],
+            if (_controller.failure != null && !_controller.consentRevocationPending) ...[
+              const SizedBox(height: 12),
+              _buildFailureCard(_controller.failure!),
+            ],
             if (_showConsent) ...[const SizedBox(height: 16), _buildConsentCard()],
           ],
         ),
@@ -276,17 +285,21 @@ class _ImessageEnrollmentPageState extends State<ImessageEnrollmentPage> {
               icon: Icons.open_in_new,
               onPressed: _controller.loading ? null : _controller.openMessages,
             )
-          else
+          else if (_controller.canRetryPendingStart)
             _PrimaryButton(
-              label: context.l10n.ellaImessageStartAgain,
+              label: context.l10n.ellaImessageRetry,
               icon: Icons.replay,
-              onPressed: _controller.loading ? null : _beginConsent,
+              onPressed: _controller.loading ? null : _controller.retryPendingStart,
             ),
           const SizedBox(height: 8),
           _SecondaryButton(
             label: context.l10n.ellaImessageCheckVerification,
             onPressed: _controller.loading ? null : _controller.load,
           ),
+          if (_controller.canDisconnect) ...[
+            const SizedBox(height: 8),
+            _buildDisconnectButton(),
+          ],
         ],
       ),
     );
@@ -316,11 +329,7 @@ class _ImessageEnrollmentPageState extends State<ImessageEnrollmentPage> {
             style: const TextStyle(fontSize: 13, height: 1.35, color: EllaColors.textTertiary),
           ),
           const SizedBox(height: 16),
-          _SecondaryButton(
-            label: context.l10n.ellaImessageDisconnect,
-            destructive: true,
-            onPressed: _controller.loading ? null : _controller.revoke,
-          ),
+          _buildDisconnectButton(),
         ],
       ),
     );
@@ -347,6 +356,10 @@ class _ImessageEnrollmentPageState extends State<ImessageEnrollmentPage> {
             icon: Icons.refresh,
             onPressed: _controller.loading ? null : _controller.load,
           ),
+          if (_controller.canDisconnect) ...[
+            const SizedBox(height: 8),
+            _buildDisconnectButton(),
+          ],
         ],
       ),
     );
@@ -380,6 +393,10 @@ class _ImessageEnrollmentPageState extends State<ImessageEnrollmentPage> {
             icon: Icons.refresh,
             onPressed: _controller.loading ? null : _controller.load,
           ),
+          if (_controller.canDisconnect) ...[
+            const SizedBox(height: 8),
+            _buildDisconnectButton(),
+          ],
         ],
       ),
     );
@@ -397,17 +414,33 @@ class _ImessageEnrollmentPageState extends State<ImessageEnrollmentPage> {
           ),
           const SizedBox(height: 10),
           Text(
-            context.l10n.ellaImessageRevokedBody,
+            _controller.consentRevocationPending
+                ? context.l10n.ellaImessageConsentRevocationPendingBody
+                : context.l10n.ellaImessageRevokedBody,
             style: const TextStyle(fontSize: 15, height: 1.35, color: EllaColors.textSecondary),
           ),
           const SizedBox(height: 16),
           _PrimaryButton(
-            label: context.l10n.ellaImessageReconnect,
-            icon: Icons.link,
-            onPressed: _controller.loading ? null : _beginConsent,
+            label: _controller.consentRevocationPending
+                ? context.l10n.ellaImessageFinishDisconnect
+                : context.l10n.ellaImessageReconnect,
+            icon: _controller.consentRevocationPending ? Icons.sync : Icons.link,
+            onPressed: _controller.loading
+                ? null
+                : _controller.consentRevocationPending
+                    ? _controller.revoke
+                    : _beginConsent,
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildDisconnectButton() {
+    return _SecondaryButton(
+      label: context.l10n.ellaImessageDisconnect,
+      destructive: true,
+      onPressed: _controller.loading ? null : _controller.revoke,
     );
   }
 
