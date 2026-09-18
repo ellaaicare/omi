@@ -8478,4 +8478,10 @@ class AppLocalizationsKo extends AppLocalizations {
 
   @override
   String get conversationEllaEnrichedLabel => 'Summary enriched by Ella';
+
+  @override
+  String get ellaAlertChannelsUnavailableBadge => 'Unavailable';
+
+  @override
+  String get ellaAlertChannelsImessageUnavailable => 'iMessage is unavailable while Ella upgrades messaging.';
 }
