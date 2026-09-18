@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:omi/ella/models/imessage_enrollment.dart';
 import 'package:omi/ella/services/imessage_enrollment_api.dart';
+import 'package:omi/ella/services/imessage_enrollment_attempt_store.dart';
 import 'package:omi/ella/services/imessage_enrollment_controller.dart';
 
 void main() {
@@ -172,6 +173,54 @@ void main() {
     expect(controller.proof?.code, '123456');
   });
 
+  test('accepted start response lost survives fresh process and replays the exact attempt', () async {
+    final generatedIds = <String>['consent-request', 'start-attempt'];
+    var generatedIndex = 0;
+    final gateway = _FakeGateway()..startResponsesLostRemaining = 1;
+    final attemptStore = ImessageEnrollmentMemoryAttemptStore();
+    final first = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => 'owner-a',
+      messagesLauncher: (_) async => true,
+      idGenerator: () => generatedIds[generatedIndex++],
+      appInfoReader: _appInfo,
+      attemptStore: attemptStore,
+      now: () => DateTime.utc(2026, 9, 18, 8),
+    );
+    await first.loadConsentPolicy();
+    await first.start('+12025550123');
+
+    expect(first.failure?.kind, ImessageEnrollmentFailureKind.transport);
+    expect(gateway.status.state, ImessageEnrollmentState.verificationPending);
+    first.dispose();
+
+    final reconstructed = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => 'owner-a',
+      messagesLauncher: (_) async => true,
+      idGenerator: () => throw StateError('must reuse the durable attempt'),
+      appInfoReader: _appInfo,
+      sessionStore: ImessageEnrollmentSessionStore(),
+      attemptStore: attemptStore,
+      now: () => DateTime.utc(2026, 9, 18, 8),
+    );
+    await reconstructed.load();
+
+    expect(reconstructed.status?.state, ImessageEnrollmentState.verificationPending);
+    expect(reconstructed.proof, isNull);
+    expect(reconstructed.canRetryPendingStart, isTrue);
+
+    await reconstructed.retryPendingStart();
+
+    expect(reconstructed.proof?.code, '123456');
+    expect(gateway.consentDecisions, [ImessageConsentDecision.granted]);
+    expect(gateway.startedReceipts.toSet(), hasLength(1));
+    expect(gateway.startedIdempotencyKeys, ['start-attempt', 'start-attempt']);
+    expect(gateway.consentAuthorityRevision, 1);
+  });
+
   test('account drift discards an in-flight owner response', () async {
     var authority = 'owner-a';
     final completion = Completer<ImessageEnrollmentStatus>();
@@ -216,6 +265,8 @@ void main() {
     );
 
     final ownerALoad = controller.load();
+    await Future<void>.delayed(Duration.zero);
+    expect(fetchCount, 1);
     authority = 'owner-b';
     expect(controller.handleAuthorityChanged(), isTrue);
     final ownerBLoad = controller.load();
@@ -389,12 +440,14 @@ void main() {
 
   test('revocation closes the binding before advancing consent generation', () async {
     final gateway = _FakeGateway()..rejectRevokeAfterRevokedConsent = true;
+    final generatedIds = <String>['grant-request', 'start-attempt', 'binding-revoke', 'consent-revoke'];
+    var generatedIndex = 0;
     final controller = ImessageEnrollmentController(
       gateway: gateway,
       consentGateway: gateway,
       authorityReader: () => 'owner-a',
       messagesLauncher: (_) async => true,
-      idGenerator: () => 'request-1',
+      idGenerator: () => generatedIds[generatedIndex++],
       appInfoReader: _appInfo,
       now: () => DateTime.utc(2026, 9, 18, 8),
     );
@@ -414,12 +467,14 @@ void main() {
   test('failed consent revocation remains retryable without closing the binding twice', () async {
     final gateway = _FakeGateway()..revokedConsentFailuresRemaining = 1;
     final sessionStore = ImessageEnrollmentSessionStore();
+    final generatedIds = <String>['grant-request', 'start-attempt', 'binding-revoke', 'consent-revoke'];
+    var generatedIndex = 0;
     final controller = ImessageEnrollmentController(
       gateway: gateway,
       consentGateway: gateway,
       authorityReader: () => 'owner-a',
       messagesLauncher: (_) async => true,
-      idGenerator: () => 'request-1',
+      idGenerator: () => generatedIds[generatedIndex++],
       appInfoReader: _appInfo,
       sessionStore: sessionStore,
       now: () => DateTime.utc(2026, 9, 18, 8),
@@ -440,7 +495,7 @@ void main() {
       consentGateway: gateway,
       authorityReader: () => 'owner-a',
       messagesLauncher: (_) async => true,
-      idGenerator: () => 'request-2',
+      idGenerator: () => throw StateError('retry must reuse the consent revoke identity'),
       appInfoReader: _appInfo,
       sessionStore: sessionStore,
       now: () => DateTime.utc(2026, 9, 18, 8),
@@ -456,6 +511,154 @@ void main() {
     expect(gateway.revokeCalls, 1);
     expect(gateway.revokedConsentCalls, 2);
     expect(gateway.events.where((event) => event == 'revoke'), hasLength(1));
+    expect(gateway.revokedConsentRequestIds.toSet(), hasLength(1));
+    expect(gateway.consentAuthorityRevision, 2);
+  });
+
+  test('accepted binding revoke response lost reconciles from fresh server status without a second revoke', () async {
+    final generatedIds = <String>['grant-request', 'start-attempt', 'binding-revoke', 'consent-revoke'];
+    var generatedIndex = 0;
+    final gateway = _FakeGateway()..revokeResponsesLostRemaining = 1;
+    final attemptStore = ImessageEnrollmentMemoryAttemptStore();
+    final first = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => 'owner-a',
+      messagesLauncher: (_) async => true,
+      idGenerator: () => generatedIds[generatedIndex++],
+      appInfoReader: _appInfo,
+      attemptStore: attemptStore,
+      now: () => DateTime.utc(2026, 9, 18, 8),
+    );
+    await first.loadConsentPolicy();
+    await first.start('+12025550123');
+    await first.revoke();
+
+    expect(first.failure?.kind, ImessageEnrollmentFailureKind.transport);
+    expect(gateway.revokeCalls, 1);
+    expect(gateway.status.reason, ImessageEnrollmentReason.bindingRevoked);
+    first.dispose();
+
+    final reconstructed = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => 'owner-a',
+      messagesLauncher: (_) async => true,
+      idGenerator: () => generatedIds[generatedIndex++],
+      appInfoReader: _appInfo,
+      sessionStore: ImessageEnrollmentSessionStore(),
+      attemptStore: attemptStore,
+      now: () => DateTime.utc(2026, 9, 18, 8),
+    );
+    await reconstructed.load();
+
+    expect(reconstructed.consentRevocationPending, isTrue);
+    await reconstructed.revoke();
+
+    expect(gateway.revokeCalls, 1);
+    expect(gateway.revokedIdempotencyKeys, ['binding-revoke']);
+    expect(reconstructed.status?.reason, ImessageEnrollmentReason.consentRevoked);
+    expect(reconstructed.consentRevocationPending, isFalse);
+  });
+
+  test('fresh binding-revoked status resumes consent cleanup without another binding mutation', () async {
+    final gateway = _FakeGateway()
+      ..status = _status(
+        ImessageEnrollmentState.revoked,
+        reason: ImessageEnrollmentReason.bindingRevoked,
+        generation: 5,
+      );
+    final controller = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => 'owner-a',
+      messagesLauncher: (_) async => true,
+      idGenerator: () => 'consent-revoke',
+      appInfoReader: _appInfo,
+      sessionStore: ImessageEnrollmentSessionStore(),
+      attemptStore: ImessageEnrollmentMemoryAttemptStore(),
+    );
+
+    await controller.load();
+
+    expect(controller.consentRevocationPending, isTrue);
+    await controller.revoke();
+
+    expect(gateway.revokeCalls, 0);
+    expect(gateway.revokedConsentCalls, 1);
+    expect(controller.status?.reason, ImessageEnrollmentReason.consentRevoked);
+  });
+
+  test('accepted consent revoke response lost becomes terminal after fresh status reconciliation', () async {
+    final generatedIds = <String>['grant-request', 'start-attempt', 'binding-revoke', 'consent-revoke'];
+    var generatedIndex = 0;
+    final gateway = _FakeGateway()..revokedConsentResponsesLostRemaining = 1;
+    final attemptStore = ImessageEnrollmentMemoryAttemptStore();
+    final first = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => 'owner-a',
+      messagesLauncher: (_) async => true,
+      idGenerator: () => generatedIds[generatedIndex++],
+      appInfoReader: _appInfo,
+      attemptStore: attemptStore,
+      now: () => DateTime.utc(2026, 9, 18, 8),
+    );
+    await first.loadConsentPolicy();
+    await first.start('+12025550123');
+    await first.revoke();
+
+    expect(first.failure?.kind, ImessageEnrollmentFailureKind.transport);
+    expect(first.consentRevocationPending, isTrue);
+    expect(gateway.status.reason, ImessageEnrollmentReason.consentRevoked);
+    expect(gateway.consentAuthorityRevision, 2);
+    first.dispose();
+
+    final reconstructed = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => 'owner-a',
+      messagesLauncher: (_) async => true,
+      idGenerator: () => throw StateError('terminal status must not mint another identity'),
+      appInfoReader: _appInfo,
+      sessionStore: ImessageEnrollmentSessionStore(),
+      attemptStore: attemptStore,
+    );
+    await reconstructed.load();
+
+    expect(reconstructed.status?.reason, ImessageEnrollmentReason.consentRevoked);
+    expect(reconstructed.consentRevocationPending, isFalse);
+    expect(gateway.revokedConsentCalls, 1);
+    expect(gateway.revokedConsentRequestIds, ['consent-revoke']);
+    expect(gateway.consentDecisions.where((decision) => decision == ImessageConsentDecision.revoked), hasLength(1));
+    expect(gateway.consentAuthorityRevision, 2);
+  });
+
+  test('fresh consent-revoked status is terminal and never offers cleanup', () async {
+    final gateway = _FakeGateway()
+      ..status = _status(
+        ImessageEnrollmentState.revoked,
+        reason: ImessageEnrollmentReason.consentRevoked,
+        generation: 0,
+      );
+    final controller = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => 'owner-a',
+      messagesLauncher: (_) async => true,
+      idGenerator: () => throw StateError('terminal status cannot mutate'),
+      appInfoReader: _appInfo,
+      sessionStore: ImessageEnrollmentSessionStore(),
+      attemptStore: ImessageEnrollmentMemoryAttemptStore(),
+    );
+
+    await controller.load();
+
+    expect(controller.status?.reason, ImessageEnrollmentReason.consentRevoked);
+    expect(controller.consentRevocationPending, isFalse);
+    expect(controller.canDisconnect, isFalse);
+    expect(gateway.revokeCalls, 0);
+    expect(gateway.revokedConsentCalls, 0);
   });
 
   test('owner switch clears the memory-only enrollment session before reconstruction', () async {
@@ -525,17 +728,26 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
   String? startedReceipt;
   int startCalls = 0;
   int startFailuresRemaining = 0;
+  int startResponsesLostRemaining = 0;
   int fetchStatusCalls = 0;
   int? revokedGeneration;
   int revokeCalls = 0;
+  int revokeResponsesLostRemaining = 0;
   int revokedConsentCalls = 0;
   int revokedConsentFailuresRemaining = 0;
+  int revokedConsentResponsesLostRemaining = 0;
+  int consentAuthorityRevision = 0;
   bool rejectRevokeAfterRevokedConsent = false;
   ImessageEnrollmentStartResponse? startResponse;
   Completer<ImessageEnrollmentStartResponse>? startCompletion;
   final consentDecisions = <ImessageConsentDecision>[];
   final startedReceipts = <String>[];
   final startedIdempotencyKeys = <String>[];
+  final revokedIdempotencyKeys = <String>[];
+  final revokedConsentRequestIds = <String>[];
+  final Map<String, ImessageConsentReceipt> _consentReceipts = {};
+  final Set<String> _acceptedStartKeys = {};
+  final Set<String> _acceptedRevokeKeys = {};
   final events = <String>[];
 
   @override
@@ -551,14 +763,31 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
   }) async {
     if (decision == ImessageConsentDecision.revoked) {
       revokedConsentCalls += 1;
+      revokedConsentRequestIds.add(requestId);
       if (revokedConsentFailuresRemaining > 0) {
         revokedConsentFailuresRemaining -= 1;
         throw const ImessageEnrollmentFailure(ImessageEnrollmentFailureKind.transport);
       }
     }
+    final existing = _consentReceipts[requestId];
+    if (existing != null) return existing;
+    consentAuthorityRevision += 1;
     consentDecisions.add(decision);
     events.add('consent:${decision.wireValue}');
-    return _receipt(policy, decision);
+    final receipt = _receipt(policy, decision, authorityRevision: consentAuthorityRevision);
+    _consentReceipts[requestId] = receipt;
+    if (decision == ImessageConsentDecision.revoked) {
+      status = _status(
+        ImessageEnrollmentState.revoked,
+        reason: ImessageEnrollmentReason.consentRevoked,
+        generation: 0,
+      );
+      if (revokedConsentResponsesLostRemaining > 0) {
+        revokedConsentResponsesLostRemaining -= 1;
+        throw const ImessageEnrollmentFailure(ImessageEnrollmentFailureKind.transport);
+      }
+    }
+    return receipt;
   }
 
   @override
@@ -572,6 +801,7 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
   @override
   Future<ImessageEnrollmentStatus> revoke({required int expectedGeneration, required String idempotencyKey}) async {
     revokeCalls += 1;
+    revokedIdempotencyKeys.add(idempotencyKey);
     events.add('revoke');
     if (rejectRevokeAfterRevokedConsent &&
         consentDecisions.isNotEmpty &&
@@ -582,7 +812,18 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
       );
     }
     revokedGeneration = expectedGeneration;
-    status = _status(ImessageEnrollmentState.revoked);
+    if (!_acceptedRevokeKeys.contains(idempotencyKey)) {
+      _acceptedRevokeKeys.add(idempotencyKey);
+      status = _status(
+        ImessageEnrollmentState.revoked,
+        reason: ImessageEnrollmentReason.bindingRevoked,
+        generation: expectedGeneration + 1,
+      );
+    }
+    if (revokeResponsesLostRemaining > 0) {
+      revokeResponsesLostRemaining -= 1;
+      throw const ImessageEnrollmentFailure(ImessageEnrollmentFailureKind.transport);
+    }
     return status;
   }
 
@@ -605,7 +846,12 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
     if (completion != null) return completion.future;
     final override = startResponse;
     if (override != null) return override;
+    _acceptedStartKeys.add(idempotencyKey);
     status = _status(ImessageEnrollmentState.verificationPending, destination: '+12025550123');
+    if (startResponsesLostRemaining > 0) {
+      startResponsesLostRemaining -= 1;
+      throw const ImessageEnrollmentFailure(ImessageEnrollmentFailureKind.transport);
+    }
     return ImessageEnrollmentStartResponse(
       status: status,
       proof: ImessageEnrollmentProof(code: '123456', expiresAt: DateTime.utc(2026, 9, 18, 8, 5)),
@@ -637,7 +883,11 @@ ImessageConsentPolicy _policy() => ImessageConsentPolicy(
       textDmOnly: true,
     );
 
-ImessageConsentReceipt _receipt(ImessageConsentPolicy policy, ImessageConsentDecision decision) {
+ImessageConsentReceipt _receipt(
+  ImessageConsentPolicy policy,
+  ImessageConsentDecision decision, {
+  int authorityRevision = 1,
+}) {
   return ImessageConsentReceipt(
     schemaVersion: ImessageConsentReceipt.schema,
     receiptId: '00000000-0000-4000-8000-000000000005',
@@ -646,7 +896,7 @@ ImessageConsentReceipt _receipt(ImessageConsentPolicy policy, ImessageConsentDec
     processorSetHash: policy.processorSetHash,
     scopeVersion: policy.scopeVersion,
     scopeHash: policy.scopeHash,
-    authorityRevision: 1,
+    authorityRevision: authorityRevision,
     decidedAt: DateTime.utc(2026, 9, 18, 8),
   );
 }
@@ -655,19 +905,22 @@ ImessageEnrollmentStatus _status(
   ImessageEnrollmentState state, {
   bool textDm = false,
   String? destination,
+  ImessageEnrollmentReason? reason,
+  int generation = 4,
 }) {
-  final reason = switch (state) {
-    ImessageEnrollmentState.notConnected => ImessageEnrollmentReason.notEnrolled,
-    ImessageEnrollmentState.verificationPending => ImessageEnrollmentReason.verificationPending,
-    ImessageEnrollmentState.ready => ImessageEnrollmentReason.ready,
-    ImessageEnrollmentState.temporarilyUnavailable => ImessageEnrollmentReason.transportUnhealthy,
-    ImessageEnrollmentState.revoked => ImessageEnrollmentReason.bindingRevoked,
-  };
+  final resolvedReason = reason ??
+      switch (state) {
+        ImessageEnrollmentState.notConnected => ImessageEnrollmentReason.notEnrolled,
+        ImessageEnrollmentState.verificationPending => ImessageEnrollmentReason.verificationPending,
+        ImessageEnrollmentState.ready => ImessageEnrollmentReason.ready,
+        ImessageEnrollmentState.temporarilyUnavailable => ImessageEnrollmentReason.transportUnhealthy,
+        ImessageEnrollmentState.revoked => ImessageEnrollmentReason.bindingRevoked,
+      };
   return ImessageEnrollmentStatus(
     schemaVersion: ImessageEnrollmentStatus.schema,
     state: state,
-    reason: reason,
-    authorityGeneration: 4,
+    reason: resolvedReason,
+    authorityGeneration: generation,
     assignedDestination: destination,
     features: ImessageEnrollmentFeatures(
       textDm: textDm,

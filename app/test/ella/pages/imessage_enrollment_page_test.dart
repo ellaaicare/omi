@@ -206,6 +206,59 @@ void main() {
     expect(find.text('Connect again'), findsOneWidget);
   });
 
+  testWidgets('fresh binding-revoked status offers Finish disconnecting and skips binding revoke', (tester) async {
+    final gateway = _FakeGateway()
+      ..status = _status(
+        ImessageEnrollmentState.revoked,
+        reason: ImessageEnrollmentReason.bindingRevoked,
+        generation: 5,
+      );
+    final controller = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => 'owner-a',
+      messagesLauncher: (_) async => true,
+      idGenerator: () => 'consent-revoke',
+      appInfoReader: _appInfo,
+    );
+
+    await tester.pumpWidget(_TestApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Finish disconnecting'), findsOneWidget);
+    await tester.tap(find.text('Finish disconnecting'));
+    await tester.pumpAndSettle();
+
+    expect(gateway.revokeCalls, 0);
+    expect(gateway.revokedConsentCalls, 1);
+    expect(find.text('Connect again'), findsOneWidget);
+  });
+
+  testWidgets('fresh consent-revoked status is terminal and offers reconnect', (tester) async {
+    final gateway = _FakeGateway()
+      ..status = _status(
+        ImessageEnrollmentState.revoked,
+        reason: ImessageEnrollmentReason.consentRevoked,
+        generation: 0,
+      );
+    final controller = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => 'owner-a',
+      messagesLauncher: (_) async => true,
+      idGenerator: () => throw StateError('terminal state cannot mutate'),
+      appInfoReader: _appInfo,
+    );
+
+    await tester.pumpWidget(_TestApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Finish disconnecting'), findsNothing);
+    expect(find.text('Connect again'), findsOneWidget);
+    expect(gateway.revokeCalls, 0);
+    expect(gateway.revokedConsentCalls, 0);
+  });
+
   testWidgets('server ready without text DM capability is presented unavailable', (tester) async {
     final gateway = _FakeGateway()..status = _status(ImessageEnrollmentState.ready, textDm: false);
     final controller = ImessageEnrollmentController(
@@ -317,6 +370,13 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
       }
     }
     consentDecisions.add(decision);
+    if (decision == ImessageConsentDecision.revoked) {
+      status = _status(
+        ImessageEnrollmentState.revoked,
+        reason: ImessageEnrollmentReason.consentRevoked,
+        generation: 0,
+      );
+    }
     return _receipt(policy, decision);
   }
 
@@ -385,19 +445,22 @@ ImessageEnrollmentStatus _status(
   ImessageEnrollmentState state, {
   bool textDm = false,
   String? destination,
+  ImessageEnrollmentReason? reason,
+  int generation = 4,
 }) {
-  final reason = switch (state) {
-    ImessageEnrollmentState.notConnected => ImessageEnrollmentReason.notEnrolled,
-    ImessageEnrollmentState.verificationPending => ImessageEnrollmentReason.verificationPending,
-    ImessageEnrollmentState.ready => ImessageEnrollmentReason.ready,
-    ImessageEnrollmentState.temporarilyUnavailable => ImessageEnrollmentReason.transportUnhealthy,
-    ImessageEnrollmentState.revoked => ImessageEnrollmentReason.bindingRevoked,
-  };
+  final resolvedReason = reason ??
+      switch (state) {
+        ImessageEnrollmentState.notConnected => ImessageEnrollmentReason.notEnrolled,
+        ImessageEnrollmentState.verificationPending => ImessageEnrollmentReason.verificationPending,
+        ImessageEnrollmentState.ready => ImessageEnrollmentReason.ready,
+        ImessageEnrollmentState.temporarilyUnavailable => ImessageEnrollmentReason.transportUnhealthy,
+        ImessageEnrollmentState.revoked => ImessageEnrollmentReason.bindingRevoked,
+      };
   return ImessageEnrollmentStatus(
     schemaVersion: ImessageEnrollmentStatus.schema,
     state: state,
-    reason: reason,
-    authorityGeneration: 4,
+    reason: resolvedReason,
+    authorityGeneration: generation,
     assignedDestination: destination,
     features: ImessageEnrollmentFeatures(
       textDm: textDm,

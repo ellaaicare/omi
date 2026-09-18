@@ -10,6 +10,7 @@ import 'package:uuid/uuid.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/imessage_enrollment.dart';
 import 'package:omi/ella/services/imessage_enrollment_api.dart';
+import 'package:omi/ella/services/imessage_enrollment_attempt_store.dart';
 import 'package:omi/ella/services/imessage_enrollment_controller.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
@@ -18,6 +19,7 @@ bool isImessageEnrollmentSupportedPlatform({TargetPlatform? platform, bool? isWe
 }
 
 final _imessageEnrollmentSessionStore = ImessageEnrollmentSessionStore();
+final _imessageEnrollmentAttemptStore = ImessageEnrollmentSecureAttemptStore();
 ImessageEnrollmentController? _imessageEnrollmentController;
 
 class ImessageEnrollmentPage extends StatefulWidget {
@@ -76,6 +78,7 @@ class _ImessageEnrollmentPageState extends State<ImessageEnrollmentPage> {
       messagesLauncher: (uri) => launchUrl(uri, mode: LaunchMode.externalApplication),
       idGenerator: () => const Uuid().v4(),
       sessionStore: _imessageEnrollmentSessionStore,
+      attemptStore: _imessageEnrollmentAttemptStore,
       appInfoReader: () async {
         final info = await PackageInfo.fromPlatform();
         return (version: info.version, buildNumber: info.buildNumber);
