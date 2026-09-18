@@ -8629,6 +8629,162 @@ class AppLocalizationsLv extends AppLocalizations {
   String get conversationEllaEnrichedLabel => 'Summary enriched by Ella';
 
   @override
+  String get ellaMessagingSection => 'MESSAGING';
+
+  @override
+  String get ellaImessageTitle => 'iMessage with Ella';
+
+  @override
+  String get ellaImessageSettingsSubtitle => 'Verify this iPhone for private text messages';
+
+  @override
+  String get ellaImessageIntro =>
+      'Connect this iPhone to your private Ella workspace. Registration alone never makes messaging ready; Ella confirms readiness only after a message from this handset is verified.';
+
+  @override
+  String get ellaImessageNotConnectedTitle => 'Not connected';
+
+  @override
+  String get ellaImessageNotConnectedBody => 'Set up this iPhone before using iMessage with Ella.';
+
+  @override
+  String get ellaImessageSetUp => 'Set up iMessage';
+
+  @override
+  String get ellaImessagePendingTitle => 'Verification pending';
+
+  @override
+  String get ellaImessagePendingBody =>
+      'Open Messages and send the one-time verification message from this iPhone. Then return here to check verification.';
+
+  @override
+  String ellaImessageAssignedDestination(String destination) {
+    return 'Verification destination: $destination';
+  }
+
+  @override
+  String get ellaImessageOpenMessages => 'Open Messages';
+
+  @override
+  String get ellaImessageStartAgain => 'Start again';
+
+  @override
+  String get ellaImessageCheckVerification => 'Check verification';
+
+  @override
+  String get ellaImessageReadyTitle => 'Ready for private messages';
+
+  @override
+  String get ellaImessageReadyBody => 'This verified iPhone can send private text messages to your Ella workspace.';
+
+  @override
+  String ellaImessageLastVerified(String dateTime) {
+    return 'Last verified $dateTime';
+  }
+
+  @override
+  String get ellaImessageTextOnly =>
+      'Text messages only. Group messages, attachments, and caregiver delivery are not enabled.';
+
+  @override
+  String get ellaImessageDisconnect => 'Disconnect this iPhone';
+
+  @override
+  String get ellaImessageUnavailableTitle => 'iMessage is unavailable';
+
+  @override
+  String get ellaImessageUnavailableBody =>
+      'Ella could not verify private messaging right now. Pull down or try again without changing your other alert channels.';
+
+  @override
+  String get ellaImessageFeatureUnavailableBody =>
+      'The server has not enabled private text messages for this binding. Ella will not show it as ready.';
+
+  @override
+  String get ellaImessageRetry => 'Try again';
+
+  @override
+  String ellaImessageSupportCode(String supportCode) {
+    return 'Support code: $supportCode';
+  }
+
+  @override
+  String get ellaImessageRevokedTitle => 'Disconnected';
+
+  @override
+  String get ellaImessageRevokedBody => 'This iPhone is no longer authorized for iMessage with Ella.';
+
+  @override
+  String get ellaImessageConsentRevocationPendingBody =>
+      'This iPhone is disconnected. Ella still needs to finish withdrawing iMessage data-sharing consent.';
+
+  @override
+  String get ellaImessageFinishDisconnect => 'Finish disconnecting';
+
+  @override
+  String get ellaImessageReconnect => 'Connect again';
+
+  @override
+  String get ellaImessageConsentTitle => 'Before you connect';
+
+  @override
+  String ellaImessageConsentFlow(String recipients) {
+    return '$recipients process your private text-message flow for your Ella workspace.';
+  }
+
+  @override
+  String ellaImessageConsentData(String dataClasses) {
+    return 'Data included by the current policy: $dataClasses. Nothing is connected or sent until you agree.';
+  }
+
+  @override
+  String get ellaImessagePhoneLabel => 'This iPhone phone number';
+
+  @override
+  String get ellaImessagePhoneHint => '+12025550123';
+
+  @override
+  String get ellaImessagePhoneHelp =>
+      'Include + and the country code. Ella does not reuse a phone number saved by another account.';
+
+  @override
+  String get ellaImessagePhoneInvalid => 'Enter a valid phone number with country code';
+
+  @override
+  String ellaImessageConsentAgreement(String recipients) {
+    return 'I agree to share this data with $recipients for private text messages.';
+  }
+
+  @override
+  String get ellaImessageAgreeContinue => 'Agree and continue';
+
+  @override
+  String get ellaImessageNotNow => 'Not now';
+
+  @override
+  String get ellaImessageErrorSignIn => 'Sign in again before connecting iMessage.';
+
+  @override
+  String get ellaImessageErrorRateLimited => 'Too many setup attempts. Wait before trying again.';
+
+  @override
+  String get ellaImessageErrorConsentUnavailable =>
+      'Ella cannot record the required iMessage consent yet. Nothing was connected or sent.';
+
+  @override
+  String get ellaImessageErrorProofExpired => 'The one-time verification message expired. Start setup again.';
+
+  @override
+  String get ellaImessageErrorAccountChanged =>
+      'The signed-in account changed. This response was discarded; reload before continuing.';
+
+  @override
+  String get ellaImessageErrorMessages => 'Messages could not be opened. No verification message was sent.';
+
+  @override
+  String get ellaImessageErrorGeneric => 'Ella could not update iMessage setup. Nothing was connected or sent.';
+
+  @override
   String get ellaAlertChannelsUnavailableBadge => 'Unavailable';
 
   @override
