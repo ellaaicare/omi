@@ -49,12 +49,38 @@ def test_imessage_enrollment_contract_has_exact_owner_only_surfaces():
         "transport-auth-can-select-owner": False,
     }
     assert set(contract["paths"]) == {
+        "/v1/ella/imessage/consent/policy",
+        "/v1/ella/imessage/consent",
         "/v1/ella/imessage/enrollment",
         "/v1/ella/imessage/enrollment/start",
         "/v1/ella/imessage/enrollment/revoke",
     }
-    assert all(path_item[next(iter(path_item))].get("security") is None for path_item in contract["paths"].values())
+    owner_paths = set(contract["paths"]) - {"/v1/ella/imessage/consent/policy"}
+    assert all(
+        contract["paths"][path][next(iter(contract["paths"][path]))].get("security") is None for path in owner_paths
+    )
+    assert contract["paths"]["/v1/ella/imessage/consent/policy"]["get"]["security"] == []
     assert contract["security"] == [{"bearerAuth": []}]
+
+
+def test_dedicated_consent_contract_precedes_enrollment_and_cannot_select_owner():
+    schemas = _contract()["components"]["schemas"]
+    request_properties = set(schemas["ImessageConsentRequest"]["properties"])
+
+    assert request_properties == {
+        "decision",
+        "policy_version",
+        "processor_set_hash",
+        "scope_version",
+        "scope_hash",
+        "request_id",
+        "app_version",
+        "build_number",
+    }
+    assert request_properties.isdisjoint(FORBIDDEN_AUTHORITY_FIELDS)
+    assert schemas["ImessageConsentPolicy"]["properties"]["policy_version"] == {"const": "ella-imessage-data-v1"}
+    assert schemas["ImessageConsentPolicy"]["properties"]["scope_version"] == {"const": "ella.imessage_text_dm.v1"}
+    assert schemas["ImessageConsentPolicy"]["properties"]["text_dm_only"] == {"const": True}
 
 
 def test_start_request_cannot_select_tenant_runtime_or_transport_authority():

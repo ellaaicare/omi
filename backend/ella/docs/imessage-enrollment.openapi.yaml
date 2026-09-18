@@ -19,6 +19,41 @@ x-ella-authority:
   fallback: none
   transport-auth-can-select-owner: false
 paths:
+  /v1/ella/imessage/consent/policy:
+    get:
+      tags: [iMessage Enrollment]
+      summary: Return the immutable iMessage text-DM disclosure before sign-in.
+      security: []
+      responses:
+        "200":
+          description: Content-only policy metadata; no owner or provider state is read.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImessageConsentPolicy"
+  /v1/ella/imessage/consent:
+    post:
+      tags: [iMessage Enrollment]
+      summary: Record the exact Firebase owner's iMessage text-DM consent decision.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImessageConsentRequest"
+      responses:
+        "200":
+          description: Idempotent decision receipt bound to the current owner and policy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImessageConsentReceipt"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /v1/ella/imessage/enrollment:
     get:
       tags: [iMessage Enrollment]
@@ -125,6 +160,116 @@ components:
           schema:
             $ref: "#/components/schemas/ContractError"
   schemas:
+    ImessageConsentDecision:
+      type: string
+      enum: [granted, declined, revoked]
+    ImessageConsentPolicy:
+      type: object
+      additionalProperties: false
+      required:
+        - policy_version
+        - processor_set_hash
+        - scope_version
+        - scope_hash
+        - recipients
+        - data_classes
+        - text_dm_only
+      properties:
+        policy_version:
+          const: ella-imessage-data-v1
+        processor_set_hash:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+        scope_version:
+          const: ella.imessage_text_dm.v1
+        scope_hash:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+        recipients:
+          type: array
+          minItems: 2
+          items:
+            type: string
+        data_classes:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        text_dm_only:
+          const: true
+    ImessageConsentRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - decision
+        - policy_version
+        - processor_set_hash
+        - scope_version
+        - scope_hash
+        - request_id
+        - app_version
+        - build_number
+      properties:
+        decision:
+          $ref: "#/components/schemas/ImessageConsentDecision"
+        policy_version:
+          type: string
+          maxLength: 80
+        processor_set_hash:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+        scope_version:
+          type: string
+          maxLength: 100
+        scope_hash:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+        request_id:
+          type: string
+          format: uuid
+        app_version:
+          type: string
+          minLength: 1
+          maxLength: 80
+        build_number:
+          type: string
+          minLength: 1
+          maxLength: 40
+    ImessageConsentReceipt:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - receipt_id
+        - decision
+        - policy_version
+        - processor_set_hash
+        - scope_version
+        - scope_hash
+        - authority_revision
+        - decided_at
+      properties:
+        schema_version:
+          const: ella.imessage_consent_receipt.v1
+        receipt_id:
+          type: string
+          format: uuid
+        decision:
+          $ref: "#/components/schemas/ImessageConsentDecision"
+        policy_version:
+          type: string
+        processor_set_hash:
+          type: string
+        scope_version:
+          type: string
+        scope_hash:
+          type: string
+        authority_revision:
+          type: integer
+          minimum: 1
+        decided_at:
+          type: string
+          format: date-time
     EnrollmentState:
       type: string
       enum:
