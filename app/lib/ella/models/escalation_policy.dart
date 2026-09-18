@@ -8,11 +8,7 @@ class ChannelStatus {
   final bool enabled;
   final String reason;
 
-  const ChannelStatus({
-    required this.channel,
-    required this.enabled,
-    required this.reason,
-  });
+  const ChannelStatus({required this.channel, required this.enabled, required this.reason});
 
   factory ChannelStatus.fromJson(Map<String, dynamic> json) {
     return ChannelStatus(
@@ -21,6 +17,11 @@ class ChannelStatus {
       reason: json['reason'] as String? ?? '',
     );
   }
+
+  /// The legacy policy response can mark iMessage enabled from a stored phone
+  /// number alone. Until verified Photon readiness is authoritative, the app
+  /// must not present that value as an operational messaging channel.
+  bool get isCurrentlyAvailable => enabled && channel != 'imessage';
 
   /// Human-readable channel name.
   String get displayName {
@@ -83,11 +84,7 @@ class CaregiverPermissions {
   final bool dailySummary;
   final bool weeklySummary;
 
-  const CaregiverPermissions({
-    required this.emergencyAlerts,
-    required this.dailySummary,
-    required this.weeklySummary,
-  });
+  const CaregiverPermissions({required this.emergencyAlerts, required this.dailySummary, required this.weeklySummary});
 
   factory CaregiverPermissions.fromJson(Map<String, dynamic> json) {
     return CaregiverPermissions(
@@ -143,12 +140,7 @@ class EscalationRule {
   final String title;
   final String text;
 
-  const EscalationRule({
-    required this.severity,
-    required this.decision,
-    required this.title,
-    required this.text,
-  });
+  const EscalationRule({required this.severity, required this.decision, required this.title, required this.text});
 
   factory EscalationRule.fromJson(Map<String, dynamic> json) {
     return EscalationRule(
