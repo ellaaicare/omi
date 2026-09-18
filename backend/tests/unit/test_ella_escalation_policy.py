@@ -495,3 +495,33 @@ def test_plain_language_policy_view_does_not_advertise_phone_only_imessage():
         "enabled": True,
         "reason": "iMessage is ready",
     }
+
+
+def test_plain_language_policy_view_requires_exact_provider_readiness_for_caregiver_imessage():
+    for provider_health in ({}, {CHANNEL_IMESSAGE: False}, {CHANNEL_IMESSAGE: "healthy"}, {CHANNEL_IMESSAGE: 1}):
+        policy = build_plain_language_policy_view(
+            _user(provider_health=provider_health),
+            [_caregiver()],
+        )
+
+        assert policy["caregivers"][0]["channels"][0] == {
+            "channel": CHANNEL_IMESSAGE,
+            "enabled": False,
+            "reason": "iMessage is not currently available",
+        }
+        assert policy["caregivers"][0]["channels"][1] == {
+            "channel": CHANNEL_EMAIL,
+            "enabled": True,
+            "reason": "Email on file",
+        }
+
+    ready = build_plain_language_policy_view(
+        _user(provider_health={CHANNEL_IMESSAGE: True}),
+        [_caregiver()],
+    )
+
+    assert ready["caregivers"][0]["channels"][0] == {
+        "channel": CHANNEL_IMESSAGE,
+        "enabled": True,
+        "reason": "iMessage is ready",
+    }

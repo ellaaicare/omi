@@ -1092,6 +1092,19 @@ def build_plain_language_policy_view(
     caregiver_alerts = snapshot["caregiver_alert_preferences"]
     for caregiver in caregivers:
         permissions = caregiver.permissions or {}
+        caregiver_imessage_enabled = (
+            bool(caregiver.phone)
+            and CHANNEL_IMESSAGE in caregiver_alerts["channels"]
+            and _provider_healthy(user, CHANNEL_IMESSAGE)
+        )
+        if not caregiver.phone:
+            caregiver_imessage_reason = "No phone number on file"
+        elif CHANNEL_IMESSAGE not in caregiver_alerts["channels"]:
+            caregiver_imessage_reason = "iMessage is disabled in caregiver alert settings"
+        elif not _provider_healthy(user, CHANNEL_IMESSAGE):
+            caregiver_imessage_reason = "iMessage is not currently available"
+        else:
+            caregiver_imessage_reason = "iMessage is ready"
         emergency_alerts = _permission_enabled(
             permissions,
             ("receive_emergency_alerts", "emergency_alerts", "urgent_alerts"),
@@ -1117,8 +1130,8 @@ def build_plain_language_policy_view(
                 "channels": [
                     channel_status(
                         CHANNEL_IMESSAGE,
-                        bool(caregiver.phone) and CHANNEL_IMESSAGE in caregiver_alerts["channels"],
-                        "Phone number on file" if caregiver.phone else "No phone number on file",
+                        caregiver_imessage_enabled,
+                        caregiver_imessage_reason,
                     ),
                     channel_status(
                         CHANNEL_EMAIL,
