@@ -77,6 +77,12 @@ class RegistrarResult:
     assigned_destination: str
 
 
+@dataclass(frozen=True)
+class RegistrarCleanupResult:
+    provider_disposition: str
+    operator_action_required: bool
+
+
 class Registrar(Protocol):
     async def register(
         self,
@@ -85,6 +91,8 @@ class Registrar(Protocol):
         provider_request_id: str,
     ) -> RegistrarResult: ...
 
+    async def cleanup(self, *, provider_request_id: str) -> RegistrarCleanupResult: ...
+
 
 class UnavailableRegistrar:
     def __init__(self, code: str = "imessage_registrar_not_configured") -> None:
@@ -92,6 +100,10 @@ class UnavailableRegistrar:
 
     async def register(self, *, handset_e164: str, provider_request_id: str) -> RegistrarResult:
         del handset_e164, provider_request_id
+        raise RegistrarError(self.code, ambiguous=False)
+
+    async def cleanup(self, *, provider_request_id: str) -> RegistrarCleanupResult:
+        del provider_request_id
         raise RegistrarError(self.code, ambiguous=False)
 
 
@@ -170,6 +182,59 @@ class PhotonRegistrarClient:
         return RegistrarResult(
             registration_ref=registration_ref,
             assigned_destination=assigned_destination,
+        )
+
+    async def cleanup(self, *, provider_request_id: str) -> RegistrarCleanupResult:
+        try:
+            request_id = str(uuid.UUID(provider_request_id))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise RegistrarError("imessage_registrar_cleanup_invalid", ambiguous=False) from exc
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._timeout,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                async with client.stream(
+                    "DELETE",
+                    f"{self._endpoint}/{request_id}",
+                    headers={"Authorization": f"Bearer {self._token}"},
+                ) as response:
+                    if response.status_code != 202:
+                        ambiguous = response.status_code >= 500
+                        raise RegistrarError(
+                            (
+                                "imessage_registrar_cleanup_uncertain"
+                                if ambiguous
+                                else "imessage_registrar_cleanup_rejected"
+                            ),
+                            ambiguous=ambiguous,
+                        )
+                    chunks: list[bytes] = []
+                    response_size = 0
+                    async for chunk in response.aiter_bytes():
+                        response_size += len(chunk)
+                        if response_size > 32_768:
+                            raise RegistrarError("imessage_registrar_cleanup_response_invalid", ambiguous=True)
+                        chunks.append(chunk)
+                    response_content = b"".join(chunks)
+        except httpx.HTTPError as exc:
+            raise RegistrarError("imessage_registrar_cleanup_transport_uncertain", ambiguous=True) from exc
+        try:
+            body = json.loads(response_content)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise RegistrarError("imessage_registrar_cleanup_response_invalid", ambiguous=True) from exc
+        if (
+            not isinstance(body, dict)
+            or body.get("status") != "local_cleanup_complete_provider_retained"
+            or body.get("provider_disposition") != "provider_user_retained_unbound"
+            or body.get("operator_action_required") is not True
+            or body.get("absence_proof") != {"registrations": 0, "inbound_events": 0, "deliveries": 0}
+        ):
+            raise RegistrarError("imessage_registrar_cleanup_response_invalid", ambiguous=True)
+        return RegistrarCleanupResult(
+            provider_disposition="provider_user_retained_unbound",
+            operator_action_required=True,
         )
 
 
@@ -581,7 +646,21 @@ class ImessageEnrollmentService:
             raise self._authority_error(exc) from exc
         if not binding:
             return self._status(state="not_connected", reason="not_enrolled")
-        return self._binding_status(binding, status="revoked", reason="binding_revoked")
+        provider_request_id = str(binding.get("provider_request_id") or "")
+        try:
+            cleanup = await self.registrar.cleanup(provider_request_id=provider_request_id)
+        except RegistrarError as exc:
+            raise ImessageEnrollmentError(
+                "imessage_local_cleanup_uncertain" if exc.ambiguous else "imessage_local_cleanup_failed",
+                status_code=503,
+            ) from exc
+        response = self._binding_status(binding, status="revoked", reason="binding_revoked")
+        response["cleanup"] = {
+            "local_absence_proven": True,
+            "provider_disposition": cleanup.provider_disposition,
+            "operator_action_required": cleanup.operator_action_required,
+        }
+        return response
 
     async def _runtime(self, uid: str) -> tuple[IsolatedRuntime, ImessageRuntimeSnapshot, Any]:
         try:

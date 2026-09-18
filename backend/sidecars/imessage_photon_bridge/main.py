@@ -41,6 +41,7 @@ from bridge import (  # noqa: E402
     ImessagePhotonBridge,
     SingletonLease,
     _is_provider_stream_healthy,
+    send_provider_text_once,
 )
 
 
@@ -50,7 +51,11 @@ class HermesPhotonProvider:
     def __init__(self) -> None:
         self.adapter: Optional[PhotonAdapter] = None
 
-    async def connect(self, handler: Callable[[dict[str, Any]], Awaitable[None]]) -> bool:
+    async def connect(
+        self,
+        handler: Callable[[dict[str, Any]], Awaitable[None]],
+        fatal_handler: Callable[[], Awaitable[None]],
+    ) -> bool:
         adapter = PhotonAdapter(PlatformConfig(enabled=True, token="", extra={}))
 
         async def handle(message_event: Any) -> None:
@@ -59,6 +64,11 @@ class HermesPhotonProvider:
                 await handler(raw)
 
         adapter.handle_message = handle
+
+        async def handle_fatal(_adapter: Any) -> None:
+            await fatal_handler()
+
+        adapter.set_fatal_error_handler(handle_fatal)
         connected = await adapter.connect()
         if connected:
             self.adapter = adapter
@@ -98,10 +108,7 @@ class HermesPhotonProvider:
     async def send_text(self, handset_e164: str, text: str) -> Optional[str]:
         if self.adapter is None:
             raise BridgeError("bridge_provider_not_connected")
-        result = await self.adapter.send(handset_e164, text)
-        if not result.success:
-            raise BridgeError("bridge_provider_send_failed")
-        return str(result.message_id) if result.message_id else None
+        return await send_provider_text_once(self.adapter, handset_e164, text)
 
 
 async def _serve(config: BridgeConfig, *, reconcile_only: bool = False) -> int:
@@ -123,11 +130,21 @@ async def _serve(config: BridgeConfig, *, reconcile_only: bool = False) -> int:
     try:
         await bridge.start()
         if reconcile_only:
+            if bridge.health_status != "ready":
+                raise BridgeError("bridge_transport_not_ready", retryable=True)
             await bridge.queue.join()
             return 0
         await server.start()
-        await stop_event.wait()
-        return 0
+        stop_waiter = asyncio.create_task(stop_event.wait(), name="ella-imessage-stop-waiter")
+        fatal_waiter = asyncio.create_task(bridge.fatal_event.wait(), name="ella-imessage-fatal-waiter")
+        done, pending = await asyncio.wait(
+            {stop_waiter, fatal_waiter},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        return 75 if fatal_waiter in done and bridge.fatal_event.is_set() else 0
     finally:
         await server.stop()
         await bridge.stop()

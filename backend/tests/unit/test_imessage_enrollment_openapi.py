@@ -111,6 +111,19 @@ def test_status_states_are_complete_redacted_and_text_dm_only():
     }
 
 
+def test_revoke_cleanup_contract_never_claims_provider_user_deletion():
+    schemas = _contract()["components"]["schemas"]
+    cleanup = schemas["EnrollmentCleanup"]
+
+    assert schemas["EnrollmentStatus"]["properties"]["cleanup"] == {"$ref": "#/components/schemas/EnrollmentCleanup"}
+    assert cleanup["additionalProperties"] is False
+    assert cleanup["properties"] == {
+        "local_absence_proven": {"const": True},
+        "provider_disposition": {"const": "provider_user_retained_unbound"},
+        "operator_action_required": {"const": True},
+    }
+
+
 def test_assigned_destination_is_owner_visible_but_provider_routing_stays_internal():
     contract = _contract()
     serialized = yaml.safe_dump(contract["components"]["schemas"]["EnrollmentStatus"])

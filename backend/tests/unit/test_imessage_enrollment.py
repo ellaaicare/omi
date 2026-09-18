@@ -19,6 +19,7 @@ from ella.services.imessage_enrollment import (
     CONSENT_SCOPE_VERSION,
     ImessageEnrollmentError,
     ImessageEnrollmentService,
+    RegistrarCleanupResult,
     RegistrarError,
     RegistrarResult,
     consent_policy,
@@ -159,7 +160,12 @@ class FakeRepository:
 
     async def revoke_binding(self, **kwargs):
         self.events.append(("revoke", kwargs))
-        return {**self.binding, "status": "revoked", "generation": 2}
+        return {
+            **self.binding,
+            "status": "revoked",
+            "generation": 2,
+            "provider_request_id": REQUEST_ID,
+        }
 
 
 class FakeRegistrar:
@@ -174,6 +180,15 @@ class FakeRegistrar:
         return RegistrarResult(
             registration_ref="provider-registration-a",
             assigned_destination="+15555550100",
+        )
+
+    async def cleanup(self, **kwargs):
+        self.events.append(("cleanup", kwargs))
+        if self.error:
+            raise self.error
+        return RegistrarCleanupResult(
+            provider_disposition="provider_user_retained_unbound",
+            operator_action_required=True,
         )
 
 
@@ -205,6 +220,53 @@ def test_consent_policy_is_dedicated_text_dm_disclosure():
         ],
         "text_dm_only": True,
     }
+
+
+def test_revoke_requires_exact_local_cleanup_and_reports_retained_provider_user(monkeypatch):
+    monkeypatch.setenv("ELLA_IMESSAGE_ENROLLMENT_ENABLED", "true")
+    repository = FakeRepository()
+    registrar = FakeRegistrar(repository.events)
+    service = _service(repository, registrar)
+
+    result = asyncio.run(
+        service.revoke(
+            uid="owner-a",
+            expected_generation=1,
+            idempotency_key=IDEMPOTENCY_KEY,
+        )
+    )
+
+    assert result["state"] == "revoked"
+    assert result["cleanup"] == {
+        "local_absence_proven": True,
+        "provider_disposition": "provider_user_retained_unbound",
+        "operator_action_required": True,
+    }
+    assert [event[0] for event in repository.events] == ["schema", "revoke", "cleanup"]
+    assert repository.events[-1][1] == {"provider_request_id": str(REQUEST_ID)}
+
+
+def test_revoke_stays_typed_unavailable_when_local_cleanup_is_ambiguous(monkeypatch):
+    monkeypatch.setenv("ELLA_IMESSAGE_ENROLLMENT_ENABLED", "true")
+    repository = FakeRepository()
+    registrar = FakeRegistrar(
+        repository.events,
+        error=RegistrarError("imessage_registrar_cleanup_transport_uncertain", ambiguous=True),
+    )
+    service = _service(repository, registrar)
+
+    with pytest.raises(ImessageEnrollmentError) as failure:
+        asyncio.run(
+            service.revoke(
+                uid="owner-a",
+                expected_generation=1,
+                idempotency_key=IDEMPOTENCY_KEY,
+            )
+        )
+
+    assert failure.value.code == "imessage_local_cleanup_uncertain"
+    assert failure.value.status_code == 503
+    assert [event[0] for event in repository.events] == ["schema", "revoke", "cleanup"]
 
 
 def test_previous_policy_consent_is_rejected_before_authority_write(monkeypatch):

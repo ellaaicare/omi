@@ -863,12 +863,14 @@ class ImessageEnrollmentRepository:
                 )
                 binding = await connection.fetchrow(
                     """
-                    SELECT *
-                    FROM ella_imessage_channel_bindings
-                    WHERE user_id = $1
-                    ORDER BY generation DESC, created_at DESC
+                    SELECT b.*, a.provider_request_id
+                    FROM ella_imessage_channel_bindings b
+                    JOIN ella_imessage_registration_attempts a
+                      ON a.user_id = b.user_id AND a.id = b.registration_attempt_id
+                    WHERE b.user_id = $1
+                    ORDER BY b.generation DESC, b.created_at DESC
                     LIMIT 1
-                    FOR UPDATE
+                    FOR UPDATE OF b
                     """,
                     user_id,
                 )
@@ -893,7 +895,9 @@ class ImessageEnrollmentRepository:
                     binding["id"],
                     idempotency_key,
                 )
-                return dict(revoked)
+                result = dict(revoked)
+                result["provider_request_id"] = binding["provider_request_id"]
+                return result
 
     async def _set_attempt_terminal(
         self,

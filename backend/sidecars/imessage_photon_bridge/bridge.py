@@ -17,6 +17,7 @@ import os
 import re
 import sqlite3
 import stat
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -33,15 +34,17 @@ PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$")
 NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 TERMINAL_RECEIPT_STATES = {"delivered", "failed", "uncertain", "quarantined"}
 PROVIDER_OUTBOUND_MAX_CHARS = 8_000
+INBOUND_RETRY_DELAYS = (1.0, 5.0, 15.0)
 
 
 class BridgeError(RuntimeError):
     """Typed, content-free bridge failure."""
 
-    def __init__(self, code: str, *, status_code: int = 503) -> None:
+    def __init__(self, code: str, *, status_code: int = 503, retryable: bool = False) -> None:
         super().__init__(code)
         self.code = code
         self.status_code = status_code
+        self.retryable = retryable
 
 
 @dataclass(frozen=True)
@@ -54,6 +57,7 @@ class BridgeConfig:
     transport_token: str
     registrar_token: str
     heartbeat_seconds: float = 30.0
+    heartbeat_freshness_seconds: float = 90.0
     backend_timeout_seconds: float = 90.0
 
     @classmethod
@@ -67,6 +71,7 @@ class BridgeConfig:
             transport_token=os.getenv("ELLA_IMESSAGE_TRANSPORT_TOKEN", ""),
             registrar_token=os.getenv("ELLA_IMESSAGE_REGISTRAR_TOKEN", ""),
             heartbeat_seconds=_float_environment("ELLA_IMESSAGE_HEARTBEAT_SECONDS", 30.0),
+            heartbeat_freshness_seconds=_float_environment("ELLA_IMESSAGE_HEARTBEAT_FRESHNESS_SECONDS", 90.0),
             backend_timeout_seconds=_float_environment("ELLA_IMESSAGE_BACKEND_TIMEOUT_SECONDS", 90.0),
         ).validated()
 
@@ -91,6 +96,8 @@ class BridgeConfig:
             raise BridgeError("bridge_service_tokens_must_be_distinct")
         if not 10.0 <= self.heartbeat_seconds <= 60.0:
             raise BridgeError("bridge_heartbeat_interval_invalid")
+        if not self.heartbeat_seconds * 2 <= self.heartbeat_freshness_seconds <= 120.0:
+            raise BridgeError("bridge_heartbeat_freshness_invalid")
         if not 30.0 <= self.backend_timeout_seconds <= 180.0:
             raise BridgeError("bridge_backend_timeout_invalid")
         return self
@@ -115,7 +122,11 @@ class ProviderInbound:
 
 
 class PhotonProvider(Protocol):
-    async def connect(self, handler: Callable[[dict[str, Any]], Awaitable[None]]) -> bool: ...
+    async def connect(
+        self,
+        handler: Callable[[dict[str, Any]], Awaitable[None]],
+        fatal_handler: Callable[[], Awaitable[None]],
+    ) -> bool: ...
 
     async def disconnect(self) -> None: ...
 
@@ -188,7 +199,7 @@ class HttpEllaBackend:
                     content=json.dumps(payload, separators=(",", ":")),
                 )
         except httpx.HTTPError as exc:
-            raise BridgeError("bridge_backend_transport_failed") from exc
+            raise BridgeError("bridge_backend_transport_failed", retryable=True) from exc
         if response.status_code != 200:
             code = "bridge_backend_rejected"
             try:
@@ -197,7 +208,11 @@ class HttpEllaBackend:
                     code = str(detail["code"])
             except (TypeError, ValueError):
                 pass
-            raise BridgeError(code, status_code=response.status_code)
+            raise BridgeError(
+                code,
+                status_code=response.status_code,
+                retryable=response.status_code == 429 or response.status_code >= 500,
+            )
         try:
             body = response.json()
         except ValueError as exc:
@@ -293,6 +308,7 @@ class BridgeJournal:
             CREATE TABLE IF NOT EXISTS inbound_events (
                 project_id TEXT NOT NULL,
                 provider_message_id TEXT NOT NULL,
+                handset_e164 TEXT,
                 payload_sha256 TEXT NOT NULL,
                 event_json TEXT,
                 status TEXT NOT NULL CHECK (status IN ('pending','processing','terminal','quarantined')),
@@ -318,8 +334,37 @@ class BridgeJournal:
             );
             CREATE INDEX IF NOT EXISTS inbound_events_status_idx ON inbound_events(status, created_at);
             CREATE INDEX IF NOT EXISTS deliveries_status_idx ON deliveries(status, created_at);
+            CREATE TABLE IF NOT EXISTS cleanup_receipts (
+                provider_request_id TEXT PRIMARY KEY,
+                provider_disposition TEXT NOT NULL,
+                registrations_removed INTEGER NOT NULL,
+                inbound_events_removed INTEGER NOT NULL,
+                deliveries_removed INTEGER NOT NULL,
+                completed_at TEXT NOT NULL
+            );
             """
         )
+        inbound_columns = {
+            str(row["name"]) for row in self.connection.execute("PRAGMA table_info(inbound_events)").fetchall()
+        }
+        if "handset_e164" not in inbound_columns:
+            self.connection.execute("ALTER TABLE inbound_events ADD COLUMN handset_e164 TEXT")
+        for row in self.connection.execute(
+            "SELECT project_id, provider_message_id, event_json FROM inbound_events WHERE handset_e164 IS NULL"
+        ).fetchall():
+            try:
+                event = json.loads(str(row["event_json"] or ""))
+                handset = str((event.get("sender") or {}).get("id") or "")
+            except (AttributeError, TypeError, ValueError):
+                handset = ""
+            if E164_RE.fullmatch(handset):
+                self.connection.execute(
+                    """
+                    UPDATE inbound_events SET handset_e164 = ?
+                    WHERE project_id = ? AND provider_message_id = ?
+                    """,
+                    (handset, row["project_id"], row["provider_message_id"]),
+                )
 
     def _bind_project(self) -> None:
         self.connection.execute("BEGIN IMMEDIATE")
@@ -349,10 +394,44 @@ class BridgeJournal:
                 "SELECT * FROM registrations WHERE handset_e164 = ? AND status != 'disabled'",
                 (handset_e164,),
             ).fetchone()
+            disabled = self.connection.execute(
+                "SELECT * FROM registrations WHERE handset_e164 = ? AND status = 'disabled'",
+                (handset_e164,),
+            ).fetchone()
             if existing and (existing["project_id"] != project_id or existing["handset_e164"] != handset_e164):
                 raise BridgeError("bridge_registration_idempotency_conflict", status_code=409)
             if by_handset and by_handset["provider_request_id"] != provider_request_id:
                 existing = by_handset
+            if existing and existing["status"] == "disabled":
+                self.connection.execute(
+                    """
+                    UPDATE registrations
+                    SET registration_id = NULL, provider_user_id = NULL, assigned_destination = NULL,
+                        status = 'attempting', provider_attempt_started = 0, proof_accepted = 0,
+                        created_at = ?, updated_at = ?
+                    WHERE provider_request_id = ?
+                    """,
+                    (now, now, provider_request_id),
+                )
+                existing = self.connection.execute(
+                    "SELECT * FROM registrations WHERE provider_request_id = ?",
+                    (provider_request_id,),
+                ).fetchone()
+            elif not existing and disabled:
+                self.connection.execute(
+                    """
+                    UPDATE registrations
+                    SET provider_request_id = ?, project_id = ?, registration_id = NULL,
+                        provider_user_id = NULL, assigned_destination = NULL, status = 'attempting',
+                        provider_attempt_started = 0, proof_accepted = 0, created_at = ?, updated_at = ?
+                    WHERE provider_request_id = ? AND status = 'disabled'
+                    """,
+                    (provider_request_id, project_id, now, now, disabled["provider_request_id"]),
+                )
+                existing = self.connection.execute(
+                    "SELECT * FROM registrations WHERE provider_request_id = ?",
+                    (provider_request_id,),
+                ).fetchone()
             if not existing:
                 self.connection.execute(
                     """
@@ -424,6 +503,13 @@ class BridgeJournal:
     def ready_registrations(self) -> list[dict[str, Any]]:
         return [dict(row) for row in self.connection.execute("SELECT * FROM registrations WHERE status = 'ready'")]
 
+    def registration_for_request(self, provider_request_id: str) -> Optional[dict[str, Any]]:
+        row = self.connection.execute(
+            "SELECT * FROM registrations WHERE provider_request_id = ?",
+            (provider_request_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
     def mark_proof_accepted(self, handset_e164: str) -> None:
         self.connection.execute(
             "UPDATE registrations SET proof_accepted = 1, updated_at = ? WHERE handset_e164 = ? AND status = 'ready'",
@@ -460,10 +546,19 @@ class BridgeJournal:
                 self.connection.execute(
                     """
                     INSERT INTO inbound_events (
-                        project_id, provider_message_id, payload_sha256, event_json, status, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, 'pending', ?, ?)
+                        project_id, provider_message_id, handset_e164, payload_sha256,
+                        event_json, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
                     """,
-                    (event.raw_event["project_id"], event.provider_message_id, digest, canonical, now, now),
+                    (
+                        event.raw_event["project_id"],
+                        event.provider_message_id,
+                        event.sender_e164,
+                        digest,
+                        canonical,
+                        now,
+                        now,
+                    ),
                 )
                 state = "new"
             else:
@@ -498,7 +593,16 @@ class BridgeJournal:
             (_utc_now(), provider_message_id),
         )
 
-    def prepare_delivery(
+    def mark_inbound_quarantined(self, provider_message_id: str) -> None:
+        self.connection.execute(
+            """
+            UPDATE inbound_events SET status = 'quarantined', event_json = NULL, updated_at = ?
+            WHERE project_id = ? AND provider_message_id = ?
+            """,
+            (_utc_now(), self.project_id, provider_message_id),
+        )
+
+    def prepare_delivery_intent(
         self,
         *,
         response: dict[str, Any],
@@ -510,22 +614,15 @@ class BridgeJournal:
         receipt_id = _uuid_text(response.get("receipt_id"), "bridge_delivery_receipt_invalid")
         delivery_key = _uuid_text(response.get("delivery_idempotency_key"), "bridge_delivery_key_invalid")
         generation = response.get("binding_generation")
-        text = response.get("text")
-        if (
-            not isinstance(generation, int)
-            or generation < 1
-            or not isinstance(text, str)
-            or not text
-            or len(text) > PROVIDER_OUTBOUND_MAX_CHARS
-        ):
+        if not isinstance(generation, int) or generation < 1:
             raise BridgeError("bridge_delivery_response_invalid")
         now = _utc_now()
         self.connection.execute(
             """
             INSERT INTO deliveries (
                 receipt_id, delivery_idempotency_key, binding_generation, line_identity,
-                contact_identity, connection_id, handset_e164, reply_text, status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)
+                contact_identity, connection_id, handset_e164, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)
             ON CONFLICT (receipt_id) DO NOTHING
             """,
             (
@@ -536,7 +633,6 @@ class BridgeJournal:
                 contact_identity,
                 connection_id,
                 handset_e164,
-                text,
                 now,
                 now,
             ),
@@ -544,7 +640,66 @@ class BridgeJournal:
         row = self.connection.execute("SELECT * FROM deliveries WHERE receipt_id = ?", (receipt_id,)).fetchone()
         if not row or row["delivery_idempotency_key"] != delivery_key:
             raise BridgeError("bridge_delivery_replay_conflict", status_code=409)
+        if (
+            int(row["binding_generation"]) != generation
+            or row["line_identity"] != line_identity
+            or row["contact_identity"] != contact_identity
+            or row["connection_id"] != connection_id
+            or row["handset_e164"] != handset_e164
+        ):
+            raise BridgeError("bridge_delivery_replay_conflict", status_code=409)
         return dict(row)
+
+    def complete_delivery_start(self, receipt_id: str, response: dict[str, Any]) -> dict[str, Any]:
+        expected_receipt = _uuid_text(response.get("receipt_id"), "bridge_delivery_receipt_invalid")
+        delivery_key = _uuid_text(response.get("delivery_idempotency_key"), "bridge_delivery_key_invalid")
+        generation = response.get("binding_generation")
+        text = response.get("text")
+        if (
+            expected_receipt != receipt_id
+            or not isinstance(generation, int)
+            or generation < 1
+            or not isinstance(text, str)
+            or not text
+            or len(text) > PROVIDER_OUTBOUND_MAX_CHARS
+        ):
+            raise BridgeError("bridge_delivery_response_invalid")
+        self.connection.execute(
+            """
+            UPDATE deliveries SET reply_text = ?, updated_at = ?
+            WHERE receipt_id = ? AND delivery_idempotency_key = ?
+              AND binding_generation = ? AND status = 'prepared'
+              AND provider_send_started = 0
+              AND (reply_text IS NULL OR reply_text = ?)
+            """,
+            (text, _utc_now(), receipt_id, delivery_key, generation, text),
+        )
+        row = self.connection.execute("SELECT * FROM deliveries WHERE receipt_id = ?", (receipt_id,)).fetchone()
+        if not row or row["status"] != "prepared" or row["reply_text"] != text:
+            raise BridgeError("bridge_delivery_start_conflict", status_code=409)
+        return dict(row)
+
+    def prepare_delivery(
+        self,
+        *,
+        response: dict[str, Any],
+        line_identity: str,
+        contact_identity: str,
+        connection_id: str,
+        handset_e164: str,
+    ) -> dict[str, Any]:
+        intent = self.prepare_delivery_intent(
+            response=response,
+            line_identity=line_identity,
+            contact_identity=contact_identity,
+            connection_id=connection_id,
+            handset_e164=handset_e164,
+        )
+        return self.complete_delivery_start(str(intent["receipt_id"]), response)
+
+    def delivery_by_receipt(self, receipt_id: str) -> Optional[dict[str, Any]]:
+        row = self.connection.execute("SELECT * FROM deliveries WHERE receipt_id = ?", (receipt_id,)).fetchone()
+        return dict(row) if row else None
 
     def mark_provider_send_started(self, receipt_id: str) -> dict[str, Any]:
         self.connection.execute(
@@ -587,6 +742,75 @@ class BridgeJournal:
             )
         ]
 
+    def cleanup_registration(self, provider_request_id: str) -> dict[str, Any]:
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            prior = self.connection.execute(
+                "SELECT * FROM cleanup_receipts WHERE provider_request_id = ?",
+                (provider_request_id,),
+            ).fetchone()
+            if prior:
+                self.connection.execute("COMMIT")
+                return dict(prior)
+            registration = self.connection.execute(
+                "SELECT * FROM registrations WHERE provider_request_id = ?",
+                (provider_request_id,),
+            ).fetchone()
+            if not registration:
+                raise BridgeError("bridge_cleanup_registration_not_found", status_code=404)
+            if self.connection.execute("SELECT 1 FROM inbound_events WHERE handset_e164 IS NULL LIMIT 1").fetchone():
+                raise BridgeError("bridge_cleanup_absence_unavailable")
+            handset = str(registration["handset_e164"])
+            inbound_count = int(
+                self.connection.execute(
+                    "SELECT COUNT(*) FROM inbound_events WHERE handset_e164 = ?", (handset,)
+                ).fetchone()[0]
+            )
+            delivery_count = int(
+                self.connection.execute(
+                    "SELECT COUNT(*) FROM deliveries WHERE handset_e164 = ?", (handset,)
+                ).fetchone()[0]
+            )
+            self.connection.execute("DELETE FROM inbound_events WHERE handset_e164 = ?", (handset,))
+            self.connection.execute("DELETE FROM deliveries WHERE handset_e164 = ?", (handset,))
+            cursor = self.connection.execute(
+                "DELETE FROM registrations WHERE provider_request_id = ?", (provider_request_id,)
+            )
+            if cursor.rowcount != 1:
+                raise BridgeError("bridge_cleanup_registration_conflict")
+            disposition = "provider_user_retained_unbound"
+            completed_at = _utc_now()
+            self.connection.execute(
+                """
+                INSERT INTO cleanup_receipts (
+                    provider_request_id, provider_disposition, registrations_removed,
+                    inbound_events_removed, deliveries_removed, completed_at
+                ) VALUES (?, ?, 1, ?, ?, ?)
+                """,
+                (provider_request_id, disposition, inbound_count, delivery_count, completed_at),
+            )
+            proof = self.connection.execute(
+                """
+                SELECT
+                  (SELECT COUNT(*) FROM registrations WHERE handset_e164 = ?) AS registrations,
+                  (SELECT COUNT(*) FROM inbound_events WHERE handset_e164 = ?) AS inbound_events,
+                  (SELECT COUNT(*) FROM deliveries WHERE handset_e164 = ?) AS deliveries
+                """,
+                (handset, handset, handset),
+            ).fetchone()
+            if tuple(proof) != (0, 0, 0):
+                raise BridgeError("bridge_cleanup_absence_unavailable")
+            receipt = self.connection.execute(
+                "SELECT * FROM cleanup_receipts WHERE provider_request_id = ?",
+                (provider_request_id,),
+            ).fetchone()
+            self.connection.execute("COMMIT")
+            return dict(receipt)
+        except BaseException:
+            if self.connection.in_transaction:
+                self.connection.execute("ROLLBACK")
+            raise
+
 
 class Registrar:
     def __init__(self, config: BridgeConfig, journal: BridgeJournal, provider: PhotonProvider) -> None:
@@ -603,8 +827,6 @@ class Registrar:
             row = self.journal.begin_registration(provider_request_id, self.config.project_id, handset_e164)
             if row["status"] == "ready":
                 return 200, _registration_response(row)
-            if not await self.provider.healthy():
-                raise BridgeError("bridge_provider_unhealthy")
             matches = _matching_provider_users(await self.provider.list_users(), handset_e164)
             if len(matches) > 1:
                 self.journal.mark_registration_uncertain(str(row["provider_request_id"]))
@@ -634,6 +856,7 @@ class ImessagePhotonBridge:
         provider: PhotonProvider,
         backend: EllaBackend,
         connection_id: Optional[str] = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.config = config
         self.journal = journal
@@ -644,19 +867,32 @@ class ImessagePhotonBridge:
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self.worker_task: Optional[asyncio.Task[None]] = None
         self.heartbeat_task: Optional[asyncio.Task[None]] = None
+        self.provider_connected = False
         self.provider_ready = False
+        self.fatal_event = asyncio.Event()
         self.stopping = False
+        self.monotonic = monotonic
+        self.activation_lock = asyncio.Lock()
+        self.lifecycle_lock = asyncio.Lock()
+        self.processing_lock = asyncio.Lock()
+        self.backend_heartbeat_success: dict[str, float] = {}
+        self.backend_heartbeat_failed: set[str] = set()
+        self.inbound_retry_delays = INBOUND_RETRY_DELAYS
+        self.inbound_retry_attempts: dict[str, int] = {}
+        self.queued_inbound: set[str] = set()
 
     async def start(self) -> None:
-        if not await self.provider.connect(self.accept_provider_event):
+        if not await self.provider.connect(self.accept_provider_event, self._provider_fatal):
             raise BridgeError("bridge_provider_connect_failed")
+        self.provider_connected = True
         self.provider_ready = await self.provider.healthy()
-        if not self.provider_ready:
-            await self.provider.disconnect()
-            raise BridgeError("bridge_provider_stream_not_healthy")
-        self.worker_task = asyncio.create_task(self._worker(), name="ella-imessage-worker")
         self.heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="ella-imessage-heartbeat")
-        await self.reconcile()
+        if self.provider_ready:
+            try:
+                await self._activate_provider_ready(ignore_heartbeat_errors=False)
+            except BridgeError:
+                await self.stop()
+                raise
 
     async def stop(self) -> None:
         self.stopping = True
@@ -667,18 +903,26 @@ class ImessagePhotonBridge:
             *(task for task in (self.heartbeat_task, self.worker_task) if task is not None),
             return_exceptions=True,
         )
+        self.heartbeat_task = None
+        self.worker_task = None
         await self.provider.disconnect()
+        self.provider_connected = False
         self.provider_ready = False
+        self.backend_heartbeat_success.clear()
+        self.backend_heartbeat_failed.clear()
 
     async def accept_provider_event(self, raw_event: dict[str, Any]) -> None:
         try:
             inbound = _normalize_provider_event(self.config.project_id, raw_event)
-            registration = self.journal.registration_for_handset(inbound.sender_e164)
-            if registration is None:
-                return
-            state = self.journal.record_inbound(inbound)
+            async with self.lifecycle_lock:
+                registration = self.journal.registration_for_handset(inbound.sender_e164)
+                if registration is None:
+                    return
+                state = self.journal.record_inbound(inbound)
+            if self.provider_connected:
+                await self._activate_provider_ready(ignore_heartbeat_errors=False)
             if state in {"new", "pending", "processing"}:
-                await self.queue.put(inbound.provider_message_id)
+                await self._enqueue_inbound(inbound.provider_message_id)
         except BridgeError:
             return
 
@@ -688,9 +932,11 @@ class ImessagePhotonBridge:
                 await self._ack_delivery(delivery)
             elif bool(delivery["provider_send_started"]):
                 await self._uncertain_delivery(delivery, "bridge_restart_after_send_start")
+            elif delivery["status"] == "prepared":
+                await self._resume_prepared_delivery(delivery)
         for event in self.journal.pending_inbound():
             if event.get("event_json"):
-                await self.queue.put(str(event["provider_message_id"]))
+                await self._enqueue_inbound(str(event["provider_message_id"]))
 
     async def deregister_all(self) -> None:
         for registration in self.journal.ready_registrations():
@@ -700,17 +946,58 @@ class ImessagePhotonBridge:
                 raise BridgeError("bridge_deregister_response_invalid")
             self.journal.disable_registration(str(registration["handset_e164"]))
 
+    async def cleanup_registration(self, provider_request_id: str) -> dict[str, Any]:
+        _uuid_text(provider_request_id, "bridge_registration_idempotency_key_invalid")
+        async with self.lifecycle_lock:
+            registration = self.journal.registration_for_request(provider_request_id)
+            if registration is None:
+                receipt = self.journal.connection.execute(
+                    "SELECT * FROM cleanup_receipts WHERE provider_request_id = ?", (provider_request_id,)
+                ).fetchone()
+                if receipt is None:
+                    raise BridgeError("bridge_cleanup_registration_not_found", status_code=404)
+                return dict(receipt)
+            if registration["status"] == "ready":
+                result = await self.backend.deregister(self._transport_identity(registration))
+                if result.get("status") not in {"not_connected", "quarantined"}:
+                    raise BridgeError("bridge_deregister_response_invalid")
+            async with self.processing_lock:
+                return self.journal.cleanup_registration(provider_request_id)
+
     async def _worker(self) -> None:
         while True:
             provider_message_id = await self.queue.get()
             try:
-                await self._process(provider_message_id)
-            except BridgeError:
-                pass
+                async with self.processing_lock:
+                    await self._process(provider_message_id)
+            except BridgeError as exc:
+                await self._handle_inbound_failure(provider_message_id, exc)
+            else:
+                self.inbound_retry_attempts.pop(provider_message_id, None)
+                self.queued_inbound.discard(provider_message_id)
             finally:
                 self.queue.task_done()
 
+    async def _handle_inbound_failure(self, provider_message_id: str, exc: BridgeError) -> None:
+        attempt = self.inbound_retry_attempts.get(provider_message_id, 0)
+        if exc.retryable and attempt < len(self.inbound_retry_delays):
+            self.inbound_retry_attempts[provider_message_id] = attempt + 1
+            await asyncio.sleep(self.inbound_retry_delays[attempt])
+            await self.queue.put(provider_message_id)
+            return
+        self.inbound_retry_attempts.pop(provider_message_id, None)
+        self.queued_inbound.discard(provider_message_id)
+        self.journal.mark_inbound_quarantined(provider_message_id)
+
+    async def _enqueue_inbound(self, provider_message_id: str) -> None:
+        if provider_message_id in self.queued_inbound:
+            return
+        self.queued_inbound.add(provider_message_id)
+        await self.queue.put(provider_message_id)
+
     async def _process(self, provider_message_id: str) -> None:
+        if self.provider_connected:
+            self._require_routing_ready()
         row = next(
             (item for item in self.journal.pending_inbound() if item["provider_message_id"] == provider_message_id),
             None,
@@ -740,6 +1027,14 @@ class ImessagePhotonBridge:
                 raise BridgeError("bridge_proof_response_invalid")
             self.journal.mark_proof_accepted(inbound.sender_e164)
             self.journal.mark_inbound_terminal(provider_message_id)
+            if self.provider_connected:
+                try:
+                    await self._heartbeat_registration(registration)
+                except BridgeError:
+                    # Proof acceptance is terminal and idempotent. The periodic
+                    # heartbeat owns readiness recovery; never reinterpret the
+                    # six-digit proof as a model message on retry.
+                    return
             return
         result = await self.backend.inbound(
             {
@@ -756,7 +1051,10 @@ class ImessagePhotonBridge:
             await self._start_and_send(registration, identity, result)
             self.journal.mark_inbound_terminal(provider_message_id)
         elif status_value == "sending":
-            delivery = _delivery_from_inbound_result(registration, identity, result)
+            receipt_id = _uuid_text(result.get("receipt_id"), "bridge_delivery_receipt_invalid")
+            delivery = self.journal.delivery_by_receipt(receipt_id)
+            if delivery is None:
+                raise BridgeError("bridge_delivery_start_identity_missing", status_code=409)
             await self._uncertain_delivery(delivery, "bridge_backend_send_state_unowned")
             self.journal.mark_inbound_terminal(provider_message_id)
         elif status_value in TERMINAL_RECEIPT_STATES or status_value == "unknown_sender":
@@ -774,14 +1072,25 @@ class ImessagePhotonBridge:
         inbound_result: dict[str, Any],
     ) -> None:
         delivery_identity = _delivery_from_inbound_result(registration, identity, inbound_result)
-        start = await self.backend.delivery_start(_delivery_request(delivery_identity))
-        delivery = self.journal.prepare_delivery(
-            response=start,
+        delivery = self.journal.prepare_delivery_intent(
+            response=inbound_result,
             line_identity=identity["line_identity"],
             contact_identity=identity["contact_identity"],
             connection_id=identity["connection_id"],
             handset_e164=str(registration["handset_e164"]),
         )
+        try:
+            start = await self.backend.delivery_start(_delivery_request(delivery))
+        except BridgeError as exc:
+            if exc.code == "imessage_delivery_outcome_uncertain":
+                await self._uncertain_delivery(delivery, "bridge_delivery_start_response_uncertain")
+            raise
+        delivery = self.journal.complete_delivery_start(str(delivery["receipt_id"]), start)
+        await self._send_prepared_delivery(delivery)
+
+    async def _send_prepared_delivery(self, delivery: dict[str, Any]) -> None:
+        if not delivery.get("reply_text"):
+            raise BridgeError("bridge_delivery_response_invalid")
         delivery = self.journal.mark_provider_send_started(str(delivery["receipt_id"]))
         try:
             provider_message_id = await self.provider.send_text(
@@ -796,6 +1105,20 @@ class ImessagePhotonBridge:
         self.journal.record_provider_message(str(delivery["receipt_id"]), provider_message_id)
         pending = next(item for item in self.journal.open_deliveries() if item["receipt_id"] == delivery["receipt_id"])
         await self._ack_delivery(pending)
+
+    async def _resume_prepared_delivery(self, delivery: dict[str, Any]) -> None:
+        if delivery.get("reply_text"):
+            await self._send_prepared_delivery(delivery)
+            return
+        try:
+            start = await self.backend.delivery_start(_delivery_request(delivery))
+        except BridgeError as exc:
+            if exc.code == "imessage_delivery_outcome_uncertain":
+                await self._uncertain_delivery(delivery, "bridge_delivery_start_response_uncertain")
+                return
+            raise
+        prepared = self.journal.complete_delivery_start(str(delivery["receipt_id"]), start)
+        await self._send_prepared_delivery(prepared)
 
     async def _ack_delivery(self, delivery: dict[str, Any]) -> None:
         await self.backend.delivery_ack(
@@ -812,18 +1135,106 @@ class ImessagePhotonBridge:
 
     async def _heartbeat_loop(self) -> None:
         while True:
-            await asyncio.sleep(self.config.heartbeat_seconds)
             healthy = await self.provider.healthy()
             self.provider_ready = healthy
-            if not healthy:
-                continue
-            for registration in self.journal.ready_registrations():
+            if healthy:
                 try:
-                    result = await self.backend.heartbeat(self._transport_identity(registration))
+                    await self._activate_provider_ready(ignore_heartbeat_errors=True)
+                    if self.worker_task is not None:
+                        await self._heartbeat_ready_registrations(ignore_errors=True)
                 except BridgeError:
+                    pass
+            else:
+                self.backend_heartbeat_success.clear()
+            await asyncio.sleep(self.config.heartbeat_seconds)
+
+    async def _activate_provider_ready(self, *, ignore_heartbeat_errors: bool) -> None:
+        async with self.activation_lock:
+            if not self.provider_connected or self.fatal_event.is_set():
+                raise BridgeError("bridge_provider_not_connected", retryable=True)
+            self.provider_ready = await self.provider.healthy()
+            if not self.provider_ready:
+                raise BridgeError("bridge_provider_stream_not_healthy", retryable=True)
+            if self.worker_task is not None:
+                if not self.worker_task.done():
+                    return
+                if not self.worker_task.cancelled():
+                    self.worker_task.exception()
+                self.worker_task = None
+            await self._heartbeat_ready_registrations(ignore_errors=ignore_heartbeat_errors)
+            if not self.backend_ready:
+                raise BridgeError("bridge_backend_heartbeat_unavailable", retryable=True)
+            await self.reconcile()
+            self.worker_task = asyncio.create_task(self._worker(), name="ella-imessage-worker")
+
+    async def _heartbeat_ready_registrations(self, *, ignore_errors: bool) -> None:
+        for registration in self.journal.ready_registrations():
+            if not bool(registration["proof_accepted"]):
+                continue
+            try:
+                result = await self._heartbeat_registration(registration)
+            except BridgeError:
+                handset = str(registration["handset_e164"])
+                self.backend_heartbeat_failed.add(handset)
+                if ignore_errors:
                     continue
-                if result.get("status") == "unknown_sender" and bool(registration["proof_accepted"]):
-                    self.journal.disable_registration(str(registration["handset_e164"]))
+                raise
+            if result.get("status") == "unknown_sender" and bool(registration["proof_accepted"]):
+                handset = str(registration["handset_e164"])
+                self.journal.disable_registration(handset)
+                self.backend_heartbeat_success.pop(handset, None)
+                self.backend_heartbeat_failed.discard(handset)
+
+    async def _heartbeat_registration(self, registration: dict[str, Any]) -> dict[str, Any]:
+        handset = str(registration["handset_e164"])
+        try:
+            result = await self.backend.heartbeat(self._transport_identity(registration))
+        except BridgeError:
+            self.backend_heartbeat_failed.add(handset)
+            raise
+        if result.get("status") == "ready":
+            self.backend_heartbeat_success[handset] = self.monotonic()
+            self.backend_heartbeat_failed.discard(handset)
+        elif bool(registration["proof_accepted"]):
+            self.backend_heartbeat_failed.add(handset)
+        return result
+
+    @property
+    def backend_ready(self) -> bool:
+        now = self.monotonic()
+        for registration in self.journal.ready_registrations():
+            if not bool(registration["proof_accepted"]):
+                continue
+            handset = str(registration["handset_e164"])
+            last_success = self.backend_heartbeat_success.get(handset)
+            if (
+                handset in self.backend_heartbeat_failed
+                or last_success is None
+                or now - last_success > self.config.heartbeat_freshness_seconds
+            ):
+                return False
+        return True
+
+    @property
+    def health_status(self) -> str:
+        if self.fatal_event.is_set() or not self.provider_connected:
+            return "degraded"
+        if not self.provider_ready:
+            return "starting"
+        if not self.backend_ready:
+            return "degraded"
+        if self.worker_task is None or self.worker_task.done():
+            return "degraded"
+        return "ready"
+
+    def _require_routing_ready(self) -> None:
+        if self.health_status != "ready":
+            raise BridgeError("bridge_transport_not_ready", retryable=True)
+
+    async def _provider_fatal(self) -> None:
+        self.provider_ready = False
+        self.backend_heartbeat_success.clear()
+        self.fatal_event.set()
 
     def _transport_identity(self, registration: dict[str, Any]) -> dict[str, str]:
         provider_user_id = str(registration.get("provider_user_id") or "")
@@ -851,6 +1262,7 @@ class BridgeHttpServer:
     def application(self) -> web.Application:
         app = web.Application(client_max_size=64 * 1024)
         app.router.add_post("/v1/registrations", self._register)
+        app.router.add_delete("/v1/registrations/{provider_request_id}", self._cleanup_registration)
         app.router.add_get("/healthz", self._health)
         return app
 
@@ -879,10 +1291,35 @@ class BridgeHttpServer:
             error = exc
         return web.json_response({"detail": {"code": error.code}}, status=error.status_code, headers=NO_STORE_HEADERS)
 
+    async def _cleanup_registration(self, request: web.Request) -> web.Response:
+        if not _bearer_ok(request.headers.get("Authorization"), self.bridge.config.registrar_token):
+            return web.json_response(
+                {"detail": {"code": "invalid_registrar_token"}}, status=401, headers=NO_STORE_HEADERS
+            )
+        try:
+            receipt = await self.bridge.cleanup_registration(request.match_info["provider_request_id"])
+            return web.json_response(
+                {
+                    "status": "local_cleanup_complete_provider_retained",
+                    "provider_disposition": receipt["provider_disposition"],
+                    "operator_action_required": True,
+                    "absence_proof": {
+                        "registrations": 0,
+                        "inbound_events": 0,
+                        "deliveries": 0,
+                    },
+                },
+                status=202,
+                headers=NO_STORE_HEADERS,
+            )
+        except BridgeError as exc:
+            return web.json_response({"detail": {"code": exc.code}}, status=exc.status_code, headers=NO_STORE_HEADERS)
+
     async def _health(self, _request: web.Request) -> web.Response:
+        status_value = self.bridge.health_status
         return web.json_response(
-            {"status": "ready" if self.bridge.provider_ready else "degraded"},
-            status=200 if self.bridge.provider_ready else 503,
+            {"status": status_value},
+            status=200 if status_value == "ready" else 503,
             headers=NO_STORE_HEADERS,
         )
 
@@ -963,6 +1400,27 @@ def _is_provider_stream_healthy(body: Any) -> bool:
         and stream.get("state") == "healthy"
         and not (isinstance(staleness, dict) and staleness.get("zombieSuspected") is True)
     )
+
+
+async def send_provider_text_once(adapter: Any, handset_e164: str, text: str) -> Optional[str]:
+    """Issue exactly one plain-text provider operation; ambiguity is terminal."""
+    if not E164_RE.fullmatch(handset_e164) or not text or len(text) > PROVIDER_OUTBOUND_MAX_CHARS:
+        raise BridgeError("bridge_provider_send_invalid")
+    try:
+        result = await adapter._sidecar_call(
+            "/send",
+            {"spaceId": handset_e164, "text": text, "format": "text"},
+        )
+    except Exception as exc:
+        raise BridgeError("bridge_provider_send_uncertain") from exc
+    if not isinstance(result, dict):
+        raise BridgeError("bridge_provider_send_response_invalid")
+    message_id = result.get("messageId")
+    if message_id is None:
+        return None
+    if not isinstance(message_id, str) or not message_id or len(message_id) > 512:
+        raise BridgeError("bridge_provider_message_id_invalid")
+    return message_id
 
 
 def _matching_provider_users(users: list[dict[str, Any]], handset_e164: str) -> list[dict[str, Any]]:

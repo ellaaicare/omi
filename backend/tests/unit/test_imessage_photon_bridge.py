@@ -26,6 +26,7 @@ from bridge import (  # noqa: E402
     SingletonLease,
     _is_provider_stream_healthy,
     _normalize_provider_event,
+    send_provider_text_once,
 )
 
 PROJECT_ID = "ed929a1e-9d91-4be2-a4a8-7d9571dab702"
@@ -102,14 +103,21 @@ class FakeProvider:
         self.send_result: Optional[str] = "provider-outbound-1"
         self.is_healthy = True
         self.handler: Optional[Callable[[dict[str, Any]], Awaitable[None]]] = None
+        self.fatal_handler: Optional[Callable[[], Awaitable[None]]] = None
         self.order: list[str] = []
 
-    async def connect(self, handler: Callable[[dict[str, Any]], Awaitable[None]]) -> bool:
+    async def connect(
+        self,
+        handler: Callable[[dict[str, Any]], Awaitable[None]],
+        fatal_handler: Callable[[], Awaitable[None]],
+    ) -> bool:
         self.handler = handler
+        self.fatal_handler = fatal_handler
         return True
 
     async def disconnect(self) -> None:
         self.handler = None
+        self.fatal_handler = None
 
     async def healthy(self) -> bool:
         return self.is_healthy
@@ -146,6 +154,8 @@ class FakeBackend:
         self.release_inbound: Optional[asyncio.Event] = None
         self.delivery_start_error: Optional[BridgeError] = None
         self.delivery_ack_error: Optional[BridgeError] = None
+        self.heartbeat_error: Optional[BridgeError] = None
+        self.inbound_errors: list[BridgeError] = []
 
     async def proof(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(("proof", payload))
@@ -153,12 +163,16 @@ class FakeBackend:
 
     async def heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(("heartbeat", payload))
+        if self.heartbeat_error is not None:
+            raise self.heartbeat_error
         return {"status": "ready", "binding_generation": 1, "text_dm_only": True}
 
     async def inbound(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.order.append("inbound")
         self.calls.append(("inbound", payload))
         self.inbound_entered.set()
+        if self.inbound_errors:
+            raise self.inbound_errors.pop(0)
         if self.release_inbound is not None:
             await self.release_inbound.wait()
         return dict(self.inbound_result)
@@ -242,6 +256,10 @@ def test_entrypoint_rejects_missing_transport_home_before_hermes_import(tmp_path
     assert "fallback" not in result.stderr.lower()
 
 
+def test_bridge_runtime_dependency_manifest_is_pinned() -> None:
+    assert (BRIDGE_ROOT / "requirements.txt").read_text(encoding="ascii") == "aiohttp==3.14.3\n"
+
+
 def test_journal_and_singleton_are_owner_only_and_exclusive(tmp_path: Path) -> None:
     state = tmp_path / "state"
     state.mkdir(mode=0o700)
@@ -311,6 +329,34 @@ async def test_registrar_waits_for_assigned_destination_without_duplicate_provid
     assert status_code == 201
     assert response["assigned_destination"] == LINE_A
     assert provider.register_calls == 0
+    journal.close()
+
+
+@async_test
+async def test_deregistered_handset_can_reenroll_with_new_idempotency_key(tmp_path: Path) -> None:
+    bridge, journal, provider, _backend = _bridge(tmp_path)
+    first = _ready_registration(journal)
+    journal.mark_proof_accepted(PHONE_A)
+    provider.users.append(
+        {
+            "id": first["provider_user_id"],
+            "phoneNumber": PHONE_A,
+            "assignedPhoneNumber": LINE_A,
+        }
+    )
+    await bridge.deregister_all()
+
+    replacement_request_id = str(uuid.uuid4())
+    status_code, response = await bridge.registrar.register(replacement_request_id, PHONE_A)
+
+    assert status_code == 201
+    assert response["assigned_destination"] == LINE_A
+    assert provider.register_calls == 0
+    rows = journal.connection.execute(
+        "SELECT provider_request_id, status, proof_accepted FROM registrations WHERE handset_e164 = ?",
+        (PHONE_A,),
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [(replacement_request_id, "ready", 0)]
     journal.close()
 
 
@@ -438,6 +484,7 @@ async def test_six_digit_text_after_proof_uses_normal_inbound_route(tmp_path: Pa
 async def test_heartbeat_continues_while_backend_model_call_is_slow(tmp_path: Path) -> None:
     bridge, journal, provider, backend = _bridge(tmp_path)
     _ready_registration(journal)
+    journal.mark_proof_accepted(PHONE_A)
     backend.release_inbound = asyncio.Event()
     await bridge.start()
     try:
@@ -454,15 +501,128 @@ async def test_heartbeat_continues_while_backend_model_call_is_slow(tmp_path: Pa
 
 
 @async_test
-async def test_bridge_start_refuses_nonhealthy_provider_before_workers(tmp_path: Path) -> None:
-    bridge, journal, provider, _backend = _bridge(tmp_path)
-    provider.is_healthy = False
-    with pytest.raises(BridgeError, match="bridge_provider_stream_not_healthy"):
+async def test_start_heartbeats_before_replaying_pending_inbound(tmp_path: Path) -> None:
+    bridge, journal, _provider, backend = _bridge(tmp_path)
+    _ready_registration(journal)
+    journal.mark_proof_accepted(PHONE_A)
+    journal.record_inbound(_normalize_provider_event(PROJECT_ID, _event("startup-replay", PHONE_A)))
+
+    await bridge.start()
+    try:
+        await asyncio.wait_for(bridge.queue.join(), timeout=1)
+    finally:
+        await bridge.stop()
+        journal.close()
+
+    call_names = [name for name, _payload in backend.calls]
+    assert call_names[0] == "heartbeat"
+    assert call_names.count("inbound") == 1
+    assert call_names.index("heartbeat") < call_names.index("inbound")
+
+
+@async_test
+async def test_start_refuses_failed_initial_heartbeat_before_workers_and_replay(tmp_path: Path) -> None:
+    bridge, journal, provider, backend = _bridge(tmp_path)
+    _ready_registration(journal)
+    journal.mark_proof_accepted(PHONE_A)
+    journal.record_inbound(_normalize_provider_event(PROJECT_ID, _event("blocked-replay", PHONE_A)))
+    backend.heartbeat_error = BridgeError("bridge_backend_transport_failed", retryable=True)
+
+    with pytest.raises(BridgeError, match="bridge_backend_transport_failed"):
         await bridge.start()
+
     assert bridge.provider_ready is False
     assert bridge.worker_task is None
     assert bridge.heartbeat_task is None
     assert provider.handler is None
+    assert [name for name, _payload in backend.calls] == ["heartbeat"]
+    assert journal.pending_inbound()[0]["status"] == "pending"
+    journal.close()
+
+
+@async_test
+async def test_worker_retries_retryable_inbound_failure_without_restart(tmp_path: Path) -> None:
+    bridge, journal, _provider, backend = _bridge(tmp_path)
+    _ready_registration(journal)
+    bridge.inbound_retry_delays = (0.0,)
+    backend.inbound_errors = [BridgeError("bridge_backend_transport_failed", retryable=True)]
+
+    await bridge.start()
+    try:
+        await bridge.accept_provider_event(_event("retry-in-process", PHONE_A))
+        await asyncio.wait_for(bridge.queue.join(), timeout=1)
+    finally:
+        await bridge.stop()
+
+    assert [name for name, _payload in backend.calls].count("inbound") == 2
+    row = journal.connection.execute(
+        "SELECT status, event_json FROM inbound_events WHERE provider_message_id = 'retry-in-process'"
+    ).fetchone()
+    assert tuple(row) == ("terminal", None)
+    journal.close()
+
+
+@async_test
+async def test_worker_bounds_retryable_inbound_failures_then_quarantines(tmp_path: Path) -> None:
+    bridge, journal, _provider, backend = _bridge(tmp_path)
+    _ready_registration(journal)
+    bridge.inbound_retry_delays = (0.0, 0.0)
+    backend.inbound_errors = [
+        BridgeError("bridge_backend_transport_failed", retryable=True),
+        BridgeError("bridge_backend_transport_failed", retryable=True),
+        BridgeError("bridge_backend_transport_failed", retryable=True),
+    ]
+
+    await bridge.start()
+    try:
+        await bridge.accept_provider_event(_event("retry-exhausted", PHONE_A))
+        await asyncio.wait_for(bridge.queue.join(), timeout=1)
+    finally:
+        await bridge.stop()
+
+    assert [name for name, _payload in backend.calls].count("inbound") == 3
+    row = journal.connection.execute(
+        "SELECT status, event_json FROM inbound_events WHERE provider_message_id = 'retry-exhausted'"
+    ).fetchone()
+    assert tuple(row) == ("quarantined", None)
+    journal.close()
+
+
+@async_test
+async def test_worker_quarantines_nonretryable_inbound_failure_without_loop(tmp_path: Path) -> None:
+    bridge, journal, _provider, backend = _bridge(tmp_path)
+    _ready_registration(journal)
+    backend.inbound_errors = [BridgeError("bridge_inbound_response_invalid")]
+
+    await bridge.start()
+    try:
+        await bridge.accept_provider_event(_event("terminal-in-process", PHONE_A))
+        await asyncio.wait_for(bridge.queue.join(), timeout=1)
+    finally:
+        await bridge.stop()
+
+    assert [name for name, _payload in backend.calls].count("inbound") == 1
+    row = journal.connection.execute(
+        "SELECT status, event_json FROM inbound_events WHERE provider_message_id = 'terminal-in-process'"
+    ).fetchone()
+    assert tuple(row) == ("quarantined", None)
+    journal.close()
+
+
+@async_test
+async def test_bridge_start_keeps_registrar_up_while_provider_stream_is_starting(tmp_path: Path) -> None:
+    bridge, journal, provider, _backend = _bridge(tmp_path)
+    provider.is_healthy = False
+    await bridge.start()
+    assert bridge.provider_ready is False
+    assert bridge.worker_task is None
+    assert bridge.heartbeat_task is not None
+    assert provider.handler is not None
+    assert bridge.health_status == "starting"
+    status_code, response = await bridge.registrar.register(str(uuid.uuid4()), PHONE_A)
+    assert status_code == 201
+    assert response["assigned_destination"] == LINE_A
+    await bridge.stop()
     journal.close()
 
 
@@ -648,3 +808,331 @@ async def test_deregister_quarantines_backend_then_disables_local_mapping(tmp_pa
     assert [name for name, _payload in backend.calls] == ["deregister"]
     assert journal.registration_for_handset(PHONE_A) is None
     journal.close()
+
+
+@async_test
+async def test_cold_stream_persists_first_event_then_promotes_before_model_work(tmp_path: Path) -> None:
+    bridge, journal, provider, backend = _bridge(tmp_path)
+    _ready_registration(journal)
+    journal.mark_proof_accepted(PHONE_A)
+    provider.is_healthy = False
+    await bridge.start()
+    client = TestClient(TestServer(BridgeHttpServer(bridge).application()))
+    await client.start_server()
+    try:
+        assert bridge.health_status == "starting"
+        starting = await client.get("/healthz")
+        assert starting.status == 503
+        assert await starting.json() == {"status": "starting"}
+        provider.is_healthy = True
+        assert provider.handler is not None
+        await provider.handler(_event("cold-first-event", PHONE_A))
+        await asyncio.wait_for(bridge.queue.join(), timeout=1)
+        call_names = [name for name, _payload in backend.calls]
+        assert call_names.count("inbound") == 1
+        assert call_names.index("heartbeat") < call_names.index("inbound")
+        assert bridge.health_status == "ready"
+        ready = await client.get("/healthz")
+        assert ready.status == 200
+        assert await ready.json() == {"status": "ready"}
+    finally:
+        await client.close()
+        await bridge.stop()
+        journal.close()
+
+
+@async_test
+async def test_cold_stream_backend_failure_retains_event_for_later_reconcile(tmp_path: Path) -> None:
+    bridge, journal, provider, backend = _bridge(tmp_path)
+    _ready_registration(journal)
+    journal.mark_proof_accepted(PHONE_A)
+    provider.is_healthy = False
+    await bridge.start()
+    try:
+        provider.is_healthy = True
+        backend.heartbeat_error = BridgeError("bridge_backend_transport_failed", retryable=True)
+        assert provider.handler is not None
+        await provider.handler(_event("cold-backend-down", PHONE_A))
+        assert bridge.worker_task is None
+        assert journal.pending_inbound()[0]["provider_message_id"] == "cold-backend-down"
+        backend.heartbeat_error = None
+        for _ in range(50):
+            if bridge.worker_task is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert bridge.worker_task is not None
+        await asyncio.wait_for(bridge.queue.join(), timeout=1)
+        assert [name for name, _payload in backend.calls].count("inbound") == 1
+    finally:
+        await bridge.stop()
+        journal.close()
+
+
+@async_test
+async def test_health_degrades_on_backend_failure_and_heartbeat_expiry(tmp_path: Path) -> None:
+    now = [100.0]
+    config = _config(tmp_path, heartbeat_freshness_seconds=0.02)
+    journal = BridgeJournal(config.state_directory, config.project_id)
+    provider = FakeProvider()
+    backend = FakeBackend()
+    bridge = ImessagePhotonBridge(
+        config=config,
+        journal=journal,
+        provider=provider,
+        backend=backend,
+        connection_id="connection-health",
+        monotonic=lambda: now[0],
+    )
+    _ready_registration(journal)
+    journal.mark_proof_accepted(PHONE_A)
+    await bridge.start()
+    client = TestClient(TestServer(BridgeHttpServer(bridge).application()))
+    await client.start_server()
+    try:
+        assert (await client.get("/healthz")).status == 200
+        backend.heartbeat_error = BridgeError("bridge_backend_transport_failed", retryable=True)
+        await bridge._heartbeat_ready_registrations(ignore_errors=True)
+        assert (await client.get("/healthz")).status == 503
+        backend.heartbeat_error = None
+        await bridge._heartbeat_ready_registrations(ignore_errors=False)
+        assert (await client.get("/healthz")).status == 200
+        now[0] += 0.03
+        expired = await client.get("/healthz")
+        assert expired.status == 503
+        assert await expired.json() == {"status": "degraded"}
+    finally:
+        await client.close()
+        await bridge.stop()
+        journal.close()
+
+
+@async_test
+async def test_provider_fatal_marks_health_degraded_and_requests_process_restart(tmp_path: Path) -> None:
+    bridge, journal, provider, _backend = _bridge(tmp_path)
+    await bridge.start()
+    try:
+        assert bridge.health_status == "ready"
+        assert provider.fatal_handler is not None
+        await provider.fatal_handler()
+        assert bridge.fatal_event.is_set()
+        assert bridge.health_status == "degraded"
+    finally:
+        await bridge.stop()
+        journal.close()
+
+
+@async_test
+async def test_provider_send_uses_one_plain_text_operation_for_url_only_reply() -> None:
+    class Adapter:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        async def _sidecar_call(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append((path, body))
+            return {"ok": True, "messageId": "provider-message-one"}
+
+    adapter = Adapter()
+    result = await send_provider_text_once(adapter, PHONE_A, "https://example.com")
+    assert result == "provider-message-one"
+    assert adapter.calls == [("/send", {"spaceId": PHONE_A, "text": "https://example.com", "format": "text"})]
+
+
+@async_test
+async def test_provider_send_lost_response_never_issues_fallback_operation() -> None:
+    class Adapter:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        async def _sidecar_call(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append((path, body))
+            raise TimeoutError("synthetic lost response")
+
+    adapter = Adapter()
+    with pytest.raises(BridgeError, match="bridge_provider_send_uncertain"):
+        await send_provider_text_once(adapter, PHONE_A, "https://example.com")
+    assert len(adapter.calls) == 1
+    assert adapter.calls[0][0] == "/send"
+
+
+@async_test
+async def test_prepared_restart_reuses_original_connection_fence_without_provider_resend(tmp_path: Path) -> None:
+    bridge, journal, provider, backend = _bridge(tmp_path)
+    registration = _ready_registration(journal)
+    receipt_id, delivery_key = _delivery_ids()
+    identity = bridge._transport_identity(registration)
+    intent = journal.prepare_delivery_intent(
+        response={
+            "receipt_id": receipt_id,
+            "delivery_idempotency_key": delivery_key,
+            "binding_generation": 9,
+        },
+        handset_e164=PHONE_A,
+        **identity,
+    )
+    restarted = ImessagePhotonBridge(
+        config=bridge.config,
+        journal=journal,
+        provider=provider,
+        backend=backend,
+        connection_id="connection-after-restart",
+    )
+    backend.delivery_start_error = BridgeError("imessage_delivery_outcome_uncertain", status_code=409)
+
+    await restarted.reconcile()
+
+    uncertain = next(payload for name, payload in backend.calls if name == "delivery_uncertain")
+    assert uncertain["connection_id"] == intent["connection_id"] == "connection-1"
+    assert provider.send_calls == []
+    assert journal.delivery_by_receipt(receipt_id)["status"] == "uncertain"
+    journal.close()
+
+
+@async_test
+async def test_scoped_cleanup_purges_only_selected_registration_and_is_retry_safe(tmp_path: Path) -> None:
+    bridge, journal, _provider, backend = _bridge(tmp_path)
+    first = _ready_registration(journal, phone=PHONE_A, line=LINE_A, provider_user_id="cleanup-a")
+    second = _ready_registration(journal, phone=PHONE_B, line=LINE_B, provider_user_id="cleanup-b")
+    journal.record_inbound(_normalize_provider_event(PROJECT_ID, _event("cleanup-in-a", PHONE_A)))
+    journal.record_inbound(_normalize_provider_event(PROJECT_ID, _event("cleanup-in-b", PHONE_B)))
+    receipt_a, key_a = _delivery_ids()
+    receipt_b, key_b = _delivery_ids()
+    journal.prepare_delivery(
+        response={
+            "receipt_id": receipt_a,
+            "delivery_idempotency_key": key_a,
+            "binding_generation": 1,
+            "text": "cleanup a",
+        },
+        handset_e164=PHONE_A,
+        **bridge._transport_identity(first),
+    )
+    journal.prepare_delivery(
+        response={
+            "receipt_id": receipt_b,
+            "delivery_idempotency_key": key_b,
+            "binding_generation": 1,
+            "text": "cleanup b",
+        },
+        handset_e164=PHONE_B,
+        **bridge._transport_identity(second),
+    )
+
+    receipt = await bridge.cleanup_registration(str(first["provider_request_id"]))
+    duplicate = await bridge.cleanup_registration(str(first["provider_request_id"]))
+
+    assert receipt["provider_disposition"] == "provider_user_retained_unbound"
+    assert duplicate == receipt
+    assert [name for name, _payload in backend.calls].count("deregister") == 1
+    assert journal.registration_for_handset(PHONE_A) is None
+    assert journal.registration_for_handset(PHONE_B) is not None
+    assert (
+        journal.connection.execute("SELECT COUNT(*) FROM inbound_events WHERE handset_e164 = ?", (PHONE_A,)).fetchone()[
+            0
+        ]
+        == 0
+    )
+    assert (
+        journal.connection.execute("SELECT COUNT(*) FROM inbound_events WHERE handset_e164 = ?", (PHONE_B,)).fetchone()[
+            0
+        ]
+        == 1
+    )
+    assert journal.delivery_by_receipt(receipt_a) is None
+    assert journal.delivery_by_receipt(receipt_b) is not None
+    journal.close()
+
+
+@async_test
+async def test_cleanup_drains_inflight_work_and_blocks_late_provider_journal(tmp_path: Path) -> None:
+    bridge, journal, provider, backend = _bridge(tmp_path)
+    registration = _ready_registration(journal)
+    journal.mark_proof_accepted(PHONE_A)
+    backend.release_inbound = asyncio.Event()
+    await bridge.start()
+    try:
+        await bridge.accept_provider_event(_event("cleanup-inflight", PHONE_A))
+        await asyncio.wait_for(backend.inbound_entered.wait(), timeout=1)
+
+        cleanup = asyncio.create_task(bridge.cleanup_registration(str(registration["provider_request_id"])))
+        for _ in range(50):
+            if any(name == "deregister" for name, _payload in backend.calls):
+                break
+            await asyncio.sleep(0.01)
+        assert any(name == "deregister" for name, _payload in backend.calls)
+        assert not cleanup.done()
+
+        assert provider.handler is not None
+        late_event = asyncio.create_task(provider.handler(_event("cleanup-late", PHONE_A)))
+        await asyncio.sleep(0)
+        assert not late_event.done()
+
+        backend.release_inbound.set()
+        receipt = await asyncio.wait_for(cleanup, timeout=1)
+        await asyncio.wait_for(late_event, timeout=1)
+        await asyncio.wait_for(bridge.queue.join(), timeout=1)
+
+        assert receipt["provider_disposition"] == "provider_user_retained_unbound"
+        assert journal.registration_for_handset(PHONE_A) is None
+        assert (
+            journal.connection.execute(
+                "SELECT COUNT(*) FROM inbound_events WHERE handset_e164 = ?", (PHONE_A,)
+            ).fetchone()[0]
+            == 0
+        )
+        assert journal.open_deliveries() == []
+        assert [name for name, _payload in backend.calls].count("inbound") == 1
+    finally:
+        await bridge.stop()
+        journal.close()
+
+
+@async_test
+async def test_reconcile_failure_never_publishes_ready_or_strands_a_live_worker(tmp_path: Path) -> None:
+    bridge, journal, _provider, backend = _bridge(tmp_path)
+    registration = _ready_registration(journal)
+    journal.mark_proof_accepted(PHONE_A)
+    receipt_id, delivery_key = _delivery_ids()
+    journal.prepare_delivery_intent(
+        response={
+            "receipt_id": receipt_id,
+            "delivery_idempotency_key": delivery_key,
+            "binding_generation": 1,
+        },
+        handset_e164=PHONE_A,
+        **bridge._transport_identity(registration),
+    )
+    backend.delivery_start_error = BridgeError("bridge_backend_transport_failed", retryable=True)
+
+    with pytest.raises(BridgeError, match="bridge_backend_transport_failed"):
+        await bridge.start()
+
+    assert bridge.worker_task is None
+    assert bridge.health_status == "degraded"
+    assert journal.delivery_by_receipt(receipt_id)["status"] == "prepared"
+    journal.close()
+
+
+@async_test
+async def test_cleanup_http_is_authenticated_content_free_and_reports_provider_retained(tmp_path: Path) -> None:
+    bridge, journal, _provider, _backend = _bridge(tmp_path)
+    registration = _ready_registration(journal)
+    client = TestClient(TestServer(BridgeHttpServer(bridge).application()))
+    await client.start_server()
+    path = f"/v1/registrations/{registration['provider_request_id']}"
+    try:
+        denied = await client.delete(path)
+        assert denied.status == 401
+        accepted = await client.delete(path, headers={"Authorization": f"Bearer {TOKEN_B}"})
+        assert accepted.status == 202
+        assert accepted.headers["Cache-Control"] == "no-store"
+        body = await accepted.json()
+        assert body == {
+            "status": "local_cleanup_complete_provider_retained",
+            "provider_disposition": "provider_user_retained_unbound",
+            "operator_action_required": True,
+            "absence_proof": {"registrations": 0, "inbound_events": 0, "deliveries": 0},
+        }
+        assert PHONE_A not in str(body)
+    finally:
+        await client.close()
+        journal.close()

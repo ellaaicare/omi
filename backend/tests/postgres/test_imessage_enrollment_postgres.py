@@ -933,6 +933,16 @@ def test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners():
             connection_ref_hmac=connection_key,
             authority=runtime_authority_a,
         )
+        with pytest.raises(ImessageRuntimeRepositoryError, match="imessage_delivery_uncertain_conflict"):
+            await runtime_repository.mark_delivery_uncertain(
+                receipt_id=str(uncertain_delivery["id"]),
+                delivery_idempotency_key=str(uncertain_delivery["delivery_idempotency_key"]),
+                binding_generation=int(binding_a["generation"]),
+                line_identity_hmac=line_a,
+                contact_identity_hmac=contact_a,
+                connection_ref_hmac=hashlib.sha256(b"runtime-connection-after-restart").hexdigest(),
+                error_code="provider_outcome_unconfirmed",
+            )
         async with pool.acquire() as connection:
             await connection.execute(
                 "UPDATE ella_imessage_consent_authority SET decision = 'revoked' WHERE user_id = $1",
@@ -1097,6 +1107,41 @@ def test_expired_pending_binding_is_atomically_retired_and_replacement_can_start
         assert int(state["revision"]) == int(binding["revision"]) + 1
         assert state["attempt_state"] == "quarantined"
         assert state["error_code"] == "imessage_proof_expired"
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_revoke_returns_exact_provider_request_for_idempotent_local_cleanup():
+    async def scenario(pool):
+        repository = ImessageEnrollmentRepository(pool)
+        uid = "imessage-cleanup-owner"
+        _, runtime = await _seed_owner(pool, uid=uid, ordinal=8)
+        receipt = await _grant(repository, uid=uid, ordinal=8)
+        binding, _, _ = await _pending_binding(
+            repository,
+            uid=uid,
+            ordinal=8,
+            runtime=runtime,
+            receipt=receipt,
+        )
+        revoke_key = uuid.uuid5(uuid.NAMESPACE_URL, "imessage-cleanup-revoke")
+        revoked = await repository.revoke_binding(
+            uid=uid,
+            expected_generation=int(binding["generation"]),
+            idempotency_key=revoke_key,
+        )
+        duplicate = await repository.revoke_binding(
+            uid=uid,
+            expected_generation=int(binding["generation"]),
+            idempotency_key=revoke_key,
+        )
+        async with pool.acquire() as connection:
+            expected_request_id = await connection.fetchval(
+                "SELECT provider_request_id FROM ella_imessage_registration_attempts WHERE id = $1",
+                binding["registration_attempt_id"],
+            )
+        assert revoked["status"] == duplicate["status"] == "revoked"
+        assert revoked["provider_request_id"] == duplicate["provider_request_id"] == expected_request_id
 
     asyncio.run(_run_with_database(scenario))
 

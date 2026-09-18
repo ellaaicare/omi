@@ -47,7 +47,10 @@ The app flow is:
 4. Show the returned one-time code and assigned destination to the owner.
 5. Poll `GET /v1/ella/imessage/enrollment` until it reports `ready`.
 6. Revoke through `POST /v1/ella/imessage/enrollment/revoke` using the current
-   generation.
+   generation. Revocation is not reported complete unless the authenticated
+   registrar proves the exact local registration/inbound/delivery artifacts
+   absent; its response explicitly reports that the upstream provider user is
+   retained but unbound.
 
 ## Bridge interface
 
@@ -59,6 +62,13 @@ The backend calls one fixed registrar authority:
 - Body contains only `channel=imessage`, `mode=text_dm`, and the handset E.164.
 - Response must be bounded JSON with `registration_id` and
   `assigned_destination`.
+
+Provider enrollment alone does not create this local mapping. The
+app-authenticated enrollment path must invoke the registrar once, including
+when the handset is already present in the Ella Photon project. In that case
+the registrar performs list-before-create, persists the existing provider user
+and assigned destination, and does not create a duplicate. This bootstrap is
+reachability only; consent and proof remain backend authority.
 
 The bridge delivers an inbound proof to:
 
@@ -134,6 +144,8 @@ Required non-secret launch configuration:
 - `ELLA_IMESSAGE_REGISTRAR_BIND=127.0.0.1`; wildcard/public binds are refused.
 - `ELLA_IMESSAGE_REGISTRAR_PORT` defaults to `8796`.
 - `ELLA_IMESSAGE_HEARTBEAT_SECONDS` defaults to 30 seconds.
+- `ELLA_IMESSAGE_HEARTBEAT_FRESHNESS_SECONDS` defaults to 90 seconds and must
+  remain no greater than the backend's 120-second connection fence.
 - `ELLA_IMESSAGE_BACKEND_TIMEOUT_SECONDS` defaults to 90 seconds.
 
 Required protected values are `PHOTON_PROJECT_ID`, `PHOTON_PROJECT_SECRET`,
@@ -146,11 +158,23 @@ distinct.
 The bridge owns an additional kernel lifetime lock and an SQLite WAL journal
 under its state directory. The journal records a provider-attempt marker before
 registration, the minimal normalized inbound event before backend inference,
-send-start before provider I/O, and the provider message ID before backend ACK.
+delivery start-intent with the original connection before the backend
+delivery-start call, send-start before provider I/O, and the provider message
+ID before backend ACK.
 It binds the state directory permanently to the configured project and removes
 message text after terminal processing. A different project, second bridge
 process, insecure state directory, provider stream in `starting`/`recovering`,
-or suspected zombie stream fails closed.
+stale backend heartbeat, or suspected zombie stream fails closed for message
+processing.
+
+Photon's pinned stream truthfully starts in `starting` until the first inbound
+yield. During that cold/quiet state the process and authenticated registrar
+remain available, `/healthz` returns HTTP 503 with `status=starting`, and no
+message work runs. The first provider event is durably journaled before the
+bridge establishes provider health and current backend heartbeat; a temporary
+backend outage leaves it pending for reconciliation instead of acknowledging
+and losing it. Operators must not restart-loop the bridge merely because a
+quiet, not-yet-proven stream reports `starting`.
 
 The registrar listener remains loopback-only. If the VPS backend cannot reach
 the Mini over loopback, Atlas must place a separately reviewed private HTTPS
@@ -158,7 +182,35 @@ proxy/tunnel in front of this listener and pin
 `ELLA_IMESSAGE_REGISTRAR_URL` to that private coordinate. Do not publish the
 registrar or bind the bridge to a public or wildcard address. The registrar
 requires its dedicated bearer and idempotency UUID; `/healthz` is coarse and
-contains no project, contact, credential, or runtime detail.
+contains no project, contact, credential, or runtime detail. A `ready` response
+requires both a healthy provider stream and fresh successful backend
+heartbeats for every proof-accepted local registration. Backend failure or
+expiry returns HTTP 503 rather than provider-only false health.
+
+Before rendering the launch service, install the checked-in bridge-only runtime
+dependency into the isolated Ella Hermes venv without modifying the pinned
+Hermes source checkout:
+
+```bash
+uv pip install --python @@ELLA_VENV@@/bin/python \
+  -r @@OMI_RELEASE_ROOT@@/backend/sidecars/imessage_photon_bridge/requirements.txt
+```
+
+Record the requirements-file SHA-256 and installed package version in the
+deployment manifest. A successful Hermes venv build alone is not sufficient:
+the bridge imports this dependency directly and must pass the entrypoint import
+check before the launch service is loaded.
+
+The registrar also exposes authenticated
+`DELETE /v1/registrations/{provider_request_id}` for exact lifecycle cleanup.
+It quarantines the backend binding first, then transactionally removes only
+that local handset's registration, inbound journal, and delivery artifacts,
+and proves all three exact counts are zero while preserving unrelated users.
+The pinned Photon management client has no authenticated provider-user delete
+operation, so successful local cleanup is intentionally HTTP 202 with
+`provider_user_retained_unbound` and `operator_action_required=true`; it must
+never be reported as provider deletion. The provider request UUID is used so a
+phone number is not placed in the URL, argv, or operator receipt.
 
 Supported operator commands use the same protected environment and immutable
 paths:
@@ -170,10 +222,16 @@ paths:
 ```
 
 `reconcile` retries only a backend ACK after a provider message ID was durably
-stored. A send-start without a stored provider ID becomes `uncertain`; it is
-never resent. Normal service stop does not deregister. Deregistration is an
-explicit lifecycle operation and must complete before disabling the runtime
-flag.
+stored. A prepared local start-intent is resumed with its original connection:
+if the backend proves the start was new, the one provider send may proceed; if
+the prior backend outcome is ambiguous, it becomes `uncertain` with no provider
+send. A send-start without a stored provider ID also becomes `uncertain`; it is
+never resent. Provider output always uses one exact raw `/send` operation with
+`format=text`; URL replies never try a rich-link operation first. Adapter fatal
+state makes health unavailable and exits the process with a temporary-failure
+code so launchd can create a new connection generation. Normal service stop
+does not deregister. Deregistration is an explicit lifecycle operation and must
+complete before disabling the runtime flag.
 
 The bridge has no owner-to-agent selector. For the authorized owner canary, the
 backend operator must separately read back that the exact active invitation,
