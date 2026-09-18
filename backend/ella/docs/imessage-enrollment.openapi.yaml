@@ -176,7 +176,7 @@ components:
         - text_dm_only
       properties:
         policy_version:
-          const: ella-imessage-data-v1
+          const: ella-imessage-data-v2
         processor_set_hash:
           type: string
           pattern: "^sha256:[a-f0-9]{64}$"
@@ -195,6 +195,11 @@ components:
           minItems: 1
           items:
             type: string
+          example:
+            - your handset phone number used for iMessage transport registration
+            - the text messages you send to Ella
+            - Ella's text replies
+            - messaging delivery identifiers
         text_dm_only:
           const: true
     ImessageConsentRequest:
@@ -290,6 +295,7 @@ components:
         - binding_quarantined
         - consent_required
         - consent_revoked
+        - consent_policy_stale
         - runtime_unavailable
         - binding_revoked
     EnrollmentFeatures:

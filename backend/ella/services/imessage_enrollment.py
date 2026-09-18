@@ -34,7 +34,7 @@ from ella.services.runtime_resolver import (
 
 CONTRACT_ID = "ella.imessage_enrollment.v1"
 CONSENT_RECEIPT_SCHEMA = "ella.imessage_consent_receipt.v1"
-CONSENT_POLICY_VERSION = "ella-imessage-data-v1"
+CONSENT_POLICY_VERSION = "ella-imessage-data-v2"
 CONSENT_SCOPE_VERSION = "ella.imessage_text_dm.v1"
 CANONICAL_PROCESSORS = "ella-self-hosted-hermes:reasoning|honcho-self-hosted:memory|photon:imessage-transport"
 CONSENT_PROCESSOR_SET_HASH = f"sha256:{hashlib.sha256(CANONICAL_PROCESSORS.encode()).hexdigest()}"
@@ -188,6 +188,7 @@ def consent_policy() -> dict[str, Any]:
             "Photon iMessage transport",
         ],
         "data_classes": [
+            "your handset phone number used for iMessage transport registration",
             "the text messages you send to Ella",
             "Ella's text replies",
             "messaging delivery identifiers",
@@ -304,7 +305,40 @@ class ImessageEnrollmentService:
         if binding_status == "quarantined":
             return self._binding_status(state, status="temporarily_unavailable", reason="binding_quarantined")
         if binding_status == "verification_pending":
-            return self._binding_status(state, status="verification_pending", reason="verification_pending")
+            challenge_expires_at = state.get("challenge_expires_at")
+            if isinstance(challenge_expires_at, datetime) and challenge_expires_at <= self.now():
+                try:
+                    binding = await self.repository.retire_expired_pending_binding(
+                        uid=uid,
+                        binding_id=state["binding_id"],
+                        now=self.now(),
+                    )
+                except ImessageAuthorityError as exc:
+                    raise self._authority_error(exc) from exc
+                if str(binding.get("status") or "") == "quarantined":
+                    return self._binding_status(
+                        binding,
+                        status="temporarily_unavailable",
+                        reason="binding_quarantined",
+                    )
+                state = {
+                    **state,
+                    **binding,
+                    "binding_id": binding.get("id"),
+                    "binding_status": binding.get("status"),
+                    "binding_revision": binding.get("revision"),
+                }
+                binding_status = str(binding.get("status") or "")
+                if binding_status == "revoked":
+                    return self._binding_status(state, status="revoked", reason="binding_revoked")
+                if binding_status not in {"verification_pending", "active"}:
+                    return self._binding_status(
+                        state,
+                        status="temporarily_unavailable",
+                        reason="binding_quarantined",
+                    )
+            if binding_status == "verification_pending":
+                return self._binding_status(state, status="verification_pending", reason="verification_pending")
         try:
             runtime = await self._runtime(uid)
         except ImessageEnrollmentError:
@@ -356,6 +390,17 @@ class ImessageEnrollmentService:
                 raise ImessageEnrollmentError("imessage_binding_already_exists", status_code=409)
             if binding_status != "verification_pending":
                 raise ImessageEnrollmentError("imessage_registration_state_invalid", status_code=409)
+            challenge_expires_at = binding.get("challenge_expires_at")
+            if not isinstance(challenge_expires_at, datetime) or challenge_expires_at <= self.now():
+                try:
+                    await self.repository.retire_expired_pending_binding(
+                        uid=uid,
+                        binding_id=binding["id"],
+                        now=self.now(),
+                    )
+                except ImessageAuthorityError as exc:
+                    raise self._authority_error(exc) from exc
+                raise ImessageEnrollmentError("imessage_registration_proof_window_expired", status_code=409)
             code = self._challenge_code(attempt["id"])
             return (
                 {
@@ -403,6 +448,10 @@ class ImessageEnrollmentService:
                     assigned_destination_ref_hmac=assigned_destination_ref_hmac,
                 )
             except ImessageAuthorityError as exc:
+                try:
+                    await self.repository.mark_registration_uncertain(uid=uid, attempt_id=attempt["id"])
+                except ImessageAuthorityError:
+                    pass
                 raise self._authority_error(exc) from exc
         try:
             await revalidate_runtime_authority(runtime_identity)
@@ -435,8 +484,14 @@ class ImessageEnrollmentService:
                 challenge_expires_at=expires_at,
                 consent_contract=CONSENT_CONTRACT,
             )
-        except ImessageAuthorityError as exc:
-            raise self._authority_error(exc) from exc
+        except Exception as exc:
+            try:
+                await self.repository.mark_registration_uncertain(uid=uid, attempt_id=attempt["id"])
+            except ImessageAuthorityError:
+                pass
+            if isinstance(exc, ImessageAuthorityError):
+                raise self._authority_error(exc) from exc
+            raise ImessageEnrollmentError("imessage_registration_finalization_incomplete", status_code=503) from exc
         return (
             {
                 "status": self._binding_status(binding, status="verification_pending", reason="verification_pending"),
@@ -642,6 +697,10 @@ class ImessageEnrollmentService:
     @staticmethod
     def _authority_error(exc: ImessageAuthorityError) -> ImessageEnrollmentError:
         if exc.code in {
+            "imessage_consent_required",
+            "imessage_consent_receipt_stale",
+            "imessage_consent_authority_changed",
+            "imessage_consent_policy_stale",
             "imessage_consent_idempotency_conflict",
             "imessage_enrollment_idempotency_conflict",
             "imessage_binding_already_exists",

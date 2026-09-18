@@ -581,11 +581,17 @@ jobs:
               tests/postgres/test_imessage_enrollment_postgres.py |
               sed '/^$/d'
           )"
-          test "$(grep -c '::' <<<"$imessage_ids")" -eq 37
+          test "$(grep -c '::' <<<"$imessage_ids")" -eq 46
           required_imessage_ids=(
+            "tests/unit/test_imessage_enrollment.py::test_previous_policy_consent_is_rejected_before_authority_write"
             "tests/unit/test_imessage_enrollment.py::test_start_persists_before_provider_and_revalidates_before_finalization"
             "tests/unit/test_imessage_enrollment.py::test_provider_accepted_retry_skips_second_external_registration"
             "tests/unit/test_imessage_enrollment.py::test_ambiguous_provider_result_is_durable_and_never_finalized"
+            "tests/unit/test_imessage_enrollment.py::test_provider_accepted_finalization_drift_is_quarantined_without_repeat_registration"
+            "tests/unit/test_imessage_enrollment.py::test_status_atomically_retires_expired_pending_challenge"
+            "tests/unit/test_imessage_enrollment.py::test_finalized_retry_retires_expired_proof_instead_of_reissuing"
+            "tests/unit/test_imessage_enrollment.py::test_mounted_enrollment_surfaces_are_no_store_including_start_json_response"
+            "tests/unit/test_imessage_enrollment_openapi.py::test_all_literal_service_statuses_and_reasons_are_declared_in_openapi"
             "tests/unit/test_imessage_enrollment.py::test_mounted_transport_proof_denies_before_service[None-None-503]"
             "tests/unit/test_imessage_runtime.py::test_text_dm_claim_precedes_model_and_delivery_requires_send_start"
             "tests/unit/test_imessage_runtime.py::test_model_error_after_send_boundary_is_quarantined_without_retry"
@@ -595,6 +601,8 @@ jobs:
             "tests/postgres/test_imessage_enrollment_postgres.py::test_two_owner_identity_collision_has_zero_cross_write"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_provider_registration_identity_is_unique_without_cross_owner_mutation"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners"
+            "tests/postgres/test_imessage_enrollment_postgres.py::test_expired_pending_binding_is_atomically_retired_and_replacement_can_start"
+            "tests/postgres/test_imessage_enrollment_postgres.py::test_unresolved_provider_acceptance_blocks_competing_registration_graph"
           )
           for required_id in "${required_imessage_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$imessage_ids"

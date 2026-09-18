@@ -25,6 +25,14 @@ from database.account_diagnostics import PostgresAccountDiagnosticsRepository
 from ella.routers.account_diagnostics import create_account_diagnostics_router
 from ella.routers.canonical_events import _get_pool
 from ella.routers.invites import router as invite_router
+
+try:
+    from ella.routers.imessage_enrollment import router as imessage_enrollment_router
+except ImportError as exc:
+    imessage_enrollment_router = None
+    _IMESSAGE_ENROLLMENT_IMPORT_ERROR = exc
+else:
+    _IMESSAGE_ENROLLMENT_IMPORT_ERROR = None
 from ella.routers.onboarding import configure_firestore_db, router as onboarding_router
 from ella.routers.today_cards import create_today_cards_router
 from ella.services.today_card import TodayCardMaterializer
@@ -461,13 +469,11 @@ def _register_routers(app) -> None:
         print(f"  ⚠️ Hermes Cloud Photon adapter not available: {e}", flush=True)
 
     # Owner-authenticated enrollment for the separate self-hosted iMessage lane.
-    try:
-        from ella.routers.imessage_enrollment import router as imessage_enrollment_router
-
+    if imessage_enrollment_router is not None:
         app.include_router(imessage_enrollment_router, tags=["iMessage Enrollment"])
         print("  🌐 /v1/ella/imessage/* - Owner-scoped iMessage enrollment", flush=True)
-    except ImportError as e:
-        print(f"  ⚠️ iMessage enrollment not available: {e}", flush=True)
+    else:
+        print(f"  ⚠️ iMessage enrollment not available: {_IMESSAGE_ENROLLMENT_IMPORT_ERROR}", flush=True)
 
     # Transport-only self-hosted iMessage runtime and fenced delivery outbox.
     try:
