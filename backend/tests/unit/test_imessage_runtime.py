@@ -62,6 +62,7 @@ def _runtime(**overrides) -> IsolatedRuntime:
         "consent_authority_epoch": "88888888-8888-4888-8888-888888888888",
         "account_user_id": str(USER_ID),
         "profile_user_id": str(USER_ID),
+        "binding_role": "user",
     }
     values.update(overrides)
     return IsolatedRuntime(**values)
@@ -82,6 +83,7 @@ def _binding(runtime: IsolatedRuntime) -> dict:
         "consent_receipt_id": CONSENT_ID,
         "consent_authority_epoch": uuid.UUID(runtime.consent_authority_epoch),
         "runtime_binding_id": BINDING_ID,
+        "runtime_binding_role": runtime.binding_role,
         "runtime_target_id": TARGET_ID,
         "runtime_authority_kind": "target",
         "runtime_authority_digest": runtime_authority_identity(runtime).digest,
@@ -95,6 +97,7 @@ def _retained_runtime(*, uid: str = "owner-a") -> IsolatedRuntime:
         runtime_target_mode="",
         runtime_target_updated_at="",
         target_entitlement_revision=0,
+        binding_role="imessage",
     )
 
 
@@ -106,6 +109,14 @@ def _retained_binding(runtime: IsolatedRuntime) -> dict:
         runtime_authority_digest=runtime_authority_identity(runtime).digest,
     )
     return binding
+
+
+def test_authority_digest_preserves_user_contract_and_domains_imessage_role():
+    user_digest = runtime_authority_identity(_runtime()).digest
+    retained_digest = runtime_authority_identity(_retained_runtime()).digest
+
+    assert user_digest == "7ee26e926aadb7f8512c280648188c1342bd367deb46086d5d90078b7b698e97"
+    assert retained_digest != user_digest
 
 
 class FakeRepository:
@@ -199,7 +210,15 @@ class FakeCompletionClient:
         return self.response
 
 
-def _service(repository, completion_client, runtime=None, *, revalidator=None):
+def _service(
+    repository,
+    completion_client,
+    runtime=None,
+    *,
+    revalidator=None,
+    resolver=None,
+    retained_resolver=None,
+):
     runtime = runtime or _runtime()
 
     async def resolve(*_args, **_kwargs):
@@ -216,7 +235,8 @@ def _service(repository, completion_client, runtime=None, *, revalidator=None):
         completion_client=completion_client,
         hmac_key=b"h" * 32,
         now=lambda: NOW,
-        runtime_resolver=resolve,
+        runtime_resolver=resolver or resolve,
+        retained_runtime_resolver=retained_resolver or resolve,
         runtime_revalidator=revalidate,
     )
 
@@ -316,7 +336,23 @@ def test_exact_configured_retained_owner_uses_targetless_binding_without_fallbac
     runtime = _retained_runtime()
     repository = FakeRepository(_retained_binding(runtime))
     client = FakeCompletionClient(repository.events)
-    service = _service(repository, client, runtime)
+    calls = {"ordinary": 0, "retained": 0}
+
+    async def ordinary(*_args, **_kwargs):
+        calls["ordinary"] += 1
+        raise AssertionError("ordinary runtime resolver must not be used")
+
+    async def retained(*_args, **_kwargs):
+        calls["retained"] += 1
+        return runtime
+
+    service = _service(
+        repository,
+        client,
+        runtime,
+        resolver=ordinary,
+        retained_resolver=retained,
+    )
 
     heartbeat = asyncio.run(
         service.heartbeat(line_identity="line-a", contact_identity="contact-a", connection_id="connection-a")
@@ -329,8 +365,10 @@ def test_exact_configured_retained_owner_uses_targetless_binding_without_fallbac
     assert len(authorities) == 1
     assert authorities[0].runtime_authority_kind == "retained_owner"
     assert authorities[0].runtime_target_id is None
+    assert authorities[0].runtime_binding_role == "imessage"
     assert authorities[0].runtime_target_entitlement_revision == 0
     assert client.calls == 1
+    assert calls == {"ordinary": 0, "retained": 2}
 
 
 def test_targetless_non_owner_is_denied_before_heartbeat_or_model(monkeypatch):

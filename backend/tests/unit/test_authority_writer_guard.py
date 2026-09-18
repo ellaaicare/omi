@@ -39,6 +39,9 @@ EXPECTED_WRITERS = {
     ("database/invitation_operator.py", "_cleanup_locked"),
     ("database/invitations.py", "_bind_verified_identity_on_connection"),
     ("database/invitations.py", "_redeem_locked_invitation"),
+    ("database/imessage_retained_runtime.py", "activate"),
+    ("database/imessage_retained_runtime.py", "rollback"),
+    ("database/imessage_retained_runtime.py", "stage"),
     ("database/managed_cloud_consent.py", "_quarantine_on_connection"),
     ("database/managed_cloud_consent.py", "_rearm_fresh_self_hosted_regrant_on_connection"),
     ("database/managed_cloud_consent.py", "lock_or_bootstrap_grant_on_connection"),
@@ -144,6 +147,18 @@ REAL_POSTGRES_WRITER_COVERAGE = {
     ("database/invitations.py", "_bind_verified_identity_on_connection"): (
         "tests/postgres/test_invitation_redemption_postgres.py",
         "test_self_hosted_redemption_binds_verified_email_identity_and_target_atomically",
+    ),
+    ("database/imessage_retained_runtime.py", "activate"): (
+        "tests/postgres/test_imessage_enrollment_postgres.py",
+        "test_retained_imessage_binding_admin_is_two_phase_exact_and_rollback_safe",
+    ),
+    ("database/imessage_retained_runtime.py", "rollback"): (
+        "tests/postgres/test_imessage_enrollment_postgres.py",
+        "test_retained_imessage_binding_admin_is_two_phase_exact_and_rollback_safe",
+    ),
+    ("database/imessage_retained_runtime.py", "stage"): (
+        "tests/postgres/test_imessage_enrollment_postgres.py",
+        "test_retained_imessage_binding_admin_is_two_phase_exact_and_rollback_safe",
     ),
     ("database/invitation_operator.py", "_cleanup_locked"): (
         "tests/postgres/test_invitation_redemption_postgres.py",

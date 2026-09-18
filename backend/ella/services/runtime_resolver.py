@@ -137,6 +137,7 @@ class IsolatedRuntime:
     # Canonical broker/authority owner coordinates (users.id UUIDs), not omi_uid.
     account_user_id: str = ""
     profile_user_id: str = ""
+    binding_role: str = "user"
 
 
 @dataclass(frozen=True)
@@ -210,6 +211,10 @@ def runtime_authority_identity(runtime: IsolatedRuntime) -> CloudRuntimeAuthorit
         "allowed_tools": list(runtime.allowed_tools),
         "required_capabilities": list(runtime.required_capabilities),
     }
+    # Preserve the established role=user digest preimage used by existing chat
+    # and voice sessions. Only the dedicated iMessage role needs a new domain.
+    if runtime.binding_role != "user":
+        material["binding_role"] = runtime.binding_role
     digest = hashlib.sha256(
         json.dumps(
             material,
@@ -482,6 +487,7 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
         consent_authority_epoch=consent_authority_epoch,
         account_user_id=account_user_id,
         profile_user_id=profile_user_id,
+        binding_role=str(binding.get("role") or ""),
     )
 
 
@@ -507,6 +513,50 @@ async def resolve_direct_self_hosted_runtime(
     except Exception as exc:
         raise ProvisioningError("self_hosted_runtime_authority_unavailable", retryable=True) from exc
     return runtime_from_binding(binding, uid) if binding else None
+
+
+async def resolve_imessage_retained_runtime(
+    uid: str,
+    repository: Optional[EllaProvisioningRepository] = None,
+) -> Optional[IsolatedRuntime]:
+    """Resolve the exact owner-scoped retained runtime dedicated to iMessage.
+
+    The dedicated role keeps iMessage from inheriting the owner's ordinary
+    retained binding or silently selecting another active Hermes profile.
+    """
+    if not uid:
+        return None
+    try:
+        repository = repository or await EllaProvisioningRepository.create()
+        binding = await repository.resolve_self_hosted_active_direct(uid=uid, role="imessage")
+    except ProvisioningSchemaNotReadyError as exc:
+        raise ProvisioningError("provisioning_schema_not_ready", retryable=True) from exc
+    except ProvisioningError:
+        raise
+    except Exception as exc:
+        raise ProvisioningError("imessage_retained_runtime_authority_unavailable", retryable=True) from exc
+    return runtime_from_binding(binding, uid) if binding else None
+
+
+async def revalidate_imessage_runtime_authority(
+    identity: CloudRuntimeAuthorityIdentity,
+    repository: Optional[EllaProvisioningRepository] = None,
+) -> IsolatedRuntime:
+    """Re-resolve the exact iMessage runtime authority immediately before use."""
+    if identity.target_mode == "retained":
+        current = await resolve_imessage_retained_runtime(identity.uid, repository=repository)
+    else:
+        current = await resolve_isolated_runtime(
+            identity.uid,
+            repository=repository,
+            target_mode=identity.target_mode,
+        )
+    if current is None:
+        raise ProvisioningError("imessage_runtime_required", retryable=False)
+    current_identity = runtime_authority_identity(current)
+    if not hmac.compare_digest(current_identity.digest, identity.digest):
+        raise ProvisioningError("imessage_runtime_authority_changed", retryable=False)
+    return current
 
 
 async def resolve_isolated_runtime(
