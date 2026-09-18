@@ -36,7 +36,8 @@ Future<String> getAuthHeader({
   DateTime Function()? clock,
 }) async {
   final preferences = SharedPreferencesUtil();
-  final now = (clock ?? DateTime.now)();
+  final currentTime = clock ?? DateTime.now;
+  final now = currentTime();
   var expiry = DateTime.fromMillisecondsSinceEpoch(preferences.tokenExpirationTime);
   var token = preferences.authToken;
   final shouldRefresh = forceRefresh || token.isEmpty || !expiry.isAfter(now.add(_authRefreshLeadTime));
@@ -55,7 +56,7 @@ Future<String> getAuthHeader({
     expiry = DateTime.fromMillisecondsSinceEpoch(preferences.tokenExpirationTime);
   }
 
-  if (token.isEmpty || !expiry.isAfter(now)) {
+  if (token.isEmpty || !expiry.isAfter(currentTime())) {
     throw const ClientApiFailure(ClientApiFailureKind.authenticationRequired, retryable: true);
   }
   return 'Bearer $token';

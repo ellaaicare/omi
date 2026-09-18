@@ -181,6 +181,31 @@ void main() {
     );
   });
 
+  test('cached token expiring during refresh is never returned', () async {
+    final preferences = SharedPreferencesUtil()
+      ..authToken = 'nearly-expired-token'
+      ..tokenExpirationTime = DateTime.utc(2026, 9, 18, 12, 0, 10).millisecondsSinceEpoch;
+    final clockValues = <DateTime>[
+      DateTime.utc(2026, 9, 18, 12),
+      DateTime.utc(2026, 9, 18, 12, 0, 15),
+    ];
+
+    await expectLater(
+      getAuthHeader(
+        forceRefresh: true,
+        tokenRefresher: () async => preferences.authToken,
+        clock: () => clockValues.removeAt(0),
+      ),
+      throwsA(
+        isA<ClientApiFailure>().having(
+          (failure) => failure.kind,
+          'kind',
+          ClientApiFailureKind.authenticationRequired,
+        ),
+      ),
+    );
+  });
+
   test('expired cached token blocks the stream before any transport egress', () async {
     final preferences = SharedPreferencesUtil()
       ..authToken = 'expired-token'
