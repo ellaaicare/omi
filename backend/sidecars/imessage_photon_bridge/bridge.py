@@ -267,7 +267,8 @@ class BridgeJournal:
             raise BridgeError("bridge_state_directory_insecure")
 
     def _migrate(self) -> None:
-        self.connection.executescript("""
+        self.connection.executescript(
+            """
             CREATE TABLE IF NOT EXISTS registrations (
                 provider_request_id TEXT PRIMARY KEY,
                 project_id TEXT NOT NULL,
@@ -309,7 +310,8 @@ class BridgeJournal:
             );
             CREATE INDEX IF NOT EXISTS inbound_events_status_idx ON inbound_events(status, created_at);
             CREATE INDEX IF NOT EXISTS deliveries_status_idx ON deliveries(status, created_at);
-            """)
+            """
+        )
 
     def begin_registration(self, provider_request_id: str, project_id: str, handset_e164: str) -> dict[str, Any]:
         now = _utc_now()
