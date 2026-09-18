@@ -1,0 +1,262 @@
+openapi: 3.1.0
+info:
+  title: Ella iMessage Enrollment
+  version: 1.0.0
+  description: >
+    Authenticated app contract for linking one verified handset to the current
+    Firebase owner and that owner's existing self-hosted Hermes runtime. Photon
+    is an internal transport detail. The app cannot select a UID, profile,
+    project, runtime, endpoint, credential, or provider route.
+servers:
+  - url: https://api.ella-ai-care.com
+security:
+  - bearerAuth: []
+x-ella-contract-id: ella.imessage_enrollment.v1
+x-ella-consent-scope: ella.imessage_text_dm.v1
+x-ella-authority:
+  owner: firebase_bearer_subject
+  runtime-mode: hermes-chat
+  fallback: none
+  transport-auth-can-select-owner: false
+paths:
+  /v1/ella/imessage/enrollment:
+    get:
+      tags: [iMessage Enrollment]
+      summary: Return the current owner's redacted enrollment and readiness state.
+      responses:
+        "200":
+          description: Authoritative owner-scoped state. This response never contains provider credentials or raw routing identifiers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrollmentStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/ella/imessage/enrollment/start:
+    post:
+      tags: [iMessage Enrollment]
+      summary: Register reachability and issue a short-lived handset proof challenge.
+      description: >
+        Registration does not grant identity. The server derives the owner and
+        exact runtime from the Firebase bearer, validates current entitlement
+        and consent, registers the submitted handset through the isolated Ella
+        transport, and binds the challenge to the normalized handset, assigned
+        destination, project, owner, and next binding generation. Only an
+        inbound proof from that handset can activate the binding.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnrollmentStartRequest"
+      responses:
+        "200":
+          description: Existing identical pending challenge returned idempotently.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrollmentStartResponse"
+        "201":
+          description: New pending proof challenge created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrollmentStartResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          description: Enrollment attempt limit reached.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContractError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/ella/imessage/enrollment/revoke:
+    post:
+      tags: [iMessage Enrollment]
+      summary: Revoke the current owner's binding and increment its authority generation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnrollmentRevokeRequest"
+      responses:
+        "200":
+          description: Binding is revoked or was already revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrollmentStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Firebase ID token
+  responses:
+    Unauthorized:
+      description: Missing, invalid, or expired Firebase bearer.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ContractError"
+    Conflict:
+      description: Current consent, entitlement, runtime, binding, or idempotency authority conflicts.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ContractError"
+    Unavailable:
+      description: Enrollment or exact runtime authority is disabled or temporarily unavailable.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ContractError"
+  schemas:
+    EnrollmentState:
+      type: string
+      enum:
+        - not_connected
+        - verification_pending
+        - ready
+        - temporarily_unavailable
+        - revoked
+    EnrollmentReason:
+      type: string
+      enum:
+        - not_enrolled
+        - rollout_disabled
+        - verification_pending
+        - ready
+        - transport_unhealthy
+        - authority_stale
+        - binding_quarantined
+        - consent_required
+        - consent_revoked
+        - runtime_unavailable
+        - binding_revoked
+    EnrollmentFeatures:
+      type: object
+      additionalProperties: false
+      required: [text_dm, groups, attachments, caregiver_delivery]
+      properties:
+        text_dm:
+          type: boolean
+        groups:
+          const: false
+        attachments:
+          const: false
+        caregiver_delivery:
+          const: false
+    EnrollmentStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - state
+        - reason_code
+        - authority_generation
+        - features
+      properties:
+        schema_version:
+          const: ella.imessage_enrollment.v1
+        state:
+          $ref: "#/components/schemas/EnrollmentState"
+        reason_code:
+          $ref: "#/components/schemas/EnrollmentReason"
+        authority_generation:
+          type: integer
+          minimum: 0
+        binding_revision:
+          type: [integer, "null"]
+          minimum: 1
+        binding_fingerprint:
+          type: [string, "null"]
+          pattern: "^[a-f0-9]{16}$"
+        assigned_destination:
+          type: [string, "null"]
+          pattern: "^\\+[1-9][0-9]{7,14}$"
+          description: Provider-assigned destination visible only to the exact authenticated owner.
+        last_verified_at:
+          type: [string, "null"]
+          format: date-time
+        verification_expires_at:
+          type: [string, "null"]
+          format: date-time
+        support_code:
+          type: [string, "null"]
+          pattern: "^ELLA-[A-F0-9]{8}$"
+        features:
+          $ref: "#/components/schemas/EnrollmentFeatures"
+    EnrollmentStartRequest:
+      type: object
+      additionalProperties: false
+      required: [handset_e164, consent_receipt_id, idempotency_key]
+      properties:
+        handset_e164:
+          type: string
+          pattern: "^\\+[1-9][0-9]{7,14}$"
+        consent_receipt_id:
+          type: string
+          format: uuid
+        idempotency_key:
+          type: string
+          format: uuid
+    EnrollmentStartResponse:
+      type: object
+      additionalProperties: false
+      required: [status, proof]
+      properties:
+        status:
+          $ref: "#/components/schemas/EnrollmentStatus"
+        proof:
+          type: object
+          additionalProperties: false
+          required: [code, expires_at]
+          properties:
+            code:
+              type: string
+              pattern: "^[0-9]{6}$"
+              description: Single-use value shown once to the exact authenticated owner.
+            expires_at:
+              type: string
+              format: date-time
+    EnrollmentRevokeRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_generation, idempotency_key]
+      properties:
+        expected_generation:
+          type: integer
+          minimum: 1
+        idempotency_key:
+          type: string
+          format: uuid
+    ContractError:
+      type: object
+      additionalProperties: false
+      required: [detail]
+      properties:
+        detail:
+          type: object
+          additionalProperties: false
+          required: [code]
+          properties:
+            code:
+              type: string
+              pattern: "^[a-z0-9_]{3,80}$"
+            support_code:
+              type: string
+              pattern: "^ELLA-[A-F0-9]{8}$"
