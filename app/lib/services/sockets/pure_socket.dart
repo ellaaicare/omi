@@ -6,12 +6,21 @@ import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/status.dart' as socket_channel_status;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
 enum PureSocketStatus { notConnected, connecting, connected, disconnected }
+
+@visibleForTesting
+Future<Map<String, String>> buildAuthenticatedWebSocketHeaders({AuthHeaderProvider? authHeaderProvider}) =>
+    buildHeaders(
+      requireAuthCheck: true,
+      forceAuthRefresh: true,
+      authHeaderProvider: authHeaderProvider,
+    );
 
 abstract class IPureSocketListener {
   void onConnected();
@@ -56,6 +65,7 @@ class PureSocket implements IPureSocket {
   IPureSocketListener? _listener;
   bool _closeNotified = false;
   final Duration _disconnectCloseTimeout;
+  final AuthHeaderProvider? _authHeaderProvider;
   Future<void>? _disconnectFence;
 
   String url;
@@ -64,10 +74,13 @@ class PureSocket implements IPureSocket {
     this.url, {
     @visibleForTesting WebSocketChannel? connectedChannel,
     @visibleForTesting Duration disconnectCloseTimeout = const Duration(seconds: 3),
+    @visibleForTesting AuthHeaderProvider? authHeaderProvider,
   })  : _channel = connectedChannel,
         _status = connectedChannel == null ? PureSocketStatus.notConnected : PureSocketStatus.connected,
-        _disconnectCloseTimeout = disconnectCloseTimeout;
+        _disconnectCloseTimeout = disconnectCloseTimeout,
+        _authHeaderProvider = authHeaderProvider;
 
+  @override
   void setListener(IPureSocketListener listener) {
     _listener = listener;
   }
@@ -80,8 +93,18 @@ class PureSocket implements IPureSocket {
 
     _closeNotified = false;
     _disconnectFence = null;
-    Logger.debug("request wss ${url}");
-    final headers = await buildHeaders(requireAuthCheck: true);
+    Logger.debug("request wss $url");
+    late final Map<String, String> headers;
+    try {
+      headers = await buildAuthenticatedWebSocketHeaders(authHeaderProvider: _authHeaderProvider);
+    } on ClientApiFailure catch (error) {
+      _status = PureSocketStatus.notConnected;
+      DebugLogManager.logWarning('pure_socket_auth_header_unavailable', {
+        'url': url,
+        'failure_kind': error.kind.name,
+      });
+      return false;
+    }
 
     _channel = IOWebSocketChannel.connect(
       url,
