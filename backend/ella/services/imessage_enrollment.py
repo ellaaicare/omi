@@ -28,8 +28,9 @@ from ella.services.provisioning import ProvisioningError
 from ella.services.runtime_resolver import (
     IsolatedRuntime,
     retained_owner_uid_configured,
+    resolve_imessage_retained_runtime,
     resolve_isolated_runtime,
-    revalidate_runtime_authority,
+    revalidate_imessage_runtime_authority,
     runtime_authority_identity,
 )
 
@@ -531,7 +532,7 @@ class ImessageEnrollmentService:
                     pass
                 raise self._authority_error(exc) from exc
         try:
-            await revalidate_runtime_authority(runtime_identity)
+            await revalidate_imessage_runtime_authority(runtime_identity)
         except Exception as exc:
             try:
                 await self.repository.mark_registration_uncertain(uid=uid, attempt_id=attempt["id"])
@@ -721,21 +722,30 @@ class ImessageEnrollmentService:
 
     async def _runtime(self, uid: str) -> tuple[IsolatedRuntime, ImessageRuntimeSnapshot, Any]:
         try:
-            runtime = await resolve_isolated_runtime(uid, target_mode="hermes-chat")
+            retained_owner = retained_owner_uid_configured(uid)
+            runtime = (
+                await resolve_imessage_retained_runtime(uid)
+                if retained_owner
+                else await resolve_isolated_runtime(uid, target_mode="hermes-chat")
+            )
             if runtime is None or runtime.provider != "hermes":
                 raise ProvisioningError("self_hosted_runtime_required", retryable=False)
             identity = runtime_authority_identity(runtime)
-            retained_owner = not runtime.runtime_target_id
-            if retained_owner and not retained_owner_uid_configured(uid):
+            targetless = not runtime.runtime_target_id
+            if targetless != retained_owner:
                 raise ProvisioningError("retained_runtime_owner_forbidden", retryable=False)
+            expected_role = "imessage" if targetless else "user"
+            if runtime.binding_role != expected_role:
+                raise ProvisioningError("imessage_runtime_role_invalid", retryable=False)
             snapshot = ImessageRuntimeSnapshot(
                 uid=uid,
                 binding_id=uuid.UUID(runtime.binding_id),
+                binding_role=runtime.binding_role,
                 target_id=uuid.UUID(runtime.runtime_target_id) if runtime.runtime_target_id else None,
-                authority_kind="retained_owner" if retained_owner else "target",
+                authority_kind="retained_owner" if targetless else "target",
                 authority_digest=identity.digest,
                 binding_revision=runtime.revision,
-                entitlement_revision=0 if retained_owner else runtime.target_entitlement_revision,
+                entitlement_revision=0 if targetless else runtime.target_entitlement_revision,
                 account_user_id=uuid.UUID(runtime.account_user_id),
                 profile_user_id=uuid.UUID(runtime.profile_user_id),
             )

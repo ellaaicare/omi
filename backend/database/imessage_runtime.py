@@ -34,6 +34,7 @@ class ImessageRuntimeAuthority:
     runtime_agent_id: str
     runtime_instance_id: Optional[str]
     runtime_profile_name: str
+    runtime_binding_role: str = "user"
 
 
 def _row(row: Any) -> Optional[dict[str, Any]]:
@@ -61,14 +62,14 @@ class ImessageRuntimeRepository:
                       AND column_name = 'transport_connection_ref_hmac'
                 )
                 AND (
-                    SELECT COUNT(*) = 2
+                    SELECT COUNT(*) = 4
                     FROM information_schema.columns
                     WHERE table_schema = current_schema()
                       AND table_name IN (
                           'ella_imessage_channel_bindings',
                           'ella_imessage_message_receipts'
                       )
-                      AND column_name = 'runtime_authority_kind'
+                      AND column_name IN ('runtime_authority_kind', 'runtime_binding_role')
                 )
             """
         )
@@ -165,7 +166,11 @@ class ImessageRuntimeRepository:
               AND rb.active = true
               AND rb.health_state = 'healthy'
               AND rb.provider = 'hermes'
-              AND rb.role = 'user'
+              AND b.runtime_binding_role = rb.role
+              AND (
+                  (b.runtime_authority_kind = 'target' AND rb.role = 'user')
+                  OR (b.runtime_authority_kind = 'retained_owner' AND rb.role = 'imessage')
+              )
               AND rb.user_id = b.user_id
               AND rb.account_user_id = b.user_id
               AND rb.profile_user_id = b.user_id
@@ -228,6 +233,7 @@ class ImessageRuntimeRepository:
               AND b.runtime_binding_id = $5
               AND b.runtime_target_id IS NOT DISTINCT FROM $6
               AND b.runtime_authority_kind = $16
+              AND b.runtime_binding_role = CASE $16 WHEN 'target' THEN 'user' ELSE 'imessage' END
               AND b.runtime_authority_digest = $7
               AND b.status = 'active'
               AND u.id = b.user_id
@@ -242,7 +248,10 @@ class ImessageRuntimeRepository:
               AND rb.active = true
               AND rb.health_state = 'healthy'
               AND rb.provider = 'hermes'
-              AND rb.role = 'user'
+              AND (
+                  ($16 = 'target' AND rb.role = 'user')
+                  OR ($16 = 'retained_owner' AND rb.role = 'imessage')
+              )
               AND rb.user_id = $4
               AND rb.account_user_id = $4
               AND rb.profile_user_id = $9
@@ -344,6 +353,7 @@ class ImessageRuntimeRepository:
                       AND b.runtime_binding_id = $6
                       AND b.runtime_target_id IS NOT DISTINCT FROM $7
                       AND b.runtime_authority_kind = $17
+                      AND b.runtime_binding_role = CASE $17 WHEN 'target' THEN 'user' ELSE 'imessage' END
                       AND b.runtime_authority_digest = $8
                       AND u.status = 'ACTIVE'
                       AND u.omi_uid = $9
@@ -354,7 +364,10 @@ class ImessageRuntimeRepository:
                       AND rb.active = true
                       AND rb.health_state = 'healthy'
                       AND rb.provider = 'hermes'
-                      AND rb.role = 'user'
+                      AND (
+                          ($17 = 'target' AND rb.role = 'user')
+                          OR ($17 = 'retained_owner' AND rb.role = 'imessage')
+                      )
                       AND rb.user_id = $2
                       AND rb.account_user_id = $2
                       AND rb.profile_user_id = $10
@@ -422,12 +435,13 @@ class ImessageRuntimeRepository:
                         inbound_payload_sha256, message_text, occurred_at,
                         binding_generation, consent_receipt_id,
                         consent_authority_epoch, runtime_binding_id,
-                        runtime_target_id, runtime_authority_kind, runtime_authority_digest,
+                        runtime_binding_role, runtime_target_id,
+                        runtime_authority_kind, runtime_authority_digest,
                         lease_token, lease_expires_at
                     )
                     VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                        $13, $14, CURRENT_TIMESTAMP + ($15 * INTERVAL '1 second')
+                        $13, $14, $15, CURRENT_TIMESTAMP + ($16 * INTERVAL '1 second')
                     )
                     ON CONFLICT (binding_id, inbound_provider_ref_hmac) DO NOTHING
                     RETURNING *
@@ -442,6 +456,7 @@ class ImessageRuntimeRepository:
                     current["consent_receipt_id"],
                     current["consent_authority_epoch"],
                     current["runtime_binding_id"],
+                    current["runtime_binding_role"],
                     current["runtime_target_id"],
                     current["runtime_authority_kind"],
                     current["runtime_authority_digest"],
@@ -471,6 +486,7 @@ class ImessageRuntimeRepository:
                 if (
                     int(result["binding_generation"]) != int(current["generation"])
                     or result["consent_receipt_id"] != current["consent_receipt_id"]
+                    or str(result["runtime_binding_role"]) != str(current["runtime_binding_role"])
                     or result["runtime_target_id"] != current["runtime_target_id"]
                     or str(result["runtime_authority_kind"]) != str(current["runtime_authority_kind"])
                     or result["runtime_authority_digest"] != current["runtime_authority_digest"]
@@ -564,11 +580,13 @@ class ImessageRuntimeRepository:
               AND b.runtime_binding_id = r.runtime_binding_id
               AND b.runtime_target_id IS NOT DISTINCT FROM r.runtime_target_id
               AND b.runtime_authority_kind = r.runtime_authority_kind
+              AND b.runtime_binding_role = r.runtime_binding_role
               AND b.runtime_authority_digest = r.runtime_authority_digest
               AND b.user_id = $3
               AND b.runtime_binding_id = $5
               AND b.runtime_target_id IS NOT DISTINCT FROM $6
               AND b.runtime_authority_kind = $15
+              AND b.runtime_binding_role = CASE $15 WHEN 'target' THEN 'user' ELSE 'imessage' END
               AND b.runtime_authority_digest = $7
               AND u.id = r.user_id
               AND u.status = 'ACTIVE'
@@ -583,7 +601,10 @@ class ImessageRuntimeRepository:
               AND rb.active = true
               AND rb.health_state = 'healthy'
               AND rb.provider = 'hermes'
-              AND rb.role = 'user'
+              AND (
+                  ($15 = 'target' AND rb.role = 'user')
+                  OR ($15 = 'retained_owner' AND rb.role = 'imessage')
+              )
               AND rb.user_id = $3
               AND rb.account_user_id = $3
               AND rb.profile_user_id = $4
@@ -685,11 +706,13 @@ class ImessageRuntimeRepository:
               AND b.runtime_binding_id = r.runtime_binding_id
               AND b.runtime_target_id IS NOT DISTINCT FROM r.runtime_target_id
               AND b.runtime_authority_kind = r.runtime_authority_kind
+              AND b.runtime_binding_role = r.runtime_binding_role
               AND b.runtime_authority_digest = r.runtime_authority_digest
               AND b.user_id = $8
               AND b.runtime_binding_id = $10
               AND b.runtime_target_id IS NOT DISTINCT FROM $11
               AND b.runtime_authority_kind = $18
+              AND b.runtime_binding_role = CASE $18 WHEN 'target' THEN 'user' ELSE 'imessage' END
               AND b.runtime_authority_digest = $12
               AND u.id = r.user_id
               AND u.status = 'ACTIVE'
@@ -704,7 +727,10 @@ class ImessageRuntimeRepository:
               AND rb.active = true
               AND rb.health_state = 'healthy'
               AND rb.provider = 'hermes'
-              AND rb.role = 'user'
+              AND (
+                  ($18 = 'target' AND rb.role = 'user')
+                  OR ($18 = 'retained_owner' AND rb.role = 'imessage')
+              )
               AND rb.user_id = $8
               AND rb.account_user_id = $8
               AND rb.profile_user_id = $9
@@ -829,6 +855,7 @@ class ImessageRuntimeRepository:
                       AND r.runtime_binding_id = $8
                       AND r.runtime_target_id IS NOT DISTINCT FROM $9
                       AND r.runtime_authority_kind = $18
+                      AND r.runtime_binding_role = CASE $18 WHEN 'target' THEN 'user' ELSE 'imessage' END
                       AND r.runtime_authority_digest = $10
                       AND b.status = 'active'
                       AND b.generation = r.binding_generation
@@ -837,7 +864,9 @@ class ImessageRuntimeRepository:
                       AND b.runtime_target_id IS NOT DISTINCT FROM r.runtime_target_id
                       AND b.runtime_target_id IS NOT DISTINCT FROM $9
                       AND b.runtime_authority_kind = r.runtime_authority_kind
+                      AND b.runtime_binding_role = r.runtime_binding_role
                       AND b.runtime_authority_kind = $18
+                      AND b.runtime_binding_role = CASE $18 WHEN 'target' THEN 'user' ELSE 'imessage' END
                       AND b.runtime_authority_digest = $10
                       AND b.transport_connection_ref_hmac = $5
                       AND b.last_transport_healthy_at >= CURRENT_TIMESTAMP - INTERVAL '2 minutes'
@@ -851,7 +880,10 @@ class ImessageRuntimeRepository:
                       AND rb.active = true
                       AND rb.health_state = 'healthy'
                       AND rb.provider = 'hermes'
-                      AND rb.role = 'user'
+                      AND (
+                          ($18 = 'target' AND rb.role = 'user')
+                          OR ($18 = 'retained_owner' AND rb.role = 'imessage')
+                      )
                       AND rb.user_id = $6
                       AND rb.account_user_id = $6
                       AND rb.profile_user_id = $7

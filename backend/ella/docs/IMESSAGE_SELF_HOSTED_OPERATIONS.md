@@ -8,11 +8,12 @@ and authority contracts described here.
 
 ## Boundaries
 
-- This lane uses the exact owner's existing self-hosted Hermes runtime. New
+- This lane uses an exact owner-scoped self-hosted Hermes runtime. New
   invitation-owned profiles remain pinned to a `hermes-chat` runtime target.
-  The one configured retained owner is pinned instead to its pre-target active
-  binding under the explicit `retained_owner` authority kind; this does not
-  create another agent or permit a caller-selected or global fallback.
+  The one configured retained owner is pinned instead to a dedicated active
+  `role=imessage` binding under the explicit `retained_owner` authority kind;
+  the owner's ordinary `role=user` binding is not eligible or modified. This
+  does not create another agent or permit a caller-selected or global fallback.
 - Migrations `020_create_imessage_enrollment_authority.sql` and
   `021_create_imessage_runtime_outbox.sql`, plus the authority-shape migration
   `022_add_imessage_retained_runtime_authority.sql`, are additive and do not
@@ -126,10 +127,11 @@ the durable backend claim prevents a second inference.
 The backend writes canonical `imessage` user and assistant events under the
 owner's stable OMI session. It performs one bounded non-stream request against
 the already authorized self-hosted Hermes target or the configured owner's
-exact pre-target retained binding. A retained binding is accepted only when it
-has no runtime-target row and exact user/account/profile ownership; target
-appearance or authority drift fails closed. There is no Cloud or global Plato
-fallback and no second inference on an empty or malformed response.
+exact dedicated `role=imessage` retained binding. A retained binding is
+accepted only when it has no runtime-target row and exact user/account/profile
+ownership; a `role=user` binding, target appearance, or authority drift fails
+closed. There is no Cloud or global Plato fallback and no second inference on
+an empty or malformed response.
 Replies longer than the pinned Photon adapter's 8,000-character transport limit
 are rejected before the assistant event or delivery intent is committed; the
 bridge never relies on the adapter's silent truncation.
@@ -252,11 +254,15 @@ code so launchd can create a new connection generation. Normal service stop
 does not deregister. Deregistration is an explicit lifecycle operation and must
 complete before disabling the runtime flag.
 
-The bridge has no owner-to-agent selector. For the authorized owner canary, the
-backend operator must separately read back that the exact active invitation,
-entitlement, consent epoch, runtime binding, and `hermes-chat` target resolve to
-the preserved `plato-eval` agent. Missing or mismatched authority blocks the
-turn; the bridge cannot substitute a profile or workspace.
+The bridge has no owner-to-agent selector. Invitation-owned users must retain
+the exact active invitation, entitlement, consent epoch, runtime binding, and
+`hermes-chat` target chain. The configured retained owner instead requires one
+separate active and healthy `provider=hermes`, `role=imessage` binding whose
+profile, workspace, endpoint, service label, and protected credential reference
+identify the preserved `plato-eval` agent. The ordinary `role=user` binding is
+left unchanged and cannot satisfy retained iMessage authority. Missing,
+mismatched, target-bearing, or non-`imessage` authority blocks the turn; the
+bridge cannot substitute a profile, workspace, endpoint, or owner.
 
 ## Required protected configuration
 
@@ -278,12 +284,53 @@ reference, not by copying values into an operations receipt.
 Store values only in the approved root-owned secret mechanism. Never place
 values in Git, argv, logs, receipts, issue comments, or this document.
 
+## Retained-owner runtime binding
+
+The preserved retained owner uses a separate `ella_runtime_bindings` row with
+`provider=hermes` and `role=imessage`. It does not update, deactivate, or copy
+the owner's ordinary `role=user` row. The root-only operator entrypoint is:
+
+```text
+python backend/scripts/imessage_retained_runtime_admin.py stage
+python backend/scripts/imessage_retained_runtime_admin.py activate
+python backend/scripts/imessage_retained_runtime_admin.py rollback
+```
+
+The command reads the owner only from `ELLA_PLATO_UID`. It reads a root-owned,
+mode-0600 JSON manifest only from
+`ELLA_IMESSAGE_RETAINED_RUNTIME_MANIFEST`; no UID, endpoint, credential value,
+or manifest field is accepted in argv. The manifest contract is
+`ella.imessage.retained_runtime_manifest.v1` and pins the literal preserved
+profile and service label, exact expected workspace, exact loopback gateway
+coordinate, protected credential-reference name, owner-scoped Honcho/peer
+identifiers, and policy versions. It cannot contain unknown fields or a
+credential value.
+
+`stage` creates an inactive/pending row under the shared owner advisory lock.
+It refuses unless the owner has zero iMessage registration attempts, channel
+bindings, and message receipts, so the authority cannot be changed underneath
+an existing transport graph. Invitation or ordinary provisioning revocation
+continues to affect only `role=user`; confirmed account deletion explicitly
+disables both `role=user` and `role=imessage` under the same owner lock.
+`activate` additionally requires a separate root-owned mode-0600 receipt at
+`ELLA_IMESSAGE_RETAINED_RUNTIME_HEALTH_RECEIPT`. That receipt is content-free,
+manifest-hash bound, and must prove profile-home, workspace, service, endpoint,
+credential-reference resolution, and health equality before the row becomes
+active/healthy. Both commands are idempotent only for byte-identical manifest
+and receipt hashes. A changed row or hash fails closed.
+
+`rollback` deletes only the exact manifest-bound `role=imessage` row and is
+idempotent when it is absent. It refuses while any registration attempt,
+channel binding, or message receipt still references the row; revoke and clean
+the exact iMessage graph first. Output contains only fixed state, SHA-256 values,
+and an opaque binding fingerprint. It never prints the owner or credential.
+
 ## Inactive-first acceptance
 
 Before any live enablement, an operator must prove all of the following with
 synthetic identities and content-free receipts:
 
-1. Migrations 020 and 021 apply in sequence after 019 and the migration-009
+1. Migrations 020, 021, and 022 apply in sequence after 019 and the migration-009
    Cloud tables are unchanged.
 2. Enrollment flag false returns `rollout_disabled` and performs no provider or
    database write.

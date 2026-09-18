@@ -26,8 +26,9 @@ from ella.services.runtime_resolver import (
     CloudRuntimeAuthorityIdentity,
     IsolatedRuntime,
     retained_owner_uid_configured,
+    resolve_imessage_retained_runtime,
     resolve_isolated_runtime,
-    revalidate_runtime_authority,
+    revalidate_imessage_runtime_authority,
     runtime_authority_identity,
 )
 
@@ -90,7 +91,9 @@ class SelfHostedHermesCompletionClient:
         session_key: str,
     ) -> str:
         retained_owner = not runtime.runtime_target_id and retained_owner_uid_configured(runtime.uid)
-        if runtime.provider != "hermes" or (runtime.runtime_target_mode != "hermes-chat" and not retained_owner):
+        target_runtime = runtime.runtime_target_mode == "hermes-chat" and runtime.binding_role == "user"
+        retained_runtime = retained_owner and runtime.binding_role == "imessage"
+        if runtime.provider != "hermes" or not (target_runtime or retained_runtime):
             raise ImessageRuntimeError("imessage_runtime_target_invalid", status_code=409)
         endpoint = f"{runtime.gateway_url.rstrip('/')}/v1/chat/completions"
         try:
@@ -167,8 +170,11 @@ class ImessageRuntimeService:
         hmac_key: Optional[bytes] = None,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         runtime_resolver: Callable[..., Awaitable[Optional[IsolatedRuntime]]] = resolve_isolated_runtime,
+        retained_runtime_resolver: Callable[..., Awaitable[Optional[IsolatedRuntime]]] = (
+            resolve_imessage_retained_runtime
+        ),
         runtime_revalidator: Callable[[CloudRuntimeAuthorityIdentity], Awaitable[IsolatedRuntime]] = (
-            revalidate_runtime_authority
+            revalidate_imessage_runtime_authority
         ),
     ) -> None:
         self.repository = repository
@@ -181,6 +187,7 @@ class ImessageRuntimeService:
         )
         self.now = now
         self.runtime_resolver = runtime_resolver
+        self.retained_runtime_resolver = retained_runtime_resolver
         self.runtime_revalidator = runtime_revalidator
 
     @classmethod
@@ -464,7 +471,11 @@ class ImessageRuntimeService:
     async def _runtime(
         self, binding: dict[str, Any]
     ) -> tuple[IsolatedRuntime, CloudRuntimeAuthorityIdentity, ImessageRuntimeAuthority]:
-        runtime = await self.runtime_resolver(str(binding["omi_uid"]), target_mode="hermes-chat")
+        authority_kind = str(binding.get("runtime_authority_kind") or "")
+        if authority_kind == "retained_owner":
+            runtime = await self.retained_runtime_resolver(str(binding["omi_uid"]))
+        else:
+            runtime = await self.runtime_resolver(str(binding["omi_uid"]), target_mode="hermes-chat")
         if runtime is None:
             raise ImessageRuntimeError("imessage_runtime_unavailable", status_code=503, retryable=True)
         self._assert_runtime_matches(binding, runtime)
@@ -501,6 +512,7 @@ class ImessageRuntimeService:
                 user_id=uuid.UUID(runtime.account_user_id),
                 profile_user_id=uuid.UUID(runtime.profile_user_id),
                 runtime_binding_id=uuid.UUID(runtime.binding_id),
+                runtime_binding_role=runtime.binding_role,
                 runtime_target_id=target_id,
                 runtime_authority_kind=authority_kind,
                 runtime_binding_revision=runtime.revision,
@@ -521,11 +533,15 @@ class ImessageRuntimeService:
     def _assert_runtime_matches(binding: dict[str, Any], runtime: IsolatedRuntime) -> None:
         authority_kind = str(binding.get("runtime_authority_kind") or "")
         target_matches = authority_kind == "target" and (
-            runtime.runtime_target_mode == "hermes-chat"
+            runtime.binding_role == "user"
+            and str(binding.get("runtime_binding_role") or "") == "user"
+            and runtime.runtime_target_mode == "hermes-chat"
             and runtime.runtime_target_id == str(binding["runtime_target_id"])
         )
         retained_matches = authority_kind == "retained_owner" and (
-            binding.get("runtime_target_id") is None
+            runtime.binding_role == "imessage"
+            and str(binding.get("runtime_binding_role") or "") == "imessage"
+            and binding.get("runtime_target_id") is None
             and not runtime.runtime_target_id
             and retained_owner_uid_configured(runtime.uid)
         )

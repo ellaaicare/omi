@@ -10,6 +10,7 @@ import asyncpg
 import pytest
 
 from database import authority_advisory_lock
+from database.ella_provisioning import invalidate_self_hosted_authority_on_connection
 from database.imessage_enrollment import (
     ImessageAuthorityError,
     ImessageConsentContract,
@@ -21,6 +22,11 @@ from database.imessage_runtime import (
     ImessageRuntimeAuthority,
     ImessageRuntimeRepository,
     ImessageRuntimeRepositoryError,
+)
+from database.imessage_retained_runtime import (
+    RetainedImessageRuntimeError,
+    RetainedImessageRuntimeRepository,
+    RetainedImessageRuntimeSpec,
 )
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
@@ -264,19 +270,44 @@ async def _seed_owner(pool, *, uid: str, ordinal: int):
         entitlement_revision=4,
         account_user_id=user_id,
         profile_user_id=user_id,
+        binding_role="user",
     )
 
 
 async def _seed_retained_owner(pool, *, uid: str, ordinal: int):
     user_id, targeted = await _seed_owner(pool, uid=uid, ordinal=ordinal)
+    gateway_port = 9000 + ordinal
     async with pool.acquire() as connection:
-        await connection.execute(
-            "DELETE FROM ella_runtime_targets WHERE id = $1",
-            targeted.target_id,
+        binding_id = await connection.fetchval(
+            """
+            INSERT INTO ella_runtime_bindings (
+                user_id, account_user_id, profile_user_id, role, provider,
+                profile_name, agent_id, workspace_root, internal_gateway_url,
+                gateway_port, service_label, credential_ref, honcho_workspace,
+                observed_peer, observer_peer, template_version,
+                model_policy_version, voice_policy_version, health_state,
+                revision, active, status
+            ) VALUES (
+                $1, $1, $1, 'imessage', 'hermes', $2, $3, $4, $5,
+                $6, $7, $8, $9, $10, $11, 'template-v1',
+                'model-v1', 'voice-v1', 'healthy', 3, TRUE, 'active'
+            ) RETURNING id
+            """,
+            user_id,
+            f"retained-imessage-profile-{ordinal}",
+            f"retained-imessage-agent-{ordinal}",
+            f"/Users/ellaai/.hermes/profiles/retained-imessage-profile-{ordinal}/workspace",
+            f"http://127.0.0.1:{gateway_port}",
+            gateway_port,
+            f"ai.hermes.gateway-imessage-{ordinal}",
+            f"IMESSAGE_GATEWAY_TOKEN_{ordinal}",
+            f"imessage-honcho-{ordinal}",
+            f"imessage-observed-{ordinal}",
+            f"imessage-observer-{ordinal}",
         )
     return user_id, ImessageRuntimeSnapshot(
         uid=uid,
-        binding_id=targeted.binding_id,
+        binding_id=binding_id,
         target_id=None,
         authority_kind="retained_owner",
         authority_digest=hashlib.sha256(f"retained-runtime-{ordinal}".encode()).hexdigest(),
@@ -284,6 +315,7 @@ async def _seed_retained_owner(pool, *, uid: str, ordinal: int):
         entitlement_revision=0,
         account_user_id=user_id,
         profile_user_id=user_id,
+        binding_role="imessage",
     )
 
 
@@ -320,9 +352,18 @@ async def _runtime_authority(pool, *, uid: str, ordinal: int, runtime: ImessageR
         runtime_target_entitlement_revision=runtime.entitlement_revision,
         runtime_target_updated_at=target_updated_at,
         runtime_authority_digest=runtime.authority_digest,
-        runtime_agent_id=f"imessage-agent-{ordinal}",
+        runtime_agent_id=(
+            f"retained-imessage-agent-{ordinal}"
+            if runtime.authority_kind == "retained_owner"
+            else f"imessage-agent-{ordinal}"
+        ),
         runtime_instance_id=None,
-        runtime_profile_name=f"imessage-profile-{ordinal}",
+        runtime_profile_name=(
+            f"retained-imessage-profile-{ordinal}"
+            if runtime.authority_kind == "retained_owner"
+            else f"imessage-profile-{ordinal}"
+        ),
+        runtime_binding_role=runtime.binding_role,
     )
 
 
@@ -591,10 +632,13 @@ def test_retained_authority_migration_upgrades_existing_target_rows_without_rewr
                 """
                 SELECT
                     a.runtime_authority_kind AS attempt_kind,
+                    a.runtime_binding_role AS attempt_role,
                     a.runtime_target_id AS attempt_target,
                     b.runtime_authority_kind AS binding_kind,
+                    b.runtime_binding_role AS binding_role,
                     b.runtime_target_id AS binding_target,
                     r.runtime_authority_kind AS receipt_kind,
+                    r.runtime_binding_role AS receipt_role,
                     r.runtime_target_id AS receipt_target
                 FROM ella_imessage_registration_attempts a
                 JOIN ella_imessage_channel_bindings b ON b.registration_attempt_id = a.id
@@ -605,10 +649,13 @@ def test_retained_authority_migration_upgrades_existing_target_rows_without_rewr
             )
             assert dict(rows) == {
                 "attempt_kind": "target",
+                "attempt_role": "user",
                 "attempt_target": runtime.target_id,
                 "binding_kind": "target",
+                "binding_role": "user",
                 "binding_target": runtime.target_id,
                 "receipt_kind": "target",
+                "receipt_role": "user",
                 "receipt_target": runtime.target_id,
             }
             with pytest.raises(asyncpg.CheckViolationError):
@@ -618,6 +665,224 @@ def test_retained_authority_migration_upgrades_existing_target_rows_without_rewr
                 )
 
     asyncio.run(_run_with_database(scenario, migration_chain=MIGRATION_CHAIN[:-1]))
+
+
+def test_retained_imessage_binding_admin_is_two_phase_exact_and_rollback_safe():
+    async def scenario(pool):
+        uid = "imessage-retained-admin-owner"
+        user_id, ordinary_runtime = await _seed_owner(pool, uid=uid, ordinal=19)
+        repository = RetainedImessageRuntimeRepository(pool, owner_uid=uid)
+        spec = RetainedImessageRuntimeSpec(
+            profile_name="plato-eval",
+            agent_id="plato-eval",
+            workspace_root="/Users/ellaai/.hermes/profiles/plato-eval/workspace",
+            internal_gateway_url="http://127.0.0.1:8657",
+            gateway_port=8657,
+            service_label="ai.hermes.gateway-plato-eval",
+            credential_ref="ELLA_IMESSAGE_PLATO_EVAL_GATEWAY_TOKEN",
+            honcho_workspace="plato-eval-retained",
+            observed_peer="plato-eval-owner",
+            observer_peer="plato-eval-observer",
+            template_version="retained-v1",
+            model_policy_version="retained-model-v1",
+            voice_policy_version="retained-voice-v1",
+        )
+        manifest_sha256 = hashlib.sha256(b"retained-admin-manifest").hexdigest()
+        health_sha256 = hashlib.sha256(b"retained-admin-health").hexdigest()
+
+        _, collision_runtime = await _seed_owner(
+            pool,
+            uid="imessage-retained-admin-collision",
+            ordinal=21,
+        )
+        async with pool.acquire() as connection:
+            colliding_service_label = await connection.fetchval(
+                "UPDATE ella_runtime_bindings SET service_label = $2 WHERE id = $1 RETURNING service_label",
+                collision_runtime.binding_id,
+                spec.service_label,
+            )
+        assert colliding_service_label == spec.service_label
+        with pytest.raises(
+            RetainedImessageRuntimeError,
+            match="imessage_retained_physical_identity_conflict",
+        ):
+            await repository.stage(uid=uid, spec=spec, manifest_sha256=manifest_sha256)
+        async with pool.acquire() as connection:
+            await connection.execute(
+                "UPDATE ella_runtime_bindings SET service_label = $2 WHERE id = $1",
+                collision_runtime.binding_id,
+                "ai.hermes.gateway-imessage-21",
+            )
+
+        staged, created = await repository.stage(uid=uid, spec=spec, manifest_sha256=manifest_sha256)
+        assert created is True
+        assert staged["role"] == "imessage"
+        assert staged["active"] is False
+        assert staged["status"] == "disabled"
+        assert staged["health_state"] == "pending"
+        same, created = await repository.stage(uid=uid, spec=spec, manifest_sha256=manifest_sha256)
+        assert created is False
+        assert same["id"] == staged["id"]
+
+        with pytest.raises(RetainedImessageRuntimeError, match="imessage_retained_binding_conflict"):
+            await repository.stage(
+                uid=uid,
+                spec=RetainedImessageRuntimeSpec(**{**spec.__dict__, "agent_id": "wrong-agent"}),
+                manifest_sha256=manifest_sha256,
+            )
+        with pytest.raises(RetainedImessageRuntimeError, match="imessage_retained_owner_forbidden"):
+            await repository.stage(uid="other-owner", spec=spec, manifest_sha256=manifest_sha256)
+
+        async with pool.acquire() as connection:
+            await connection.execute(
+                "UPDATE ella_runtime_bindings SET agent_id = 'drifted-agent' WHERE id = $1",
+                staged["id"],
+            )
+        with pytest.raises(RetainedImessageRuntimeError, match="imessage_retained_binding_conflict"):
+            await repository.activate(
+                uid=uid,
+                spec=spec,
+                manifest_sha256=manifest_sha256,
+                health_receipt_sha256=health_sha256,
+            )
+        async with pool.acquire() as connection:
+            await connection.execute(
+                "UPDATE ella_runtime_bindings SET agent_id = $2 WHERE id = $1",
+                staged["id"],
+                spec.agent_id,
+            )
+
+        activated, changed = await repository.activate(
+            uid=uid,
+            spec=spec,
+            manifest_sha256=manifest_sha256,
+            health_receipt_sha256=health_sha256,
+        )
+        assert changed is True
+        assert activated["active"] is True
+        assert activated["status"] == "active"
+        assert activated["health_state"] == "healthy"
+        same, changed = await repository.activate(
+            uid=uid,
+            spec=spec,
+            manifest_sha256=manifest_sha256,
+            health_receipt_sha256=health_sha256,
+        )
+        assert changed is False
+        assert same["id"] == activated["id"]
+
+        async with pool.acquire() as connection:
+            ordinary = await connection.fetchrow(
+                "SELECT id, role, active FROM ella_runtime_bindings WHERE id = $1",
+                ordinary_runtime.binding_id,
+            )
+            target_count = await connection.fetchval(
+                "SELECT COUNT(*) FROM ella_runtime_targets WHERE runtime_binding_id = $1",
+                ordinary_runtime.binding_id,
+            )
+        assert ordinary["role"] == "user"
+        assert ordinary["active"] is True
+        assert int(target_count) == 1
+
+        runtime = ImessageRuntimeSnapshot(
+            uid=uid,
+            binding_id=activated["id"],
+            target_id=None,
+            authority_kind="retained_owner",
+            authority_digest=hashlib.sha256(b"retained-admin-authority").hexdigest(),
+            binding_revision=int(activated["revision"]),
+            entitlement_revision=0,
+            account_user_id=user_id,
+            profile_user_id=user_id,
+            binding_role="imessage",
+        )
+        enrollment = ImessageEnrollmentRepository(pool)
+        consent = await _grant(enrollment, uid=uid, ordinal=19)
+        await _pending_binding(
+            enrollment,
+            uid=uid,
+            ordinal=19,
+            runtime=runtime,
+            receipt=consent,
+        )
+        with pytest.raises(RetainedImessageRuntimeError, match="imessage_retained_graph_not_empty"):
+            await repository.stage(uid=uid, spec=spec, manifest_sha256=manifest_sha256)
+        with pytest.raises(RetainedImessageRuntimeError, match="imessage_retained_binding_in_use"):
+            await repository.rollback(uid=uid, manifest_sha256=manifest_sha256)
+
+        async with pool.acquire() as connection:
+            await connection.execute(
+                "DELETE FROM ella_imessage_channel_bindings WHERE runtime_binding_id = $1",
+                activated["id"],
+            )
+            await connection.execute(
+                "DELETE FROM ella_imessage_registration_attempts WHERE runtime_binding_id = $1",
+                activated["id"],
+            )
+        assert await repository.rollback(uid=uid, manifest_sha256=manifest_sha256) is True
+        assert await repository.rollback(uid=uid, manifest_sha256=manifest_sha256) is False
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_invitation_revocation_preserves_retained_role_but_account_deletion_disables_it():
+    async def scenario(pool):
+        uid = "imessage-retained-lifecycle-owner"
+        user_id, runtime = await _seed_retained_owner(pool, uid=uid, ordinal=20)
+        owner = authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                proof = await authority_advisory_lock.acquire_authority_lock(connection, owner=owner)
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=proof,
+                )
+                await invalidate_self_hosted_authority_on_connection(
+                    connection,
+                    uid=uid,
+                    user_id=user_id,
+                    reason="self_hosted_invitation_revoked",
+                    owner_lock=proof,
+                )
+        async with pool.acquire() as connection:
+            rows = await connection.fetch(
+                "SELECT role, active, status FROM ella_runtime_bindings WHERE user_id = $1 ORDER BY role",
+                user_id,
+            )
+        by_role = {str(row["role"]): row for row in rows}
+        assert by_role["user"]["active"] is False
+        assert by_role["user"]["status"] == "disabled"
+        assert by_role["imessage"]["active"] is True
+        assert by_role["imessage"]["status"] == "active"
+
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                proof = await authority_advisory_lock.acquire_authority_lock(connection, owner=owner)
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=proof,
+                )
+                await invalidate_self_hosted_authority_on_connection(
+                    connection,
+                    uid=uid,
+                    user_id=user_id,
+                    reason="account_deletion_confirmed",
+                    owner_lock=proof,
+                    include_imessage_binding=True,
+                )
+        async with pool.acquire() as connection:
+            retained = await connection.fetchrow(
+                "SELECT active, status FROM ella_runtime_bindings WHERE id = $1",
+                runtime.binding_id,
+            )
+        assert retained["active"] is False
+        assert retained["status"] == "disabled"
+
+    asyncio.run(_run_with_database(scenario))
 
 
 def test_two_owner_identity_collision_has_zero_cross_write():
@@ -1253,6 +1518,27 @@ def test_retained_owner_authority_is_targetless_and_fails_closed_if_a_target_app
         assert resolved["runtime_authority_kind"] == "retained_owner"
         assert resolved["runtime_target_id"] is None
         assert authority.runtime_authority_kind == "retained_owner"
+        async with pool.acquire() as connection:
+            binding_roles = await connection.fetch(
+                """
+                SELECT id, role, active,
+                       EXISTS (
+                           SELECT 1 FROM ella_runtime_targets target
+                           WHERE target.runtime_binding_id = binding.id
+                       ) AS has_target
+                FROM ella_runtime_bindings binding
+                WHERE user_id = $1 AND provider = 'hermes'
+                ORDER BY role
+                """,
+                user_id,
+            )
+        by_role = {str(row["role"]): row for row in binding_roles}
+        assert set(by_role) == {"imessage", "user"}
+        assert by_role["imessage"]["id"] == runtime.binding_id
+        assert by_role["imessage"]["has_target"] is False
+        assert by_role["user"]["id"] != runtime.binding_id
+        assert by_role["user"]["active"] is True
+        assert by_role["user"]["has_target"] is True
         connection_key = hashlib.sha256(b"retained-connection").hexdigest()
         await runtime_repository.record_heartbeat(
             binding_id=str(binding["id"]),

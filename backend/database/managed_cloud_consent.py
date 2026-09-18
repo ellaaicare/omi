@@ -254,6 +254,7 @@ async def _quarantine_on_connection(
     user_id: uuid.UUID,
     reason: str,
     owner_lock: authority_advisory_lock.AuthorityLockProof,
+    include_imessage_binding: bool = False,
 ) -> None:
     await authority_advisory_lock.require_self_owner_lock(
         conn,
@@ -266,6 +267,7 @@ async def _quarantine_on_connection(
         user_id=user_id,
         reason=reason,
         owner_lock=owner_lock,
+        include_imessage_binding=include_imessage_binding,
     )
     await conn.execute(
         """
@@ -680,6 +682,7 @@ async def unlink_self_owner_account_on_deletion(*, uid: str) -> None:
                     user_id=user_id,
                     reason="account_deletion_confirmed",
                     owner_lock=owner_lock,
+                    include_imessage_binding=True,
                 )
                 # ella_invitation_redemptions.user_id is ON DELETE RESTRICT; detach it.
                 await conn.execute(

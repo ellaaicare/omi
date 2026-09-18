@@ -196,6 +196,7 @@ async def invalidate_self_hosted_authority_on_connection(
     reason: str,
     owner_lock: authority_advisory_lock.AuthorityLockProof,
     invitation_id: Optional[uuid.UUID] = None,
+    include_imessage_binding: bool = False,
 ) -> dict[str, int]:
     """Atomically make an invitation-owned local Hermes runtime unusable."""
     await authority_advisory_lock.require_self_owner_lock(
@@ -276,8 +277,10 @@ async def invalidate_self_hosted_authority_on_connection(
         WHERE scope.binding_id = binding.id
           AND binding.user_id = $1
           AND binding.provider = 'hermes'
+          AND (binding.role = 'user' OR ($2 AND binding.role = 'imessage'))
         """,
         user_id,
+        include_imessage_binding,
     )
     binding_rows = await connection.fetch(
         """
@@ -292,12 +295,14 @@ async def invalidate_self_hosted_authority_on_connection(
             updated_at = CURRENT_TIMESTAMP
         WHERE user_id = $1
           AND provider = 'hermes'
+          AND (role = 'user' OR ($4 AND role = 'imessage'))
           AND (active = true OR status <> 'disabled' OR health_state <> 'unhealthy')
         RETURNING id
         """,
         user_id,
         json.dumps({"content_free": True, "reason": reason}),
         reason,
+        include_imessage_binding,
     )
     job_rows = await connection.fetch(
         """

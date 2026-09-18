@@ -19,6 +19,7 @@ on:
       - "backend/database/honcho_attestation.py"
       - "backend/database/hermes_cloud_enrichment_outbox.py"
       - "backend/database/imessage_enrollment.py"
+      - "backend/database/imessage_retained_runtime.py"
       - "backend/database/imessage_runtime.py"
       - "backend/sidecars/imessage_photon_bridge/**"
       - "backend/database/invitations.py"
@@ -92,6 +93,7 @@ on:
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_product_fit_canary.py"
+      - "backend/scripts/imessage_retained_runtime_admin.py"
       - "backend/scripts/ella_memory_e2e_smoke.py"
       - "backend/scripts/hermes_cloud_shadow.py"
       - "backend/scripts/voice_canary_admin.py"
@@ -128,6 +130,7 @@ on:
       - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
       - "backend/tests/unit/test_ella_runtime_route_isolation.py"
       - "backend/tests/unit/test_imessage_enrollment.py"
+      - "backend/tests/unit/test_imessage_retained_runtime_admin.py"
       - "backend/tests/unit/test_imessage_enrollment_openapi.py"
       - "backend/tests/unit/test_imessage_runtime.py"
       - "backend/tests/unit/test_imessage_runtime_openapi.py"
@@ -179,6 +182,7 @@ on:
       - "backend/database/honcho_attestation.py"
       - "backend/database/hermes_cloud_enrichment_outbox.py"
       - "backend/database/imessage_enrollment.py"
+      - "backend/database/imessage_retained_runtime.py"
       - "backend/database/imessage_runtime.py"
       - "backend/sidecars/imessage_photon_bridge/**"
       - "backend/database/invitations.py"
@@ -252,6 +256,7 @@ on:
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_product_fit_canary.py"
+      - "backend/scripts/imessage_retained_runtime_admin.py"
       - "backend/scripts/ella_memory_e2e_smoke.py"
       - "backend/scripts/hermes_cloud_shadow.py"
       - "backend/scripts/voice_canary_admin.py"
@@ -288,6 +293,7 @@ on:
       - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
       - "backend/tests/unit/test_ella_runtime_route_isolation.py"
       - "backend/tests/unit/test_imessage_enrollment.py"
+      - "backend/tests/unit/test_imessage_retained_runtime_admin.py"
       - "backend/tests/unit/test_imessage_enrollment_openapi.py"
       - "backend/tests/unit/test_imessage_runtime.py"
       - "backend/tests/unit/test_imessage_runtime_openapi.py"
@@ -386,6 +392,7 @@ jobs:
           database/honcho_attestation.py
           database/hermes_cloud_enrichment_outbox.py
           database/imessage_enrollment.py
+          database/imessage_retained_runtime.py
           database/imessage_runtime.py
           sidecars/imessage_photon_bridge/__init__.py
           sidecars/imessage_photon_bridge/bridge.py
@@ -455,6 +462,7 @@ jobs:
           scripts/ella_observer_cron.py
           scripts/hermes_cloud_enrichment_smoke.py
           scripts/hermes_product_fit_canary.py
+          scripts/imessage_retained_runtime_admin.py
           scripts/pilot_invite_admin.py
           scripts/hermes_cloud_shadow.py
           scripts/voice_canary_admin.py
@@ -475,6 +483,7 @@ jobs:
           database/authority_advisory_lock.py
           database/ella_caregivers.py
           database/imessage_enrollment.py
+          database/imessage_retained_runtime.py
           database/imessage_runtime.py
           database/ella_provisioning.py database/honcho_attestation.py database/invitations.py
           sidecars/imessage_photon_bridge/__init__.py
@@ -522,6 +531,7 @@ jobs:
           scripts/ella_memory_e2e_smoke.py
           scripts/ella_observer_cron.py
           scripts/hermes_product_fit_canary.py
+          scripts/imessage_retained_runtime_admin.py
           tests/unit/test_ella_callbacks_summary_update.py
           tests/unit/test_authority_advisory_lock.py
           tests/unit/test_authority_writer_guard.py
@@ -540,6 +550,7 @@ jobs:
           tests/unit/test_ella_reviewed_route_integration.py
           tests/unit/test_ella_runtime_route_isolation.py
           tests/unit/test_imessage_enrollment.py
+          tests/unit/test_imessage_retained_runtime_admin.py
           tests/unit/test_imessage_enrollment_openapi.py
           tests/unit/test_imessage_runtime.py
           tests/unit/test_imessage_runtime_openapi.py
@@ -589,6 +600,7 @@ jobs:
           imessage_ids="$(
             pytest --collect-only -q \
               tests/unit/test_imessage_enrollment.py \
+              tests/unit/test_imessage_retained_runtime_admin.py \
               tests/unit/test_imessage_enrollment_openapi.py \
               tests/unit/test_imessage_runtime.py \
               tests/unit/test_imessage_runtime_openapi.py \
@@ -596,10 +608,14 @@ jobs:
               tests/postgres/test_imessage_enrollment_postgres.py |
               sed '/^$/d'
           )"
-          test "$(grep -c '::' <<<"$imessage_ids")" -eq 114
+          test "$(grep -c '::' <<<"$imessage_ids")" -eq 121
           required_imessage_ids=(
             "tests/unit/test_imessage_enrollment.py::test_previous_policy_consent_is_rejected_before_authority_write"
             "tests/unit/test_imessage_enrollment.py::test_enrollment_runtime_accepts_only_exact_configured_retained_owner"
+            "tests/unit/test_imessage_enrollment.py::test_retained_imessage_resolver_selects_only_the_dedicated_runtime_role"
+            "tests/unit/test_imessage_retained_runtime_admin.py::test_manifest_pins_preserved_profile_and_exact_loopback_authority"
+            "tests/unit/test_imessage_retained_runtime_admin.py::test_protected_manifest_refuses_non_root_or_insecure_file"
+            "tests/unit/test_imessage_retained_runtime_admin.py::test_health_receipt_is_content_free_exact_and_manifest_bound"
             "tests/unit/test_imessage_enrollment.py::test_revoke_requires_exact_local_cleanup_and_reports_retained_provider_user"
             "tests/unit/test_imessage_enrollment.py::test_revoke_stays_typed_unavailable_when_local_cleanup_is_ambiguous"
             "tests/unit/test_imessage_enrollment_openapi.py::test_revoke_cleanup_contract_never_claims_provider_user_deletion"
@@ -617,6 +633,7 @@ jobs:
             "tests/unit/test_imessage_enrollment_openapi.py::test_all_literal_service_statuses_and_reasons_are_declared_in_openapi"
             "tests/unit/test_imessage_enrollment.py::test_mounted_transport_proof_denies_before_service[None-None-503]"
             "tests/unit/test_imessage_runtime.py::test_text_dm_claim_precedes_model_and_delivery_requires_send_start"
+            "tests/unit/test_imessage_runtime.py::test_authority_digest_preserves_user_contract_and_domains_imessage_role"
             "tests/unit/test_imessage_runtime.py::test_exact_configured_retained_owner_uses_targetless_binding_without_fallback"
             "tests/unit/test_imessage_runtime.py::test_targetless_non_owner_is_denied_before_heartbeat_or_model"
             "tests/unit/test_imessage_runtime.py::test_completion_transport_accepts_only_the_configured_targetless_owner"
@@ -667,6 +684,8 @@ jobs:
             "tests/unit/test_imessage_photon_bridge.py::test_lost_delivery_start_response_is_quarantined_without_provider_send"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_migration_and_repository_enforce_consent_proof_replay_and_revoke"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_retained_authority_migration_upgrades_existing_target_rows_without_rewriting_identity"
+            "tests/postgres/test_imessage_enrollment_postgres.py::test_retained_imessage_binding_admin_is_two_phase_exact_and_rollback_safe"
+            "tests/postgres/test_imessage_enrollment_postgres.py::test_invitation_revocation_preserves_retained_role_but_account_deletion_disables_it"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_two_owner_identity_collision_has_zero_cross_write"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_provider_registration_identity_is_unique_without_cross_owner_mutation"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners"
@@ -683,6 +702,7 @@ jobs:
           done
           pytest \
             tests/unit/test_imessage_enrollment.py \
+            tests/unit/test_imessage_retained_runtime_admin.py \
             tests/unit/test_imessage_enrollment_openapi.py \
             tests/unit/test_imessage_runtime.py \
             tests/unit/test_imessage_runtime_openapi.py \

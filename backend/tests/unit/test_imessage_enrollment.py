@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from database.imessage_enrollment import ImessageAuthorityError, ImessageRuntimeSnapshot
 from ella.routers import imessage_enrollment as enrollment_router
 from ella.services import imessage_enrollment as enrollment_service
+from ella.services import runtime_resolver
 from ella.services.imessage_enrollment import (
     CONSENT_POLICY_VERSION,
     CONSENT_PROCESSOR_SET_HASH,
@@ -49,6 +50,7 @@ def _snapshot() -> ImessageRuntimeSnapshot:
         entitlement_revision=4,
         account_user_id=USER_ID,
         profile_user_id=USER_ID,
+        binding_role="user",
     )
 
 
@@ -77,6 +79,7 @@ def _retained_runtime(uid: str) -> IsolatedRuntime:
         revision=3,
         account_user_id=str(USER_ID),
         profile_user_id=str(USER_ID),
+        binding_role="imessage",
     )
 
 
@@ -367,11 +370,14 @@ def test_enrollment_runtime_accepts_only_exact_configured_retained_owner(monkeyp
     repository = FakeRepository()
     service = _service(repository, FakeRegistrar(repository.events))
     monkeypatch.setenv("ELLA_PLATO_UID", "owner-a")
+    retained_resolver = AsyncMock(return_value=_retained_runtime("owner-a"))
+    ordinary_resolver = AsyncMock()
     monkeypatch.setattr(
         enrollment_service,
-        "resolve_isolated_runtime",
-        AsyncMock(return_value=_retained_runtime("owner-a")),
+        "resolve_imessage_retained_runtime",
+        retained_resolver,
     )
+    monkeypatch.setattr(enrollment_service, "resolve_isolated_runtime", ordinary_resolver)
 
     _, snapshot, identity = asyncio.run(service._runtime("owner-a"))
 
@@ -380,6 +386,8 @@ def test_enrollment_runtime_accepts_only_exact_configured_retained_owner(monkeyp
     assert snapshot.target_id is None
     assert snapshot.entitlement_revision == 0
     assert identity.target_mode == "retained"
+    retained_resolver.assert_awaited_once_with("owner-a")
+    ordinary_resolver.assert_not_awaited()
 
     monkeypatch.setattr(
         enrollment_service,
@@ -400,6 +408,17 @@ def test_enrollment_runtime_accepts_only_exact_configured_retained_owner(monkeyp
     assert repository.events == []
 
 
+def test_retained_imessage_resolver_selects_only_the_dedicated_runtime_role(monkeypatch):
+    repository = SimpleNamespace(resolve_self_hosted_active_direct=AsyncMock(return_value={"id": "binding-a"}))
+    selected = object()
+    monkeypatch.setattr(runtime_resolver, "runtime_from_binding", lambda binding, uid: selected)
+
+    result = asyncio.run(runtime_resolver.resolve_imessage_retained_runtime("owner-a", repository=repository))
+
+    assert result is selected
+    repository.resolve_self_hosted_active_direct.assert_awaited_once_with(uid="owner-a", role="imessage")
+
+
 def test_start_persists_before_provider_and_revalidates_before_finalization(monkeypatch):
     monkeypatch.setenv("ELLA_IMESSAGE_ENROLLMENT_ENABLED", "true")
     events = []
@@ -412,7 +431,7 @@ def test_start_persists_before_provider_and_revalidates_before_finalization(monk
         assert observed is identity
         events.append(("revalidate", {}))
 
-    monkeypatch.setattr(enrollment_service, "revalidate_runtime_authority", revalidate)
+    monkeypatch.setattr(enrollment_service, "revalidate_imessage_runtime_authority", revalidate)
 
     body, created = asyncio.run(
         service.start(
@@ -451,7 +470,7 @@ def test_provider_accepted_retry_skips_second_external_registration(monkeypatch)
         assert observed is identity
         events.append(("revalidate", {}))
 
-    monkeypatch.setattr(enrollment_service, "revalidate_runtime_authority", revalidate)
+    monkeypatch.setattr(enrollment_service, "revalidate_imessage_runtime_authority", revalidate)
 
     asyncio.run(
         service.start(
@@ -509,7 +528,7 @@ def test_provider_accepted_finalization_drift_is_quarantined_without_repeat_regi
             SimpleNamespace(uid="owner-a", target_mode="hermes-chat", digest="a" * 64),
         )
     )
-    monkeypatch.setattr(enrollment_service, "revalidate_runtime_authority", AsyncMock())
+    monkeypatch.setattr(enrollment_service, "revalidate_imessage_runtime_authority", AsyncMock())
 
     with pytest.raises(ImessageEnrollmentError) as failure:
         asyncio.run(
