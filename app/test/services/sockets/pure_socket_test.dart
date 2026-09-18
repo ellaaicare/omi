@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/services/sockets/pure_socket.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
@@ -61,6 +62,19 @@ void main() {
 
     expect(forceRefreshes, [true]);
     expect(headers['Authorization'], 'Bearer fresh-token');
+  });
+
+  test('auth refresh failure remains a disconnected retryable socket result', () async {
+    final socket = PureSocket(
+      'wss://example.invalid',
+      authHeaderProvider: ({required forceRefresh}) async {
+        expect(forceRefresh, isTrue);
+        throw const ClientApiFailure(ClientApiFailureKind.authenticationRequired, retryable: true);
+      },
+    );
+
+    expect(await socket.connect(), isFalse);
+    expect(socket.status, PureSocketStatus.notConnected);
   });
 
   test('disconnect waits for the underlying channel close and notifies its listener once', () async {
