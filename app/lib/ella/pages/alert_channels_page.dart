@@ -216,7 +216,9 @@ class _ChannelStatusRow extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Semantics(
+        key: ValueKey('channel-status-${channel.channel}'),
         container: true,
+        excludeSemantics: true,
         label: '${channel.displayName}, $badge',
         child: Container(
           padding: const EdgeInsets.all(12),

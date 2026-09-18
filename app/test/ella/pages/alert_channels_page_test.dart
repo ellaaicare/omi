@@ -25,6 +25,8 @@ EscalationPolicy _policy() {
 
 void main() {
   testWidgets('does not present legacy phone-only iMessage as ready', (tester) async {
+    final semanticsHandle = tester.ensureSemantics();
+
     await tester.pumpWidget(
       MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -41,7 +43,9 @@ void main() {
     expect(find.text('Email on file'), findsOneWidget);
     expect(find.text('Enabled'), findsOneWidget);
 
-    final semantics = tester.getSemantics(find.text('iMessage'));
-    expect(semantics.label, contains('Unavailable'));
+    final semantics = tester.getSemantics(find.byKey(const ValueKey('channel-status-imessage')));
+    expect(semantics.label, 'iMessage, Unavailable');
+    expect(semantics.childrenCountInTraversalOrder, 0);
+    semanticsHandle.dispose();
   });
 }
