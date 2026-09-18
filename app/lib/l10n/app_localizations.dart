@@ -16322,6 +16322,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Ella could not update iMessage setup. Nothing was connected or sent.'**
   String get ellaImessageErrorGeneric;
+
+  /// No description provided for @ellaAlertChannelsUnavailableBadge.
+  ///
+  /// In en, this message translates to:
+  /// **'Unavailable'**
+  String get ellaAlertChannelsUnavailableBadge;
+
+  /// No description provided for @ellaAlertChannelsImessageUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'iMessage is unavailable while Ella upgrades messaging.'**
+  String get ellaAlertChannelsImessageUnavailable;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

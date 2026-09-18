@@ -964,7 +964,7 @@ jobs:
             "tests/unit/test_ella_escalations_router_auth.py::test_policy_view_uid_uses_authenticated_uid_when_uid_omitted"
             "tests/unit/test_ella_escalations_router_auth.py::test_policy_view_uid_rejects_cross_user_read"
             "tests/unit/test_ella_escalations_router_auth.py::test_policy_view_denies_absent_empty_malformed_and_wrong_credentials_before_context"
-            "tests/unit/test_ella_escalations_router_auth.py::test_load_context_uses_canonical_phone_number_for_user_imessage"
+            "tests/unit/test_ella_escalations_router_auth.py::test_load_context_does_not_advertise_imessage_from_phone_alone"
             "tests/unit/test_ella_escalations_router_auth.py::test_load_context_allows_identities_phone_override"
             "tests/unit/test_ella_escalations_router_auth.py::test_policy_markdown_internal_key_reaches_same_auth_and_context"
             "tests/unit/test_ella_escalations_router_auth.py::test_evaluate_internal_key_reaches_load_context_for_explicit_uid"

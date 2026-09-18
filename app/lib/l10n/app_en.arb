@@ -10297,5 +10297,7 @@
         "type": "String"
       }
     }
-  }
+  },
+  "ellaAlertChannelsUnavailableBadge": "Unavailable",
+  "ellaAlertChannelsImessageUnavailable": "iMessage is unavailable while Ella upgrades messaging."
 }

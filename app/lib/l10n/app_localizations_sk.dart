@@ -8749,4 +8749,10 @@ class AppLocalizationsSk extends AppLocalizations {
 
   @override
   String get ellaImessageErrorGeneric => 'Ella could not update iMessage setup. Nothing was connected or sent.';
+
+  @override
+  String get ellaAlertChannelsUnavailableBadge => 'Unavailable';
+
+  @override
+  String get ellaAlertChannelsImessageUnavailable => 'iMessage is unavailable while Ella upgrades messaging.';
 }
