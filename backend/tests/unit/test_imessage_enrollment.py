@@ -39,8 +39,10 @@ TRANSPORT_TOKEN = "t" * 32
 
 def _snapshot() -> ImessageRuntimeSnapshot:
     return ImessageRuntimeSnapshot(
+        uid="owner-a",
         binding_id=BINDING_ID,
         target_id=TARGET_ID,
+        authority_kind="target",
         authority_digest="a" * 64,
         binding_revision=3,
         entitlement_revision=4,

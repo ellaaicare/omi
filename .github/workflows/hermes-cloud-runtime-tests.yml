@@ -87,6 +87,7 @@ on:
       - "backend/migrations/016_create_today_cards.sql"
       - "backend/migrations/020_create_imessage_enrollment_authority.sql"
       - "backend/migrations/021_create_imessage_runtime_outbox.sql"
+      - "backend/migrations/022_add_imessage_retained_runtime_authority.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
@@ -246,6 +247,7 @@ on:
       - "backend/migrations/016_create_today_cards.sql"
       - "backend/migrations/020_create_imessage_enrollment_authority.sql"
       - "backend/migrations/021_create_imessage_runtime_outbox.sql"
+      - "backend/migrations/022_add_imessage_retained_runtime_authority.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
@@ -594,7 +596,7 @@ jobs:
               tests/postgres/test_imessage_enrollment_postgres.py |
               sed '/^$/d'
           )"
-          test "$(grep -c '::' <<<"$imessage_ids")" -eq 106
+          test "$(grep -c '::' <<<"$imessage_ids")" -eq 110
           required_imessage_ids=(
             "tests/unit/test_imessage_enrollment.py::test_previous_policy_consent_is_rejected_before_authority_write"
             "tests/unit/test_imessage_enrollment.py::test_revoke_requires_exact_local_cleanup_and_reports_retained_provider_user"
@@ -613,6 +615,9 @@ jobs:
             "tests/unit/test_imessage_enrollment_openapi.py::test_all_literal_service_statuses_and_reasons_are_declared_in_openapi"
             "tests/unit/test_imessage_enrollment.py::test_mounted_transport_proof_denies_before_service[None-None-503]"
             "tests/unit/test_imessage_runtime.py::test_text_dm_claim_precedes_model_and_delivery_requires_send_start"
+            "tests/unit/test_imessage_runtime.py::test_exact_configured_retained_owner_uses_targetless_binding_without_fallback"
+            "tests/unit/test_imessage_runtime.py::test_targetless_non_owner_is_denied_before_heartbeat_or_model"
+            "tests/unit/test_imessage_runtime.py::test_completion_transport_accepts_only_the_configured_targetless_owner"
             "tests/unit/test_imessage_runtime.py::test_provider_length_reply_is_rejected_before_canonical_write_or_delivery"
             "tests/unit/test_imessage_runtime.py::test_unknown_sender_returns_status_only_without_model_write_or_replayable_reply"
             "tests/unit/test_imessage_runtime.py::test_model_error_after_send_boundary_is_quarantined_without_retry"
@@ -662,6 +667,7 @@ jobs:
             "tests/postgres/test_imessage_enrollment_postgres.py::test_two_owner_identity_collision_has_zero_cross_write"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_provider_registration_identity_is_unique_without_cross_owner_mutation"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners"
+            "tests/postgres/test_imessage_enrollment_postgres.py::test_retained_owner_authority_is_targetless_and_fails_closed_if_a_target_appears"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_revoke_returns_exact_provider_request_for_idempotent_local_cleanup"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_expired_pending_binding_is_atomically_retired_and_replacement_can_start"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_unresolved_provider_acceptance_blocks_competing_registration_graph"

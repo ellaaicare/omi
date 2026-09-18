@@ -27,6 +27,7 @@ from database.honcho_attestation import authority_credential, retain_authority_c
 from ella.services.provisioning import ProvisioningError
 from ella.services.runtime_resolver import (
     IsolatedRuntime,
+    retained_owner_uid_configured,
     resolve_isolated_runtime,
     revalidate_runtime_authority,
     runtime_authority_identity,
@@ -717,12 +718,17 @@ class ImessageEnrollmentService:
             if runtime is None or runtime.provider != "hermes":
                 raise ProvisioningError("self_hosted_runtime_required", retryable=False)
             identity = runtime_authority_identity(runtime)
+            retained_owner = not runtime.runtime_target_id
+            if retained_owner and not retained_owner_uid_configured(uid):
+                raise ProvisioningError("retained_runtime_owner_forbidden", retryable=False)
             snapshot = ImessageRuntimeSnapshot(
+                uid=uid,
                 binding_id=uuid.UUID(runtime.binding_id),
-                target_id=uuid.UUID(runtime.runtime_target_id),
+                target_id=uuid.UUID(runtime.runtime_target_id) if runtime.runtime_target_id else None,
+                authority_kind="retained_owner" if retained_owner else "target",
                 authority_digest=identity.digest,
                 binding_revision=runtime.revision,
-                entitlement_revision=runtime.target_entitlement_revision,
+                entitlement_revision=0 if retained_owner else runtime.target_entitlement_revision,
                 account_user_id=uuid.UUID(runtime.account_user_id),
                 profile_user_id=uuid.UUID(runtime.profile_user_id),
             )

@@ -25,6 +25,7 @@ from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import (
     CloudRuntimeAuthorityIdentity,
     IsolatedRuntime,
+    retained_owner_uid_configured,
     resolve_isolated_runtime,
     revalidate_runtime_authority,
     runtime_authority_identity,
@@ -88,7 +89,8 @@ class SelfHostedHermesCompletionClient:
         user_text: str,
         session_key: str,
     ) -> str:
-        if runtime.provider != "hermes" or runtime.runtime_target_mode != "hermes-chat":
+        retained_owner = not runtime.runtime_target_id and retained_owner_uid_configured(runtime.uid)
+        if runtime.provider != "hermes" or (runtime.runtime_target_mode != "hermes-chat" and not retained_owner):
             raise ImessageRuntimeError("imessage_runtime_target_invalid", status_code=409)
         endpoint = f"{runtime.gateway_url.rstrip('/')}/v1/chat/completions"
         try:
@@ -478,18 +480,32 @@ class ImessageRuntimeService:
         identity: CloudRuntimeAuthorityIdentity,
     ) -> ImessageRuntimeAuthority:
         try:
-            target_updated_at = datetime.fromisoformat(runtime.runtime_target_updated_at.replace("Z", "+00:00"))
-            if target_updated_at.tzinfo is None or target_updated_at.utcoffset() is None:
-                raise ValueError("runtime target timestamp is naive")
+            authority_kind = str(binding.get("runtime_authority_kind") or "")
+            if authority_kind == "target":
+                target_id = uuid.UUID(runtime.runtime_target_id)
+                target_updated_at = datetime.fromisoformat(runtime.runtime_target_updated_at.replace("Z", "+00:00"))
+                if target_updated_at.tzinfo is None or target_updated_at.utcoffset() is None:
+                    raise ValueError("runtime target timestamp is naive")
+                target_updated_at = target_updated_at.astimezone(timezone.utc)
+                entitlement_revision = runtime.target_entitlement_revision
+            elif authority_kind == "retained_owner" and retained_owner_uid_configured(runtime.uid):
+                if runtime.runtime_target_id or runtime.target_entitlement_revision:
+                    raise ValueError("retained runtime unexpectedly has target authority")
+                target_id = None
+                target_updated_at = None
+                entitlement_revision = 0
+            else:
+                raise ValueError("runtime authority kind is invalid")
             authority = ImessageRuntimeAuthority(
                 uid=runtime.uid,
                 user_id=uuid.UUID(runtime.account_user_id),
                 profile_user_id=uuid.UUID(runtime.profile_user_id),
                 runtime_binding_id=uuid.UUID(runtime.binding_id),
-                runtime_target_id=uuid.UUID(runtime.runtime_target_id),
+                runtime_target_id=target_id,
+                runtime_authority_kind=authority_kind,
                 runtime_binding_revision=runtime.revision,
-                runtime_target_entitlement_revision=runtime.target_entitlement_revision,
-                runtime_target_updated_at=target_updated_at.astimezone(timezone.utc),
+                runtime_target_entitlement_revision=entitlement_revision,
+                runtime_target_updated_at=target_updated_at,
                 runtime_authority_digest=identity.digest,
                 runtime_agent_id=runtime.agent_id,
                 runtime_instance_id=runtime.runtime_instance_id or None,
@@ -503,12 +519,21 @@ class ImessageRuntimeService:
 
     @staticmethod
     def _assert_runtime_matches(binding: dict[str, Any], runtime: IsolatedRuntime) -> None:
+        authority_kind = str(binding.get("runtime_authority_kind") or "")
+        target_matches = authority_kind == "target" and (
+            runtime.runtime_target_mode == "hermes-chat"
+            and runtime.runtime_target_id == str(binding["runtime_target_id"])
+        )
+        retained_matches = authority_kind == "retained_owner" and (
+            binding.get("runtime_target_id") is None
+            and not runtime.runtime_target_id
+            and retained_owner_uid_configured(runtime.uid)
+        )
         if (
             runtime.provider != "hermes"
-            or runtime.runtime_target_mode != "hermes-chat"
             or runtime.uid != str(binding["omi_uid"])
             or runtime.binding_id != str(binding["runtime_binding_id"])
-            or runtime.runtime_target_id != str(binding["runtime_target_id"])
+            or not (target_matches or retained_matches)
         ):
             raise ImessageRuntimeError("imessage_runtime_authority_changed", status_code=409)
 

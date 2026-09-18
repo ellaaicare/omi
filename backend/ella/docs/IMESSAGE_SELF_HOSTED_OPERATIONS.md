@@ -8,11 +8,15 @@ and authority contracts described here.
 
 ## Boundaries
 
-- This lane uses the owner's existing `hermes-chat` runtime. It does not create
-  another agent or fall back to a retained or Plato workspace.
+- This lane uses the exact owner's existing self-hosted Hermes runtime. New
+  invitation-owned profiles remain pinned to a `hermes-chat` runtime target.
+  The one configured retained owner is pinned instead to its pre-target active
+  binding under the explicit `retained_owner` authority kind; this does not
+  create another agent or permit a caller-selected or global fallback.
 - Migrations `020_create_imessage_enrollment_authority.sql` and
-  `021_create_imessage_runtime_outbox.sql` are additive and do not alter
-  migration 009 or any `ella_photon_*` Cloud-canary table.
+  `021_create_imessage_runtime_outbox.sql`, plus the authority-shape migration
+  `022_add_imessage_retained_runtime_authority.sql`, are additive and do not
+  alter migration 009 or any `ella_photon_*` Cloud-canary table.
 - App calls use an exact Firebase bearer. The app cannot select a UID, account,
   profile, project, runtime, endpoint, credential, or provider route.
 - The bridge uses a dedicated transport credential. That credential cannot
@@ -27,7 +31,7 @@ and authority contracts described here.
 - Internal transport OpenAPI:
   `backend/ella/docs/imessage-runtime-internal.openapi.yaml`
 - Migrations: `backend/migrations/020_create_imessage_enrollment_authority.sql`
-  and `backend/migrations/021_create_imessage_runtime_outbox.sql`
+  through `backend/migrations/022_add_imessage_retained_runtime_authority.sql`
 - App router: `backend/ella/routers/imessage_enrollment.py`
 - Internal runtime router: `backend/ella/routers/imessage_runtime.py`
 - Service: `backend/ella/services/imessage_enrollment.py`
@@ -121,8 +125,11 @@ the durable backend claim prevents a second inference.
 
 The backend writes canonical `imessage` user and assistant events under the
 owner's stable OMI session. It performs one bounded non-stream request against
-the already authorized self-hosted Hermes target. There is no Cloud, retained,
-or Plato fallback and no second inference on an empty or malformed response.
+the already authorized self-hosted Hermes target or the configured owner's
+exact pre-target retained binding. A retained binding is accepted only when it
+has no runtime-target row and exact user/account/profile ownership; target
+appearance or authority drift fails closed. There is no Cloud or global Plato
+fallback and no second inference on an empty or malformed response.
 Replies longer than the pinned Photon adapter's 8,000-character transport limit
 are rejected before the assistant event or delivery intent is committed; the
 bridge never relies on the adapter's silent truncation.

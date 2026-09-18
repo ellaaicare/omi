@@ -102,6 +102,7 @@ MIGRATION_CHAIN = (
     "015_add_invitation_allowed_email_hash.sql",
     "020_create_imessage_enrollment_authority.sql",
     "021_create_imessage_runtime_outbox.sql",
+    "022_add_imessage_retained_runtime_authority.sql",
 )
 
 POLICY = "ella-imessage-data-v2"
@@ -142,24 +143,20 @@ async def _run_with_database(scenario):
             await connection.execute(
                 (MIGRATIONS / "009_create_hermes_cloud_runtime_pool.sql").read_text(encoding="utf-8")
             )
-            photon_columns_before = await connection.fetchval(
-                """
+            photon_columns_before = await connection.fetchval("""
                 SELECT jsonb_agg(column_name ORDER BY ordinal_position)
                 FROM information_schema.columns
                 WHERE table_schema = current_schema()
                   AND table_name = 'ella_photon_channel_bindings'
-                """
-            )
+                """)
             for name in MIGRATION_CHAIN[2:]:
                 await connection.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
-            photon_columns_after = await connection.fetchval(
-                """
+            photon_columns_after = await connection.fetchval("""
                 SELECT jsonb_agg(column_name ORDER BY ordinal_position)
                 FROM information_schema.columns
                 WHERE table_schema = current_schema()
                   AND table_name = 'ella_photon_channel_bindings'
-                """
-            )
+                """)
             assert photon_columns_after == photon_columns_before
         await scenario(pool)
     finally:
@@ -253,11 +250,33 @@ async def _seed_owner(pool, *, uid: str, ordinal: int):
             invitation_target_id,
         )
     return user_id, ImessageRuntimeSnapshot(
+        uid=uid,
         binding_id=binding_id,
         target_id=target_id,
+        authority_kind="target",
         authority_digest=hashlib.sha256(f"runtime-{ordinal}".encode()).hexdigest(),
         binding_revision=3,
         entitlement_revision=4,
+        account_user_id=user_id,
+        profile_user_id=user_id,
+    )
+
+
+async def _seed_retained_owner(pool, *, uid: str, ordinal: int):
+    user_id, targeted = await _seed_owner(pool, uid=uid, ordinal=ordinal)
+    async with pool.acquire() as connection:
+        await connection.execute(
+            "DELETE FROM ella_runtime_targets WHERE id = $1",
+            targeted.target_id,
+        )
+    return user_id, ImessageRuntimeSnapshot(
+        uid=uid,
+        binding_id=targeted.binding_id,
+        target_id=None,
+        authority_kind="retained_owner",
+        authority_digest=hashlib.sha256(f"retained-runtime-{ordinal}".encode()).hexdigest(),
+        binding_revision=targeted.binding_revision,
+        entitlement_revision=0,
         account_user_id=user_id,
         profile_user_id=user_id,
     )
@@ -291,6 +310,7 @@ async def _runtime_authority(pool, *, uid: str, ordinal: int, runtime: ImessageR
         profile_user_id=runtime.profile_user_id,
         runtime_binding_id=runtime.binding_id,
         runtime_target_id=runtime.target_id,
+        runtime_authority_kind=runtime.authority_kind,
         runtime_binding_revision=runtime.binding_revision,
         runtime_target_entitlement_revision=runtime.entitlement_revision,
         runtime_target_updated_at=target_updated_at,
@@ -1037,14 +1057,151 @@ def test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners():
         )
 
         async with pool.acquire() as connection:
-            owner_counts = await connection.fetch(
-                """
+            owner_counts = await connection.fetch("""
                 SELECT user_id, COUNT(*) AS count
                 FROM ella_imessage_message_receipts
                 GROUP BY user_id
-                """
-            )
+                """)
         assert {row["user_id"]: int(row["count"]) for row in owner_counts} == {user_a: 3}
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_retained_owner_authority_is_targetless_and_fails_closed_if_a_target_appears():
+    async def scenario(pool):
+        enrollment = ImessageEnrollmentRepository(pool)
+        runtime_repository = ImessageRuntimeRepository(pool)
+        await enrollment.assert_schema_ready()
+        await runtime_repository.assert_schema_ready()
+
+        uid = "imessage-retained-owner"
+        user_id, runtime = await _seed_retained_owner(pool, uid=uid, ordinal=16)
+        consent = await _grant(enrollment, uid=uid, ordinal=16)
+        pending, code, destination = await _pending_binding(
+            enrollment,
+            uid=uid,
+            ordinal=16,
+            runtime=runtime,
+            receipt=consent,
+        )
+        line = hashlib.sha256(b"retained-line").hexdigest()
+        contact = hashlib.sha256(b"retained-contact").hexdigest()
+        binding = await enrollment.verify_inbound_proof(
+            assigned_destination_ref_hmac=destination,
+            handset_ref_hmac=hashlib.sha256(b"handset-16").hexdigest(),
+            line_identity_hmac=line,
+            contact_identity_hmac=contact,
+            provider_message_ref_hmac=hashlib.sha256(b"retained-proof").hexdigest(),
+            candidate_challenge_hash=_proof_hash(salt=f"{16:032x}", code=code),
+            consent_contract=CONSENT_CONTRACT,
+            runtime=runtime,
+            now=datetime.now(timezone.utc),
+        )
+        authority = await _runtime_authority(pool, uid=uid, ordinal=16, runtime=runtime)
+        resolved = await runtime_repository.resolve_binding(
+            line_identity_hmac=line,
+            contact_identity_hmac=contact,
+        )
+
+        assert pending["runtime_authority_kind"] == "retained_owner"
+        assert binding["runtime_authority_kind"] == "retained_owner"
+        assert resolved["runtime_authority_kind"] == "retained_owner"
+        assert resolved["runtime_target_id"] is None
+        assert authority.runtime_authority_kind == "retained_owner"
+        connection_key = hashlib.sha256(b"retained-connection").hexdigest()
+        await runtime_repository.record_heartbeat(
+            binding_id=str(binding["id"]),
+            generation=int(binding["generation"]),
+            connection_ref_hmac=connection_key,
+            authority=authority,
+        )
+        resolved = await runtime_repository.resolve_binding(
+            line_identity_hmac=line,
+            contact_identity_hmac=contact,
+        )
+        receipt = await runtime_repository.claim_message(
+            binding=resolved,
+            inbound_provider_ref_hmac=hashlib.sha256(b"retained-message").hexdigest(),
+            inbound_payload_sha256=hashlib.sha256(b"retained-payload").hexdigest(),
+            message_text="content-free retained runtime test",
+            occurred_at=datetime.now(timezone.utc),
+            lease_seconds=60,
+            authority=authority,
+        )
+        assert receipt["runtime_authority_kind"] == "retained_owner"
+        assert receipt["runtime_target_id"] is None
+        await runtime_repository.mark_model_started(
+            receipt_id=str(receipt["id"]),
+            lease_token=str(receipt["lease_token"]),
+            authority=authority,
+        )
+        receipt = await runtime_repository.complete_model(
+            receipt_id=str(receipt["id"]),
+            lease_token=str(receipt["lease_token"]),
+            canonical_inbound_event_id="imessage:retained:user",
+            canonical_outbound_event_id="imessage:retained:assistant",
+            outbound_text="content-free retained reply",
+            authority=authority,
+        )
+
+        async with pool.acquire() as connection:
+            drift_target = await connection.fetchval(
+                """
+                INSERT INTO ella_runtime_targets (
+                    account_user_id, profile_user_id, role, mode, provider,
+                    runtime_binding_id, candidate_runtime_instance_id,
+                    endpoint_ref, credential_ref, status, policy_version,
+                    processor_set_hash, scope_version, scope_hash,
+                    entitlement_revision
+                ) VALUES (
+                    $1, $1, 'user', 'hermes-cloud-chat', 'hermes_cloud',
+                    $2, 'unexpected-instance', 'unexpected-endpoint-ref',
+                    'unexpected-credential-ref', 'ready', $3, $4, $5, $6, 1
+                ) RETURNING id
+                """,
+                user_id,
+                runtime.binding_id,
+                POLICY,
+                PROCESSOR_HASH,
+                SCOPE,
+                SCOPE_HASH,
+            )
+
+        assert (
+            await runtime_repository.resolve_binding(
+                line_identity_hmac=line,
+                contact_identity_hmac=contact,
+            )
+            is None
+        )
+        with pytest.raises(ImessageRuntimeRepositoryError, match="imessage_transport_authority_changed"):
+            await runtime_repository.record_heartbeat(
+                binding_id=str(binding["id"]),
+                generation=int(binding["generation"]),
+                connection_ref_hmac=connection_key,
+                authority=authority,
+            )
+        with pytest.raises(ImessageRuntimeRepositoryError, match="imessage_delivery_authority_changed"):
+            await runtime_repository.start_delivery(
+                receipt_id=str(receipt["id"]),
+                delivery_idempotency_key=str(receipt["delivery_idempotency_key"]),
+                binding_id=str(binding["id"]),
+                generation=int(binding["generation"]),
+                connection_ref_hmac=connection_key,
+                authority=authority,
+            )
+
+        async with pool.acquire() as connection:
+            await connection.execute("DELETE FROM ella_runtime_targets WHERE id = $1", drift_target)
+        started = await runtime_repository.start_delivery(
+            receipt_id=str(receipt["id"]),
+            delivery_idempotency_key=str(receipt["delivery_idempotency_key"]),
+            binding_id=str(binding["id"]),
+            generation=int(binding["generation"]),
+            connection_ref_hmac=connection_key,
+            authority=authority,
+        )
+        assert started["status"] == "sending"
 
     asyncio.run(_run_with_database(scenario))
 
