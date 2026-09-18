@@ -26,7 +26,7 @@ class ImessageConsentPolicy {
     required this.textDmOnly,
   });
 
-  static const supportedPolicyVersion = 'ella-imessage-data-v1';
+  static const supportedPolicyVersion = 'ella-imessage-data-v2';
   static const supportedScopeVersion = 'ella.imessage_text_dm.v1';
 
   final String policyVersion;

@@ -165,6 +165,7 @@ Map<String, dynamic> _policyJson() => {
       'scope_hash': _hash('b'),
       'recipients': ['Ella self-hosted Hermes and Honcho', 'Photon iMessage transport'],
       'data_classes': [
+        'your handset phone number used for iMessage transport registration',
         'the text messages you send to Ella',
         "Ella's text replies",
         'messaging delivery identifiers',

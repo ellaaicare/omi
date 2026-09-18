@@ -393,6 +393,7 @@ ImessageConsentPolicy _policy() => ImessageConsentPolicy(
       scopeHash: _hash('b'),
       recipients: const ['Ella self-hosted Hermes and Honcho', 'Photon iMessage transport'],
       dataClasses: const [
+        'your handset phone number used for iMessage transport registration',
         'the text messages you send to Ella',
         "Ella's text replies",
         'messaging delivery identifiers',
