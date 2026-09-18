@@ -9,7 +9,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from database.imessage_enrollment import ImessageRuntimeSnapshot
+from database.imessage_enrollment import ImessageAuthorityError, ImessageRuntimeSnapshot
 from ella.routers import imessage_enrollment as enrollment_router
 from ella.services import imessage_enrollment as enrollment_service
 from ella.services.imessage_enrollment import (
@@ -77,6 +77,7 @@ class FakeRepository:
         self.events = events if events is not None else []
         self.attempt = _attempt()
         self.binding = _binding()
+        self.finalize_error = None
         self.state = {
             "user_status": "ACTIVE",
             "consent_decision": "granted",
@@ -121,16 +122,25 @@ class FakeRepository:
 
     async def finalize_registration(self, **kwargs):
         self.events.append(("finalize", kwargs))
+        if self.finalize_error:
+            raise self.finalize_error
         return dict(self.binding), True
 
     async def mark_registration_uncertain(self, **kwargs):
         self.events.append(("uncertain", kwargs))
+        self.attempt = {**self.attempt, "state": "uncertain"}
 
     async def mark_registration_failed(self, **kwargs):
         self.events.append(("failed", kwargs))
 
     async def get_binding_for_attempt(self, **kwargs):
         self.events.append(("binding_for_attempt", kwargs))
+        return dict(self.binding)
+
+    async def retire_expired_pending_binding(self, **kwargs):
+        self.events.append(("retire_expired", kwargs))
+        self.binding = {**self.binding, "status": "quarantined", "revision": 2}
+        self.attempt = {**self.attempt, "state": "quarantined"}
         return dict(self.binding)
 
     async def verify_inbound_proof(self, **kwargs):
@@ -314,6 +324,57 @@ def test_ambiguous_provider_result_is_durable_and_never_finalized(monkeypatch):
     assert [event[0] for event in events] == ["schema", "prepare", "register", "uncertain"]
 
 
+def test_provider_accepted_finalization_drift_is_quarantined_without_repeat_registration(monkeypatch):
+    monkeypatch.setenv("ELLA_IMESSAGE_ENROLLMENT_ENABLED", "true")
+    events = []
+    repository = FakeRepository(events)
+    repository.finalize_error = ImessageAuthorityError("imessage_consent_authority_changed")
+    registrar = FakeRegistrar(events)
+    service = _service(repository, registrar)
+    service._runtime = AsyncMock(
+        return_value=(
+            SimpleNamespace(),
+            _snapshot(),
+            SimpleNamespace(uid="owner-a", target_mode="hermes-chat", digest="a" * 64),
+        )
+    )
+    monkeypatch.setattr(enrollment_service, "revalidate_runtime_authority", AsyncMock())
+
+    with pytest.raises(ImessageEnrollmentError) as failure:
+        asyncio.run(
+            service.start(
+                uid="owner-a",
+                handset_e164="+15555550123",
+                consent_receipt_id=CONSENT_ID,
+                idempotency_key=IDEMPOTENCY_KEY,
+            )
+        )
+
+    assert failure.value.code == "imessage_consent_authority_changed"
+    assert failure.value.status_code == 409
+    assert repository.attempt["state"] == "uncertain"
+    assert [event[0] for event in events] == [
+        "schema",
+        "prepare",
+        "register",
+        "provider_accepted",
+        "finalize",
+        "uncertain",
+    ]
+
+    events.clear()
+    with pytest.raises(ImessageEnrollmentError, match="imessage_registration_manual_reconciliation_required"):
+        asyncio.run(
+            service.start(
+                uid="owner-a",
+                handset_e164="+15555550123",
+                consent_receipt_id=CONSENT_ID,
+                idempotency_key=uuid.uuid4(),
+            )
+        )
+    assert [event[0] for event in events] == ["schema", "prepare"]
+
+
 def test_inbound_proof_hashes_transport_values_and_never_accepts_owner_selector(monkeypatch):
     monkeypatch.setenv("ELLA_IMESSAGE_ENROLLMENT_ENABLED", "true")
     repository = FakeRepository()
@@ -377,6 +438,47 @@ def test_status_requires_the_current_consent_contract(monkeypatch):
     assert [event[0] for event in repository.events] == ["schema", "state"]
 
 
+def test_status_atomically_retires_expired_pending_challenge(monkeypatch):
+    monkeypatch.setenv("ELLA_IMESSAGE_ENROLLMENT_ENABLED", "true")
+    repository = FakeRepository()
+    repository.binding = _binding()
+    repository.binding["challenge_expires_at"] = NOW - timedelta(seconds=1)
+    repository.state.update(
+        {
+            "policy_version": CONSENT_POLICY_VERSION,
+            "processor_set_hash": CONSENT_PROCESSOR_SET_HASH,
+            "scope_version": CONSENT_SCOPE_VERSION,
+            "scope_hash": CONSENT_SCOPE_HASH,
+            "binding_id": repository.binding["id"],
+            "binding_status": "verification_pending",
+            "generation": 1,
+            "binding_revision": 1,
+            "assigned_destination_e164": repository.binding["assigned_destination_e164"],
+            "challenge_expires_at": repository.binding["challenge_expires_at"],
+        }
+    )
+    service = _service(repository, FakeRegistrar(repository.events))
+
+    status = asyncio.run(service.status(uid="owner-a"))
+
+    assert status["state"] == "temporarily_unavailable"
+    assert status["reason_code"] == "binding_quarantined"
+    assert status["verification_expires_at"] == repository.binding["challenge_expires_at"].isoformat()
+    assert [event[0] for event in repository.events] == ["schema", "state", "retire_expired"]
+
+
+def test_consent_authority_conflicts_use_documented_http_409_semantics():
+    for code in (
+        "imessage_consent_required",
+        "imessage_consent_receipt_stale",
+        "imessage_consent_authority_changed",
+        "imessage_consent_policy_stale",
+    ):
+        mapped = ImessageEnrollmentService._authority_error(ImessageAuthorityError(code))
+        assert mapped.code == code
+        assert mapped.status_code == 409
+
+
 def test_finalized_retry_does_not_reissue_proof_for_revoked_binding(monkeypatch):
     monkeypatch.setenv("ELLA_IMESSAGE_ENROLLMENT_ENABLED", "true")
     repository = FakeRepository()
@@ -402,6 +504,42 @@ def test_finalized_retry_does_not_reissue_proof_for_revoked_binding(monkeypatch)
         )
 
     assert [event[0] for event in repository.events] == ["schema", "prepare", "binding_for_attempt"]
+
+
+def test_finalized_retry_retires_expired_proof_instead_of_reissuing(monkeypatch):
+    monkeypatch.setenv("ELLA_IMESSAGE_ENROLLMENT_ENABLED", "true")
+    repository = FakeRepository()
+    repository.attempt = _attempt(state="finalized")
+    repository.binding = _binding()
+    repository.binding["challenge_expires_at"] = NOW - timedelta(seconds=1)
+    service = _service(repository, FakeRegistrar(repository.events))
+    service._runtime = AsyncMock(
+        return_value=(
+            SimpleNamespace(),
+            _snapshot(),
+            SimpleNamespace(uid="owner-a", target_mode="hermes-chat", digest="a" * 64),
+        )
+    )
+
+    with pytest.raises(ImessageEnrollmentError) as failure:
+        asyncio.run(
+            service.start(
+                uid="owner-a",
+                handset_e164="+15555550123",
+                consent_receipt_id=CONSENT_ID,
+                idempotency_key=IDEMPOTENCY_KEY,
+            )
+        )
+
+    assert failure.value.code == "imessage_registration_proof_window_expired"
+    assert failure.value.status_code == 409
+    assert repository.binding["status"] == "quarantined"
+    assert [event[0] for event in repository.events] == [
+        "schema",
+        "prepare",
+        "binding_for_attempt",
+        "retire_expired",
+    ]
 
 
 class RouteService:
@@ -550,6 +688,57 @@ def test_mounted_transport_proof_accepts_configured_transport_without_owner_sele
     assert response.json() == {"status": "accepted"}
     assert service.calls[0][0] == "proof"
     assert "uid" not in service.calls[0][1]
+
+
+def test_mounted_enrollment_surfaces_are_no_store_including_start_json_response(monkeypatch):
+    monkeypatch.setenv("ELLA_IMESSAGE_TRANSPORT_TOKEN", TRANSPORT_TOKEN)
+    service = RouteService()
+    client = _route_client(service)
+
+    responses = [
+        client.get("/v1/ella/imessage/consent/policy"),
+        client.post(
+            "/v1/ella/imessage/consent",
+            json={
+                "decision": "granted",
+                "policy_version": CONSENT_POLICY_VERSION,
+                "processor_set_hash": CONSENT_PROCESSOR_SET_HASH,
+                "scope_version": CONSENT_SCOPE_VERSION,
+                "scope_hash": CONSENT_SCOPE_HASH,
+                "request_id": str(REQUEST_ID),
+                "app_version": "1.0",
+                "build_number": "1",
+            },
+        ),
+        client.get("/v1/ella/imessage/enrollment"),
+        client.post(
+            "/v1/ella/imessage/enrollment/start",
+            json={
+                "handset_e164": "+15555550123",
+                "consent_receipt_id": str(CONSENT_ID),
+                "idempotency_key": str(IDEMPOTENCY_KEY),
+            },
+        ),
+        client.post(
+            "/v1/ella/imessage/enrollment/revoke",
+            json={"expected_generation": 1, "idempotency_key": str(IDEMPOTENCY_KEY)},
+        ),
+        client.post(
+            "/v1/ella/internal/imessage/proof",
+            headers={"X-Ella-Imessage-Transport": TRANSPORT_TOKEN},
+            json={
+                "assigned_destination": "+15555550100",
+                "handset_e164": "+15555550123",
+                "code": "123456",
+                "provider_message_id": "message-a",
+                "line_identity": "line-a",
+                "contact_identity": "contact-a",
+            },
+        ),
+    ]
+
+    assert [response.status_code for response in responses] == [200, 200, 200, 201, 200, 200]
+    assert all(response.headers.get("cache-control") == "no-store" for response in responses)
 
 
 def test_registrar_rejects_non_tls_non_loopback_authority():

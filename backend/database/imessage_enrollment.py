@@ -344,6 +344,20 @@ class ImessageEnrollmentRepository:
                 )
                 if current_binding:
                     raise ImessageAuthorityError("imessage_binding_already_exists")
+                unresolved_attempt = await connection.fetchval(
+                    """
+                    SELECT state
+                    FROM ella_imessage_registration_attempts
+                    WHERE user_id = $1
+                      AND state IN ('prepared', 'provider_accepted', 'uncertain')
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    FOR UPDATE
+                    """,
+                    user_id,
+                )
+                if unresolved_attempt:
+                    raise ImessageAuthorityError("imessage_registration_manual_reconciliation_required")
                 recent_attempts = int(
                     await connection.fetchval(
                         """
@@ -584,6 +598,77 @@ class ImessageEnrollmentRepository:
             state="failed",
             error_code=error_code,
         )
+
+    async def retire_expired_pending_binding(
+        self,
+        *,
+        uid: str,
+        binding_id: uuid.UUID,
+        now: datetime,
+    ) -> dict[str, Any]:
+        async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(connection, uid=uid)
+            async with connection.transaction():
+                proof = await authority_advisory_lock.acquire_authority_lock(connection, owner=owner)
+                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=proof,
+                )
+                binding = await connection.fetchrow(
+                    """
+                    SELECT *
+                    FROM ella_imessage_channel_bindings
+                    WHERE id = $1 AND user_id = $2
+                    FOR UPDATE
+                    """,
+                    binding_id,
+                    user_id,
+                )
+                if not binding:
+                    raise ImessageAuthorityError("imessage_proof_binding_not_found")
+                if str(binding["status"]) != "verification_pending" or binding["challenge_expires_at"] > now:
+                    return dict(binding)
+                retired = await connection.fetchrow(
+                    """
+                    UPDATE ella_imessage_channel_bindings
+                    SET status = 'quarantined',
+                        revision = revision + 1,
+                        updated_at = $3
+                    WHERE id = $1
+                      AND user_id = $2
+                      AND status = 'verification_pending'
+                      AND challenge_expires_at <= $3
+                    RETURNING *
+                    """,
+                    binding_id,
+                    user_id,
+                    now,
+                )
+                if not retired:
+                    current = await connection.fetchrow(
+                        "SELECT * FROM ella_imessage_channel_bindings WHERE id = $1 AND user_id = $2",
+                        binding_id,
+                        user_id,
+                    )
+                    if not current:
+                        raise ImessageAuthorityError("imessage_proof_binding_not_found")
+                    return dict(current)
+                attempt_update = await connection.execute(
+                    """
+                    UPDATE ella_imessage_registration_attempts
+                    SET state = 'quarantined',
+                        error_code = 'imessage_proof_expired',
+                        updated_at = $2
+                    WHERE id = $1 AND state = 'finalized'
+                    """,
+                    retired["registration_attempt_id"],
+                    now,
+                )
+                if attempt_update != "UPDATE 1":
+                    raise ImessageAuthorityError("imessage_registration_state_invalid")
+                return dict(retired)
 
     async def verify_inbound_proof(
         self,

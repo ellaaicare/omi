@@ -290,6 +290,7 @@ components:
         - binding_quarantined
         - consent_required
         - consent_revoked
+        - consent_policy_stale
         - runtime_unavailable
         - binding_revoked
     EnrollmentFeatures:

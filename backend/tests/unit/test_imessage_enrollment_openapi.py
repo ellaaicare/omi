@@ -1,8 +1,10 @@
+import ast
 from pathlib import Path
 
 import yaml
 
 CONTRACT_PATH = Path(__file__).resolve().parents[2] / "ella" / "docs" / "imessage-enrollment.openapi.yaml"
+SERVICE_PATH = Path(__file__).resolve().parents[2] / "ella" / "services" / "imessage_enrollment.py"
 EXPECTED_STATES = {
     "not_connected",
     "verification_pending",
@@ -113,3 +115,27 @@ def test_assigned_destination_is_owner_visible_but_provider_routing_stays_intern
     assert "assigned_destination" in serialized
     for field in FORBIDDEN_PUBLIC_FIELDS:
         assert field not in serialized
+
+
+def test_all_literal_service_statuses_and_reasons_are_declared_in_openapi():
+    schemas = _contract()["components"]["schemas"]
+    declared_states = set(schemas["EnrollmentState"]["enum"])
+    declared_reasons = set(schemas["EnrollmentReason"]["enum"])
+    observed_states = set()
+    observed_reasons = set()
+
+    for node in ast.walk(ast.parse(SERVICE_PATH.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in {"_status", "_binding_status"}:
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "state" and isinstance(keyword.value, ast.Constant):
+                observed_states.add(keyword.value.value)
+            if keyword.arg in {"reason", "status"} and isinstance(keyword.value, ast.Constant):
+                values = observed_reasons if keyword.arg == "reason" else observed_states
+                values.add(keyword.value.value)
+
+    assert observed_states <= declared_states
+    assert observed_reasons <= declared_reasons
+    assert "consent_policy_stale" in observed_reasons
