@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'package:omi/services/sockets/pure_socket.dart';
+import 'package:omi/utils/platform/platform_manager.dart';
 
 class _BlockingWebSocketSink extends Fake implements WebSocketSink {
   final Completer<void> closeBarrier = Completer<void>();
@@ -45,6 +46,23 @@ class _CloseListener implements IPureSocketListener {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  PlatformManager.initializeForTesting();
+
+  test('transcription WebSocket requests a freshly refreshed bearer', () async {
+    final forceRefreshes = <bool>[];
+
+    final headers = await buildAuthenticatedWebSocketHeaders(
+      authHeaderProvider: ({required forceRefresh}) async {
+        forceRefreshes.add(forceRefresh);
+        return 'Bearer fresh-token';
+      },
+    );
+
+    expect(forceRefreshes, [true]);
+    expect(headers['Authorization'], 'Bearer fresh-token');
+  });
+
   test('disconnect waits for the underlying channel close and notifies its listener once', () async {
     final sink = _BlockingWebSocketSink();
     final socket = PureSocket('wss://example.invalid', connectedChannel: _BlockingWebSocketChannel(sink));

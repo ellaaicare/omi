@@ -178,6 +178,7 @@ Stream<ServerMessageChunk> sendEllaMessageStream(
   DateTime? clientSentAt,
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
+  AuthHeaderProvider? authHeaderProvider,
 }) async* {
   if (!SharedPreferencesUtil().aiConsentAccepted) {
     throw const ClientApiFailure(ClientApiFailureKind.consentRequired);
@@ -203,6 +204,7 @@ Stream<ServerMessageChunk> sendEllaMessageStream(
       headers: headers,
       expectedAuthenticatedUid: expectedAuthenticatedUid,
       exactAuthority: exactAuthority,
+      authHeaderProvider: authHeaderProvider,
       body: jsonEncode({
         'message': text,
         'conversation_id': '',

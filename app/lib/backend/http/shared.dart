@@ -24,26 +24,41 @@ class ApiClient {
   }
 }
 
-Future<String> getAuthHeader() async {
-  DateTime? expiry = DateTime.fromMillisecondsSinceEpoch(SharedPreferencesUtil().tokenExpirationTime);
-  bool hasAuthToken = SharedPreferencesUtil().authToken.isNotEmpty;
+typedef AuthTokenRefresher = Future<String?> Function();
+typedef AuthHeaderProvider = Future<String> Function({required bool forceRefresh});
 
-  bool isExpirationDateValid = !(expiry.isBefore(DateTime.now()) ||
-      expiry.isAtSameMomentAs(DateTime.fromMillisecondsSinceEpoch(0)) ||
-      (expiry.isBefore(DateTime.now().add(const Duration(minutes: 5))) && expiry.isAfter(DateTime.now())));
+const _authRefreshTimeout = Duration(seconds: 15);
+const _authRefreshLeadTime = Duration(minutes: 5);
 
-  if (!hasAuthToken || !isExpirationDateValid) {
-    SharedPreferencesUtil().authToken = await AuthService.instance.getIdToken() ?? '';
-  }
+Future<String> getAuthHeader({
+  bool forceRefresh = false,
+  AuthTokenRefresher? tokenRefresher,
+  DateTime Function()? clock,
+}) async {
+  final preferences = SharedPreferencesUtil();
+  final now = (clock ?? DateTime.now)();
+  var expiry = DateTime.fromMillisecondsSinceEpoch(preferences.tokenExpirationTime);
+  var token = preferences.authToken;
+  final shouldRefresh = forceRefresh || token.isEmpty || !expiry.isAfter(now.add(_authRefreshLeadTime));
 
-  if (SharedPreferencesUtil().authToken.isEmpty) {
-    if (AuthService.instance.isSignedIn()) {
-      // should only throw if the user is signed in but the token is not found
-      // if the user is not signed in, the token will always be empty
-      throw Exception('No auth token found');
+  if (shouldRefresh) {
+    try {
+      final refreshed = await (tokenRefresher ?? AuthService.instance.getIdToken)().timeout(_authRefreshTimeout);
+      if (refreshed != null && refreshed.isNotEmpty) {
+        preferences.authToken = refreshed;
+      }
+    } catch (_) {
+      // A still-valid cached token can bridge a transient Firebase refresh
+      // failure. An expired token is rejected below rather than sent.
     }
+    token = preferences.authToken;
+    expiry = DateTime.fromMillisecondsSinceEpoch(preferences.tokenExpirationTime);
   }
-  return 'Bearer ${SharedPreferencesUtil().authToken}';
+
+  if (token.isEmpty || !expiry.isAfter(now)) {
+    throw const ClientApiFailure(ClientApiFailureKind.authenticationRequired, retryable: true);
+  }
+  return 'Bearer $token';
 }
 
 /// Builds common headers for API and WebSocket requests
@@ -54,6 +69,8 @@ Future<Map<String, String>> buildHeaders({
   Map<String, String> fromHeaders = const {},
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
+  bool forceAuthRefresh = false,
+  AuthHeaderProvider? authHeaderProvider,
 }) async {
   _verifyRequestAuthority(
     exactAuthority: exactAuthority,
@@ -69,7 +86,7 @@ Future<Map<String, String>> buildHeaders({
   };
 
   if (requireAuthCheck) {
-    headers['Authorization'] = await getAuthHeader();
+    headers['Authorization'] = await (authHeaderProvider ?? getAuthHeader)(forceRefresh: forceAuthRefresh);
   }
 
   _verifyRequestAuthority(
@@ -264,24 +281,41 @@ Stream<String> makeStreamingApiCall({
   String method = 'POST',
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
+  AuthHeaderProvider? authHeaderProvider,
 }) async* {
   try {
-    final builtHeaders = await buildHeaders(
-      requireAuthCheck: _isRequiredAuthCheck(url),
+    final shouldCheckAuth = _isRequiredAuthCheck(url);
+    var builtHeaders = await buildHeaders(
+      requireAuthCheck: shouldCheckAuth,
       fromHeaders: headers,
       expectedAuthenticatedUid: expectedAuthenticatedUid,
       exactAuthority: exactAuthority,
+      authHeaderProvider: authHeaderProvider,
     );
 
-    var request = http.Request(method, Uri.parse(url));
-    request.headers.addAll(builtHeaders);
-
-    if (body.isNotEmpty) {
-      request.headers['Content-Type'] = 'application/json';
-      request.body = body;
+    http.Request buildRequest() {
+      final request = http.Request(method, Uri.parse(url));
+      request.headers.addAll(builtHeaders);
+      if (body.isNotEmpty) {
+        request.headers['Content-Type'] = 'application/json';
+        request.body = body;
+      }
+      return request;
     }
 
-    var streamedResponse = await HttpPoolManager.instance.sendStreaming(request, exactAuthority: exactAuthority);
+    var streamedResponse = await HttpPoolManager.instance.sendStreaming(buildRequest(), exactAuthority: exactAuthority);
+    if (shouldCheckAuth && streamedResponse.statusCode == 401) {
+      await streamedResponse.stream.drain<void>();
+      builtHeaders = await buildHeaders(
+        requireAuthCheck: true,
+        fromHeaders: headers,
+        expectedAuthenticatedUid: expectedAuthenticatedUid,
+        exactAuthority: exactAuthority,
+        forceAuthRefresh: true,
+        authHeaderProvider: authHeaderProvider,
+      );
+      streamedResponse = await HttpPoolManager.instance.sendStreaming(buildRequest(), exactAuthority: exactAuthority);
+    }
 
     if (streamedResponse.statusCode != 200) {
       Logger.error('Streaming request failed: ${streamedResponse.statusCode}');

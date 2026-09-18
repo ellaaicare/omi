@@ -13,6 +13,14 @@ import 'package:omi/utils/platform/platform_manager.dart';
 
 enum PureSocketStatus { notConnected, connecting, connected, disconnected }
 
+@visibleForTesting
+Future<Map<String, String>> buildAuthenticatedWebSocketHeaders({AuthHeaderProvider? authHeaderProvider}) =>
+    buildHeaders(
+      requireAuthCheck: true,
+      forceAuthRefresh: true,
+      authHeaderProvider: authHeaderProvider,
+    );
+
 abstract class IPureSocketListener {
   void onConnected();
   void onMessage(dynamic message);
@@ -68,6 +76,7 @@ class PureSocket implements IPureSocket {
         _status = connectedChannel == null ? PureSocketStatus.notConnected : PureSocketStatus.connected,
         _disconnectCloseTimeout = disconnectCloseTimeout;
 
+  @override
   void setListener(IPureSocketListener listener) {
     _listener = listener;
   }
@@ -80,8 +89,8 @@ class PureSocket implements IPureSocket {
 
     _closeNotified = false;
     _disconnectFence = null;
-    Logger.debug("request wss ${url}");
-    final headers = await buildHeaders(requireAuthCheck: true);
+    Logger.debug("request wss $url");
+    final headers = await buildAuthenticatedWebSocketHeaders();
 
     _channel = IOWebSocketChannel.connect(
       url,

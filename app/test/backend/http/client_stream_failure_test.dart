@@ -127,6 +127,123 @@ void main() {
     );
   });
 
+  test('authenticated stream refreshes once after 401 before releasing terminal content', () async {
+    final forceRefreshes = <bool>[];
+    final bearerHeaders = <String?>[];
+    var requests = 0;
+    HttpPoolManager.instance.replaceClientForTesting(
+      _StreamingClient((request) async {
+        requests++;
+        bearerHeaders.add(request.headers['authorization']);
+        if (requests == 1) {
+          return http.StreamedResponse(Stream.value(utf8.encode('{"detail":"expired"}')), 401);
+        }
+        return http.StreamedResponse(
+          Stream.value(utf8.encode(_doneFrame('Authenticated reply'))),
+          200,
+        );
+      }),
+    );
+
+    final chunks = await sendEllaMessageStream(
+      'safe synthetic prompt',
+      authHeaderProvider: ({required forceRefresh}) async {
+        forceRefreshes.add(forceRefresh);
+        return forceRefresh ? 'Bearer refreshed-token' : 'Bearer stale-token';
+      },
+    ).toList();
+
+    expect(requests, 2);
+    expect(forceRefreshes, [false, true]);
+    expect(bearerHeaders, ['Bearer stale-token', 'Bearer refreshed-token']);
+    expect(chunks.single.type, MessageChunkType.done);
+    expect(chunks.single.message?.text, 'Authenticated reply');
+  });
+
+  test('expired cached token is never sent when Firebase refresh cannot replace it', () async {
+    final preferences = SharedPreferencesUtil()
+      ..authToken = 'expired-token'
+      ..tokenExpirationTime = DateTime.utc(2026, 9, 18, 11).millisecondsSinceEpoch;
+
+    await expectLater(
+      getAuthHeader(
+        forceRefresh: true,
+        tokenRefresher: () async => preferences.authToken,
+        clock: () => DateTime.utc(2026, 9, 18, 12),
+      ),
+      throwsA(
+        isA<ClientApiFailure>().having(
+          (failure) => failure.kind,
+          'kind',
+          ClientApiFailureKind.authenticationRequired,
+        ),
+      ),
+    );
+  });
+
+  test('expired cached token blocks the stream before any transport egress', () async {
+    final preferences = SharedPreferencesUtil()
+      ..authToken = 'expired-token'
+      ..tokenExpirationTime = DateTime.utc(2026, 9, 18, 11).millisecondsSinceEpoch;
+    var requests = 0;
+    HttpPoolManager.instance.replaceClientForTesting(
+      _StreamingClient((_) async {
+        requests++;
+        return http.StreamedResponse(const Stream.empty(), 200);
+      }),
+    );
+
+    await expectLater(
+      makeStreamingApiCall(
+        url: 'https://api.ella.test/v1/ella/chat/stream',
+        authHeaderProvider: ({required forceRefresh}) => getAuthHeader(
+          forceRefresh: forceRefresh,
+          tokenRefresher: () async => preferences.authToken,
+          clock: () => DateTime.utc(2026, 9, 18, 12),
+        ),
+      ).toList(),
+      throwsA(
+        isA<ClientApiFailure>().having(
+          (failure) => failure.kind,
+          'kind',
+          ClientApiFailureKind.authenticationRequired,
+        ),
+      ),
+    );
+    expect(requests, 0);
+  });
+
+  test('authenticated stream stops after one unsuccessful refresh', () async {
+    final forceRefreshes = <bool>[];
+    var requests = 0;
+    HttpPoolManager.instance.replaceClientForTesting(
+      _StreamingClient((_) async {
+        requests++;
+        return http.StreamedResponse(Stream.value(utf8.encode('{"detail":"expired"}')), 401);
+      }),
+    );
+
+    await expectLater(
+      makeStreamingApiCall(
+        url: 'https://api.ella.test/v1/ella/chat/stream',
+        authHeaderProvider: ({required forceRefresh}) async {
+          forceRefreshes.add(forceRefresh);
+          return forceRefresh ? 'Bearer still-invalid-token' : 'Bearer invalid-token';
+        },
+      ).toList(),
+      throwsA(
+        isA<ClientApiFailure>().having(
+          (failure) => failure.kind,
+          'kind',
+          ClientApiFailureKind.authenticationRequired,
+        ),
+      ),
+    );
+
+    expect(requests, 2);
+    expect(forceRefreshes, [false, true]);
+  });
+
   test('multipart voice stream surfaces backend failure instead of ending empty', () async {
     final file = File('${Directory.systemTemp.path}/typed-voice-stream.wav')..writeAsBytesSync([1, 2, 3]);
     addTearDown(() async {
