@@ -335,6 +335,8 @@ class ImessageEnrollmentService:
             )
         except ImessageAuthorityError as exc:
             raise self._authority_error(exc) from exc
+        if decision != "granted":
+            await self._cleanup_provider_requests(uid=uid, error_prefix="imessage_consent_cleanup")
         return self._receipt(receipt)
 
     async def status(self, *, uid: str) -> dict[str, Any]:
@@ -380,6 +382,7 @@ class ImessageEnrollmentService:
                     )
                 except ImessageAuthorityError as exc:
                     raise self._authority_error(exc) from exc
+                await self._cleanup_provider_requests(uid=uid, error_prefix="imessage_expired_cleanup")
                 if str(binding.get("status") or "") == "quarantined":
                     return self._binding_status(
                         binding,
@@ -465,6 +468,7 @@ class ImessageEnrollmentService:
                     )
                 except ImessageAuthorityError as exc:
                     raise self._authority_error(exc) from exc
+                await self._cleanup_provider_requests(uid=uid, error_prefix="imessage_expired_cleanup")
                 raise ImessageEnrollmentError("imessage_registration_proof_window_expired", status_code=409)
             code = self._challenge_code(attempt["id"])
             return (
@@ -662,6 +666,51 @@ class ImessageEnrollmentService:
         }
         return response
 
+    async def cleanup_for_account_deletion(self, *, uid: str) -> dict[str, Any]:
+        """Fence iMessage writes and prove exact local transport absence before unlink."""
+        await self._require_schema()
+        try:
+            fence = await self.repository.begin_account_deletion_cleanup(
+                uid=uid,
+                request_id=uuid.uuid4(),
+            )
+        except ImessageAuthorityError as exc:
+            raise self._authority_error(exc) from exc
+        request_id = uuid.UUID(str(fence["request_id"]))
+        if str(fence["state"]) != "cleaned":
+            for provider_request_id in fence.get("provider_request_ids") or []:
+                try:
+                    await self.registrar.cleanup(provider_request_id=str(provider_request_id))
+                except RegistrarError as exc:
+                    raise ImessageEnrollmentError(
+                        "imessage_account_cleanup_uncertain" if exc.ambiguous else "imessage_account_cleanup_failed",
+                        status_code=503,
+                    ) from exc
+            try:
+                fence = await self.repository.complete_account_deletion_cleanup(
+                    uid=uid,
+                    request_id=request_id,
+                )
+            except ImessageAuthorityError as exc:
+                raise self._authority_error(exc) from exc
+        return {
+            "local_absence_proven": str(fence["state"]) == "cleaned",
+            "provider_disposition": "provider_user_retained_unbound",
+            "operator_action_required": bool(fence.get("provider_request_ids")),
+        }
+
+    async def _cleanup_provider_requests(self, *, uid: str, error_prefix: str) -> None:
+        try:
+            provider_request_ids = await self.repository.provider_request_ids_for_owner(uid=uid)
+        except ImessageAuthorityError as exc:
+            raise self._authority_error(exc) from exc
+        for provider_request_id in provider_request_ids:
+            try:
+                await self.registrar.cleanup(provider_request_id=str(provider_request_id))
+            except RegistrarError as exc:
+                suffix = "uncertain" if exc.ambiguous else "failed"
+                raise ImessageEnrollmentError(f"{error_prefix}_{suffix}", status_code=503) from exc
+
     async def _runtime(self, uid: str) -> tuple[IsolatedRuntime, ImessageRuntimeSnapshot, Any]:
         try:
             runtime = await resolve_isolated_runtime(uid, target_mode="hermes-chat")
@@ -803,3 +852,8 @@ class ImessageEnrollmentService:
         if exc.code == "imessage_enrollment_rate_limited":
             return ImessageEnrollmentError(exc.code, status_code=429)
         return ImessageEnrollmentError(exc.code, status_code=503)
+
+
+async def cleanup_imessage_for_account_deletion(*, uid: str) -> dict[str, Any]:
+    service = await ImessageEnrollmentService.create()
+    return await service.cleanup_for_account_deletion(uid=uid)

@@ -151,6 +151,11 @@ class FakeRepository:
         self.receipt["status"] = "uncertain"
         return dict(self.receipt)
 
+    async def reconcile_pre_send_delivery(self, **kwargs):
+        self.events.append(("delivery_reconcile", kwargs))
+        self.receipt["status"] = "quarantined"
+        return dict(self.receipt)
+
     async def quarantine_binding(self, **kwargs):
         self.events.append(("deregister", kwargs))
         self.binding["status"] = "quarantined"
@@ -369,6 +374,24 @@ def test_model_error_after_send_boundary_is_quarantined_without_retry(monkeypatc
     assert client.calls == 1
 
 
+def test_pre_send_reconcile_is_terminal_without_current_runtime_or_reply_text(monkeypatch):
+    monkeypatch.delenv("ELLA_IMESSAGE_RUNTIME_ENABLED", raising=False)
+    runtime = _runtime()
+    repository = FakeRepository(_binding(runtime))
+    client = FakeCompletionClient(repository.events)
+
+    result = asyncio.run(_service(repository, client, runtime).reconcile_pre_send_delivery(_delivery()))
+
+    assert result == {
+        "status": "quarantined",
+        "receipt_id": str(RECEIPT_ID),
+        "retryable": False,
+    }
+    assert [event[0] for event in repository.events] == ["schema", "delivery_reconcile"]
+    assert client.calls == 0
+    assert "text" not in result
+
+
 def test_transport_routes_fail_closed_and_forbid_uid_selectors(monkeypatch):
     calls = []
 
@@ -376,6 +399,10 @@ def test_transport_routes_fail_closed_and_forbid_uid_selectors(monkeypatch):
         async def heartbeat(self, **kwargs):
             calls.append(kwargs)
             return {"status": "ready"}
+
+        async def reconcile_pre_send_delivery(self, request):
+            calls.append(request)
+            return {"status": "quarantined", "receipt_id": request.receipt_id, "retryable": False}
 
     async def factory():
         return RouteService()
@@ -426,7 +453,21 @@ def test_transport_routes_fail_closed_and_forbid_uid_selectors(monkeypatch):
     )
     assert allowed.status_code == 200
     assert allowed.headers["cache-control"] == "no-store"
-    assert calls == [payload]
+    reconciled = client.post(
+        "/v1/ella/internal/imessage/delivery/reconcile",
+        json={
+            **payload,
+            "receipt_id": str(RECEIPT_ID),
+            "delivery_idempotency_key": str(DELIVERY_KEY),
+            "binding_generation": 3,
+        },
+        headers={"X-Ella-Imessage-Transport-Token": TRANSPORT_TOKEN},
+    )
+    assert reconciled.status_code == 200
+    assert reconciled.headers["cache-control"] == "no-store"
+    assert reconciled.json()["status"] == "quarantined"
+    assert calls[0] == payload
+    assert isinstance(calls[1], ImessageDeliveryIdentity)
 
 
 def test_deregister_feature_flag_defaults_off_before_repository_mutation(monkeypatch):

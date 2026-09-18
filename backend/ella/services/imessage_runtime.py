@@ -392,6 +392,26 @@ class ImessageRuntimeService:
             raise self._error(exc) from exc
         return {"status": "uncertain", "receipt_id": str(receipt["id"]), "retryable": False}
 
+    async def reconcile_pre_send_delivery(self, request: ImessageDeliveryIdentity) -> dict[str, Any]:
+        """Close an old pre-send receipt without releasing its cached text."""
+        await self._require_storage_ready()
+        try:
+            receipt = await self.repository.reconcile_pre_send_delivery(
+                receipt_id=request.receipt_id,
+                delivery_idempotency_key=request.delivery_idempotency_key,
+                binding_generation=request.binding_generation,
+                line_identity_hmac=self._reference("line", request.line_identity),
+                contact_identity_hmac=self._reference("contact", request.contact_identity),
+                connection_ref_hmac=self._reference("connection", request.connection_id),
+            )
+        except ImessageRuntimeRepositoryError as exc:
+            raise self._error(exc) from exc
+        return {
+            "status": str(receipt["status"]),
+            "receipt_id": str(receipt["id"]),
+            "retryable": False,
+        }
+
     async def deregister(
         self,
         *,

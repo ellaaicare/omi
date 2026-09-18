@@ -101,4 +101,19 @@ CREATE UNIQUE INDEX ella_imessage_message_receipts_outbound_provider_key
 CREATE INDEX ella_imessage_message_receipts_outbox_idx
     ON ella_imessage_message_receipts(binding_id, binding_generation, status, updated_at);
 
+CREATE TABLE ella_imessage_account_deletion_fences (
+    user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    request_id UUID NOT NULL UNIQUE,
+    state TEXT COLLATE "C" NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending', 'cleaned')),
+    provider_request_ids UUID[] NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    cleaned_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (
+        (state = 'pending' AND cleaned_at IS NULL)
+        OR (state = 'cleaned' AND cleaned_at IS NOT NULL)
+    )
+);
+
 COMMIT;

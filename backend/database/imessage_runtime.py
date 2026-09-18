@@ -124,6 +124,11 @@ class ImessageRuntimeRepository:
               AND rt.account_user_id = b.user_id
               AND rt.profile_user_id = b.user_id
               AND rt.entitlement_revision IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM ella_imessage_account_deletion_fences deletion
+                  WHERE deletion.user_id = b.user_id
+              )
             """,
             line_identity_hmac,
             contact_identity_hmac,
@@ -806,6 +811,72 @@ class ImessageRuntimeRepository:
         if not row:
             raise ImessageRuntimeRepositoryError("imessage_delivery_uncertain_conflict")
         return dict(row)
+
+    async def reconcile_pre_send_delivery(
+        self,
+        *,
+        receipt_id: str,
+        delivery_idempotency_key: str,
+        binding_generation: int,
+        line_identity_hmac: str,
+        contact_identity_hmac: str,
+        connection_ref_hmac: str,
+    ) -> dict[str, Any]:
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                receipt = await connection.fetchrow(
+                    """
+                    SELECT r.*
+                    FROM ella_imessage_message_receipts r
+                    JOIN ella_imessage_channel_bindings b ON b.id = r.binding_id
+                    WHERE r.id = $1
+                      AND r.delivery_idempotency_key = $2
+                      AND r.binding_generation = $3
+                      AND b.line_identity_hmac = $4
+                      AND b.contact_identity_hmac = $5
+                    FOR UPDATE OF r
+                    """,
+                    uuid.UUID(str(receipt_id)),
+                    uuid.UUID(str(delivery_idempotency_key)),
+                    binding_generation,
+                    line_identity_hmac,
+                    contact_identity_hmac,
+                )
+                if not receipt:
+                    raise ImessageRuntimeRepositoryError("imessage_delivery_reconcile_conflict")
+                status = str(receipt["status"])
+                if status in {"uncertain", "quarantined", "failed", "delivered"}:
+                    return dict(receipt)
+                if status == "sending":
+                    if not receipt["send_started"] or receipt["send_connection_ref_hmac"] != connection_ref_hmac:
+                        raise ImessageRuntimeRepositoryError("imessage_delivery_reconcile_conflict")
+                    next_status = "uncertain"
+                    error_code = "imessage_send_outcome_unconfirmed_after_restart"
+                elif status == "awaiting_delivery" and not receipt["send_started"]:
+                    next_status = "quarantined"
+                    error_code = "imessage_delivery_abandoned_before_send"
+                else:
+                    raise ImessageRuntimeRepositoryError("imessage_delivery_reconcile_conflict")
+                row = await connection.fetchrow(
+                    """
+                    UPDATE ella_imessage_message_receipts
+                    SET status = $2,
+                        reconciliation_status = 'manual_required',
+                        error_code = $3,
+                        lease_token = NULL,
+                        lease_expires_at = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1 AND status = $4
+                    RETURNING *
+                    """,
+                    receipt["id"],
+                    next_status,
+                    error_code,
+                    status,
+                )
+                if not row:
+                    raise ImessageRuntimeRepositoryError("imessage_delivery_reconcile_conflict")
+                return dict(row)
 
     async def quarantine_binding(
         self,

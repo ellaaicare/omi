@@ -594,7 +594,7 @@ jobs:
               tests/postgres/test_imessage_enrollment_postgres.py |
               sed '/^$/d'
           )"
-          test "$(grep -c '::' <<<"$imessage_ids")" -eq 95
+          test "$(grep -c '::' <<<"$imessage_ids")" -eq 106
           required_imessage_ids=(
             "tests/unit/test_imessage_enrollment.py::test_previous_policy_consent_is_rejected_before_authority_write"
             "tests/unit/test_imessage_enrollment.py::test_revoke_requires_exact_local_cleanup_and_reports_retained_provider_user"
@@ -606,6 +606,9 @@ jobs:
             "tests/unit/test_imessage_enrollment.py::test_provider_accepted_finalization_drift_is_quarantined_without_repeat_registration"
             "tests/unit/test_imessage_enrollment.py::test_status_atomically_retires_expired_pending_challenge"
             "tests/unit/test_imessage_enrollment.py::test_finalized_retry_retires_expired_proof_instead_of_reissuing"
+            "tests/unit/test_imessage_enrollment.py::test_consent_withdrawal_revokes_then_proves_exact_local_cleanup"
+            "tests/unit/test_imessage_enrollment.py::test_account_deletion_cleanup_fences_before_exact_local_absence_proof"
+            "tests/unit/test_imessage_enrollment.py::test_account_deletion_cleanup_failure_keeps_durable_fence_pending"
             "tests/unit/test_imessage_enrollment.py::test_mounted_enrollment_surfaces_are_no_store_including_start_json_response"
             "tests/unit/test_imessage_enrollment_openapi.py::test_all_literal_service_statuses_and_reasons_are_declared_in_openapi"
             "tests/unit/test_imessage_enrollment.py::test_mounted_transport_proof_denies_before_service[None-None-503]"
@@ -616,6 +619,7 @@ jobs:
             "tests/unit/test_imessage_runtime.py::test_deregister_feature_flag_defaults_off_before_repository_mutation"
             "tests/unit/test_imessage_runtime.py::test_terminal_delivery_callbacks_use_started_receipt_without_current_authority"
             "tests/unit/test_imessage_runtime.py::test_terminal_delivery_uncertain_works_with_runtime_flag_off_after_send_start"
+            "tests/unit/test_imessage_runtime.py::test_pre_send_reconcile_is_terminal_without_current_runtime_or_reply_text"
             "tests/unit/test_imessage_runtime.py::test_transport_private_successes_and_errors_are_no_store"
             "tests/unit/test_imessage_runtime.py::test_transport_routes_fail_closed_and_forbid_uid_selectors"
             "tests/unit/test_imessage_runtime_openapi.py::test_internal_runtime_contract_is_transport_only_and_has_no_owner_selector"
@@ -639,13 +643,18 @@ jobs:
             "tests/unit/test_imessage_photon_bridge.py::test_ack_transport_failure_retries_ack_only_without_second_provider_send"
             "tests/unit/test_imessage_photon_bridge.py::test_cold_stream_persists_first_event_then_promotes_before_model_work"
             "tests/unit/test_imessage_photon_bridge.py::test_cold_stream_backend_failure_retains_event_for_later_reconcile"
+            "tests/unit/test_imessage_photon_bridge.py::test_live_worker_requeues_persisted_event_only_after_heartbeat_recovers"
             "tests/unit/test_imessage_photon_bridge.py::test_health_degrades_on_backend_failure_and_heartbeat_expiry"
             "tests/unit/test_imessage_photon_bridge.py::test_provider_fatal_marks_health_degraded_and_requests_process_restart"
             "tests/unit/test_imessage_photon_bridge.py::test_provider_send_uses_one_plain_text_operation_for_url_only_reply"
             "tests/unit/test_imessage_photon_bridge.py::test_provider_send_lost_response_never_issues_fallback_operation"
             "tests/unit/test_imessage_photon_bridge.py::test_prepared_restart_reuses_original_connection_fence_without_provider_resend"
+            "tests/unit/test_imessage_photon_bridge.py::test_cached_prepared_reply_after_revocation_is_terminal_without_provider_send"
+            "tests/unit/test_imessage_photon_bridge.py::test_running_receipt_rechecks_in_process_then_sends_once"
+            "tests/unit/test_imessage_photon_bridge.py::test_replacement_registration_rekeys_exact_cleanup_identity"
             "tests/unit/test_imessage_photon_bridge.py::test_scoped_cleanup_purges_only_selected_registration_and_is_retry_safe"
             "tests/unit/test_imessage_photon_bridge.py::test_cleanup_drains_inflight_work_and_blocks_late_provider_journal"
+            "tests/unit/test_imessage_photon_bridge.py::test_cleanup_and_same_handset_regrant_share_one_lifecycle_lock"
             "tests/unit/test_imessage_photon_bridge.py::test_reconcile_failure_never_publishes_ready_or_strands_a_live_worker"
             "tests/unit/test_imessage_photon_bridge.py::test_cleanup_http_is_authenticated_content_free_and_reports_provider_retained"
             "tests/unit/test_imessage_photon_bridge.py::test_lost_delivery_start_response_is_quarantined_without_provider_send"
@@ -656,6 +665,8 @@ jobs:
             "tests/postgres/test_imessage_enrollment_postgres.py::test_revoke_returns_exact_provider_request_for_idempotent_local_cleanup"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_expired_pending_binding_is_atomically_retired_and_replacement_can_start"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_unresolved_provider_acceptance_blocks_competing_registration_graph"
+            "tests/postgres/test_imessage_enrollment_postgres.py::test_pre_send_reconciliation_is_exact_terminal_and_never_releases_text"
+            "tests/postgres/test_imessage_enrollment_postgres.py::test_account_deletion_fence_quarantines_owner_and_preserves_unrelated_registration"
           )
           for required_id in "${required_imessage_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$imessage_ids"

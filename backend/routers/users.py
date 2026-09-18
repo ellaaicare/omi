@@ -62,6 +62,10 @@ from database.managed_cloud_consent import (
     unlink_self_owner_account_on_deletion,
 )
 from ella.services.ai_consent import build_account_deletion_receipt
+from ella.services.imessage_enrollment import (
+    ImessageEnrollmentError,
+    cleanup_imessage_for_account_deletion,
+)
 from utils.other.storage import (
     delete_all_conversation_recordings,
     get_speech_sample_signed_urls,
@@ -113,9 +117,19 @@ async def delete_account(uid: str = Depends(auth.get_current_user_uid)):
     Hermes/honcho data persists until the GC/retention pass.
     """
     try:
+        imessage_cleanup = await cleanup_imessage_for_account_deletion(uid=uid)
+        if imessage_cleanup.get('local_absence_proven') is not True:
+            raise ImessageEnrollmentError('imessage_account_cleanup_unproven', status_code=503)
         await unlink_self_owner_account_on_deletion(uid=uid)
+    except ImessageEnrollmentError:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                'code': 'account_deletion_imessage_cleanup_unavailable',
+                'retryable': True,
+            },
+        )
     except ManagedCloudAuthorityUnavailable as exc:
-        print('delete_account', str(exc))
         raise HTTPException(
             status_code=503,
             detail={
@@ -123,13 +137,19 @@ async def delete_account(uid: str = Depends(auth.get_current_user_uid)):
                 'retryable': True,
             },
         )
-    except Exception as e:
-        print('delete_account', str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                'code': 'account_deletion_authority_unavailable',
+                'retryable': True,
+            },
+        ) from exc
     return {
         'status': 'ok',
         'message': 'Account deleted successfully',
         'deletion_receipt': build_account_deletion_receipt(),
+        'imessage_cleanup': imessage_cleanup,
     }
 
 

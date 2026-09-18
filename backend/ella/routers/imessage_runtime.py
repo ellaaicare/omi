@@ -170,6 +170,19 @@ def create_imessage_runtime_router(
         except ImessageRuntimeError as exc:
             raise _http_error(exc) from exc
 
+    @router.post("/delivery/reconcile")
+    async def delivery_reconcile(
+        payload: DeliveryIdentityIn,
+        response: Response,
+        token: Optional[str] = Header(default=None, alias="X-Ella-Imessage-Transport-Token"),
+    ) -> dict:
+        _require_transport(token)
+        _mark_no_store(response)
+        try:
+            return await (await service()).reconcile_pre_send_delivery(identity(payload))
+        except ImessageRuntimeError as exc:
+            raise _http_error(exc) from exc
+
     @router.post("/deregister")
     async def deregister(
         payload: TransportIdentityIn,

@@ -58,6 +58,7 @@ def test_internal_runtime_contract_is_transport_only_and_has_no_owner_selector()
         "/v1/ella/internal/imessage/delivery/start",
         "/v1/ella/internal/imessage/delivery/ack",
         "/v1/ella/internal/imessage/delivery/uncertain",
+        "/v1/ella/internal/imessage/delivery/reconcile",
         "/v1/ella/internal/imessage/deregister",
     }
 

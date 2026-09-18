@@ -95,6 +95,7 @@ credential on these ownerless internal routes:
 - `POST /v1/ella/internal/imessage/delivery/start`
 - `POST /v1/ella/internal/imessage/delivery/ack`
 - `POST /v1/ella/internal/imessage/delivery/uncertain`
+- `POST /v1/ella/internal/imessage/delivery/reconcile`
 - `POST /v1/ella/internal/imessage/deregister`
 
 The header is `X-Ella-Imessage-Transport-Token`. Request bodies contain opaque
@@ -111,6 +112,12 @@ and delivery IDs. The reply text is released only by `delivery/start`, after
 model result after model-start, or a transport-reported ambiguous send becomes
 `uncertain` with manual reconciliation. The bridge must never retry any of those
 states blindly. Only an identical provider acknowledgement is idempotent.
+After a bridge restart, persisted pre-send intents use `delivery/reconcile` with
+their original connection identity. That route never releases cached reply text:
+it moves an unstarted intent to a terminal quarantine, or a durably started send
+to uncertain/manual reconciliation. A live `claimed` or `running` receipt is
+polled for a bounded interval with the original inbound timestamp and receipt;
+the durable backend claim prevents a second inference.
 
 The backend writes canonical `imessage` user and assistant events under the
 owner's stable OMI session. It performs one bounded non-stream request against
@@ -203,6 +210,11 @@ check before the launch service is loaded.
 
 The registrar also exposes authenticated
 `DELETE /v1/registrations/{provider_request_id}` for exact lifecycle cleanup.
+Consent withdrawal and account deletion use that exact ID for every persisted
+registration attempt. Account deletion first commits a durable write fence,
+revokes the binding, terminally quarantines open receipts, and requires the
+registrar's zero-row absence proof before the account authority can be unlinked.
+Unrelated registrations are never selected by that cleanup.
 It quarantines the backend binding first, then transactionally removes only
 that local handset's registration, inbound journal, and delivery artifacts,
 and proves all three exact counts are zero while preserving unrelated users.

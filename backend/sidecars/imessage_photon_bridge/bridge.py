@@ -35,6 +35,7 @@ NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 TERMINAL_RECEIPT_STATES = {"delivered", "failed", "uncertain", "quarantined"}
 PROVIDER_OUTBOUND_MAX_CHARS = 8_000
 INBOUND_RETRY_DELAYS = (1.0, 5.0, 15.0)
+INBOUND_PENDING_RECHECK_DELAYS = (1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 30.0)
 
 
 class BridgeError(RuntimeError):
@@ -152,6 +153,8 @@ class EllaBackend(Protocol):
 
     async def delivery_uncertain(self, payload: dict[str, Any]) -> dict[str, Any]: ...
 
+    async def delivery_reconcile(self, payload: dict[str, Any]) -> dict[str, Any]: ...
+
     async def deregister(self, payload: dict[str, Any]) -> dict[str, Any]: ...
 
 
@@ -183,6 +186,9 @@ class HttpEllaBackend:
 
     async def delivery_uncertain(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post("/v1/ella/internal/imessage/delivery/uncertain", payload)
+
+    async def delivery_reconcile(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._post("/v1/ella/internal/imessage/delivery/reconcile", payload)
 
     async def deregister(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post("/v1/ella/internal/imessage/deregister", payload)
@@ -401,7 +407,18 @@ class BridgeJournal:
             if existing and (existing["project_id"] != project_id or existing["handset_e164"] != handset_e164):
                 raise BridgeError("bridge_registration_idempotency_conflict", status_code=409)
             if by_handset and by_handset["provider_request_id"] != provider_request_id:
-                existing = by_handset
+                self.connection.execute(
+                    """
+                    UPDATE registrations
+                    SET provider_request_id = ?, proof_accepted = 0, created_at = ?, updated_at = ?
+                    WHERE provider_request_id = ? AND handset_e164 = ? AND status != 'disabled'
+                    """,
+                    (provider_request_id, now, now, by_handset["provider_request_id"], handset_e164),
+                )
+                existing = self.connection.execute(
+                    "SELECT * FROM registrations WHERE provider_request_id = ?",
+                    (provider_request_id,),
+                ).fetchone()
             if existing and existing["status"] == "disabled":
                 self.connection.execute(
                     """
@@ -757,7 +774,22 @@ class BridgeJournal:
                 (provider_request_id,),
             ).fetchone()
             if not registration:
-                raise BridgeError("bridge_cleanup_registration_not_found", status_code=404)
+                completed_at = _utc_now()
+                self.connection.execute(
+                    """
+                    INSERT INTO cleanup_receipts (
+                        provider_request_id, provider_disposition, registrations_removed,
+                        inbound_events_removed, deliveries_removed, completed_at
+                    ) VALUES (?, 'provider_user_retained_unbound', 0, 0, 0, ?)
+                    """,
+                    (provider_request_id, completed_at),
+                )
+                receipt = self.connection.execute(
+                    "SELECT * FROM cleanup_receipts WHERE provider_request_id = ?",
+                    (provider_request_id,),
+                ).fetchone()
+                self.connection.execute("COMMIT")
+                return dict(receipt)
             if self.connection.execute("SELECT 1 FROM inbound_events WHERE handset_e164 IS NULL LIMIT 1").fetchone():
                 raise BridgeError("bridge_cleanup_absence_unavailable")
             handset = str(registration["handset_e164"])
@@ -813,17 +845,23 @@ class BridgeJournal:
 
 
 class Registrar:
-    def __init__(self, config: BridgeConfig, journal: BridgeJournal, provider: PhotonProvider) -> None:
+    def __init__(
+        self,
+        config: BridgeConfig,
+        journal: BridgeJournal,
+        provider: PhotonProvider,
+        lifecycle_lock: asyncio.Lock,
+    ) -> None:
         self.config = config
         self.journal = journal
         self.provider = provider
-        self.lock = asyncio.Lock()
+        self.lifecycle_lock = lifecycle_lock
 
     async def register(self, provider_request_id: str, handset_e164: str) -> tuple[int, dict[str, Any]]:
         _uuid_text(provider_request_id, "bridge_registration_idempotency_key_invalid")
         if not E164_RE.fullmatch(handset_e164):
             raise BridgeError("bridge_handset_invalid", status_code=422)
-        async with self.lock:
+        async with self.lifecycle_lock:
             row = self.journal.begin_registration(provider_request_id, self.config.project_id, handset_e164)
             if row["status"] == "ready":
                 return 200, _registration_response(row)
@@ -863,7 +901,6 @@ class ImessagePhotonBridge:
         self.provider = provider
         self.backend = backend
         self.connection_id = connection_id or str(uuid.uuid4())
-        self.registrar = Registrar(config, journal, provider)
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self.worker_task: Optional[asyncio.Task[None]] = None
         self.heartbeat_task: Optional[asyncio.Task[None]] = None
@@ -875,9 +912,11 @@ class ImessagePhotonBridge:
         self.activation_lock = asyncio.Lock()
         self.lifecycle_lock = asyncio.Lock()
         self.processing_lock = asyncio.Lock()
+        self.registrar = Registrar(config, journal, provider, self.lifecycle_lock)
         self.backend_heartbeat_success: dict[str, float] = {}
         self.backend_heartbeat_failed: set[str] = set()
         self.inbound_retry_delays = INBOUND_RETRY_DELAYS
+        self.inbound_pending_recheck_delays = INBOUND_PENDING_RECHECK_DELAYS
         self.inbound_retry_attempts: dict[str, int] = {}
         self.queued_inbound: set[str] = set()
 
@@ -950,14 +989,7 @@ class ImessagePhotonBridge:
         _uuid_text(provider_request_id, "bridge_registration_idempotency_key_invalid")
         async with self.lifecycle_lock:
             registration = self.journal.registration_for_request(provider_request_id)
-            if registration is None:
-                receipt = self.journal.connection.execute(
-                    "SELECT * FROM cleanup_receipts WHERE provider_request_id = ?", (provider_request_id,)
-                ).fetchone()
-                if receipt is None:
-                    raise BridgeError("bridge_cleanup_registration_not_found", status_code=404)
-                return dict(receipt)
-            if registration["status"] == "ready":
+            if registration is not None and registration["status"] == "ready":
                 result = await self.backend.deregister(self._transport_identity(registration))
                 if result.get("status") not in {"not_connected", "quarantined"}:
                     raise BridgeError("bridge_deregister_response_invalid")
@@ -980,9 +1012,14 @@ class ImessagePhotonBridge:
 
     async def _handle_inbound_failure(self, provider_message_id: str, exc: BridgeError) -> None:
         attempt = self.inbound_retry_attempts.get(provider_message_id, 0)
-        if exc.retryable and attempt < len(self.inbound_retry_delays):
+        retry_delays = (
+            self.inbound_pending_recheck_delays
+            if exc.code == "bridge_backend_work_pending"
+            else self.inbound_retry_delays
+        )
+        if exc.retryable and attempt < len(retry_delays):
             self.inbound_retry_attempts[provider_message_id] = attempt + 1
-            await asyncio.sleep(self.inbound_retry_delays[attempt])
+            await asyncio.sleep(retry_delays[attempt])
             await self.queue.put(provider_message_id)
             return
         self.inbound_retry_attempts.pop(provider_message_id, None)
@@ -1055,13 +1092,18 @@ class ImessagePhotonBridge:
             delivery = self.journal.delivery_by_receipt(receipt_id)
             if delivery is None:
                 raise BridgeError("bridge_delivery_start_identity_missing", status_code=409)
-            await self._uncertain_delivery(delivery, "bridge_backend_send_state_unowned")
+            if delivery["status"] == "ack_pending" and delivery.get("provider_message_id"):
+                await self._ack_delivery(delivery)
+            else:
+                await self._uncertain_delivery(delivery, "bridge_backend_send_state_unowned")
             self.journal.mark_inbound_terminal(provider_message_id)
         elif status_value in TERMINAL_RECEIPT_STATES or status_value == "unknown_sender":
             self.journal.mark_inbound_terminal(provider_message_id)
         elif status_value in {"claimed", "running"}:
-            # Keep the exact original event for bounded restart/replay. Never alter its timestamp.
-            return
+            # Recheck the same durable backend claim in-process. The backend's
+            # receipt prevents a second model invocation and the original event
+            # timestamp remains unchanged.
+            raise BridgeError("bridge_backend_work_pending", retryable=True)
         else:
             raise BridgeError("bridge_inbound_response_invalid")
 
@@ -1107,18 +1149,15 @@ class ImessagePhotonBridge:
         await self._ack_delivery(pending)
 
     async def _resume_prepared_delivery(self, delivery: dict[str, Any]) -> None:
-        if delivery.get("reply_text"):
-            await self._send_prepared_delivery(delivery)
-            return
-        try:
-            start = await self.backend.delivery_start(_delivery_request(delivery))
-        except BridgeError as exc:
-            if exc.code == "imessage_delivery_outcome_uncertain":
-                await self._uncertain_delivery(delivery, "bridge_delivery_start_response_uncertain")
-                return
-            raise
-        prepared = self.journal.complete_delivery_start(str(delivery["receipt_id"]), start)
-        await self._send_prepared_delivery(prepared)
+        result = await self.backend.delivery_reconcile(_delivery_request(delivery))
+        status_value = str(result.get("status") or "")
+        if status_value not in {"uncertain", "quarantined", "failed", "delivered"}:
+            raise BridgeError("bridge_delivery_reconcile_response_invalid")
+        self.journal.mark_delivery_terminal(
+            str(delivery["receipt_id"]),
+            "delivered" if status_value == "delivered" else "uncertain",
+            None if status_value == "delivered" else "bridge_restart_pre_send_reconciled",
+        )
 
     async def _ack_delivery(self, delivery: dict[str, Any]) -> None:
         await self.backend.delivery_ack(
@@ -1155,15 +1194,22 @@ class ImessagePhotonBridge:
             self.provider_ready = await self.provider.healthy()
             if not self.provider_ready:
                 raise BridgeError("bridge_provider_stream_not_healthy", retryable=True)
-            if self.worker_task is not None:
-                if not self.worker_task.done():
-                    return
+            worker_live = self.worker_task is not None and not self.worker_task.done()
+            if self.worker_task is not None and not worker_live:
                 if not self.worker_task.cancelled():
                     self.worker_task.exception()
                 self.worker_task = None
             await self._heartbeat_ready_registrations(ignore_errors=ignore_heartbeat_errors)
             if not self.backend_ready:
                 raise BridgeError("bridge_backend_heartbeat_unavailable", retryable=True)
+            if worker_live:
+                # Events accepted while backend readiness is degraded remain in
+                # the durable journal. Requeue them only after every current
+                # registration has passed a fresh authority heartbeat.
+                for event in self.journal.pending_inbound():
+                    if event.get("event_json"):
+                        await self._enqueue_inbound(str(event["provider_message_id"]))
+                return
             await self.reconcile()
             self.worker_task = asyncio.create_task(self._worker(), name="ella-imessage-worker")
 

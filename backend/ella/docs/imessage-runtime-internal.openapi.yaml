@@ -136,6 +136,29 @@ paths:
           $ref: "#/components/responses/Conflict"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /v1/ella/internal/imessage/delivery/reconcile:
+    post:
+      tags: [Ella iMessage Runtime]
+      summary: Terminally reconcile one persisted pre-send intent without releasing reply text.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeliveryIdentity"
+      responses:
+        "200":
+          description: The old intent is terminal and requires no provider send.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReceiptResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /v1/ella/internal/imessage/deregister:
     post:
       tags: [Ella iMessage Runtime]

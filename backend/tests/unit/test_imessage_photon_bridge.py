@@ -154,8 +154,13 @@ class FakeBackend:
         self.release_inbound: Optional[asyncio.Event] = None
         self.delivery_start_error: Optional[BridgeError] = None
         self.delivery_ack_error: Optional[BridgeError] = None
+        self.delivery_reconcile_error: Optional[BridgeError] = None
+        self.delivery_reconcile_result: Optional[dict[str, Any]] = None
         self.heartbeat_error: Optional[BridgeError] = None
         self.inbound_errors: list[BridgeError] = []
+        self.inbound_results: list[dict[str, Any]] = []
+        self.deregister_entered = asyncio.Event()
+        self.release_deregister: Optional[asyncio.Event] = None
 
     async def proof(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(("proof", payload))
@@ -175,6 +180,8 @@ class FakeBackend:
             raise self.inbound_errors.pop(0)
         if self.release_inbound is not None:
             await self.release_inbound.wait()
+        if self.inbound_results:
+            return dict(self.inbound_results.pop(0))
         return dict(self.inbound_result)
 
     async def delivery_start(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -197,8 +204,22 @@ class FakeBackend:
         self.calls.append(("delivery_uncertain", payload))
         return {"status": "uncertain", "receipt_id": payload["receipt_id"], "retryable": False}
 
+    async def delivery_reconcile(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.order.append("delivery_reconcile")
+        self.calls.append(("delivery_reconcile", payload))
+        if self.delivery_reconcile_error is not None:
+            raise self.delivery_reconcile_error
+        return self.delivery_reconcile_result or {
+            "status": "quarantined",
+            "receipt_id": payload["receipt_id"],
+            "retryable": False,
+        }
+
     async def deregister(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(("deregister", payload))
+        self.deregister_entered.set()
+        if self.release_deregister is not None:
+            await self.release_deregister.wait()
         return {"status": "quarantined", "binding_generation": 2}
 
 
@@ -763,7 +784,14 @@ async def test_ack_transport_failure_retries_ack_only_without_second_provider_se
     assert provider.send_calls == [(PHONE_A, "one provider send")]
     assert journal.open_deliveries()[0]["status"] == "ack_pending"
     backend.delivery_ack_error = None
-    await bridge.reconcile()
+    backend.inbound_result = {
+        "status": "sending",
+        "receipt_id": receipt_id,
+        "delivery_idempotency_key": delivery_key,
+        "binding_generation": 4,
+        "model_invoked": True,
+    }
+    await bridge._process("ack-failure")
     assert provider.send_calls == [(PHONE_A, "one provider send")]
     assert journal.open_deliveries() == []
     journal.close()
@@ -863,6 +891,34 @@ async def test_cold_stream_backend_failure_retains_event_for_later_reconcile(tmp
         assert bridge.worker_task is not None
         await asyncio.wait_for(bridge.queue.join(), timeout=1)
         assert [name for name, _payload in backend.calls].count("inbound") == 1
+    finally:
+        await bridge.stop()
+        journal.close()
+
+
+@async_test
+async def test_live_worker_requeues_persisted_event_only_after_heartbeat_recovers(tmp_path: Path) -> None:
+    bridge, journal, provider, backend = _bridge(tmp_path)
+    _ready_registration(journal)
+    journal.mark_proof_accepted(PHONE_A)
+    await bridge.start()
+    try:
+        backend.heartbeat_error = BridgeError("bridge_backend_transport_failed", retryable=True)
+        await bridge._heartbeat_ready_registrations(ignore_errors=True)
+        assert bridge.health_status == "degraded"
+
+        assert provider.handler is not None
+        await provider.handler(_event("heartbeat-recovers", PHONE_A))
+        assert [name for name, _payload in backend.calls].count("inbound") == 0
+        assert journal.pending_inbound()[0]["provider_message_id"] == "heartbeat-recovers"
+
+        backend.heartbeat_error = None
+        await bridge._activate_provider_ready(ignore_heartbeat_errors=True)
+        await asyncio.wait_for(bridge.queue.join(), timeout=1)
+
+        assert [name for name, _payload in backend.calls].count("inbound") == 1
+        assert journal.pending_inbound() == []
+        assert bridge.health_status == "ready"
     finally:
         await bridge.stop()
         journal.close()
@@ -976,14 +1032,118 @@ async def test_prepared_restart_reuses_original_connection_fence_without_provide
         backend=backend,
         connection_id="connection-after-restart",
     )
-    backend.delivery_start_error = BridgeError("imessage_delivery_outcome_uncertain", status_code=409)
+    backend.delivery_reconcile_result = {
+        "status": "quarantined",
+        "receipt_id": receipt_id,
+        "retryable": False,
+    }
 
     await restarted.reconcile()
 
-    uncertain = next(payload for name, payload in backend.calls if name == "delivery_uncertain")
-    assert uncertain["connection_id"] == intent["connection_id"] == "connection-1"
+    reconciled = next(payload for name, payload in backend.calls if name == "delivery_reconcile")
+    assert reconciled["connection_id"] == intent["connection_id"] == "connection-1"
     assert provider.send_calls == []
     assert journal.delivery_by_receipt(receipt_id)["status"] == "uncertain"
+    journal.close()
+
+
+@async_test
+async def test_cached_prepared_reply_after_revocation_is_terminal_without_provider_send(tmp_path: Path) -> None:
+    bridge, journal, provider, backend = _bridge(tmp_path)
+    registration = _ready_registration(journal)
+    receipt_id, delivery_key = _delivery_ids()
+    journal.prepare_delivery(
+        response={
+            "status": "sending",
+            "receipt_id": receipt_id,
+            "delivery_idempotency_key": delivery_key,
+            "binding_generation": 3,
+            "text": "must not send after revoke",
+        },
+        handset_e164=PHONE_A,
+        **bridge._transport_identity(registration),
+    )
+    journal.disable_registration(PHONE_A)
+    backend.delivery_reconcile_result = {
+        "status": "quarantined",
+        "receipt_id": receipt_id,
+        "retryable": False,
+    }
+
+    await bridge.reconcile()
+
+    assert provider.send_calls == []
+    assert journal.delivery_by_receipt(receipt_id)["status"] == "uncertain"
+    assert [name for name, _payload in backend.calls] == ["delivery_reconcile"]
+    journal.close()
+
+
+@async_test
+async def test_running_receipt_rechecks_in_process_then_sends_once(tmp_path: Path) -> None:
+    bridge, journal, provider, backend = _bridge(tmp_path)
+    _ready_registration(journal)
+    receipt_id, delivery_key = _delivery_ids()
+    backend.inbound_results = [
+        {"status": "running", "receipt_id": receipt_id, "model_invoked": True},
+        {
+            "status": "awaiting_delivery",
+            "receipt_id": receipt_id,
+            "delivery_idempotency_key": delivery_key,
+            "binding_generation": 4,
+            "model_invoked": True,
+        },
+    ]
+    backend.start_result = {
+        "status": "sending",
+        "receipt_id": receipt_id,
+        "delivery_idempotency_key": delivery_key,
+        "binding_generation": 4,
+        "text": "one bounded reply",
+    }
+    bridge.inbound_pending_recheck_delays = (0.0,)
+    worker = asyncio.create_task(bridge._worker())
+    try:
+        await bridge.accept_provider_event(_event("running-then-ready", PHONE_A))
+        await asyncio.wait_for(bridge.queue.join(), timeout=1)
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+    assert [name for name, _payload in backend.calls].count("inbound") == 2
+    assert provider.send_calls == [(PHONE_A, "one bounded reply")]
+    assert [name for name, _payload in backend.calls].count("delivery_start") == 1
+    assert [name for name, _payload in backend.calls].count("delivery_ack") == 1
+    assert journal.pending_inbound() == []
+    journal.close()
+
+
+@async_test
+async def test_replacement_registration_rekeys_exact_cleanup_identity(tmp_path: Path) -> None:
+    bridge, journal, provider, _backend = _bridge(tmp_path)
+    original = _ready_registration(journal)
+    journal.mark_proof_accepted(PHONE_A)
+    provider.users = [
+        {
+            "id": original["provider_user_id"],
+            "phoneNumber": PHONE_A,
+            "assignedPhoneNumber": LINE_A,
+        }
+    ]
+    replacement_request = str(uuid.uuid4())
+
+    status_code, response = await bridge.registrar.register(replacement_request, PHONE_A)
+
+    assert status_code == 200
+    assert response["registration_id"] == original["registration_id"]
+    replacement = journal.registration_for_request(replacement_request)
+    assert replacement is not None
+    assert replacement["proof_accepted"] == 0
+    assert journal.registration_for_request(str(original["provider_request_id"])) is None
+    receipt = await bridge.cleanup_registration(replacement_request)
+    absent = await bridge.cleanup_registration(str(original["provider_request_id"]))
+    assert receipt["registrations_removed"] == 1
+    assert absent["registrations_removed"] == 0
+    assert journal.ready_registrations() == []
     journal.close()
 
 
@@ -1087,6 +1247,39 @@ async def test_cleanup_drains_inflight_work_and_blocks_late_provider_journal(tmp
 
 
 @async_test
+async def test_cleanup_and_same_handset_regrant_share_one_lifecycle_lock(tmp_path: Path) -> None:
+    bridge, journal, provider, backend = _bridge(tmp_path)
+    registration = _ready_registration(journal)
+    journal.mark_proof_accepted(PHONE_A)
+    provider.users = [
+        {
+            "id": registration["provider_user_id"],
+            "phoneNumber": PHONE_A,
+            "assignedPhoneNumber": LINE_A,
+        }
+    ]
+    backend.release_deregister = asyncio.Event()
+    replacement_request_id = str(uuid.uuid4())
+
+    cleanup = asyncio.create_task(bridge.cleanup_registration(str(registration["provider_request_id"])))
+    await asyncio.wait_for(backend.deregister_entered.wait(), timeout=1)
+    regrant = asyncio.create_task(bridge.registrar.register(replacement_request_id, PHONE_A))
+    await asyncio.sleep(0)
+    assert not regrant.done()
+
+    backend.release_deregister.set()
+    cleanup_receipt = await asyncio.wait_for(cleanup, timeout=1)
+    status_code, response = await asyncio.wait_for(regrant, timeout=1)
+
+    assert cleanup_receipt["registrations_removed"] == 1
+    assert status_code == 201
+    assert response["assigned_destination"] == LINE_A
+    assert journal.registration_for_request(replacement_request_id) is not None
+    assert journal.registration_for_handset(PHONE_A)["provider_request_id"] == replacement_request_id
+    journal.close()
+
+
+@async_test
 async def test_reconcile_failure_never_publishes_ready_or_strands_a_live_worker(tmp_path: Path) -> None:
     bridge, journal, _provider, backend = _bridge(tmp_path)
     registration = _ready_registration(journal)
@@ -1101,7 +1294,7 @@ async def test_reconcile_failure_never_publishes_ready_or_strands_a_live_worker(
         handset_e164=PHONE_A,
         **bridge._transport_identity(registration),
     )
-    backend.delivery_start_error = BridgeError("bridge_backend_transport_failed", retryable=True)
+    backend.delivery_reconcile_error = BridgeError("bridge_backend_transport_failed", retryable=True)
 
     with pytest.raises(BridgeError, match="bridge_backend_transport_failed"):
         await bridge.start()

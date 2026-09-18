@@ -296,6 +296,20 @@ def _load_delete_account_route():
     firestore_delete = Mock()
     firebase_delete = Mock()
     unlink = AsyncMock()
+    imessage_cleanup = AsyncMock(
+        return_value={
+            "local_absence_proven": True,
+            "provider_disposition": "provider_user_retained_unbound",
+            "operator_action_required": True,
+        }
+    )
+
+    class ImessageCleanupError(RuntimeError):
+        def __init__(self, code, *, status_code):
+            super().__init__(code)
+            self.code = code
+            self.status_code = status_code
+
     auth = types.SimpleNamespace(get_current_user_uid=authenticated_uid, delete_account=firebase_delete)
     namespace = {
         "Depends": Depends,
@@ -304,10 +318,12 @@ def _load_delete_account_route():
         "delete_user_data": firestore_delete,
         "build_account_deletion_receipt": build_account_deletion_receipt,
         "unlink_self_owner_account_on_deletion": unlink,
+        "cleanup_imessage_for_account_deletion": imessage_cleanup,
+        "ImessageEnrollmentError": ImessageCleanupError,
         "ManagedCloudAuthorityUnavailable": RuntimeError,
     }
     exec(compile(ast.Module(body=[function], type_ignores=[]), "backend/routers/users.py", "exec"), namespace)
-    return namespace["delete_account"], firestore_delete, firebase_delete, unlink
+    return namespace["delete_account"], firestore_delete, firebase_delete, unlink, imessage_cleanup
 
 
 def test_account_deletion_completes_unlink_receipt_without_destructive_removal():
@@ -317,7 +333,7 @@ def test_account_deletion_completes_unlink_receipt_without_destructive_removal()
     # (users row / consent authority freed under the advisory lock) — so the
     # receipt is truthful and a relogin creates a fresh account. The deep
     # Firestore/Firebase wipe is deferred to the GC/retention pipeline.
-    route, firestore_delete, firebase_delete, unlink = _load_delete_account_route()
+    route, firestore_delete, firebase_delete, unlink, imessage_cleanup = _load_delete_account_route()
     app = FastAPI()
     app.add_api_route("/v1/users/delete-account", route, methods=["DELETE"])
 
@@ -331,6 +347,37 @@ def test_account_deletion_completes_unlink_receipt_without_destructive_removal()
     assert body["deletion_receipt"]["scope"] == "account_and_user_data"
     assert re.match(r"^aidel_[A-Za-z0-9_-]{16,128}$", body["deletion_receipt"]["request_id"])
     assert "server_completed_at" in body["deletion_receipt"]
+    assert body["imessage_cleanup"] == {
+        "local_absence_proven": True,
+        "provider_disposition": "provider_user_retained_unbound",
+        "operator_action_required": True,
+    }
+    imessage_cleanup.assert_awaited_once_with(uid="uid-a")
     unlink.assert_called_once_with(uid="uid-a")
+    firestore_delete.assert_not_called()
+    firebase_delete.assert_not_called()
+
+
+def test_account_deletion_refuses_before_unlink_when_imessage_absence_is_unproven():
+    route, firestore_delete, firebase_delete, unlink, imessage_cleanup = _load_delete_account_route()
+    imessage_cleanup.return_value = {
+        "local_absence_proven": False,
+        "provider_disposition": "provider_user_retained_unbound",
+        "operator_action_required": True,
+    }
+    app = FastAPI()
+    app.add_api_route("/v1/users/delete-account", route, methods=["DELETE"])
+
+    with TestClient(app) as client:
+        response = client.delete("/v1/users/delete-account")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": {
+            "code": "account_deletion_imessage_cleanup_unavailable",
+            "retryable": True,
+        }
+    }
+    unlink.assert_not_awaited()
     firestore_delete.assert_not_called()
     firebase_delete.assert_not_called()
