@@ -89,6 +89,67 @@ void main() {
     expect(controller.failure?.kind, ImessageEnrollmentFailureKind.authorityChanged);
   });
 
+  test('account switch after owner A starts never launches owner A proof for owner B', () async {
+    var authority = 'owner-a';
+    final launched = <Uri>[];
+    final gateway = _FakeGateway();
+    final controller = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => authority,
+      messagesLauncher: (uri) async {
+        launched.add(uri);
+        return true;
+      },
+      idGenerator: () => 'request-1',
+      appInfoReader: _appInfo,
+      now: () => DateTime.utc(2026, 9, 18, 8),
+    );
+    await controller.loadConsentPolicy();
+    await controller.start('+12025550123');
+
+    authority = 'owner-b';
+
+    expect(controller.status, isNull);
+    expect(controller.proof, isNull);
+    expect(await controller.openMessages(), isFalse);
+    expect(launched, isEmpty);
+    expect(controller.status, isNull);
+    expect(controller.proof, isNull);
+    expect(controller.consentPolicy, isNull);
+    expect(controller.failure?.kind, ImessageEnrollmentFailureKind.authorityChanged);
+  });
+
+  test('start response cannot claim ready before inbound handset proof', () async {
+    final launched = <Uri>[];
+    final gateway = _FakeGateway()
+      ..startResponse = ImessageEnrollmentStartResponse(
+        status: _status(ImessageEnrollmentState.ready, textDm: true, destination: '+12025550123'),
+        proof: ImessageEnrollmentProof(code: '123456', expiresAt: DateTime.utc(2026, 9, 18, 8, 5)),
+      );
+    final controller = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => 'owner-a',
+      messagesLauncher: (uri) async {
+        launched.add(uri);
+        return true;
+      },
+      idGenerator: () => 'request-1',
+      appInfoReader: _appInfo,
+      now: () => DateTime.utc(2026, 9, 18, 8),
+    );
+    await controller.loadConsentPolicy();
+    await controller.start('+12025550123');
+
+    expect(controller.isReady, isFalse);
+    expect(controller.status, isNull);
+    expect(controller.proof, isNull);
+    expect(controller.failure?.kind, ImessageEnrollmentFailureKind.malformedResponse);
+    expect(await controller.openMessages(), isFalse);
+    expect(launched, isEmpty);
+  });
+
   test('missing dedicated consent policy fails closed before registration', () async {
     final gateway = _FakeGateway();
     final controller = ImessageEnrollmentController(
@@ -157,6 +218,7 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
   String? startedReceipt;
   int startCalls = 0;
   int? revokedGeneration;
+  ImessageEnrollmentStartResponse? startResponse;
   final consentDecisions = <ImessageConsentDecision>[];
 
   @override
@@ -197,6 +259,8 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
     startCalls += 1;
     startedHandset = handsetE164;
     startedReceipt = consentReceiptId;
+    final override = startResponse;
+    if (override != null) return override;
     status = _status(ImessageEnrollmentState.verificationPending, destination: '+12025550123');
     return ImessageEnrollmentStartResponse(
       status: status,

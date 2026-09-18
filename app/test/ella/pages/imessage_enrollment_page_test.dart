@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -86,6 +88,39 @@ void main() {
     expect(find.text('iMessage is unavailable'), findsOneWidget);
     expect(find.text('Ready for private messages'), findsNothing);
   });
+
+  testWidgets('auth change clears owner A UI and loads owner B state', (tester) async {
+    var authority = 'owner-a';
+    final authorityChanges = StreamController<String?>();
+    addTearDown(authorityChanges.close);
+    final gateway = _FakeGateway();
+    final controller = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => authority,
+      messagesLauncher: (_) async => true,
+      idGenerator: () => 'request-1',
+      appInfoReader: _appInfo,
+      now: () => DateTime.utc(2026, 9, 18, 8),
+    );
+
+    await tester.pumpWidget(_TestApp(controller: controller, authorityChanges: authorityChanges.stream));
+    await tester.pumpAndSettle();
+    await controller.loadConsentPolicy();
+    await controller.start('+12025550123');
+    await tester.pump();
+    expect(find.text('Verification pending'), findsOneWidget);
+
+    gateway.status = _status(ImessageEnrollmentState.notConnected);
+    authority = 'owner-b';
+    authorityChanges.add(authority);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Verification pending'), findsNothing);
+    expect(find.text('Not connected'), findsOneWidget);
+    expect(controller.proof, isNull);
+    expect(controller.consentPolicy, isNull);
+  });
 }
 
 Future<void> _scrollTo(WidgetTester tester, Finder finder) async {
@@ -94,9 +129,10 @@ Future<void> _scrollTo(WidgetTester tester, Finder finder) async {
 }
 
 class _TestApp extends StatelessWidget {
-  const _TestApp({required this.controller});
+  const _TestApp({required this.controller, this.authorityChanges});
 
   final ImessageEnrollmentController controller;
+  final Stream<String?>? authorityChanges;
 
   @override
   Widget build(BuildContext context) {
@@ -108,7 +144,7 @@ class _TestApp extends StatelessWidget {
         GlobalCupertinoLocalizations.delegate,
       ],
       supportedLocales: AppLocalizations.supportedLocales,
-      home: ImessageEnrollmentPage(controller: controller),
+      home: ImessageEnrollmentPage(controller: controller, authorityChanges: authorityChanges),
     );
   }
 }

@@ -13,9 +13,10 @@ import 'package:omi/ella/services/imessage_enrollment_controller.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 class ImessageEnrollmentPage extends StatefulWidget {
-  const ImessageEnrollmentPage({super.key, this.controller});
+  const ImessageEnrollmentPage({super.key, this.controller, this.authorityChanges});
 
   final ImessageEnrollmentController? controller;
+  final Stream<String?>? authorityChanges;
 
   @override
   State<ImessageEnrollmentPage> createState() => _ImessageEnrollmentPageState();
@@ -27,6 +28,7 @@ class _ImessageEnrollmentPageState extends State<ImessageEnrollmentPage> {
   late final ImessageEnrollmentController _controller;
   late final bool _ownsController;
   final _phoneController = TextEditingController();
+  StreamSubscription<String?>? _authoritySubscription;
   bool _showConsent = false;
   bool _agreed = false;
 
@@ -36,6 +38,9 @@ class _ImessageEnrollmentPageState extends State<ImessageEnrollmentPage> {
     _ownsController = widget.controller == null;
     _controller = widget.controller ?? _createController();
     _controller.addListener(_onControllerChanged);
+    final authorityChanges = widget.authorityChanges ??
+        (_ownsController ? FirebaseAuth.instance.authStateChanges().map((user) => user?.uid).distinct() : null);
+    _authoritySubscription = authorityChanges?.listen(_onAuthorityChanged);
     unawaited(_controller.load());
   }
 
@@ -56,6 +61,7 @@ class _ImessageEnrollmentPageState extends State<ImessageEnrollmentPage> {
 
   @override
   void dispose() {
+    unawaited(_authoritySubscription?.cancel());
     _controller.removeListener(_onControllerChanged);
     if (_ownsController) _controller.dispose();
     _phoneController.dispose();
@@ -64,6 +70,18 @@ class _ImessageEnrollmentPageState extends State<ImessageEnrollmentPage> {
 
   void _onControllerChanged() {
     if (mounted) setState(() {});
+  }
+
+  void _onAuthorityChanged(String? _) {
+    if (!_controller.handleAuthorityChanged()) return;
+    if (mounted) {
+      setState(() {
+        _showConsent = false;
+        _agreed = false;
+        _phoneController.clear();
+      });
+    }
+    unawaited(_controller.load());
   }
 
   @override
