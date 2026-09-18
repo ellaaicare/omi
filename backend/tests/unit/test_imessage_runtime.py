@@ -13,6 +13,7 @@ from ella.services.imessage_runtime import (
     ImessageInbound,
     ImessageRuntimeError,
     ImessageRuntimeService,
+    SelfHostedHermesCompletionClient,
 )
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import IsolatedRuntime, runtime_authority_identity
@@ -82,8 +83,29 @@ def _binding(runtime: IsolatedRuntime) -> dict:
         "consent_authority_epoch": uuid.UUID(runtime.consent_authority_epoch),
         "runtime_binding_id": BINDING_ID,
         "runtime_target_id": TARGET_ID,
+        "runtime_authority_kind": "target",
         "runtime_authority_digest": runtime_authority_identity(runtime).digest,
     }
+
+
+def _retained_runtime(*, uid: str = "owner-a") -> IsolatedRuntime:
+    return _runtime(
+        uid=uid,
+        runtime_target_id="",
+        runtime_target_mode="",
+        runtime_target_updated_at="",
+        target_entitlement_revision=0,
+    )
+
+
+def _retained_binding(runtime: IsolatedRuntime) -> dict:
+    binding = _binding(runtime)
+    binding.update(
+        runtime_target_id=None,
+        runtime_authority_kind="retained_owner",
+        runtime_authority_digest=runtime_authority_identity(runtime).digest,
+    )
+    return binding
 
 
 class FakeRepository:
@@ -286,6 +308,102 @@ def test_text_dm_claim_precedes_model_and_delivery_requires_send_start(monkeypat
         service.acknowledge_delivery(_delivery(), outbound_provider_message_id="outbound-message-a")
     )
     assert acknowledged == {"status": "delivered", "receipt_id": str(RECEIPT_ID)}
+
+
+def test_exact_configured_retained_owner_uses_targetless_binding_without_fallback(monkeypatch):
+    monkeypatch.setenv("ELLA_IMESSAGE_RUNTIME_ENABLED", "true")
+    monkeypatch.setenv("ELLA_PLATO_UID", "owner-a")
+    runtime = _retained_runtime()
+    repository = FakeRepository(_retained_binding(runtime))
+    client = FakeCompletionClient(repository.events)
+    service = _service(repository, client, runtime)
+
+    heartbeat = asyncio.run(
+        service.heartbeat(line_identity="line-a", contact_identity="contact-a", connection_id="connection-a")
+    )
+    result = asyncio.run(service.ingest(_inbound()))
+
+    assert heartbeat["status"] == "ready"
+    assert result["status"] == "awaiting_delivery"
+    authorities = [payload["authority"] for name, payload in repository.events if name == "model_started"]
+    assert len(authorities) == 1
+    assert authorities[0].runtime_authority_kind == "retained_owner"
+    assert authorities[0].runtime_target_id is None
+    assert authorities[0].runtime_target_entitlement_revision == 0
+    assert client.calls == 1
+
+
+def test_targetless_non_owner_is_denied_before_heartbeat_or_model(monkeypatch):
+    monkeypatch.setenv("ELLA_IMESSAGE_RUNTIME_ENABLED", "true")
+    monkeypatch.setenv("ELLA_PLATO_UID", "owner-a")
+    runtime = _retained_runtime(uid="owner-b")
+    binding = _retained_binding(runtime)
+    binding["omi_uid"] = "owner-b"
+    repository = FakeRepository(binding)
+    client = FakeCompletionClient(repository.events)
+
+    with pytest.raises(ImessageRuntimeError, match="imessage_runtime_authority_changed"):
+        asyncio.run(
+            _service(repository, client, runtime).heartbeat(
+                line_identity="line-a",
+                contact_identity="contact-a",
+                connection_id="connection-a",
+            )
+        )
+
+    assert not any(name == "heartbeat" for name, _payload in repository.events)
+    assert client.calls == 0
+
+
+def test_completion_transport_accepts_only_the_configured_targetless_owner(monkeypatch):
+    monkeypatch.setenv("ELLA_PLATO_UID", "owner-a")
+    calls = []
+
+    class Response:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def aiter_bytes(self):
+            yield b'{"choices":[{"message":{"content":"retained reply"}}]}'
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def stream(self, method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            return Response()
+
+    monkeypatch.setattr("ella.services.imessage_runtime.httpx.AsyncClient", lambda **_kwargs: Client())
+    client = SelfHostedHermesCompletionClient()
+
+    reply = asyncio.run(
+        client.complete(
+            runtime=_retained_runtime(),
+            user_text="content-free test",
+            session_key="omi:owner-a",
+        )
+    )
+    assert reply == "retained reply"
+    assert len(calls) == 1
+
+    with pytest.raises(ImessageRuntimeError, match="imessage_runtime_target_invalid"):
+        asyncio.run(
+            client.complete(
+                runtime=_retained_runtime(uid="owner-b"),
+                user_text="content-free test",
+                session_key="omi:owner-b",
+            )
+        )
+    assert len(calls) == 1
 
 
 def test_provider_length_reply_is_rejected_before_canonical_write_or_delivery(monkeypatch):

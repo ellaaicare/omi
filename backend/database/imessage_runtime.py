@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 import asyncpg
 
+from database import authority_advisory_lock
 from database.ella_provisioning import get_pool
 
 
@@ -24,10 +25,11 @@ class ImessageRuntimeAuthority:
     user_id: uuid.UUID
     profile_user_id: uuid.UUID
     runtime_binding_id: uuid.UUID
-    runtime_target_id: uuid.UUID
+    runtime_target_id: Optional[uuid.UUID]
+    runtime_authority_kind: str
     runtime_binding_revision: int
     runtime_target_entitlement_revision: int
-    runtime_target_updated_at: datetime
+    runtime_target_updated_at: Optional[datetime]
     runtime_authority_digest: str
     runtime_agent_id: str
     runtime_instance_id: Optional[str]
@@ -58,10 +60,60 @@ class ImessageRuntimeRepository:
                       AND table_name = 'ella_imessage_channel_bindings'
                       AND column_name = 'transport_connection_ref_hmac'
                 )
+                AND (
+                    SELECT COUNT(*) = 2
+                    FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name IN (
+                          'ella_imessage_channel_bindings',
+                          'ella_imessage_message_receipts'
+                      )
+                      AND column_name = 'runtime_authority_kind'
+                )
             """
         )
         if ready is not True:
             raise ImessageRuntimeRepositoryError("imessage_runtime_schema_not_ready")
+
+    @staticmethod
+    async def _lock_runtime_authority(
+        connection: asyncpg.Connection,
+        *,
+        authority: ImessageRuntimeAuthority,
+        error_code: str,
+    ) -> None:
+        try:
+            owner = authority_advisory_lock.AuthorityOwner.from_values(
+                authority.user_id,
+                authority.profile_user_id,
+            )
+            proof = await authority_advisory_lock.acquire_authority_lock(connection, owner=owner)
+            user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                connection,
+                uid=authority.uid,
+                owner=owner,
+                proof=proof,
+            )
+        except authority_advisory_lock.AuthorityLockError as exc:
+            raise ImessageRuntimeRepositoryError(error_code) from exc
+        if user_id != authority.user_id:
+            raise ImessageRuntimeRepositoryError(error_code)
+
+    async def _fetchrow_with_authority_lock(
+        self,
+        query: str,
+        *args: Any,
+        authority: ImessageRuntimeAuthority,
+        error_code: str,
+    ) -> Optional[asyncpg.Record]:
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                await self._lock_runtime_authority(
+                    connection,
+                    authority=authority,
+                    error_code=error_code,
+                )
+                return await connection.fetchrow(query, *args)
 
     async def resolve_binding(
         self,
@@ -101,7 +153,7 @@ class ImessageRuntimeRepository:
             JOIN users u ON u.id = b.user_id
             JOIN ella_imessage_consent_authority c ON c.user_id = b.user_id
             JOIN ella_runtime_bindings rb ON rb.id = b.runtime_binding_id
-            JOIN ella_runtime_targets rt ON rt.id = b.runtime_target_id
+            LEFT JOIN ella_runtime_targets rt ON rt.id = b.runtime_target_id
             WHERE b.line_identity_hmac = $1
               AND b.contact_identity_hmac = $2
               AND b.status = 'active'
@@ -112,18 +164,34 @@ class ImessageRuntimeRepository:
               AND rb.status = 'active'
               AND rb.active = true
               AND rb.health_state = 'healthy'
+              AND rb.provider = 'hermes'
               AND rb.role = 'user'
               AND rb.user_id = b.user_id
               AND rb.account_user_id = b.user_id
               AND rb.profile_user_id = b.user_id
-              AND rt.status = 'ready'
-              AND rt.provider = 'hermes'
-              AND rt.role = 'user'
-              AND rt.mode = 'hermes-chat'
-              AND rt.runtime_binding_id = b.runtime_binding_id
-              AND rt.account_user_id = b.user_id
-              AND rt.profile_user_id = b.user_id
-              AND rt.entitlement_revision IS NOT NULL
+              AND (
+                  (
+                      b.runtime_authority_kind = 'target'
+                      AND b.runtime_target_id IS NOT NULL
+                      AND rt.status = 'ready'
+                      AND rt.provider = 'hermes'
+                      AND rt.role = 'user'
+                      AND rt.mode = 'hermes-chat'
+                      AND rt.runtime_binding_id = b.runtime_binding_id
+                      AND rt.account_user_id = b.user_id
+                      AND rt.profile_user_id = b.user_id
+                      AND rt.entitlement_revision IS NOT NULL
+                  )
+                  OR (
+                      b.runtime_authority_kind = 'retained_owner'
+                      AND b.runtime_target_id IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM ella_runtime_targets retained_target
+                          WHERE retained_target.runtime_binding_id = b.runtime_binding_id
+                      )
+                  )
+              )
               AND NOT EXISTS (
                   SELECT 1
                   FROM ella_imessage_account_deletion_fences deletion
@@ -143,7 +211,7 @@ class ImessageRuntimeRepository:
         connection_ref_hmac: str,
         authority: ImessageRuntimeAuthority,
     ) -> dict[str, Any]:
-        row = await self.pool.fetchrow(
+        row = await self._fetchrow_with_authority_lock(
             """
             UPDATE ella_imessage_channel_bindings b
             SET transport_connection_ref_hmac = $3,
@@ -153,13 +221,13 @@ class ImessageRuntimeRepository:
                 updated_at = CURRENT_TIMESTAMP
             FROM users u,
                  ella_imessage_consent_authority c,
-                 ella_runtime_bindings rb,
-                 ella_runtime_targets rt
+                 ella_runtime_bindings rb
             WHERE b.id = $1
               AND b.generation = $2
               AND b.user_id = $4
               AND b.runtime_binding_id = $5
-              AND b.runtime_target_id = $6
+              AND b.runtime_target_id IS NOT DISTINCT FROM $6
+              AND b.runtime_authority_kind = $16
               AND b.runtime_authority_digest = $7
               AND b.status = 'active'
               AND u.id = b.user_id
@@ -173,6 +241,7 @@ class ImessageRuntimeRepository:
               AND rb.status = 'active'
               AND rb.active = true
               AND rb.health_state = 'healthy'
+              AND rb.provider = 'hermes'
               AND rb.role = 'user'
               AND rb.user_id = $4
               AND rb.account_user_id = $4
@@ -181,16 +250,37 @@ class ImessageRuntimeRepository:
               AND rb.agent_id = $11
               AND rb.runtime_instance_id IS NOT DISTINCT FROM $12
               AND rb.profile_name = $13
-              AND rt.id = b.runtime_target_id
-              AND rt.status = 'ready'
-              AND rt.provider = 'hermes'
-              AND rt.role = 'user'
-              AND rt.mode = 'hermes-chat'
-              AND rt.runtime_binding_id = rb.id
-              AND rt.account_user_id = $4
-              AND rt.profile_user_id = $9
-              AND rt.entitlement_revision = $14
-              AND rt.updated_at = $15
+              AND (
+                  (
+                      $16 = 'target'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM ella_runtime_targets rt
+                          WHERE rt.id = b.runtime_target_id
+                            AND rt.status = 'ready'
+                            AND rt.provider = 'hermes'
+                            AND rt.role = 'user'
+                            AND rt.mode = 'hermes-chat'
+                            AND rt.runtime_binding_id = rb.id
+                            AND rt.account_user_id = $4
+                            AND rt.profile_user_id = $9
+                            AND rt.entitlement_revision = $14
+                            AND rt.updated_at = $15
+                      )
+                  )
+                  OR (
+                      $16 = 'retained_owner'
+                      AND b.runtime_target_id IS NULL
+                      AND $6::uuid IS NULL
+                      AND $14 = 0
+                      AND $15::timestamptz IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM ella_runtime_targets retained_target
+                          WHERE retained_target.runtime_binding_id = rb.id
+                      )
+                  )
+              )
             RETURNING b.*
             """,
             uuid.UUID(str(binding_id)),
@@ -208,6 +298,9 @@ class ImessageRuntimeRepository:
             authority.runtime_profile_name,
             authority.runtime_target_entitlement_revision,
             authority.runtime_target_updated_at,
+            authority.runtime_authority_kind,
+            authority=authority,
+            error_code="imessage_transport_authority_changed",
         )
         if not row:
             raise ImessageRuntimeRepositoryError("imessage_transport_authority_changed")
@@ -230,6 +323,11 @@ class ImessageRuntimeRepository:
         binding_id = uuid.UUID(str(binding["id"]))
         async with self.pool.acquire() as connection:
             async with connection.transaction():
+                await self._lock_runtime_authority(
+                    connection,
+                    authority=authority,
+                    error_code="imessage_authority_changed",
+                )
                 current = await connection.fetchrow(
                     """
                     SELECT b.*
@@ -237,7 +335,6 @@ class ImessageRuntimeRepository:
                     JOIN users u ON u.id = b.user_id
                     JOIN ella_imessage_consent_authority c ON c.user_id = b.user_id
                     JOIN ella_runtime_bindings rb ON rb.id = b.runtime_binding_id
-                    JOIN ella_runtime_targets rt ON rt.id = b.runtime_target_id
                     WHERE b.id = $1
                       AND b.user_id = $2
                       AND b.status = 'active'
@@ -245,7 +342,8 @@ class ImessageRuntimeRepository:
                       AND b.consent_receipt_id = $4
                       AND b.consent_authority_epoch = $5
                       AND b.runtime_binding_id = $6
-                      AND b.runtime_target_id = $7
+                      AND b.runtime_target_id IS NOT DISTINCT FROM $7
+                      AND b.runtime_authority_kind = $17
                       AND b.runtime_authority_digest = $8
                       AND u.status = 'ACTIVE'
                       AND u.omi_uid = $9
@@ -255,6 +353,7 @@ class ImessageRuntimeRepository:
                       AND rb.status = 'active'
                       AND rb.active = true
                       AND rb.health_state = 'healthy'
+                      AND rb.provider = 'hermes'
                       AND rb.role = 'user'
                       AND rb.user_id = $2
                       AND rb.account_user_id = $2
@@ -263,16 +362,38 @@ class ImessageRuntimeRepository:
                       AND rb.agent_id = $12
                       AND rb.runtime_instance_id IS NOT DISTINCT FROM $13
                       AND rb.profile_name = $14
-                      AND rt.status = 'ready'
-                      AND rt.provider = 'hermes'
-                      AND rt.role = 'user'
-                      AND rt.mode = 'hermes-chat'
-                      AND rt.runtime_binding_id = b.runtime_binding_id
-                      AND rt.account_user_id = $2
-                      AND rt.profile_user_id = $10
-                      AND rt.entitlement_revision = $15
-                      AND rt.updated_at = $16
-                    FOR SHARE OF b, u, c, rb, rt
+                      AND (
+                          (
+                              $17 = 'target'
+                              AND EXISTS (
+                                  SELECT 1
+                                  FROM ella_runtime_targets rt
+                                  WHERE rt.id = b.runtime_target_id
+                                    AND rt.status = 'ready'
+                                    AND rt.provider = 'hermes'
+                                    AND rt.role = 'user'
+                                    AND rt.mode = 'hermes-chat'
+                                    AND rt.runtime_binding_id = b.runtime_binding_id
+                                    AND rt.account_user_id = $2
+                                    AND rt.profile_user_id = $10
+                                    AND rt.entitlement_revision = $15
+                                    AND rt.updated_at = $16
+                              )
+                          )
+                          OR (
+                              $17 = 'retained_owner'
+                              AND b.runtime_target_id IS NULL
+                              AND $7::uuid IS NULL
+                              AND $15 = 0
+                              AND $16::timestamptz IS NULL
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM ella_runtime_targets retained_target
+                                  WHERE retained_target.runtime_binding_id = rb.id
+                              )
+                          )
+                      )
+                    FOR SHARE OF b, u, c, rb
                     """,
                     binding_id,
                     authority.user_id,
@@ -290,6 +411,7 @@ class ImessageRuntimeRepository:
                     authority.runtime_profile_name,
                     authority.runtime_target_entitlement_revision,
                     authority.runtime_target_updated_at,
+                    authority.runtime_authority_kind,
                 )
                 if not current:
                     raise ImessageRuntimeRepositoryError("imessage_authority_changed")
@@ -300,12 +422,12 @@ class ImessageRuntimeRepository:
                         inbound_payload_sha256, message_text, occurred_at,
                         binding_generation, consent_receipt_id,
                         consent_authority_epoch, runtime_binding_id,
-                        runtime_target_id, runtime_authority_digest,
+                        runtime_target_id, runtime_authority_kind, runtime_authority_digest,
                         lease_token, lease_expires_at
                     )
                     VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                        $13, CURRENT_TIMESTAMP + ($14 * INTERVAL '1 second')
+                        $13, $14, CURRENT_TIMESTAMP + ($15 * INTERVAL '1 second')
                     )
                     ON CONFLICT (binding_id, inbound_provider_ref_hmac) DO NOTHING
                     RETURNING *
@@ -321,6 +443,7 @@ class ImessageRuntimeRepository:
                     current["consent_authority_epoch"],
                     current["runtime_binding_id"],
                     current["runtime_target_id"],
+                    current["runtime_authority_kind"],
                     current["runtime_authority_digest"],
                     lease_token,
                     lease_seconds,
@@ -348,6 +471,8 @@ class ImessageRuntimeRepository:
                 if (
                     int(result["binding_generation"]) != int(current["generation"])
                     or result["consent_receipt_id"] != current["consent_receipt_id"]
+                    or result["runtime_target_id"] != current["runtime_target_id"]
+                    or str(result["runtime_authority_kind"]) != str(current["runtime_authority_kind"])
                     or result["runtime_authority_digest"] != current["runtime_authority_digest"]
                 ):
                     await connection.execute(
@@ -417,7 +542,7 @@ class ImessageRuntimeRepository:
         lease_token: str,
         authority: ImessageRuntimeAuthority,
     ) -> dict[str, Any]:
-        row = await self.pool.fetchrow(
+        row = await self._fetchrow_with_authority_lock(
             """
             UPDATE ella_imessage_message_receipts r
             SET status = 'running',
@@ -426,8 +551,7 @@ class ImessageRuntimeRepository:
             FROM ella_imessage_channel_bindings b,
                  users u,
                  ella_imessage_consent_authority c,
-                 ella_runtime_bindings rb,
-                 ella_runtime_targets rt
+                 ella_runtime_bindings rb
             WHERE r.id = $1
               AND r.status = 'claimed'
               AND r.lease_token = $2
@@ -438,11 +562,13 @@ class ImessageRuntimeRepository:
               AND b.consent_receipt_id = r.consent_receipt_id
               AND b.consent_authority_epoch = r.consent_authority_epoch
               AND b.runtime_binding_id = r.runtime_binding_id
-              AND b.runtime_target_id = r.runtime_target_id
+              AND b.runtime_target_id IS NOT DISTINCT FROM r.runtime_target_id
+              AND b.runtime_authority_kind = r.runtime_authority_kind
               AND b.runtime_authority_digest = r.runtime_authority_digest
               AND b.user_id = $3
               AND b.runtime_binding_id = $5
-              AND b.runtime_target_id = $6
+              AND b.runtime_target_id IS NOT DISTINCT FROM $6
+              AND b.runtime_authority_kind = $15
               AND b.runtime_authority_digest = $7
               AND u.id = r.user_id
               AND u.status = 'ACTIVE'
@@ -456,6 +582,7 @@ class ImessageRuntimeRepository:
               AND rb.status = 'active'
               AND rb.active = true
               AND rb.health_state = 'healthy'
+              AND rb.provider = 'hermes'
               AND rb.role = 'user'
               AND rb.user_id = $3
               AND rb.account_user_id = $3
@@ -464,16 +591,37 @@ class ImessageRuntimeRepository:
               AND rb.agent_id = $10
               AND rb.runtime_instance_id IS NOT DISTINCT FROM $11
               AND rb.profile_name = $12
-              AND rt.id = r.runtime_target_id
-              AND rt.status = 'ready'
-              AND rt.provider = 'hermes'
-              AND rt.role = 'user'
-              AND rt.mode = 'hermes-chat'
-              AND rt.runtime_binding_id = rb.id
-              AND rt.account_user_id = $3
-              AND rt.profile_user_id = $4
-              AND rt.entitlement_revision = $13
-              AND rt.updated_at = $14
+              AND (
+                  (
+                      $15 = 'target'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM ella_runtime_targets rt
+                          WHERE rt.id = r.runtime_target_id
+                            AND rt.status = 'ready'
+                            AND rt.provider = 'hermes'
+                            AND rt.role = 'user'
+                            AND rt.mode = 'hermes-chat'
+                            AND rt.runtime_binding_id = rb.id
+                            AND rt.account_user_id = $3
+                            AND rt.profile_user_id = $4
+                            AND rt.entitlement_revision = $13
+                            AND rt.updated_at = $14
+                      )
+                  )
+                  OR (
+                      $15 = 'retained_owner'
+                      AND r.runtime_target_id IS NULL
+                      AND $6::uuid IS NULL
+                      AND $13 = 0
+                      AND $14::timestamptz IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM ella_runtime_targets retained_target
+                          WHERE retained_target.runtime_binding_id = rb.id
+                      )
+                  )
+              )
             RETURNING r.*
             """,
             uuid.UUID(str(receipt_id)),
@@ -490,6 +638,9 @@ class ImessageRuntimeRepository:
             authority.runtime_profile_name,
             authority.runtime_target_entitlement_revision,
             authority.runtime_target_updated_at,
+            authority.runtime_authority_kind,
+            authority=authority,
+            error_code="imessage_message_claim_conflict",
         )
         if not row:
             raise ImessageRuntimeRepositoryError("imessage_message_claim_conflict")
@@ -505,7 +656,7 @@ class ImessageRuntimeRepository:
         outbound_text: str,
         authority: ImessageRuntimeAuthority,
     ) -> dict[str, Any]:
-        row = await self.pool.fetchrow(
+        row = await self._fetchrow_with_authority_lock(
             """
             UPDATE ella_imessage_message_receipts r
             SET status = 'awaiting_delivery',
@@ -521,8 +672,7 @@ class ImessageRuntimeRepository:
             FROM ella_imessage_channel_bindings b,
                  users u,
                  ella_imessage_consent_authority c,
-                 ella_runtime_bindings rb,
-                 ella_runtime_targets rt
+                 ella_runtime_bindings rb
             WHERE r.id = $1
               AND r.status = 'running'
               AND r.lease_token = $2
@@ -530,10 +680,16 @@ class ImessageRuntimeRepository:
               AND b.id = r.binding_id
               AND b.status = 'active'
               AND b.generation = r.binding_generation
+              AND b.consent_receipt_id = r.consent_receipt_id
+              AND b.consent_authority_epoch = r.consent_authority_epoch
+              AND b.runtime_binding_id = r.runtime_binding_id
+              AND b.runtime_target_id IS NOT DISTINCT FROM r.runtime_target_id
+              AND b.runtime_authority_kind = r.runtime_authority_kind
               AND b.runtime_authority_digest = r.runtime_authority_digest
               AND b.user_id = $8
               AND b.runtime_binding_id = $10
-              AND b.runtime_target_id = $11
+              AND b.runtime_target_id IS NOT DISTINCT FROM $11
+              AND b.runtime_authority_kind = $18
               AND b.runtime_authority_digest = $12
               AND u.id = r.user_id
               AND u.status = 'ACTIVE'
@@ -547,6 +703,7 @@ class ImessageRuntimeRepository:
               AND rb.status = 'active'
               AND rb.active = true
               AND rb.health_state = 'healthy'
+              AND rb.provider = 'hermes'
               AND rb.role = 'user'
               AND rb.user_id = $8
               AND rb.account_user_id = $8
@@ -555,16 +712,37 @@ class ImessageRuntimeRepository:
               AND rb.agent_id = $7
               AND rb.runtime_instance_id IS NOT DISTINCT FROM $14
               AND rb.profile_name = $15
-              AND rt.id = r.runtime_target_id
-              AND rt.status = 'ready'
-              AND rt.provider = 'hermes'
-              AND rt.role = 'user'
-              AND rt.mode = 'hermes-chat'
-              AND rt.runtime_binding_id = rb.id
-              AND rt.account_user_id = $8
-              AND rt.profile_user_id = $9
-              AND rt.entitlement_revision = $16
-              AND rt.updated_at = $17
+              AND (
+                  (
+                      $18 = 'target'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM ella_runtime_targets rt
+                          WHERE rt.id = r.runtime_target_id
+                            AND rt.status = 'ready'
+                            AND rt.provider = 'hermes'
+                            AND rt.role = 'user'
+                            AND rt.mode = 'hermes-chat'
+                            AND rt.runtime_binding_id = rb.id
+                            AND rt.account_user_id = $8
+                            AND rt.profile_user_id = $9
+                            AND rt.entitlement_revision = $16
+                            AND rt.updated_at = $17
+                      )
+                  )
+                  OR (
+                      $18 = 'retained_owner'
+                      AND r.runtime_target_id IS NULL
+                      AND $11::uuid IS NULL
+                      AND $16 = 0
+                      AND $17::timestamptz IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM ella_runtime_targets retained_target
+                          WHERE retained_target.runtime_binding_id = rb.id
+                      )
+                  )
+              )
             RETURNING r.*
             """,
             uuid.UUID(str(receipt_id)),
@@ -584,6 +762,9 @@ class ImessageRuntimeRepository:
             authority.runtime_profile_name,
             authority.runtime_target_entitlement_revision,
             authority.runtime_target_updated_at,
+            authority.runtime_authority_kind,
+            authority=authority,
+            error_code="imessage_model_completion_conflict",
         )
         if not row:
             raise ImessageRuntimeRepositoryError("imessage_model_completion_conflict")
@@ -628,6 +809,11 @@ class ImessageRuntimeRepository:
     ) -> dict[str, Any]:
         async with self.pool.acquire() as connection:
             async with connection.transaction():
+                await self._lock_runtime_authority(
+                    connection,
+                    authority=authority,
+                    error_code="imessage_delivery_authority_changed",
+                )
                 receipt = await connection.fetchrow(
                     """
                     SELECT r.*
@@ -636,19 +822,22 @@ class ImessageRuntimeRepository:
                     JOIN users u ON u.id = r.user_id
                     JOIN ella_imessage_consent_authority c ON c.user_id = r.user_id
                     JOIN ella_runtime_bindings rb ON rb.id = r.runtime_binding_id
-                    JOIN ella_runtime_targets rt ON rt.id = r.runtime_target_id
                     WHERE r.id = $1
                       AND r.delivery_idempotency_key = $2
                       AND r.binding_id = $3
                       AND r.binding_generation = $4
                       AND r.runtime_binding_id = $8
-                      AND r.runtime_target_id = $9
+                      AND r.runtime_target_id IS NOT DISTINCT FROM $9
+                      AND r.runtime_authority_kind = $18
                       AND r.runtime_authority_digest = $10
                       AND b.status = 'active'
                       AND b.generation = r.binding_generation
                       AND b.user_id = $6
                       AND b.runtime_binding_id = $8
-                      AND b.runtime_target_id = $9
+                      AND b.runtime_target_id IS NOT DISTINCT FROM r.runtime_target_id
+                      AND b.runtime_target_id IS NOT DISTINCT FROM $9
+                      AND b.runtime_authority_kind = r.runtime_authority_kind
+                      AND b.runtime_authority_kind = $18
                       AND b.runtime_authority_digest = $10
                       AND b.transport_connection_ref_hmac = $5
                       AND b.last_transport_healthy_at >= CURRENT_TIMESTAMP - INTERVAL '2 minutes'
@@ -661,6 +850,7 @@ class ImessageRuntimeRepository:
                       AND rb.status = 'active'
                       AND rb.active = true
                       AND rb.health_state = 'healthy'
+                      AND rb.provider = 'hermes'
                       AND rb.role = 'user'
                       AND rb.user_id = $6
                       AND rb.account_user_id = $6
@@ -669,15 +859,37 @@ class ImessageRuntimeRepository:
                       AND rb.agent_id = $13
                       AND rb.runtime_instance_id IS NOT DISTINCT FROM $14
                       AND rb.profile_name = $15
-                      AND rt.status = 'ready'
-                      AND rt.provider = 'hermes'
-                      AND rt.role = 'user'
-                      AND rt.mode = 'hermes-chat'
-                      AND rt.runtime_binding_id = rb.id
-                      AND rt.account_user_id = $6
-                      AND rt.profile_user_id = $7
-                      AND rt.entitlement_revision = $16
-                      AND rt.updated_at = $17
+                      AND (
+                          (
+                              $18 = 'target'
+                              AND EXISTS (
+                                  SELECT 1
+                                  FROM ella_runtime_targets rt
+                                  WHERE rt.id = r.runtime_target_id
+                                    AND rt.status = 'ready'
+                                    AND rt.provider = 'hermes'
+                                    AND rt.role = 'user'
+                                    AND rt.mode = 'hermes-chat'
+                                    AND rt.runtime_binding_id = rb.id
+                                    AND rt.account_user_id = $6
+                                    AND rt.profile_user_id = $7
+                                    AND rt.entitlement_revision = $16
+                                    AND rt.updated_at = $17
+                              )
+                          )
+                          OR (
+                              $18 = 'retained_owner'
+                              AND r.runtime_target_id IS NULL
+                              AND $9::uuid IS NULL
+                              AND $16 = 0
+                              AND $17::timestamptz IS NULL
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM ella_runtime_targets retained_target
+                                  WHERE retained_target.runtime_binding_id = rb.id
+                              )
+                          )
+                      )
                     FOR UPDATE OF r
                     """,
                     uuid.UUID(str(receipt_id)),
@@ -697,6 +909,7 @@ class ImessageRuntimeRepository:
                     authority.runtime_profile_name,
                     authority.runtime_target_entitlement_revision,
                     authority.runtime_target_updated_at,
+                    authority.runtime_authority_kind,
                 )
                 if not receipt:
                     raise ImessageRuntimeRepositoryError("imessage_delivery_authority_changed")

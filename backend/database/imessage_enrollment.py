@@ -44,8 +44,10 @@ class ImessageConsentContract:
 
 @dataclass(frozen=True)
 class ImessageRuntimeSnapshot:
+    uid: str
     binding_id: uuid.UUID
-    target_id: uuid.UUID
+    target_id: Optional[uuid.UUID]
+    authority_kind: str
     authority_digest: str
     binding_revision: int
     entitlement_revision: int
@@ -75,7 +77,17 @@ class ImessageEnrollmentRepository:
                 to_regclass('ella_imessage_registration_attempts') IS NOT NULL AS attempts,
                 to_regclass('ella_imessage_channel_bindings') IS NOT NULL AS bindings,
                 to_regclass('ella_imessage_proof_receipts') IS NOT NULL AS proof_receipts,
-                to_regclass('ella_imessage_account_deletion_fences') IS NOT NULL AS deletion_fences
+                to_regclass('ella_imessage_account_deletion_fences') IS NOT NULL AS deletion_fences,
+                (
+                    SELECT COUNT(*) = 2
+                    FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name IN (
+                          'ella_imessage_registration_attempts',
+                          'ella_imessage_channel_bindings'
+                      )
+                      AND column_name = 'runtime_authority_kind'
+                ) AS retained_authority_kind
             """
         )
         if not row or not all(row.values()):
@@ -229,6 +241,7 @@ class ImessageEnrollmentRepository:
                 b.assigned_destination_e164,
                 b.runtime_binding_id,
                 b.runtime_target_id,
+                b.runtime_authority_kind,
                 b.runtime_authority_digest,
                 b.challenge_expires_at,
                 b.verified_at,
@@ -251,6 +264,38 @@ class ImessageEnrollmentRepository:
         if not row:
             raise ImessageAuthorityError("imessage_owner_not_found")
         return dict(row)
+
+    async def validate_runtime_authority(
+        self,
+        *,
+        uid: str,
+        runtime: ImessageRuntimeSnapshot,
+    ) -> None:
+        owner = authority_advisory_lock.AuthorityOwner.from_values(
+            runtime.account_user_id,
+            runtime.profile_user_id,
+        )
+        try:
+            async with self.pool.acquire() as connection:
+                async with connection.transaction():
+                    proof = await authority_advisory_lock.acquire_authority_lock(connection, owner=owner)
+                    user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                        connection,
+                        uid=uid,
+                        owner=owner,
+                        proof=proof,
+                    )
+                    if not await self._active_user(connection, user_id=user_id):
+                        raise ImessageAuthorityError("imessage_owner_not_active")
+                    if runtime.account_user_id != user_id or runtime.profile_user_id != user_id:
+                        raise ImessageAuthorityError("imessage_runtime_owner_mismatch")
+                    await self._require_runtime(
+                        connection,
+                        user_id=user_id,
+                        runtime=runtime,
+                    )
+        except authority_advisory_lock.AuthorityLockError as exc:
+            raise ImessageAuthorityError("imessage_runtime_authority_changed") from exc
 
     async def get_binding_for_attempt(self, *, uid: str, attempt_id: uuid.UUID) -> Optional[dict[str, Any]]:
         row = await self.pool.fetchrow(
@@ -306,6 +351,7 @@ class ImessageEnrollmentRepository:
                         consent_receipt_id,
                         runtime.binding_id,
                         runtime.target_id,
+                        runtime.authority_kind,
                         runtime.authority_digest,
                     )
                     observed = (
@@ -313,6 +359,7 @@ class ImessageEnrollmentRepository:
                         existing["consent_receipt_id"],
                         existing["runtime_binding_id"],
                         existing["runtime_target_id"],
+                        str(existing["runtime_authority_kind"]),
                         str(existing["runtime_authority_digest"]),
                     )
                     if observed != expected:
@@ -378,9 +425,9 @@ class ImessageEnrollmentRepository:
                     INSERT INTO ella_imessage_registration_attempts (
                         user_id, idempotency_key, handset_ref_hmac,
                         consent_receipt_id, consent_authority_epoch,
-                        runtime_binding_id, runtime_target_id,
+                        runtime_binding_id, runtime_target_id, runtime_authority_kind,
                         runtime_authority_digest, provider_request_id
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                     RETURNING *
                     """,
                     user_id,
@@ -390,6 +437,7 @@ class ImessageEnrollmentRepository:
                     consent["authority_epoch"],
                     runtime.binding_id,
                     runtime.target_id,
+                    runtime.authority_kind,
                     runtime.authority_digest,
                     uuid.uuid4(),
                 )
@@ -448,6 +496,7 @@ class ImessageEnrollmentRepository:
                 if (
                     attempt["runtime_binding_id"] != runtime.binding_id
                     or attempt["runtime_target_id"] != runtime.target_id
+                    or str(attempt["runtime_authority_kind"]) != runtime.authority_kind
                     or not hmac.compare_digest(str(attempt["runtime_authority_digest"]), runtime.authority_digest)
                     or not hmac.compare_digest(
                         str(attempt["provider_registration_ref_hmac"]),
@@ -481,12 +530,12 @@ class ImessageEnrollmentRepository:
                         handset_ref_hmac, assigned_destination_e164,
                         assigned_destination_ref_hmac,
                         provider_registration_ref_hmac, runtime_binding_id,
-                        runtime_target_id, runtime_authority_digest,
+                        runtime_target_id, runtime_authority_kind, runtime_authority_digest,
                         consent_receipt_id, consent_authority_epoch,
                         challenge_salt, challenge_hash, challenge_expires_at
                     ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8,
-                        $9, $10, $11, $12, $13, $14, $15
+                        $9, $10, $11, $12, $13, $14, $15, $16
                     )
                     RETURNING *
                     """,
@@ -499,6 +548,7 @@ class ImessageEnrollmentRepository:
                     provider_registration_ref_hmac,
                     runtime.binding_id,
                     runtime.target_id,
+                    runtime.authority_kind,
                     runtime.authority_digest,
                     attempt["consent_receipt_id"],
                     attempt["consent_authority_epoch"],
@@ -748,6 +798,7 @@ class ImessageEnrollmentRepository:
                 if (
                     binding["runtime_binding_id"] != runtime.binding_id
                     or binding["runtime_target_id"] != runtime.target_id
+                    or str(binding["runtime_authority_kind"]) != runtime.authority_kind
                     or not hmac.compare_digest(str(binding["runtime_authority_digest"]), runtime.authority_digest)
                 ):
                     raise ImessageAuthorityError("imessage_runtime_authority_changed")
@@ -829,6 +880,7 @@ class ImessageEnrollmentRepository:
                 u.omi_uid,
                 b.runtime_binding_id,
                 b.runtime_target_id,
+                b.runtime_authority_kind,
                 b.runtime_authority_digest,
                 b.challenge_salt
             FROM ella_imessage_channel_bindings b
@@ -1134,17 +1186,69 @@ class ImessageEnrollmentRepository:
         runtime: ImessageRuntimeSnapshot,
         compare_revisions: bool = True,
     ) -> None:
+        if runtime.authority_kind == "retained_owner":
+            if runtime.target_id is not None or runtime.entitlement_revision != 0:
+                raise ImessageAuthorityError("imessage_runtime_authority_changed")
+            row = await connection.fetchrow(
+                """
+                SELECT
+                    b.id AS binding_id,
+                    b.revision AS binding_revision,
+                    b.active,
+                    b.status AS binding_status,
+                    b.health_state,
+                    b.provider AS binding_provider,
+                    b.role AS binding_role,
+                    b.account_user_id,
+                    b.profile_user_id,
+                    u.omi_uid,
+                    u.status AS user_status,
+                    EXISTS (
+                        SELECT 1
+                        FROM ella_runtime_targets target
+                        WHERE target.runtime_binding_id = b.id
+                    ) AS has_runtime_target
+                FROM ella_runtime_bindings b
+                JOIN users u ON u.id = b.user_id
+                WHERE b.id = $1 AND u.id = $2 AND u.omi_uid = $3
+                FOR SHARE OF b, u
+                """,
+                runtime.binding_id,
+                user_id,
+                runtime.uid,
+            )
+            if not row or (
+                row["account_user_id"] != user_id
+                or row["profile_user_id"] != user_id
+                or str(row["user_status"]) != "ACTIVE"
+                or str(row["binding_provider"]) != "hermes"
+                or str(row["binding_role"]) != "user"
+                or str(row["binding_status"]) != "active"
+                or row["active"] is not True
+                or str(row["health_state"]) != "healthy"
+                or row["has_runtime_target"] is True
+            ):
+                raise ImessageAuthorityError("imessage_runtime_unavailable")
+            if compare_revisions and int(row["binding_revision"]) != runtime.binding_revision:
+                raise ImessageAuthorityError("imessage_runtime_authority_changed")
+            return
+
+        if runtime.authority_kind != "target" or runtime.target_id is None:
+            raise ImessageAuthorityError("imessage_runtime_authority_changed")
         row = await connection.fetchrow(
             """
             SELECT
                 b.id AS binding_id,
                 b.revision AS binding_revision,
                 b.active,
+                b.status AS binding_status,
                 b.health_state,
                 b.provider AS binding_provider,
                 b.role AS binding_role,
                 b.account_user_id,
                 b.profile_user_id,
+                u.omi_uid,
+                u.status AS user_status,
                 t.id AS target_id,
                 t.provider AS target_provider,
                 t.role AS target_role,
@@ -1154,22 +1258,27 @@ class ImessageEnrollmentRepository:
                 t.status AS target_status,
                 t.entitlement_revision
             FROM ella_runtime_bindings b
+            JOIN users u ON u.id = b.user_id
             JOIN ella_runtime_targets t ON t.runtime_binding_id = b.id
-            WHERE b.id = $1 AND t.id = $2
-            FOR SHARE OF b, t
+            WHERE b.id = $1 AND t.id = $2 AND u.id = $3 AND u.omi_uid = $4
+            FOR SHARE OF b, u, t
             """,
             runtime.binding_id,
             runtime.target_id,
+            user_id,
+            runtime.uid,
         )
         if not row:
             raise ImessageAuthorityError("imessage_runtime_unavailable")
         if (
             row["account_user_id"] != user_id
             or row["profile_user_id"] != user_id
+            or str(row["user_status"]) != "ACTIVE"
             or row["target_account_user_id"] != user_id
             or row["target_profile_user_id"] != user_id
             or str(row["binding_provider"]) != "hermes"
             or str(row["binding_role"]) != "user"
+            or str(row["binding_status"]) != "active"
             or row["active"] is not True
             or str(row["health_state"]) != "healthy"
             or str(row["target_provider"]) != "hermes"

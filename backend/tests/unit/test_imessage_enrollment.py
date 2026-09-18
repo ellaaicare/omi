@@ -24,6 +24,7 @@ from ella.services.imessage_enrollment import (
     RegistrarResult,
     consent_policy,
 )
+from ella.services.runtime_resolver import IsolatedRuntime
 from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 
 NOW = datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
@@ -39,13 +40,43 @@ TRANSPORT_TOKEN = "t" * 32
 
 def _snapshot() -> ImessageRuntimeSnapshot:
     return ImessageRuntimeSnapshot(
+        uid="owner-a",
         binding_id=BINDING_ID,
         target_id=TARGET_ID,
+        authority_kind="target",
         authority_digest="a" * 64,
         binding_revision=3,
         entitlement_revision=4,
         account_user_id=USER_ID,
         profile_user_id=USER_ID,
+    )
+
+
+def _retained_runtime(uid: str) -> IsolatedRuntime:
+    return IsolatedRuntime(
+        uid=uid,
+        binding_id=str(BINDING_ID),
+        provider="hermes",
+        status="active",
+        profile_name="retained-profile",
+        agent_id="retained-agent",
+        runtime_instance_id="retained-instance",
+        gateway_url="http://127.0.0.1:8642",
+        gateway_token="test-only-token",
+        workspace_root="/tmp/retained-workspace",
+        honcho_workspace="retained-honcho",
+        observed_peer="retained-owner",
+        observer_peer="retained-observer",
+        prompt_pack_version="retained-v1",
+        expected_model="retained-agent",
+        model_context_window_tokens=128000,
+        allowed_tools=(),
+        required_capabilities=(),
+        model_policy_version="model-v1",
+        voice_policy_version="voice-v1",
+        revision=3,
+        account_user_id=str(USER_ID),
+        profile_user_id=str(USER_ID),
     )
 
 
@@ -79,6 +110,7 @@ class FakeRepository:
         self.attempt = _attempt()
         self.binding = _binding()
         self.finalize_error = None
+        self.validate_runtime_error = None
         self.state = {
             "user_status": "ACTIVE",
             "consent_decision": "granted",
@@ -110,6 +142,11 @@ class FakeRepository:
     async def get_owner_state(self, **kwargs):
         self.events.append(("state", kwargs))
         return dict(self.state)
+
+    async def validate_runtime_authority(self, **kwargs):
+        self.events.append(("validate_runtime", kwargs))
+        if self.validate_runtime_error:
+            raise self.validate_runtime_error
 
     async def prepare_registration(self, **kwargs):
         self.events.append(("prepare", kwargs))
@@ -324,6 +361,33 @@ def test_feature_flag_defaults_off_before_repository_or_provider(monkeypatch):
     assert status["state"] == "temporarily_unavailable"
     assert status["reason_code"] == "rollout_disabled"
     assert repository.events == []
+
+
+def test_enrollment_runtime_accepts_only_exact_configured_retained_owner(monkeypatch):
+    repository = FakeRepository()
+    service = _service(repository, FakeRegistrar(repository.events))
+    monkeypatch.setenv("ELLA_PLATO_UID", "owner-a")
+    monkeypatch.setattr(
+        enrollment_service,
+        "resolve_isolated_runtime",
+        AsyncMock(return_value=_retained_runtime("owner-a")),
+    )
+
+    _, snapshot, identity = asyncio.run(service._runtime("owner-a"))
+
+    assert snapshot.uid == "owner-a"
+    assert snapshot.authority_kind == "retained_owner"
+    assert snapshot.target_id is None
+    assert snapshot.entitlement_revision == 0
+    assert identity.target_mode == "retained"
+
+    monkeypatch.setattr(
+        enrollment_service,
+        "resolve_isolated_runtime",
+        AsyncMock(return_value=_retained_runtime("owner-b")),
+    )
+    with pytest.raises(ImessageEnrollmentError, match="imessage_runtime_unavailable"):
+        asyncio.run(service._runtime("owner-b"))
     with pytest.raises(ImessageEnrollmentError, match="imessage_enrollment_disabled"):
         asyncio.run(
             service.start(
@@ -578,6 +642,37 @@ def test_status_atomically_retires_expired_pending_challenge(monkeypatch):
         "provider_request_ids",
         "cleanup",
     ]
+
+
+def test_status_refuses_ready_when_persisted_runtime_authority_is_stale(monkeypatch):
+    monkeypatch.setenv("ELLA_IMESSAGE_ENROLLMENT_ENABLED", "true")
+    repository = FakeRepository()
+    repository.validate_runtime_error = ImessageAuthorityError("imessage_runtime_authority_changed")
+    repository.state.update(
+        {
+            "policy_version": CONSENT_POLICY_VERSION,
+            "processor_set_hash": CONSENT_PROCESSOR_SET_HASH,
+            "scope_version": CONSENT_SCOPE_VERSION,
+            "scope_hash": CONSENT_SCOPE_HASH,
+            "binding_id": repository.binding["id"],
+            "binding_status": "active",
+            "generation": 1,
+            "binding_revision": 1,
+            "runtime_authority_digest": _snapshot().authority_digest,
+            "assigned_destination_e164": repository.binding["assigned_destination_e164"],
+            "verified_at": NOW,
+            "last_transport_healthy_at": NOW,
+        }
+    )
+    service = _service(repository, FakeRegistrar(repository.events))
+    service._runtime = AsyncMock(return_value=(SimpleNamespace(), _snapshot(), SimpleNamespace()))
+
+    status = asyncio.run(service.status(uid="owner-a"))
+
+    assert status["state"] == "temporarily_unavailable"
+    assert status["reason_code"] == "authority_stale"
+    assert status["features"]["text_dm"] is False
+    assert [event[0] for event in repository.events] == ["schema", "state", "validate_runtime"]
 
 
 def test_consent_authority_conflicts_use_documented_http_409_semantics():
