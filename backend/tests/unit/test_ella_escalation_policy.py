@@ -14,6 +14,7 @@ from ella.services.escalation_policy import (
     REASON_NO_EMAIL,
     REASON_NO_PHONE,
     REASON_MODE_SUPPRESSED,
+    REASON_PROVIDER_UNHEALTHY,
     CaregiverPolicyContext,
     EscalationEvent,
     UserPolicyContext,
@@ -45,6 +46,7 @@ def _user(**overrides):
         "guardian_mode": "cyborg",
         "user_email": "user@example.test",
         "user_phone": "+15550000001",
+        "provider_health": {CHANNEL_IMESSAGE: True},
     }
     data.update(overrides)
     return UserPolicyContext(**data)
@@ -270,6 +272,45 @@ def test_imessage_disabled_uses_email_fallback_path():
     assert REASON_CHANNEL_DISABLED_BY_USER in _reason_codes(decision)
 
 
+def test_missing_imessage_provider_health_uses_email_for_complete_critical_plan():
+    decision = evaluate_escalation_policy(
+        _event(severity="critical"),
+        _user(guardian_mode="off", provider_health={}),
+        [_caregiver()],
+    )
+
+    assert decision.decision == DECISION_NOTIFY_NOW
+    assert [(step.target, step.channel) for step in decision.delivery_plan] == [
+        ("user", CHANNEL_EMAIL),
+        ("emergency_caregiver", CHANNEL_EMAIL),
+    ]
+    assert REASON_PROVIDER_UNHEALTHY in _reason_codes(decision)
+
+
+def test_unhealthy_imessage_provider_uses_email_for_user_first_plan():
+    decision = evaluate_escalation_policy(
+        _event(severity="medium", event_type="direct_question"),
+        _user(guardian_mode="off", provider_health={CHANNEL_IMESSAGE: False}),
+        [],
+    )
+
+    assert decision.decision == DECISION_ASK_USER_FIRST
+    assert [(step.target, step.channel) for step in decision.delivery_plan] == [("user", CHANNEL_EMAIL)]
+    assert REASON_PROVIDER_UNHEALTHY in _reason_codes(decision)
+
+
+def test_imessage_health_requires_exact_boolean_ready_signal():
+    for non_ready in (None, "healthy", 1, {"status": "ready"}):
+        decision = evaluate_escalation_policy(
+            _event(severity="critical"),
+            _user(guardian_mode="off", provider_health={CHANNEL_IMESSAGE: non_ready}),
+            [],
+        )
+
+        assert [step.channel for step in decision.delivery_plan] == [CHANNEL_EMAIL]
+        assert REASON_PROVIDER_UNHEALTHY in _reason_codes(decision)
+
+
 def test_email_disabled_removes_email_fallback():
     decision = evaluate_escalation_policy(
         _event(severity="critical"),
@@ -432,3 +473,25 @@ def test_plain_language_policy_view_handles_missing_emergency_contact():
             "reason": "No email on file",
         },
     ]
+
+
+def test_plain_language_policy_view_does_not_advertise_phone_only_imessage():
+    unavailable = build_plain_language_policy_view(
+        _user(provider_health={}),
+        [],
+    )
+    ready = build_plain_language_policy_view(
+        _user(provider_health={CHANNEL_IMESSAGE: True}),
+        [],
+    )
+
+    assert unavailable["user"]["channels"][1] == {
+        "channel": CHANNEL_IMESSAGE,
+        "enabled": False,
+        "reason": "iMessage is not currently available",
+    }
+    assert ready["user"]["channels"][1] == {
+        "channel": CHANNEL_IMESSAGE,
+        "enabled": True,
+        "reason": "iMessage is ready",
+    }

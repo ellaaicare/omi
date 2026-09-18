@@ -504,9 +504,24 @@ def _merge_recap_preferences(raw_preferences: dict[str, Any]) -> dict[str, Any]:
 
 def _provider_healthy(user: UserPolicyContext, channel: str) -> bool:
     provider_health = user.provider_health or {}
+    if channel == CHANNEL_IMESSAGE:
+        return provider_health.get(channel) is True
     if channel in provider_health:
         return bool(provider_health[channel])
     return True
+
+
+def _imessage_channel_status(
+    user: UserPolicyContext,
+    channel_preference: dict[str, Any],
+) -> tuple[bool, str]:
+    if not channel_preference["enabled"]:
+        return False, "iMessage is disabled in notification settings"
+    if not user.user_phone:
+        return False, "No phone number on file"
+    if not _provider_healthy(user, CHANNEL_IMESSAGE):
+        return False, "iMessage is not currently available"
+    return True, "iMessage is ready"
 
 
 def _severity_allowed(channel_pref: dict[str, Any], severity: str, event_type: str) -> bool:
@@ -789,9 +804,10 @@ def _consider_caregiver_channels(
 
 
 def _is_cyborg_context_event(event: EscalationEvent) -> bool:
-    return event.event_type in {"cyborg_context", "useful_context", "context"} or str(
-        event.evidence.get("delivery_class", "")
-    ).lower() == SEVERITY_CYBORG
+    return (
+        event.event_type in {"cyborg_context", "useful_context", "context"}
+        or str(event.evidence.get("delivery_class", "")).lower() == SEVERITY_CYBORG
+    )
 
 
 def _normalized_event_labels(event: EscalationEvent) -> set[str]:
@@ -1176,6 +1192,10 @@ def build_plain_language_policy_view(
     )
 
     channel_preferences = snapshot["channel_preferences"]
+    imessage_enabled, imessage_reason = _imessage_channel_status(
+        user,
+        channel_preferences[CHANNEL_IMESSAGE],
+    )
     return {
         "policy_version": POLICY_VERSION,
         "source": "omi_backend",
@@ -1190,12 +1210,16 @@ def build_plain_language_policy_view(
                 channel_status(
                     CHANNEL_GUARDIAN_AUDIO,
                     snapshot["guardian_audio_enabled"] and channel_preferences[CHANNEL_GUARDIAN_AUDIO]["enabled"],
-                    "Guardian audio mode is active" if snapshot["guardian_audio_enabled"] else "Guardian audio mode is off",
+                    (
+                        "Guardian audio mode is active"
+                        if snapshot["guardian_audio_enabled"]
+                        else "Guardian audio mode is off"
+                    ),
                 ),
                 channel_status(
                     CHANNEL_IMESSAGE,
-                    bool(user.user_phone) and channel_preferences[CHANNEL_IMESSAGE]["enabled"],
-                    "Phone number on file" if user.user_phone else "No phone number on file",
+                    imessage_enabled,
+                    imessage_reason,
                 ),
                 channel_status(
                     CHANNEL_EMAIL,
