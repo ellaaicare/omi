@@ -369,6 +369,7 @@ ROUTE_GROUPS = (
         ("POST", "/v1/ella/internal/imessage/delivery/start", "delivery_start"),
         ("POST", "/v1/ella/internal/imessage/delivery/ack", "delivery_ack"),
         ("POST", "/v1/ella/internal/imessage/delivery/uncertain", "delivery_uncertain"),
+        ("POST", "/v1/ella/internal/imessage/delivery/reconcile", "delivery_reconcile"),
         ("POST", "/v1/ella/internal/imessage/deregister", "deregister"),
     ),
     _group(
