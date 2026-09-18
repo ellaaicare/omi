@@ -80,9 +80,12 @@ def test_dedicated_consent_contract_precedes_enrollment_and_cannot_select_owner(
         "build_number",
     }
     assert request_properties.isdisjoint(FORBIDDEN_AUTHORITY_FIELDS)
-    assert schemas["ImessageConsentPolicy"]["properties"]["policy_version"] == {"const": "ella-imessage-data-v1"}
+    assert schemas["ImessageConsentPolicy"]["properties"]["policy_version"] == {"const": "ella-imessage-data-v2"}
     assert schemas["ImessageConsentPolicy"]["properties"]["scope_version"] == {"const": "ella.imessage_text_dm.v1"}
     assert schemas["ImessageConsentPolicy"]["properties"]["text_dm_only"] == {"const": True}
+    assert schemas["ImessageConsentPolicy"]["properties"]["data_classes"]["example"][0] == (
+        "your handset phone number used for iMessage transport registration"
+    )
 
 
 def test_start_request_cannot_select_tenant_runtime_or_transport_authority():

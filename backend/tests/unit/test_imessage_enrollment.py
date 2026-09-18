@@ -198,12 +198,39 @@ def test_consent_policy_is_dedicated_text_dm_disclosure():
             "Photon iMessage transport",
         ],
         "data_classes": [
+            "your handset phone number used for iMessage transport registration",
             "the text messages you send to Ella",
             "Ella's text replies",
             "messaging delivery identifiers",
         ],
         "text_dm_only": True,
     }
+
+
+def test_previous_policy_consent_is_rejected_before_authority_write(monkeypatch):
+    monkeypatch.setenv("ELLA_IMESSAGE_ENROLLMENT_ENABLED", "true")
+    repository = FakeRepository()
+    service = _service(repository, FakeRegistrar(repository.events))
+
+    with pytest.raises(ImessageEnrollmentError) as failure:
+        asyncio.run(
+            service.submit_consent(
+                uid="owner-a",
+                decision="granted",
+                policy_version="ella-imessage-data-v1",
+                processor_set_hash=CONSENT_PROCESSOR_SET_HASH,
+                scope_version=CONSENT_SCOPE_VERSION,
+                scope_hash=CONSENT_SCOPE_HASH,
+                request_id=REQUEST_ID,
+                app_version="1.0",
+                build_number="1",
+            )
+        )
+
+    assert CONSENT_POLICY_VERSION == "ella-imessage-data-v2"
+    assert failure.value.code == "imessage_consent_policy_mismatch"
+    assert failure.value.status_code == 409
+    assert repository.events == [("schema", {})]
 
 
 def test_feature_flag_defaults_off_before_repository_or_provider(monkeypatch):

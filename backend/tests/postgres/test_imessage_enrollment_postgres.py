@@ -98,7 +98,7 @@ MIGRATION_CHAIN = (
     "020_create_imessage_enrollment_authority.sql",
 )
 
-POLICY = "ella-imessage-data-v1"
+POLICY = "ella-imessage-data-v2"
 PROCESSOR_HASH = "sha256:" + ("1" * 64)
 SCOPE = "ella.imessage_text_dm.v1"
 SCOPE_HASH = "sha256:" + ("2" * 64)
@@ -315,30 +315,33 @@ def test_migration_and_repository_enforce_consent_proof_replay_and_revoke():
         repository = ImessageEnrollmentRepository(pool)
         await repository.assert_schema_ready()
         uid = "imessage-owner-a"
-        user_id, runtime = await _seed_owner(pool, uid=uid, ordinal=1)
-        receipt = await _grant(repository, uid=uid, ordinal=1)
-        same_receipt = await _grant(repository, uid=uid, ordinal=1)
-        assert same_receipt["id"] == receipt["id"]
-        async with pool.acquire() as connection:
-            await connection.execute(
-                "UPDATE ella_imessage_consent_authority SET policy_version = 'stale-policy' WHERE user_id = $1",
-                user_id,
-            )
+        _, runtime = await _seed_owner(pool, uid=uid, ordinal=1)
+        previous_receipt = await repository.submit_consent(
+            uid=uid,
+            submission=ImessageConsentInput(
+                request_id=uuid.uuid5(uuid.NAMESPACE_URL, "consent-v1-1"),
+                decision="granted",
+                policy_version="ella-imessage-data-v1",
+                processor_set_hash=PROCESSOR_HASH,
+                scope_version=SCOPE,
+                scope_hash=SCOPE_HASH,
+                app_version="1.0",
+                build_number="1",
+            ),
+        )
+        assert POLICY == "ella-imessage-data-v2"
         with pytest.raises(ImessageAuthorityError, match="imessage_consent_policy_stale"):
             await repository.prepare_registration(
                 uid=uid,
                 idempotency_key=uuid.uuid5(uuid.NAMESPACE_URL, "stale-consent-attempt"),
                 handset_ref_hmac=hashlib.sha256(b"stale-handset").hexdigest(),
-                consent_receipt_id=receipt["id"],
+                consent_receipt_id=previous_receipt["id"],
                 consent_contract=CONSENT_CONTRACT,
                 runtime=runtime,
             )
-        async with pool.acquire() as connection:
-            await connection.execute(
-                "UPDATE ella_imessage_consent_authority SET policy_version = $2 WHERE user_id = $1",
-                user_id,
-                POLICY,
-            )
+        receipt = await _grant(repository, uid=uid, ordinal=1)
+        same_receipt = await _grant(repository, uid=uid, ordinal=1)
+        assert same_receipt["id"] == receipt["id"]
 
         binding, code, destination_hmac = await _pending_binding(
             repository,

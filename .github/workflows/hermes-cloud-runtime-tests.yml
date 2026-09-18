@@ -557,8 +557,9 @@ jobs:
               tests/postgres/test_imessage_enrollment_postgres.py |
               sed '/^$/d'
           )"
-          test "$(grep -c '::' <<<"$imessage_ids")" -eq 35
+          test "$(grep -c '::' <<<"$imessage_ids")" -eq 36
           required_imessage_ids=(
+            "tests/unit/test_imessage_enrollment.py::test_previous_policy_consent_is_rejected_before_authority_write"
             "tests/unit/test_imessage_enrollment.py::test_start_persists_before_provider_and_revalidates_before_finalization"
             "tests/unit/test_imessage_enrollment.py::test_provider_accepted_retry_skips_second_external_registration"
             "tests/unit/test_imessage_enrollment.py::test_ambiguous_provider_result_is_durable_and_never_finalized"
