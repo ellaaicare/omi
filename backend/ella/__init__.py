@@ -460,6 +460,15 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Hermes Cloud Photon adapter not available: {e}", flush=True)
 
+    # Owner-authenticated enrollment for the separate self-hosted iMessage lane.
+    try:
+        from ella.routers.imessage_enrollment import router as imessage_enrollment_router
+
+        app.include_router(imessage_enrollment_router, tags=["iMessage Enrollment"])
+        print("  🌐 /v1/ella/imessage/* - Owner-scoped iMessage enrollment", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ iMessage enrollment not available: {e}", flush=True)
+
     # Loopback-only OMI enrichment handoff into the bound Hermes Cloud runtime.
     try:
         from ella.routers.hermes_cloud_enrichment import (

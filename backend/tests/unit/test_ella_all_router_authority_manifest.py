@@ -340,6 +340,27 @@ ROUTE_GROUPS = (
         ("POST", "/v1/ella/internal/hermes-cloud/photon/delivery-ack", "delivery_ack"),
     ),
     _group(
+        "imessage_enrollment",
+        "public_metadata",
+        "public",
+        ("GET", "/v1/ella/imessage/consent/policy", "get_imessage_consent_policy"),
+    ),
+    _group(
+        "imessage_enrollment",
+        "firebase_exact_owner",
+        "staged_public",
+        ("POST", "/v1/ella/imessage/consent", "submit_imessage_consent"),
+        ("GET", "/v1/ella/imessage/enrollment", "get_imessage_enrollment"),
+        ("POST", "/v1/ella/imessage/enrollment/start", "start_imessage_enrollment"),
+        ("POST", "/v1/ella/imessage/enrollment/revoke", "revoke_imessage_enrollment"),
+    ),
+    _group(
+        "imessage_enrollment",
+        "imessage_transport_only_no_subject_selector",
+        "internal_only",
+        ("POST", "/v1/ella/internal/imessage/proof", "verify_imessage_proof"),
+    ),
+    _group(
         "plato_mcp",
         "plato_mcp_fixed_profile",
         "public",
