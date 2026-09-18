@@ -22,6 +22,10 @@ class ChannelStatus {
     );
   }
 
+  /// Legacy policy responses can mark iMessage enabled from a stored phone
+  /// number alone. Only the verified enrollment flow may present it as ready.
+  bool get isCurrentlyAvailable => enabled && channel != 'imessage';
+
   /// Human-readable channel name.
   String get displayName {
     switch (channel) {

@@ -4,10 +4,15 @@ import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/escalation_policy.dart';
 import 'package:omi/ella/pages/ella_emergency_contact_page.dart';
 import 'package:omi/ella/services/escalation_policy_api.dart' as policy_api;
+import 'package:omi/ella/services/ella_service_result.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
+typedef EscalationPolicyLoader = Future<EllaServiceResult<EscalationPolicy>> Function();
+
 class AlertChannelsPage extends StatefulWidget {
-  const AlertChannelsPage({super.key});
+  final EscalationPolicyLoader loadPolicy;
+
+  const AlertChannelsPage({super.key, this.loadPolicy = policy_api.getEscalationPolicy});
 
   @override
   State<AlertChannelsPage> createState() => _AlertChannelsPageState();
@@ -25,7 +30,7 @@ class _AlertChannelsPageState extends State<AlertChannelsPage> {
 
   Future<void> _loadPolicy() async {
     setState(() => _loading = true);
-    final policy = await policy_api.getEscalationPolicy();
+    final policy = await widget.loadPolicy();
     if (mounted) {
       setState(() {
         _policy = policy.isSuccess ? policy.value : null;
@@ -200,52 +205,66 @@ class _ChannelStatusRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final available = channel.isCurrentlyAvailable;
+    final isImessage = channel.channel == 'imessage';
+    final reason = isImessage ? context.l10n.ellaAlertChannelsImessageUnavailable : channel.reason;
+    final badge = isImessage
+        ? context.l10n.ellaAlertChannelsUnavailableBadge
+        : available
+            ? context.l10n.ellaAlertChannelsEnabled
+            : context.l10n.ellaAlertChannelsDisabled;
+
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: EllaColors.bgSecondary,
-          borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
-        ),
-        child: Row(
-          children: [
-            Icon(channel.icon, size: 20, color: EllaColors.primary),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    channel.displayName,
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500, color: EllaColors.textPrimary),
-                  ),
-                  if (channel.reason.isNotEmpty)
-                    Text(channel.reason, style: const TextStyle(fontSize: 13, color: EllaColors.textTertiary)),
-                ],
-              ),
-            ),
-            // Read-only badge
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: channel.enabled
-                    ? EllaColors.primary.withValues(alpha: 0.1)
-                    : EllaColors.textTertiary.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                channel.enabled ? context.l10n.ellaAlertChannelsEnabled : context.l10n.ellaAlertChannelsDisabled,
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: channel.enabled ? EllaColors.primary : EllaColors.textTertiary,
+      child: Semantics(
+        key: ValueKey('channel-status-${channel.channel}'),
+        container: true,
+        excludeSemantics: true,
+        label: '${channel.displayName}, $badge',
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: EllaColors.bgSecondary,
+            borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
+          ),
+          child: Row(
+            children: [
+              Icon(channel.icon, size: 20, color: available ? EllaColors.primary : EllaColors.textTertiary),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      channel.displayName,
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500, color: EllaColors.textPrimary),
+                    ),
+                    if (reason.isNotEmpty)
+                      Text(reason, style: const TextStyle(fontSize: 13, color: EllaColors.textTertiary)),
+                  ],
                 ),
               ),
-            ),
-            const SizedBox(width: 6),
-            const Icon(Icons.lock_outline, size: 14, color: EllaColors.textTertiary),
-          ],
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: available
+                      ? EllaColors.primary.withValues(alpha: 0.1)
+                      : EllaColors.textTertiary.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  badge,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: available ? EllaColors.primary : EllaColors.textTertiary,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              const Icon(Icons.lock_outline, size: 14, color: EllaColors.textTertiary),
+            ],
+          ),
         ),
       ),
     );
