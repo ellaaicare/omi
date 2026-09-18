@@ -68,13 +68,15 @@ class ImessageEnrollmentRepository:
         return cls(await get_pool())
 
     async def assert_schema_ready(self) -> None:
-        row = await self.pool.fetchrow("""
+        row = await self.pool.fetchrow(
+            """
             SELECT
                 to_regclass('ella_imessage_consent_authority') IS NOT NULL AS consent_authority,
                 to_regclass('ella_imessage_registration_attempts') IS NOT NULL AS attempts,
                 to_regclass('ella_imessage_channel_bindings') IS NOT NULL AS bindings,
                 to_regclass('ella_imessage_proof_receipts') IS NOT NULL AS proof_receipts
-            """)
+            """
+        )
         if not row or not all(row.values()):
             raise ImessageAuthorityError("imessage_enrollment_schema_not_ready")
 
