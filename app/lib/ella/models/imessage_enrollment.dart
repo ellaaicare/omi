@@ -136,6 +136,7 @@ enum ImessageEnrollmentReason {
   authorityStale('authority_stale'),
   bindingQuarantined('binding_quarantined'),
   consentRequired('consent_required'),
+  consentPolicyStale('consent_policy_stale'),
   consentRevoked('consent_revoked'),
   runtimeUnavailable('runtime_unavailable'),
   bindingRevoked('binding_revoked');

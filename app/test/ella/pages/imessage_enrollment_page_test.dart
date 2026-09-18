@@ -36,7 +36,10 @@ void main() {
     await tester.tap(find.text('Set up iMessage'));
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('Photon, Ella self-hosted Hermes, OpenAI process'), findsOneWidget);
+    expect(
+      find.textContaining('Ella self-hosted Hermes and Honcho, Photon iMessage transport process'),
+      findsOneWidget,
+    );
     final continueButton = tester.widget<ElevatedButton>(
       find.widgetWithText(ElevatedButton, 'Agree and continue'),
     );
@@ -202,8 +205,12 @@ ImessageConsentPolicy _policy() => ImessageConsentPolicy(
       processorSetHash: _hash('a'),
       scopeVersion: ImessageConsentPolicy.supportedScopeVersion,
       scopeHash: _hash('b'),
-      recipients: const ['Photon', 'Ella self-hosted Hermes', 'OpenAI'],
-      dataClasses: const ['phone number', 'message text'],
+      recipients: const ['Ella self-hosted Hermes and Honcho', 'Photon iMessage transport'],
+      dataClasses: const [
+        'the text messages you send to Ella',
+        "Ella's text replies",
+        'messaging delivery identifiers',
+      ],
       textDmOnly: true,
     );
 

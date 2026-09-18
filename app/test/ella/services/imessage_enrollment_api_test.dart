@@ -137,6 +137,23 @@ void main() {
       ),
     );
   });
+
+  test('accepts the server consent-policy-stale status without plausible readiness', () async {
+    final api = ImessageEnrollmentApi(
+      baseUrl: 'https://api.example.test/',
+      transport: ({required url, required headers, required body, required method, timeout, retries}) async {
+        return http.Response(
+          jsonEncode({..._statusJson(), 'reason_code': 'consent_policy_stale'}),
+          200,
+        );
+      },
+    );
+
+    final status = await api.fetchStatus();
+
+    expect(status.reason, ImessageEnrollmentReason.consentPolicyStale);
+    expect(status.isReady, isFalse);
+  });
 }
 
 String _hash(String character) => 'sha256:${List.filled(64, character).join()}';
@@ -146,8 +163,12 @@ Map<String, dynamic> _policyJson() => {
       'processor_set_hash': _hash('a'),
       'scope_version': ImessageConsentPolicy.supportedScopeVersion,
       'scope_hash': _hash('b'),
-      'recipients': ['Photon', 'Ella self-hosted Hermes', 'OpenAI'],
-      'data_classes': ['phone number', 'message text', 'selected memory context'],
+      'recipients': ['Ella self-hosted Hermes and Honcho', 'Photon iMessage transport'],
+      'data_classes': [
+        'the text messages you send to Ella',
+        "Ella's text replies",
+        'messaging delivery identifiers',
+      ],
       'text_dm_only': true,
     };
 

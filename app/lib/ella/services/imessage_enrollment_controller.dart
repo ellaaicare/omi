@@ -326,10 +326,13 @@ class ImessageEnrollmentController extends ChangeNotifier {
     if (_isLeaseCurrent(lease)) {
       _failure = error;
     } else {
-      _replaceAuthority(
-        _currentAuthority,
-        const ImessageEnrollmentFailure(ImessageEnrollmentFailureKind.authorityChanged),
-      );
+      final authority = _currentAuthority;
+      if (_ownerUid != authority) {
+        _replaceAuthority(
+          authority,
+          const ImessageEnrollmentFailure(ImessageEnrollmentFailureKind.authorityChanged),
+        );
+      }
     }
   }
 
@@ -337,10 +340,13 @@ class ImessageEnrollmentController extends ChangeNotifier {
     if (_isLeaseCurrent(lease)) {
       _loading = false;
     } else {
-      _replaceAuthority(
-        _currentAuthority,
-        const ImessageEnrollmentFailure(ImessageEnrollmentFailureKind.authorityChanged),
-      );
+      final authority = _currentAuthority;
+      if (_ownerUid != authority) {
+        _replaceAuthority(
+          authority,
+          const ImessageEnrollmentFailure(ImessageEnrollmentFailureKind.authorityChanged),
+        );
+      }
     }
     notifyListeners();
   }

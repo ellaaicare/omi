@@ -42,7 +42,7 @@ void main() {
     final policy = ImessageConsentPolicy.fromJson(_policyJson());
     final receipt = ImessageConsentReceipt.fromJson(_receiptJson());
 
-    expect(policy.recipients, ['Photon', 'Ella self-hosted Hermes', 'OpenAI']);
+    expect(policy.recipients, ['Ella self-hosted Hermes and Honcho', 'Photon iMessage transport']);
     expect(receipt.matches(policy, ImessageConsentDecision.granted), isTrue);
     expect(receipt.matches(policy, ImessageConsentDecision.declined), isFalse);
   });
@@ -57,6 +57,16 @@ void main() {
       throwsFormatException,
     );
   });
+
+  test('decodes the server consent-policy-stale authority state', () {
+    final status = ImessageEnrollmentStatus.fromJson({
+      ..._statusJson(),
+      'reason_code': 'consent_policy_stale',
+    });
+
+    expect(status.reason, ImessageEnrollmentReason.consentPolicyStale);
+    expect(status.isReady, isFalse);
+  });
 }
 
 String _hash(String character) => 'sha256:${List.filled(64, character).join()}';
@@ -66,8 +76,12 @@ Map<String, dynamic> _policyJson() => {
       'processor_set_hash': _hash('a'),
       'scope_version': ImessageConsentPolicy.supportedScopeVersion,
       'scope_hash': _hash('b'),
-      'recipients': ['Photon', 'Ella self-hosted Hermes', 'OpenAI'],
-      'data_classes': ['phone number', 'message text'],
+      'recipients': ['Ella self-hosted Hermes and Honcho', 'Photon iMessage transport'],
+      'data_classes': [
+        'the text messages you send to Ella',
+        "Ella's text replies",
+        'messaging delivery identifiers',
+      ],
       'text_dm_only': true,
     };
 

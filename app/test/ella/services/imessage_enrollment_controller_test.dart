@@ -63,6 +63,41 @@ void main() {
     expect(controller.failure?.kind, ImessageEnrollmentFailureKind.authorityChanged);
   });
 
+  test('stale owner A completion cannot clear committed owner B state', () async {
+    var authority = 'owner-a';
+    var fetchCount = 0;
+    final ownerAResponse = Completer<ImessageEnrollmentStatus>();
+    final ownerBResponse = Completer<ImessageEnrollmentStatus>();
+    final gateway = _FakeGateway(
+      fetch: () {
+        fetchCount += 1;
+        return fetchCount == 1 ? ownerAResponse.future : ownerBResponse.future;
+      },
+    );
+    final controller = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => authority,
+      messagesLauncher: (_) async => true,
+      idGenerator: () => 'request-1',
+      appInfoReader: _appInfo,
+    );
+
+    final ownerALoad = controller.load();
+    authority = 'owner-b';
+    expect(controller.handleAuthorityChanged(), isTrue);
+    final ownerBLoad = controller.load();
+    ownerBResponse.complete(_status(ImessageEnrollmentState.notConnected));
+    await ownerBLoad;
+    expect(controller.status?.state, ImessageEnrollmentState.notConnected);
+
+    ownerAResponse.complete(_status(ImessageEnrollmentState.ready, textDm: true));
+    await ownerALoad;
+
+    expect(controller.status?.state, ImessageEnrollmentState.notConnected);
+    expect(controller.failure, isNull);
+  });
+
   test('account drift while opening Messages fails closed', () async {
     var authority = 'owner-a';
     final launch = Completer<bool>();
@@ -177,6 +212,7 @@ void main() {
       messagesLauncher: (_) async => true,
       idGenerator: () => 'request-1',
       appInfoReader: _appInfo,
+      now: () => DateTime.utc(2026, 9, 18, 8),
     );
 
     await controller.loadConsentPolicy();
@@ -278,8 +314,12 @@ ImessageConsentPolicy _policy() => ImessageConsentPolicy(
       processorSetHash: _hash('a'),
       scopeVersion: ImessageConsentPolicy.supportedScopeVersion,
       scopeHash: _hash('b'),
-      recipients: const ['Photon', 'Ella self-hosted Hermes', 'OpenAI'],
-      dataClasses: const ['phone number', 'message text'],
+      recipients: const ['Ella self-hosted Hermes and Honcho', 'Photon iMessage transport'],
+      dataClasses: const [
+        'the text messages you send to Ella',
+        "Ella's text replies",
+        'messaging delivery identifiers',
+      ],
       textDmOnly: true,
     );
 
