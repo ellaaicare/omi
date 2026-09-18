@@ -641,7 +641,10 @@ def test_capture_commit_rejects_conversation_rotation_before_write(monkeypatch):
     assert "active_conversation_id," in prepare_source
     assert "candidate_id," in prepare_source
     assert "replace_stale_conversation_id=active_conversation_id or None" in prepare_source
-    assert 'raise RuntimeError("active conversation ownership changed during reconnect")' in prepare_source
+    assert (
+        'raise CaptureReconnectAuthorityBusy("active conversation ownership changed during reconnect")'
+        in prepare_source
+    )
     assert "refresh_in_progress_conversation_id(" in heartbeat_source
     assert '"capture_socket_ownership_lost"' in heartbeat_source
     assert "await _finalize_current_conversation_on_disconnect()" in shutdown_source

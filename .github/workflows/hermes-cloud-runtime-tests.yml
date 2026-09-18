@@ -672,6 +672,9 @@ jobs:
             "tests/unit/test_capture_incident_1210_regressions.py::test_incident_regression_file_triggers_pull_request_and_push_ci"
             "tests/unit/test_capture_incident_1210_regressions.py::test_stock_summary_commit_rejects_transcript_appended_after_processing_snapshot"
             "tests/unit/test_capture_incident_1210_regressions.py::test_production_reconnect_path_does_not_let_overlapping_socket_steal_authority"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_undelivered_capture_ready_releases_only_its_exact_authority"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_undelivered_capture_ready_does_not_release_after_authority_drift"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_reconnect_conflict_is_converted_to_typed_temporary_close"
             "tests/unit/test_capture_incident_1210_regressions.py::test_production_reconnect_rotates_expired_drained_candidate_behind_terminal_authority"
             "tests/unit/test_capture_incident_1210_regressions.py::test_production_reconnect_adopts_owner_bound_legacy_successor_behind_expired_authority"
             "tests/unit/test_capture_incident_1210_regressions.py::test_reconnect_claims_firestore_authority_before_publishing_redis_owner"
@@ -714,7 +717,7 @@ jobs:
             "tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[todoist]"
             "tests/unit/test_capture_webhook_delivery.py::test_capture_developer_webhook_failure_is_not_acknowledged"
           )
-          test "$(grep -c '::' <<<"$capture_ids")" -eq 84
+          test "$(grep -c '::' <<<"$capture_ids")" -eq 87
           for required_id in "${required_capture_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$capture_ids"
           done
