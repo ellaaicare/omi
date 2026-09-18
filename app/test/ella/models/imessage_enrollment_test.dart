@@ -15,16 +15,36 @@ void main() {
     }
   });
 
-  test('requires both server ready state and text DM capability', () {
+  test('requires exact ready reason and text-DM-only capability vector', () {
     final ready = ImessageEnrollmentStatus.fromJson(
       _statusJson(state: ImessageEnrollmentState.ready, textDm: true),
     );
     final disabled = ImessageEnrollmentStatus.fromJson(
       _statusJson(state: ImessageEnrollmentState.ready, textDm: false),
     );
+    final contradictoryReason = ImessageEnrollmentStatus.fromJson(
+      _statusJson(
+        state: ImessageEnrollmentState.ready,
+        reason: ImessageEnrollmentReason.transportUnhealthy,
+        textDm: true,
+      ),
+    );
+    final groupsEnabled = ImessageEnrollmentStatus.fromJson(
+      _statusJson(state: ImessageEnrollmentState.ready, textDm: true, groups: true),
+    );
+    final attachmentsEnabled = ImessageEnrollmentStatus.fromJson(
+      _statusJson(state: ImessageEnrollmentState.ready, textDm: true, attachments: true),
+    );
+    final caregiverEnabled = ImessageEnrollmentStatus.fromJson(
+      _statusJson(state: ImessageEnrollmentState.ready, textDm: true, caregiverDelivery: true),
+    );
 
     expect(ready.isReady, isTrue);
     expect(disabled.isReady, isFalse);
+    expect(contradictoryReason.isReady, isFalse);
+    expect(groupsEnabled.isReady, isFalse);
+    expect(attachmentsEnabled.isReady, isFalse);
+    expect(caregiverEnabled.isReady, isFalse);
   });
 
   test('rejects unknown schema and unknown state instead of guessing', () {
@@ -104,9 +124,13 @@ Map<String, dynamic> _receiptJson() => {
 
 Map<String, dynamic> _statusJson({
   ImessageEnrollmentState state = ImessageEnrollmentState.notConnected,
+  ImessageEnrollmentReason? reason,
   bool textDm = false,
+  bool groups = false,
+  bool attachments = false,
+  bool caregiverDelivery = false,
 }) {
-  final reason = switch (state) {
+  final defaultReason = switch (state) {
     ImessageEnrollmentState.notConnected => ImessageEnrollmentReason.notEnrolled,
     ImessageEnrollmentState.verificationPending => ImessageEnrollmentReason.verificationPending,
     ImessageEnrollmentState.ready => ImessageEnrollmentReason.ready,
@@ -116,7 +140,7 @@ Map<String, dynamic> _statusJson({
   return {
     'schema_version': ImessageEnrollmentStatus.schema,
     'state': state.wireValue,
-    'reason_code': reason.wireValue,
+    'reason_code': (reason ?? defaultReason).wireValue,
     'authority_generation': 4,
     'binding_revision': 2,
     'binding_fingerprint': '0123456789abcdef',
@@ -126,9 +150,9 @@ Map<String, dynamic> _statusJson({
     'support_code': 'ELLA-ABCDEF12',
     'features': {
       'text_dm': textDm,
-      'groups': false,
-      'attachments': false,
-      'caregiver_delivery': false,
+      'groups': groups,
+      'attachments': attachments,
+      'caregiver_delivery': caregiverDelivery,
     },
   };
 }

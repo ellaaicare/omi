@@ -4,14 +4,33 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:omi/ella/models/imessage_enrollment.dart';
 import 'package:omi/ella/services/imessage_enrollment_api.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 
 void main() {
   test('uses exact owner-scoped routes without caller authority selectors', () async {
     final calls = <_Call>[];
+    final authority = _Authority('owner-a');
     final api = ImessageEnrollmentApi(
       baseUrl: 'https://api.example.test/',
-      transport: ({required url, required headers, required body, required method, timeout, retries}) async {
-        calls.add(_Call(url: url, method: method, body: body));
+      transport: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+        timeout,
+        retries,
+      }) async {
+        calls.add(
+          _Call(
+            url: url,
+            method: method,
+            body: body,
+            expectedAuthenticatedUid: expectedAuthenticatedUid,
+            exactAuthority: exactAuthority,
+          ),
+        );
         if (url.endsWith('/start')) {
           return http.Response(
             jsonEncode({
@@ -28,18 +47,27 @@ void main() {
       },
     );
 
-    await api.fetchStatus();
+    await api.fetchStatus(expectedAuthenticatedUid: authority.uid, exactAuthority: authority);
     await api.start(
       handsetE164: '+12025550123',
       consentReceiptId: '00000000-0000-4000-8000-000000000001',
       idempotencyKey: '00000000-0000-4000-8000-000000000002',
+      expectedAuthenticatedUid: authority.uid,
+      exactAuthority: authority,
     );
-    await api.revoke(expectedGeneration: 4, idempotencyKey: '00000000-0000-4000-8000-000000000003');
+    await api.revoke(
+      expectedGeneration: 4,
+      idempotencyKey: '00000000-0000-4000-8000-000000000003',
+      expectedAuthenticatedUid: authority.uid,
+      exactAuthority: authority,
+    );
 
     expect(calls.map((call) => call.method), ['GET', 'POST', 'POST']);
     expect(calls[0].url, endsWith('v1/ella/imessage/enrollment'));
     expect(calls[1].url, endsWith('v1/ella/imessage/enrollment/start'));
     expect(calls[2].url, endsWith('v1/ella/imessage/enrollment/revoke'));
+    expect(calls.every((call) => call.expectedAuthenticatedUid == authority.uid), isTrue);
+    expect(calls.every((call) => identical(call.exactAuthority, authority)), isTrue);
     expect(jsonDecode(calls[1].body), {
       'handset_e164': '+12025550123',
       'consent_receipt_id': '00000000-0000-4000-8000-000000000001',
@@ -58,22 +86,45 @@ void main() {
 
   test('records the exact dedicated consent policy without caller authority selectors', () async {
     final calls = <_Call>[];
+    final authority = _Authority('owner-a');
     final api = ImessageEnrollmentApi(
       baseUrl: 'https://api.example.test/',
-      transport: ({required url, required headers, required body, required method, timeout, retries}) async {
-        calls.add(_Call(url: url, method: method, body: body));
+      transport: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+        timeout,
+        retries,
+      }) async {
+        calls.add(
+          _Call(
+            url: url,
+            method: method,
+            body: body,
+            expectedAuthenticatedUid: expectedAuthenticatedUid,
+            exactAuthority: exactAuthority,
+          ),
+        );
         if (url.endsWith('/policy')) return http.Response(jsonEncode(_policyJson()), 200);
         return http.Response(jsonEncode(_receiptJson()), 200);
       },
     );
 
-    final policy = await api.fetchConsentPolicy();
+    final policy = await api.fetchConsentPolicy(
+      expectedAuthenticatedUid: authority.uid,
+      exactAuthority: authority,
+    );
     final receipt = await api.recordConsent(
       decision: ImessageConsentDecision.granted,
       policy: policy,
       requestId: '00000000-0000-4000-8000-000000000004',
       appVersion: '1.0.0',
       buildNumber: '900',
+      expectedAuthenticatedUid: authority.uid,
+      exactAuthority: authority,
     );
 
     expect(calls.map((call) => call.method), ['GET', 'POST']);
@@ -95,9 +146,19 @@ void main() {
   });
 
   test('surfaces typed unavailable error and redacted support code', () async {
+    final authority = _Authority('owner-a');
     final api = ImessageEnrollmentApi(
       baseUrl: 'https://api.example.test/',
-      transport: ({required url, required headers, required body, required method, timeout, retries}) async {
+      transport: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+        timeout,
+        retries,
+      }) async {
         return http.Response(
           jsonEncode({
             'detail': {'code': 'transport_unhealthy', 'support_code': 'ELLA-ABCDEF12'},
@@ -108,7 +169,7 @@ void main() {
     );
 
     await expectLater(
-      api.fetchStatus(),
+      api.fetchStatus(expectedAuthenticatedUid: authority.uid, exactAuthority: authority),
       throwsA(
         isA<ImessageEnrollmentFailure>()
             .having((error) => error.kind, 'kind', ImessageEnrollmentFailureKind.unavailable)
@@ -119,15 +180,25 @@ void main() {
   });
 
   test('rejects malformed success instead of presenting plausible readiness', () async {
+    final authority = _Authority('owner-a');
     final api = ImessageEnrollmentApi(
       baseUrl: 'https://api.example.test/',
-      transport: ({required url, required headers, required body, required method, timeout, retries}) async {
+      transport: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+        timeout,
+        retries,
+      }) async {
         return http.Response('{"state":"ready"}', 200);
       },
     );
 
     await expectLater(
-      api.fetchStatus(),
+      api.fetchStatus(expectedAuthenticatedUid: authority.uid, exactAuthority: authority),
       throwsA(
         isA<ImessageEnrollmentFailure>().having(
           (error) => error.kind,
@@ -139,9 +210,19 @@ void main() {
   });
 
   test('accepts the server consent-policy-stale status without plausible readiness', () async {
+    final authority = _Authority('owner-a');
     final api = ImessageEnrollmentApi(
       baseUrl: 'https://api.example.test/',
-      transport: ({required url, required headers, required body, required method, timeout, retries}) async {
+      transport: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+        timeout,
+        retries,
+      }) async {
         return http.Response(
           jsonEncode({..._statusJson(), 'reason_code': 'consent_policy_stale'}),
           200,
@@ -149,10 +230,47 @@ void main() {
       },
     );
 
-    final status = await api.fetchStatus();
+    final status = await api.fetchStatus(expectedAuthenticatedUid: authority.uid, exactAuthority: authority);
 
     expect(status.reason, ImessageEnrollmentReason.consentPolicyStale);
     expect(status.isReady, isFalse);
+  });
+
+  test('account drift at the transport boundary prevents the request from being sent', () async {
+    final authority = _Authority('owner-a')..current = false;
+    var sent = false;
+    final api = ImessageEnrollmentApi(
+      baseUrl: 'https://api.example.test/',
+      transport: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+        timeout,
+        retries,
+      }) async {
+        expect(expectedAuthenticatedUid, authority.uid);
+        if (!exactAuthority.isExactCurrent()) {
+          throw ExactAccountAuthorityChangedException('account changed before send');
+        }
+        sent = true;
+        return http.Response(jsonEncode(_statusJson()), 200);
+      },
+    );
+
+    await expectLater(
+      api.fetchStatus(expectedAuthenticatedUid: authority.uid, exactAuthority: authority),
+      throwsA(
+        isA<ImessageEnrollmentFailure>().having(
+          (error) => error.kind,
+          'kind',
+          ImessageEnrollmentFailureKind.authorityChanged,
+        ),
+      ),
+    );
+    expect(sent, isFalse);
   });
 }
 
@@ -186,11 +304,30 @@ Map<String, dynamic> _receiptJson() => {
     };
 
 class _Call {
-  const _Call({required this.url, required this.method, required this.body});
+  const _Call({
+    required this.url,
+    required this.method,
+    required this.body,
+    required this.expectedAuthenticatedUid,
+    required this.exactAuthority,
+  });
 
   final String url;
   final String method;
   final String body;
+  final String expectedAuthenticatedUid;
+  final ExactAccountAuthorityVerifier exactAuthority;
+}
+
+class _Authority implements ExactAccountAuthorityVerifier {
+  _Authority(this.uid);
+
+  @override
+  final String uid;
+  bool current = true;
+
+  @override
+  bool isExactCurrent() => current;
 }
 
 Map<String, dynamic> _statusJson({ImessageEnrollmentState state = ImessageEnrollmentState.notConnected}) {

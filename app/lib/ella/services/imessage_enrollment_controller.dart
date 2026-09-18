@@ -3,12 +3,31 @@ import 'package:flutter/foundation.dart';
 import 'package:omi/ella/models/imessage_enrollment.dart';
 import 'package:omi/ella/services/imessage_enrollment_api.dart';
 import 'package:omi/ella/services/imessage_enrollment_attempt_store.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 
 typedef ImessageAuthorityReader = String? Function();
 typedef ImessageMessagesLauncher = Future<bool> Function(Uri uri);
 typedef ImessageIdGenerator = String Function();
 typedef ImessageAppInfoReader = Future<({String version, String buildNumber})> Function();
-typedef _ImessageAuthorityLease = ({String uid, int epoch});
+
+class _ImessageAuthorityLease implements ExactAccountAuthorityVerifier {
+  const _ImessageAuthorityLease({
+    required this.uid,
+    required this.epoch,
+    required String? Function() currentUid,
+    required int Function() currentEpoch,
+  })  : _currentUid = currentUid,
+        _currentEpoch = currentEpoch;
+
+  @override
+  final String uid;
+  final int epoch;
+  final String? Function() _currentUid;
+  final int Function() _currentEpoch;
+
+  @override
+  bool isExactCurrent() => _currentUid() == uid && _currentEpoch() == epoch;
+}
 
 enum ImessageEnrollmentOperation {
   idle,
@@ -169,7 +188,10 @@ class ImessageEnrollmentController extends ChangeNotifier {
     if (_operation.isMutation) return;
     final operation = _begin(ImessageEnrollmentOperation.loadingConsent);
     try {
-      final policy = await _consentGateway.fetchConsentPolicy();
+      final policy = await _consentGateway.fetchConsentPolicy(
+        expectedAuthenticatedUid: lease.uid,
+        exactAuthority: lease,
+      );
       _assertAuthority(lease);
       if (!_isOperationCurrent(operation)) return;
       _consentPolicy = policy;
@@ -250,6 +272,8 @@ class ImessageEnrollmentController extends ChangeNotifier {
         handsetE164: handsetE164,
         consentReceiptId: receipt.receiptId,
         idempotencyKey: attempt.idempotencyKey,
+        expectedAuthenticatedUid: lease.uid,
+        exactAuthority: lease,
       );
       _assertAuthority(lease);
       if (!_isValidStartResponse(response)) {
@@ -300,6 +324,8 @@ class ImessageEnrollmentController extends ChangeNotifier {
         handsetE164: attempt.handsetE164,
         consentReceiptId: attempt.receipt!.receiptId,
         idempotencyKey: attempt.idempotencyKey,
+        expectedAuthenticatedUid: lease.uid,
+        exactAuthority: lease,
       );
       _assertAuthority(lease);
       if (!_isOperationCurrent(operation) || !_isValidStartResponse(response)) {
@@ -332,10 +358,10 @@ class ImessageEnrollmentController extends ChangeNotifier {
     if (_operation.isMutation) return;
     final policy = _consentPolicy;
     if (policy == null) {
-      _consentPolicy = null;
       _pendingStartAttempt = null;
-      _persistSession();
       await _persistAttemptJournal(lease);
+      _consentPolicy = null;
+      _persistSession();
       return;
     }
     final operation = _begin(ImessageEnrollmentOperation.decliningConsent, mutation: true);
@@ -348,8 +374,9 @@ class ImessageEnrollmentController extends ChangeNotifier {
           code: 'imessage_consent_receipt_mismatch',
         );
       }
-      _consentPolicy = null;
       _pendingStartAttempt = null;
+      await _persistAttemptJournal(lease);
+      _consentPolicy = null;
       _persistSession();
     } on ImessageEnrollmentFailure catch (error) {
       _commitFailureIfCurrent(lease, error);
@@ -447,6 +474,8 @@ class ImessageEnrollmentController extends ChangeNotifier {
       final response = await _gateway.revoke(
         expectedGeneration: attempt.expectedGeneration,
         idempotencyKey: attempt.idempotencyKey,
+        expectedAuthenticatedUid: lease.uid,
+        exactAuthority: lease,
       );
       _assertAuthority(lease);
       if (!_isBindingRevoked(response)) {
@@ -488,7 +517,10 @@ class ImessageEnrollmentController extends ChangeNotifier {
   Future<void> _completeConsentRevocation(_ImessageAuthorityLease lease) async {
     var attempt = _pendingConsentRevoke;
     if (attempt == null) {
-      final policy = await _consentGateway.fetchConsentPolicy();
+      final policy = await _consentGateway.fetchConsentPolicy(
+        expectedAuthenticatedUid: lease.uid,
+        exactAuthority: lease,
+      );
       _assertAuthority(lease);
       final appInfo = await _appInfoReader();
       _assertAuthority(lease);
@@ -521,7 +553,10 @@ class ImessageEnrollmentController extends ChangeNotifier {
         code: 'imessage_consent_receipt_mismatch',
       );
     }
-    final terminalStatus = await _gateway.fetchStatus();
+    final terminalStatus = await _gateway.fetchStatus(
+      expectedAuthenticatedUid: lease.uid,
+      exactAuthority: lease,
+    );
     _assertAuthority(lease);
     if (!_isConsentRevoked(terminalStatus)) {
       throw const ImessageEnrollmentFailure(
@@ -569,6 +604,8 @@ class ImessageEnrollmentController extends ChangeNotifier {
       requestId: requestId,
       appVersion: appVersion,
       buildNumber: buildNumber,
+      expectedAuthenticatedUid: lease.uid,
+      exactAuthority: lease,
     );
   }
 
@@ -583,7 +620,10 @@ class ImessageEnrollmentController extends ChangeNotifier {
       await _hydrateAttemptJournal(lease, mutationRevision);
       _assertAuthority(lease);
       if (!_isOperationCurrent(operation) || mutationRevision != _mutationRevision) return;
-      final response = await _gateway.fetchStatus();
+      final response = await _gateway.fetchStatus(
+        expectedAuthenticatedUid: lease.uid,
+        exactAuthority: lease,
+      );
       _assertAuthority(lease);
       if (!_isOperationCurrent(operation) || mutationRevision != _mutationRevision) return;
       _status = response;
@@ -647,7 +687,12 @@ class ImessageEnrollmentController extends ChangeNotifier {
       _authorityEpoch += 1;
       _restoreSession(authority);
     }
-    return (uid: authority, epoch: _authorityEpoch);
+    return _ImessageAuthorityLease(
+      uid: authority,
+      epoch: _authorityEpoch,
+      currentUid: () => _currentAuthority,
+      currentEpoch: () => _authorityEpoch,
+    );
   }
 
   void _assertAuthority(_ImessageAuthorityLease expected) {
@@ -762,7 +807,7 @@ class ImessageEnrollmentController extends ChangeNotifier {
   bool get _ownsCurrentAuthority => _ownerUid == _currentAuthority;
 
   bool _isLeaseCurrent(_ImessageAuthorityLease lease) {
-    return lease.uid == _ownerUid && lease.uid == _currentAuthority && lease.epoch == _authorityEpoch;
+    return lease.uid == _ownerUid && lease.isExactCurrent();
   }
 
   bool _isOperationCurrent(int operation) => operation == _activeOperation;

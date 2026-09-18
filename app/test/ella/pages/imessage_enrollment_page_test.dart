@@ -7,6 +7,7 @@ import 'package:omi/ella/models/imessage_enrollment.dart';
 import 'package:omi/ella/pages/imessage_enrollment_page.dart';
 import 'package:omi/ella/services/imessage_enrollment_api.dart';
 import 'package:omi/ella/services/imessage_enrollment_controller.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/l10n/app_localizations.dart';
 
 void main() {
@@ -352,7 +353,11 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
   final consentDecisions = <ImessageConsentDecision>[];
 
   @override
-  Future<ImessageConsentPolicy> fetchConsentPolicy() async => _policy();
+  Future<ImessageConsentPolicy> fetchConsentPolicy({
+    required String expectedAuthenticatedUid,
+    required ExactAccountAuthorityVerifier exactAuthority,
+  }) async =>
+      _policy();
 
   @override
   Future<ImessageConsentReceipt> recordConsent({
@@ -361,6 +366,8 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
     required String requestId,
     required String appVersion,
     required String buildNumber,
+    required String expectedAuthenticatedUid,
+    required ExactAccountAuthorityVerifier exactAuthority,
   }) async {
     if (decision == ImessageConsentDecision.revoked) {
       revokedConsentCalls += 1;
@@ -381,13 +388,21 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
   }
 
   @override
-  Future<ImessageEnrollmentStatus> fetchStatus() async {
+  Future<ImessageEnrollmentStatus> fetchStatus({
+    required String expectedAuthenticatedUid,
+    required ExactAccountAuthorityVerifier exactAuthority,
+  }) async {
     fetchStatusCalls += 1;
     return status;
   }
 
   @override
-  Future<ImessageEnrollmentStatus> revoke({required int expectedGeneration, required String idempotencyKey}) async {
+  Future<ImessageEnrollmentStatus> revoke({
+    required int expectedGeneration,
+    required String idempotencyKey,
+    required String expectedAuthenticatedUid,
+    required ExactAccountAuthorityVerifier exactAuthority,
+  }) async {
     revokeCalls += 1;
     status = _status(ImessageEnrollmentState.revoked);
     return status;
@@ -398,6 +413,8 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
     required String handsetE164,
     required String consentReceiptId,
     required String idempotencyKey,
+    required String expectedAuthenticatedUid,
+    required ExactAccountAuthorityVerifier exactAuthority,
   }) async {
     startCalls += 1;
     status = _status(ImessageEnrollmentState.verificationPending, destination: '+12025550123');

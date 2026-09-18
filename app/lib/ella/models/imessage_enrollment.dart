@@ -205,7 +205,13 @@ class ImessageEnrollmentStatus {
   final String? supportCode;
   final ImessageEnrollmentFeatures features;
 
-  bool get isReady => state == ImessageEnrollmentState.ready && features.textDm;
+  bool get isReady =>
+      state == ImessageEnrollmentState.ready &&
+      reason == ImessageEnrollmentReason.ready &&
+      features.textDm &&
+      !features.groups &&
+      !features.attachments &&
+      !features.caregiverDelivery;
 
   factory ImessageEnrollmentStatus.fromJson(Map<String, dynamic> json) {
     final schemaVersion = _requiredString(json, 'schema_version');
