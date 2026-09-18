@@ -10,6 +10,45 @@ import 'package:omi/ella/services/imessage_enrollment_controller.dart';
 import 'package:omi/l10n/app_localizations.dart';
 
 void main() {
+  test('enrollment surface is only supported on native iOS', () {
+    expect(
+      isImessageEnrollmentSupportedPlatform(platform: TargetPlatform.iOS, isWeb: false),
+      isTrue,
+    );
+    expect(
+      isImessageEnrollmentSupportedPlatform(platform: TargetPlatform.android, isWeb: false),
+      isFalse,
+    );
+    expect(
+      isImessageEnrollmentSupportedPlatform(platform: TargetPlatform.iOS, isWeb: true),
+      isFalse,
+    );
+  });
+
+  testWidgets('unsupported platforms render unavailable without contacting enrollment', (tester) async {
+    final gateway = _FakeGateway();
+    final controller = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => 'owner-a',
+      messagesLauncher: (_) async => true,
+      idGenerator: () => 'request-1',
+      appInfoReader: _appInfo,
+    );
+
+    await tester.pumpWidget(
+      _TestApp(
+        controller: controller,
+        pagePlatformSupported: false,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('iMessage is unavailable'), findsOneWidget);
+    expect(find.text('Set up iMessage'), findsNothing);
+    expect(gateway.fetchStatusCalls, 0);
+  });
+
   testWidgets('requires explicit consent and keeps registration pending until server verification', (tester) async {
     await tester.binding.setSurfaceSize(const Size(430, 932));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -132,10 +171,11 @@ Future<void> _scrollTo(WidgetTester tester, Finder finder) async {
 }
 
 class _TestApp extends StatelessWidget {
-  const _TestApp({required this.controller, this.authorityChanges});
+  const _TestApp({required this.controller, this.authorityChanges, this.pagePlatformSupported = true});
 
   final ImessageEnrollmentController controller;
   final Stream<String?>? authorityChanges;
+  final bool pagePlatformSupported;
 
   @override
   Widget build(BuildContext context) {
@@ -147,13 +187,18 @@ class _TestApp extends StatelessWidget {
         GlobalCupertinoLocalizations.delegate,
       ],
       supportedLocales: AppLocalizations.supportedLocales,
-      home: ImessageEnrollmentPage(controller: controller, authorityChanges: authorityChanges),
+      home: ImessageEnrollmentPage(
+        controller: controller,
+        authorityChanges: authorityChanges,
+        platformSupported: pagePlatformSupported,
+      ),
     );
   }
 }
 
 class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway {
   ImessageEnrollmentStatus status = _status(ImessageEnrollmentState.notConnected);
+  int fetchStatusCalls = 0;
   int startCalls = 0;
   final consentDecisions = <ImessageConsentDecision>[];
 
@@ -173,7 +218,10 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
   }
 
   @override
-  Future<ImessageEnrollmentStatus> fetchStatus() async => status;
+  Future<ImessageEnrollmentStatus> fetchStatus() async {
+    fetchStatusCalls += 1;
+    return status;
+  }
 
   @override
   Future<ImessageEnrollmentStatus> revoke({required int expectedGeneration, required String idempotencyKey}) async {

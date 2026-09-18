@@ -8,6 +8,12 @@ typedef ImessageMessagesLauncher = Future<bool> Function(Uri uri);
 typedef ImessageIdGenerator = String Function();
 typedef ImessageAppInfoReader = Future<({String version, String buildNumber})> Function();
 typedef _ImessageAuthorityLease = ({String uid, int epoch});
+typedef _ImessagePendingStartAttempt = ({
+  String uid,
+  String handsetE164,
+  ImessageConsentReceipt receipt,
+  String idempotencyKey,
+});
 
 class ImessageEnrollmentController extends ChangeNotifier {
   ImessageEnrollmentController({
@@ -40,6 +46,7 @@ class ImessageEnrollmentController extends ChangeNotifier {
   ImessageEnrollmentProof? _proof;
   ImessageConsentPolicy? _consentPolicy;
   ImessageEnrollmentFailure? _failure;
+  _ImessagePendingStartAttempt? _pendingStartAttempt;
   bool _loading = false;
 
   ImessageEnrollmentStatus? get status => _ownsCurrentAuthority ? _status : null;
@@ -72,7 +79,7 @@ class ImessageEnrollmentController extends ChangeNotifier {
   }
 
   Future<void> load() async {
-    await _run((_) => _gateway.fetchStatus(), clearProof: true);
+    await _run((_) => _gateway.fetchStatus(), preservePendingProof: true);
   }
 
   Future<void> loadConsentPolicy() async {
@@ -106,19 +113,35 @@ class ImessageEnrollmentController extends ChangeNotifier {
     }
     _begin();
     _proof = null;
+    _ImessagePendingStartAttempt? attempt;
     try {
-      final receipt = await _recordConsent(lease, ImessageConsentDecision.granted, policy);
-      _assertAuthority(lease);
-      if (!receipt.matches(policy, ImessageConsentDecision.granted)) {
-        throw const ImessageEnrollmentFailure(
-          ImessageEnrollmentFailureKind.malformedResponse,
-          code: 'imessage_consent_receipt_mismatch',
+      final retry = _pendingStartAttempt;
+      if (retry != null &&
+          retry.uid == lease.uid &&
+          retry.handsetE164 == handsetE164 &&
+          retry.receipt.matches(policy, ImessageConsentDecision.granted)) {
+        attempt = retry;
+      } else {
+        final receipt = await _recordConsent(lease, ImessageConsentDecision.granted, policy);
+        _assertAuthority(lease);
+        if (!receipt.matches(policy, ImessageConsentDecision.granted)) {
+          throw const ImessageEnrollmentFailure(
+            ImessageEnrollmentFailureKind.malformedResponse,
+            code: 'imessage_consent_receipt_mismatch',
+          );
+        }
+        attempt = (
+          uid: lease.uid,
+          handsetE164: handsetE164,
+          receipt: receipt,
+          idempotencyKey: _idGenerator(),
         );
+        _pendingStartAttempt = attempt;
       }
       final response = await _gateway.start(
         handsetE164: handsetE164,
-        consentReceiptId: receipt.receiptId,
-        idempotencyKey: _idGenerator(),
+        consentReceiptId: attempt.receipt.receiptId,
+        idempotencyKey: attempt.idempotencyKey,
       );
       _assertAuthority(lease);
       if (!_isValidStartResponse(response)) {
@@ -129,7 +152,11 @@ class ImessageEnrollmentController extends ChangeNotifier {
       }
       _status = response.status;
       _proof = response.proof;
+      if (_pendingStartAttempt == attempt) _pendingStartAttempt = null;
     } on ImessageEnrollmentFailure catch (error) {
+      if (!_isAmbiguousStartFailure(error) && _pendingStartAttempt == attempt) {
+        _pendingStartAttempt = null;
+      }
       _commitFailureIfCurrent(lease, error);
     } catch (_) {
       _commitFailureIfCurrent(lease, const ImessageEnrollmentFailure(ImessageEnrollmentFailureKind.transport));
@@ -144,6 +171,7 @@ class ImessageEnrollmentController extends ChangeNotifier {
     final policy = _consentPolicy;
     if (policy == null) {
       _consentPolicy = null;
+      _pendingStartAttempt = null;
       return;
     }
     _begin();
@@ -227,6 +255,14 @@ class ImessageEnrollmentController extends ChangeNotifier {
     }
     _begin();
     try {
+      final response = await _gateway.revoke(
+        expectedGeneration: generation,
+        idempotencyKey: _idGenerator(),
+      );
+      _assertAuthority(lease);
+      _status = response;
+      _proof = null;
+      _pendingStartAttempt = null;
       final policy = await _consentGateway.fetchConsentPolicy();
       _assertAuthority(lease);
       final receipt = await _recordConsent(lease, ImessageConsentDecision.revoked, policy);
@@ -237,13 +273,6 @@ class ImessageEnrollmentController extends ChangeNotifier {
           code: 'imessage_consent_receipt_mismatch',
         );
       }
-      final response = await _gateway.revoke(
-        expectedGeneration: generation,
-        idempotencyKey: _idGenerator(),
-      );
-      _assertAuthority(lease);
-      _status = response;
-      _proof = null;
       _consentPolicy = null;
     } on ImessageEnrollmentFailure catch (error) {
       _commitFailureIfCurrent(lease, error);
@@ -272,16 +301,23 @@ class ImessageEnrollmentController extends ChangeNotifier {
 
   Future<void> _run(
     Future<ImessageEnrollmentStatus> Function(_ImessageAuthorityLease lease) operation, {
-    required bool clearProof,
+    required bool preservePendingProof,
   }) async {
     final lease = _readAuthorityOrFail();
     if (lease == null) return;
+    final previousStatus = _status;
+    final previousProof = _proof;
     _begin();
     try {
       final response = await operation(lease);
       _assertAuthority(lease);
       _status = response;
-      if (clearProof) _proof = null;
+      if (!preservePendingProof || !_canPreserveProof(previousStatus, previousProof, response)) {
+        _proof = null;
+      }
+      if (response.state != ImessageEnrollmentState.verificationPending) {
+        _pendingStartAttempt = null;
+      }
     } on ImessageEnrollmentFailure catch (error) {
       _commitFailureIfCurrent(lease, error);
     } catch (_) {
@@ -366,6 +402,30 @@ class ImessageEnrollmentController extends ChangeNotifier {
         !response.proof.isExpiredAt(_now().toUtc());
   }
 
+  bool _canPreserveProof(
+    ImessageEnrollmentStatus? previousStatus,
+    ImessageEnrollmentProof? previousProof,
+    ImessageEnrollmentStatus response,
+  ) {
+    return previousStatus?.state == ImessageEnrollmentState.verificationPending &&
+        response.state == ImessageEnrollmentState.verificationPending &&
+        previousStatus?.authorityGeneration == response.authorityGeneration &&
+        previousStatus?.assignedDestination == response.assignedDestination &&
+        previousProof != null &&
+        !previousProof.isExpiredAt(_now().toUtc());
+  }
+
+  bool _isAmbiguousStartFailure(ImessageEnrollmentFailure failure) {
+    return switch (failure.kind) {
+      ImessageEnrollmentFailureKind.transport ||
+      ImessageEnrollmentFailureKind.unavailable ||
+      ImessageEnrollmentFailureKind.rateLimited ||
+      ImessageEnrollmentFailureKind.malformedResponse =>
+        true,
+      _ => false,
+    };
+  }
+
   String? get _currentAuthority {
     final authority = _authorityReader();
     if (authority == null || authority.isEmpty) return null;
@@ -385,6 +445,7 @@ class ImessageEnrollmentController extends ChangeNotifier {
     _status = null;
     _proof = null;
     _consentPolicy = null;
+    _pendingStartAttempt = null;
     _failure = failure;
   }
 }

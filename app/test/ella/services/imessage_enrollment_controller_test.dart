@@ -40,6 +40,60 @@ void main() {
     expect(controller.isReady, isTrue);
   });
 
+  test('pending status refresh keeps the usable one-time proof', () async {
+    final gateway = _FakeGateway();
+    final controller = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => 'owner-a',
+      messagesLauncher: (_) async => true,
+      idGenerator: () => 'request-1',
+      appInfoReader: _appInfo,
+      now: () => DateTime.utc(2026, 9, 18, 8),
+    );
+
+    await controller.loadConsentPolicy();
+    await controller.start('+12025550123');
+    expect(controller.proof?.code, '123456');
+
+    await controller.load();
+
+    expect(controller.status?.state, ImessageEnrollmentState.verificationPending);
+    expect(controller.proof?.code, '123456');
+    expect(controller.canOpenMessages, isTrue);
+  });
+
+  test('ambiguous start retry reuses the exact receipt and idempotency key', () async {
+    final generatedIds = <String>['consent-request', 'start-attempt', 'unexpected'];
+    var generatedIndex = 0;
+    final gateway = _FakeGateway()..startFailuresRemaining = 1;
+    final controller = ImessageEnrollmentController(
+      gateway: gateway,
+      consentGateway: gateway,
+      authorityReader: () => 'owner-a',
+      messagesLauncher: (_) async => true,
+      idGenerator: () => generatedIds[generatedIndex++],
+      appInfoReader: _appInfo,
+      now: () => DateTime.utc(2026, 9, 18, 8),
+    );
+
+    await controller.loadConsentPolicy();
+    await controller.start('+12025550123');
+    expect(controller.failure?.kind, ImessageEnrollmentFailureKind.transport);
+
+    await controller.start('+12025550123');
+
+    expect(gateway.consentDecisions, [ImessageConsentDecision.granted]);
+    expect(gateway.startedReceipts, [
+      '00000000-0000-4000-8000-000000000005',
+      '00000000-0000-4000-8000-000000000005',
+    ]);
+    expect(gateway.startedIdempotencyKeys, ['start-attempt', 'start-attempt']);
+    expect(generatedIndex, 2);
+    expect(controller.status?.state, ImessageEnrollmentState.verificationPending);
+    expect(controller.proof?.code, '123456');
+  });
+
   test('account drift discards an in-flight owner response', () async {
     var authority = 'owner-a';
     final completion = Completer<ImessageEnrollmentStatus>();
@@ -203,8 +257,8 @@ void main() {
     expect(controller.failure?.kind, ImessageEnrollmentFailureKind.consentUnavailable);
   });
 
-  test('revocation uses current generation and clears one-time proof', () async {
-    final gateway = _FakeGateway();
+  test('revocation closes the binding before advancing consent generation', () async {
+    final gateway = _FakeGateway()..rejectRevokeAfterRevokedConsent = true;
     final controller = ImessageEnrollmentController(
       gateway: gateway,
       consentGateway: gateway,
@@ -222,7 +276,9 @@ void main() {
     expect(gateway.revokedGeneration, 4);
     expect(controller.status?.state, ImessageEnrollmentState.revoked);
     expect(controller.proof, isNull);
+    expect(controller.failure, isNull);
     expect(gateway.consentDecisions, [ImessageConsentDecision.granted, ImessageConsentDecision.revoked]);
+    expect(gateway.events, ['consent:granted', 'revoke', 'consent:revoked']);
   });
 
   test('decline records the current policy and never starts enrollment', () async {
@@ -253,9 +309,14 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
   String? startedHandset;
   String? startedReceipt;
   int startCalls = 0;
+  int startFailuresRemaining = 0;
   int? revokedGeneration;
+  bool rejectRevokeAfterRevokedConsent = false;
   ImessageEnrollmentStartResponse? startResponse;
   final consentDecisions = <ImessageConsentDecision>[];
+  final startedReceipts = <String>[];
+  final startedIdempotencyKeys = <String>[];
+  final events = <String>[];
 
   @override
   Future<ImessageConsentPolicy> fetchConsentPolicy() async => _policy();
@@ -269,6 +330,7 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
     required String buildNumber,
   }) async {
     consentDecisions.add(decision);
+    events.add('consent:${decision.wireValue}');
     return _receipt(policy, decision);
   }
 
@@ -281,6 +343,15 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
 
   @override
   Future<ImessageEnrollmentStatus> revoke({required int expectedGeneration, required String idempotencyKey}) async {
+    events.add('revoke');
+    if (rejectRevokeAfterRevokedConsent &&
+        consentDecisions.isNotEmpty &&
+        consentDecisions.last == ImessageConsentDecision.revoked) {
+      throw const ImessageEnrollmentFailure(
+        ImessageEnrollmentFailureKind.conflict,
+        code: 'imessage_binding_generation_conflict',
+      );
+    }
     revokedGeneration = expectedGeneration;
     status = _status(ImessageEnrollmentState.revoked);
     return status;
@@ -295,6 +366,12 @@ class _FakeGateway implements ImessageEnrollmentGateway, ImessageConsentGateway 
     startCalls += 1;
     startedHandset = handsetE164;
     startedReceipt = consentReceiptId;
+    startedReceipts.add(consentReceiptId);
+    startedIdempotencyKeys.add(idempotencyKey);
+    if (startFailuresRemaining > 0) {
+      startFailuresRemaining -= 1;
+      throw const ImessageEnrollmentFailure(ImessageEnrollmentFailureKind.transport);
+    }
     final override = startResponse;
     if (override != null) return override;
     status = _status(ImessageEnrollmentState.verificationPending, destination: '+12025550123');

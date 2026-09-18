@@ -227,15 +227,17 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               ),
             ],
 
-            _buildSectionHeader(context.l10n.ellaMessagingSection),
-            EllaSettingsRow(
-              icon: Icons.chat_bubble_outline,
-              title: context.l10n.ellaImessageTitle,
-              subtitle: context.l10n.ellaImessageSettingsSubtitle,
-              onTap: () {
-                Navigator.push(context, MaterialPageRoute(builder: (context) => const ImessageEnrollmentPage()));
-              },
-            ),
+            if (isImessageEnrollmentSupportedPlatform()) ...[
+              _buildSectionHeader(context.l10n.ellaMessagingSection),
+              EllaSettingsRow(
+                icon: Icons.chat_bubble_outline,
+                title: context.l10n.ellaImessageTitle,
+                subtitle: context.l10n.ellaImessageSettingsSubtitle,
+                onTap: () {
+                  Navigator.push(context, MaterialPageRoute(builder: (context) => const ImessageEnrollmentPage()));
+                },
+              ),
+            ],
 
             // CARE TEAM section
             _buildSectionHeader(context.l10n.ellaCareTeamSection),

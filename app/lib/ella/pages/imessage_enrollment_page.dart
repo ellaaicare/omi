@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -12,11 +13,21 @@ import 'package:omi/ella/services/imessage_enrollment_api.dart';
 import 'package:omi/ella/services/imessage_enrollment_controller.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
+bool isImessageEnrollmentSupportedPlatform({TargetPlatform? platform, bool? isWeb}) {
+  return !(isWeb ?? kIsWeb) && (platform ?? defaultTargetPlatform) == TargetPlatform.iOS;
+}
+
 class ImessageEnrollmentPage extends StatefulWidget {
-  const ImessageEnrollmentPage({super.key, this.controller, this.authorityChanges});
+  const ImessageEnrollmentPage({
+    super.key,
+    this.controller,
+    this.authorityChanges,
+    this.platformSupported,
+  });
 
   final ImessageEnrollmentController? controller;
   final Stream<String?>? authorityChanges;
+  final bool? platformSupported;
 
   @override
   State<ImessageEnrollmentPage> createState() => _ImessageEnrollmentPageState();
@@ -27,6 +38,7 @@ class _ImessageEnrollmentPageState extends State<ImessageEnrollmentPage> {
 
   late final ImessageEnrollmentController _controller;
   late final bool _ownsController;
+  late final bool _platformSupported;
   final _phoneController = TextEditingController();
   StreamSubscription<String?>? _authoritySubscription;
   bool _showConsent = false;
@@ -35,6 +47,11 @@ class _ImessageEnrollmentPageState extends State<ImessageEnrollmentPage> {
   @override
   void initState() {
     super.initState();
+    _platformSupported = widget.platformSupported ?? isImessageEnrollmentSupportedPlatform();
+    if (!_platformSupported) {
+      _ownsController = false;
+      return;
+    }
     _ownsController = widget.controller == null;
     _controller = widget.controller ?? _createController();
     _controller.addListener(_onControllerChanged);
@@ -61,9 +78,11 @@ class _ImessageEnrollmentPageState extends State<ImessageEnrollmentPage> {
 
   @override
   void dispose() {
-    unawaited(_authoritySubscription?.cancel());
-    _controller.removeListener(_onControllerChanged);
-    if (_ownsController) _controller.dispose();
+    if (_platformSupported) {
+      unawaited(_authoritySubscription?.cancel());
+      _controller.removeListener(_onControllerChanged);
+      if (_ownsController) _controller.dispose();
+    }
     _phoneController.dispose();
     super.dispose();
   }
@@ -86,21 +105,37 @@ class _ImessageEnrollmentPageState extends State<ImessageEnrollmentPage> {
 
   @override
   Widget build(BuildContext context) {
+    if (!_platformSupported) {
+      return Scaffold(
+        backgroundColor: EllaColors.bgPrimary,
+        appBar: _buildAppBar(context),
+        body: ListView(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 40),
+          children: [
+            _EnrollmentCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _StatusHeading(
+                    icon: Icons.phone_iphone_outlined,
+                    title: context.l10n.ellaImessageUnavailableTitle,
+                    color: EllaColors.textTertiary,
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    context.l10n.ellaImessageUnavailableBody,
+                    style: const TextStyle(fontSize: 15, height: 1.35, color: EllaColors.textSecondary),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     return Scaffold(
       backgroundColor: EllaColors.bgPrimary,
-      appBar: AppBar(
-        backgroundColor: EllaColors.bgPrimary,
-        elevation: 0,
-        leading: IconButton(
-          tooltip: MaterialLocalizations.of(context).backButtonTooltip,
-          onPressed: () => Navigator.of(context).pop(),
-          icon: const Icon(Icons.arrow_back, color: EllaColors.textPrimary),
-        ),
-        title: Text(
-          context.l10n.ellaImessageTitle,
-          style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: EllaColors.textPrimary),
-        ),
-      ),
+      appBar: _buildAppBar(context),
       body: RefreshIndicator(
         color: EllaColors.primary,
         onRefresh: _controller.load,
@@ -118,6 +153,22 @@ class _ImessageEnrollmentPageState extends State<ImessageEnrollmentPage> {
             if (_showConsent) ...[const SizedBox(height: 16), _buildConsentCard()],
           ],
         ),
+      ),
+    );
+  }
+
+  AppBar _buildAppBar(BuildContext context) {
+    return AppBar(
+      backgroundColor: EllaColors.bgPrimary,
+      elevation: 0,
+      leading: IconButton(
+        tooltip: MaterialLocalizations.of(context).backButtonTooltip,
+        onPressed: () => Navigator.of(context).pop(),
+        icon: const Icon(Icons.arrow_back, color: EllaColors.textPrimary),
+      ),
+      title: Text(
+        context.l10n.ellaImessageTitle,
+        style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: EllaColors.textPrimary),
       ),
     );
   }
