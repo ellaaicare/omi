@@ -469,6 +469,15 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ iMessage enrollment not available: {e}", flush=True)
 
+    # Transport-only self-hosted iMessage runtime and fenced delivery outbox.
+    try:
+        from ella.routers.imessage_runtime import router as imessage_runtime_router
+
+        app.include_router(imessage_runtime_router, tags=["iMessage Runtime"])
+        print("  🌐 /v1/ella/internal/imessage/* - Verified iMessage runtime", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ iMessage runtime not available: {e}", flush=True)
+
     # Loopback-only OMI enrichment handoff into the bound Hermes Cloud runtime.
     try:
         from ella.routers.hermes_cloud_enrichment import (

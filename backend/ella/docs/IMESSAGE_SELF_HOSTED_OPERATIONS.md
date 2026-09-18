@@ -9,8 +9,9 @@ contracts described here.
 
 - This lane uses the owner's existing `hermes-chat` runtime. It does not create
   another agent or fall back to a retained or Plato workspace.
-- Migration `020_create_imessage_enrollment_authority.sql` is additive and does
-  not alter migration 009 or any `ella_photon_*` Cloud-canary table.
+- Migrations `020_create_imessage_enrollment_authority.sql` and
+  `021_create_imessage_runtime_outbox.sql` are additive and do not alter
+  migration 009 or any `ella_photon_*` Cloud-canary table.
 - App calls use an exact Firebase bearer. The app cannot select a UID, account,
   profile, project, runtime, endpoint, credential, or provider route.
 - The bridge uses a dedicated transport credential. That credential cannot
@@ -22,10 +23,16 @@ contracts described here.
 ## Source contracts
 
 - OpenAPI: `backend/ella/docs/imessage-enrollment.openapi.yaml`
-- Migration: `backend/migrations/020_create_imessage_enrollment_authority.sql`
+- Internal transport OpenAPI:
+  `backend/ella/docs/imessage-runtime-internal.openapi.yaml`
+- Migrations: `backend/migrations/020_create_imessage_enrollment_authority.sql`
+  and `backend/migrations/021_create_imessage_runtime_outbox.sql`
 - App router: `backend/ella/routers/imessage_enrollment.py`
+- Internal runtime router: `backend/ella/routers/imessage_runtime.py`
 - Service: `backend/ella/services/imessage_enrollment.py`
+- Runtime service: `backend/ella/services/imessage_runtime.py`
 - Repository: `backend/database/imessage_enrollment.py`
+- Runtime repository: `backend/database/imessage_runtime.py`
 
 The app flow is:
 
@@ -63,11 +70,44 @@ re-registers an uncertain outcome. Provider registration references and active
 line/contact identities are unique. The six-digit proof is stored only as a
 short-lived keyed digest; a database read alone is not enough to recover it.
 
+## Runtime and delivery interface
+
+After proof activates a binding, the bridge uses the same dedicated transport
+credential on these ownerless internal routes:
+
+- `POST /v1/ella/internal/imessage/heartbeat`
+- `POST /v1/ella/internal/imessage/inbound`
+- `POST /v1/ella/internal/imessage/delivery/start`
+- `POST /v1/ella/internal/imessage/delivery/ack`
+- `POST /v1/ella/internal/imessage/delivery/uncertain`
+- `POST /v1/ella/internal/imessage/deregister`
+
+The header is `X-Ella-Imessage-Transport-Token`. Request bodies contain opaque
+line, contact, connection, and provider-message identities only. They cannot
+select a UID, account, profile, runtime, agent, URL, credential, or provider.
+The backend hashes those transport identities, derives the exact active owner
+and `hermes-chat` runtime from the verified binding, and revalidates runtime
+authority immediately around model execution.
+
+Inbound execution is deliberately split from delivery. The backend creates a
+durable receipt before model work and returns only status plus opaque receipt
+and delivery IDs. The reply text is released only by `delivery/start`, after
+`send_started` is committed. A second start while status is `sending`, a lost
+model result after model-start, or a transport-reported ambiguous send becomes
+`uncertain` with manual reconciliation. The bridge must never retry any of those
+states blindly. Only an identical provider acknowledgement is idempotent.
+
+The backend writes canonical `imessage` user and assistant events under the
+owner's stable OMI session. It performs one bounded non-stream request against
+the already authorized self-hosted Hermes target. There is no Cloud, retained,
+or Plato fallback and no second inference on an empty or malformed response.
+
 ## Required protected configuration
 
 All settings default to disabled or unavailable:
 
 - `ELLA_IMESSAGE_ENROLLMENT_ENABLED=false`
+- `ELLA_IMESSAGE_RUNTIME_ENABLED=false`
 - `ELLA_IMESSAGE_REGISTRAR_URL` (fixed HTTPS authority, or exact loopback HTTP)
 - `ELLA_IMESSAGE_REGISTRAR_TOKEN` (at least 32 non-whitespace bytes)
 - `ELLA_IMESSAGE_TRANSPORT_TOKEN` (at least 32 non-whitespace bytes)
@@ -83,8 +123,8 @@ values in Git, argv, logs, receipts, issue comments, or this document.
 Before any live enablement, an operator must prove all of the following with
 synthetic identities and content-free receipts:
 
-1. Migration 020 applied after 019 and the migration-009 Cloud tables are
-   unchanged.
+1. Migrations 020 and 021 apply in sequence after 019 and the migration-009
+   Cloud tables are unchanged.
 2. Enrollment flag false returns `rollout_disabled` and performs no provider or
    database write.
 3. Missing/malformed Firebase and transport credentials fail before repository
@@ -96,16 +136,24 @@ synthetic identities and content-free receipts:
    mutate the other's row.
 7. A provider timeout after request transmission produces an uncertain state
    and no automatic retry.
-8. The app only advertises iMessage when the authoritative status is `ready`.
+8. A durable inbound claim precedes model work, canonical events use channel
+   `imessage`, and text is absent until the fenced delivery-start response.
+9. Replayed delivery-start, stale post-model leases, and ambiguous provider
+   sends are quarantined without automatic model or send retries.
+10. The app only advertises iMessage when the authoritative status is `ready`.
 
-Do not activate the flag until the runtime executor/outbox slice, bridge health
-reporting, deletion cleanup, and rollback rehearsal are separately reviewed.
+Do not activate either flag until Atlas's bridge/service implementation, exact
+transport health reporting, deletion cleanup/absence proof, secret installation,
+and rollback rehearsal are separately reviewed. This source contract does not
+create a Photon registration, connection, or live message.
 
 ## Rollback
 
-Source rollback is a normal application commit rollback while the flag remains
-false. A deployed schema rollback must not drop migration-020 tables while any
-row exists. Disable enrollment and transport ingress first, quarantine pending
-or active bindings, prove no in-flight registration/proof work, then use a
-reviewed data-preserving migration. Never repoint this lane to the Cloud canary
-or a retained workspace as a fallback.
+Source rollback is a normal application commit rollback while both flags remain
+false. A deployed schema rollback must not drop migration-020 or migration-021
+tables while any row exists. Disable enrollment and runtime ingress first,
+quarantine pending or active bindings, prove no in-flight registration, proof,
+model, or delivery work, then use a reviewed data-preserving migration. A
+`sending` or `uncertain` receipt is a manual reconciliation blocker, not proof
+that no message was sent. Never repoint this lane to the Cloud canary or a
+retained workspace as a fallback.

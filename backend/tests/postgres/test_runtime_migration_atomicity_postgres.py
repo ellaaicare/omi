@@ -134,6 +134,10 @@ async def _assert_failure_rolls_back(filename: str, leaked_relations: tuple[str,
             "020_create_imessage_enrollment_authority.sql",
             ("ella_imessage_consent_receipts",),
         ),
+        (
+            "021_create_imessage_runtime_outbox.sql",
+            ("ella_imessage_message_receipts",),
+        ),
     ],
 )
 def test_migration_prerequisite_failure_is_atomic(filename, leaked_relations):

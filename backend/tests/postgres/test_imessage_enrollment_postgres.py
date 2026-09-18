@@ -16,6 +16,7 @@ from database.imessage_enrollment import (
     ImessageEnrollmentRepository,
     ImessageRuntimeSnapshot,
 )
+from database.imessage_runtime import ImessageRuntimeRepository, ImessageRuntimeRepositoryError
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
 MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
@@ -96,6 +97,7 @@ MIGRATION_CHAIN = (
     "014_add_synthetic_invitation_operator_audit.sql",
     "015_add_invitation_allowed_email_hash.sql",
     "020_create_imessage_enrollment_authority.sql",
+    "021_create_imessage_runtime_outbox.sql",
 )
 
 POLICY = "ella-imessage-data-v1"
@@ -564,5 +566,243 @@ def test_provider_registration_identity_is_unique_without_cross_owner_mutation()
         assert by_id[attempt_a["id"]]["state"] == "provider_accepted"
         assert by_id[attempt_b["id"]]["state"] == "prepared"
         assert by_id[attempt_b["id"]]["provider_registration_ref_hmac"] is None
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners():
+    async def scenario(pool):
+        enrollment = ImessageEnrollmentRepository(pool)
+        runtime_repository = ImessageRuntimeRepository(pool)
+        await runtime_repository.assert_schema_ready()
+
+        user_a, runtime_a = await _seed_owner(pool, uid="imessage-runtime-owner-a", ordinal=6)
+        _, runtime_b = await _seed_owner(pool, uid="imessage-runtime-owner-b", ordinal=7)
+        consent_a = await _grant(enrollment, uid="imessage-runtime-owner-a", ordinal=6)
+        consent_b = await _grant(enrollment, uid="imessage-runtime-owner-b", ordinal=7)
+        binding_a, code_a, destination_a = await _pending_binding(
+            enrollment,
+            uid="imessage-runtime-owner-a",
+            ordinal=6,
+            runtime=runtime_a,
+            receipt=consent_a,
+        )
+        binding_b, code_b, destination_b = await _pending_binding(
+            enrollment,
+            uid="imessage-runtime-owner-b",
+            ordinal=7,
+            runtime=runtime_b,
+            receipt=consent_b,
+        )
+        line_a = hashlib.sha256(b"runtime-line-a").hexdigest()
+        contact_a = hashlib.sha256(b"runtime-contact-a").hexdigest()
+        line_b = hashlib.sha256(b"runtime-line-b").hexdigest()
+        contact_b = hashlib.sha256(b"runtime-contact-b").hexdigest()
+        binding_a = await enrollment.verify_inbound_proof(
+            assigned_destination_ref_hmac=destination_a,
+            handset_ref_hmac=hashlib.sha256(b"handset-6").hexdigest(),
+            line_identity_hmac=line_a,
+            contact_identity_hmac=contact_a,
+            provider_message_ref_hmac=hashlib.sha256(b"runtime-proof-a").hexdigest(),
+            candidate_challenge_hash=_proof_hash(salt=f"{6:032x}", code=code_a),
+            consent_contract=CONSENT_CONTRACT,
+            runtime=runtime_a,
+            now=datetime.now(timezone.utc),
+        )
+        await enrollment.verify_inbound_proof(
+            assigned_destination_ref_hmac=destination_b,
+            handset_ref_hmac=hashlib.sha256(b"handset-7").hexdigest(),
+            line_identity_hmac=line_b,
+            contact_identity_hmac=contact_b,
+            provider_message_ref_hmac=hashlib.sha256(b"runtime-proof-b").hexdigest(),
+            candidate_challenge_hash=_proof_hash(salt=f"{7:032x}", code=code_b),
+            consent_contract=CONSENT_CONTRACT,
+            runtime=runtime_b,
+            now=datetime.now(timezone.utc),
+        )
+
+        authority_a = await runtime_repository.resolve_binding(
+            line_identity_hmac=line_a,
+            contact_identity_hmac=contact_a,
+        )
+        assert authority_a["omi_uid"] == "imessage-runtime-owner-a"
+        assert (
+            await runtime_repository.resolve_binding(
+                line_identity_hmac=line_a,
+                contact_identity_hmac=contact_b,
+            )
+            is None
+        )
+        connection_key = hashlib.sha256(b"runtime-connection-a").hexdigest()
+        await runtime_repository.record_heartbeat(
+            binding_id=str(authority_a["id"]),
+            generation=int(authority_a["generation"]),
+            connection_ref_hmac=connection_key,
+        )
+        authority_a = await runtime_repository.resolve_binding(
+            line_identity_hmac=line_a,
+            contact_identity_hmac=contact_a,
+        )
+        async with pool.acquire() as connection:
+            await connection.execute(
+                "UPDATE ella_imessage_consent_authority SET decision = 'revoked' WHERE user_id = $1",
+                user_a,
+            )
+        with pytest.raises(ImessageRuntimeRepositoryError, match="imessage_authority_changed"):
+            await runtime_repository.claim_message(
+                binding=authority_a,
+                inbound_provider_ref_hmac=hashlib.sha256(b"runtime-message-denied").hexdigest(),
+                inbound_payload_sha256=hashlib.sha256(b"runtime-payload-denied").hexdigest(),
+                message_text="content-free denied test",
+                occurred_at=datetime.now(timezone.utc),
+                lease_seconds=60,
+            )
+        async with pool.acquire() as connection:
+            assert (
+                await connection.fetchval(
+                    "SELECT COUNT(*) FROM ella_imessage_message_receipts WHERE user_id = $1",
+                    user_a,
+                )
+                == 0
+            )
+            await connection.execute(
+                "UPDATE ella_imessage_consent_authority SET decision = 'granted' WHERE user_id = $1",
+                user_a,
+            )
+        receipt = await runtime_repository.claim_message(
+            binding=authority_a,
+            inbound_provider_ref_hmac=hashlib.sha256(b"runtime-message-a").hexdigest(),
+            inbound_payload_sha256=hashlib.sha256(b"runtime-payload-a").hexdigest(),
+            message_text="content-free runtime test",
+            occurred_at=datetime.now(timezone.utc),
+            lease_seconds=60,
+        )
+        assert receipt["acquired"] is True
+        async with pool.acquire() as connection:
+            await connection.execute(
+                "UPDATE ella_imessage_consent_authority SET decision = 'revoked' WHERE user_id = $1",
+                user_a,
+            )
+        with pytest.raises(ImessageRuntimeRepositoryError, match="imessage_message_claim_conflict"):
+            await runtime_repository.mark_model_started(
+                receipt_id=str(receipt["id"]),
+                lease_token=str(receipt["lease_token"]),
+            )
+        async with pool.acquire() as connection:
+            state = await connection.fetchrow(
+                "SELECT status, model_started FROM ella_imessage_message_receipts WHERE id = $1",
+                receipt["id"],
+            )
+            assert dict(state) == {"status": "claimed", "model_started": False}
+            await connection.execute(
+                "UPDATE ella_imessage_consent_authority SET decision = 'granted' WHERE user_id = $1",
+                user_a,
+            )
+        await runtime_repository.mark_model_started(
+            receipt_id=str(receipt["id"]),
+            lease_token=str(receipt["lease_token"]),
+        )
+        completed = await runtime_repository.complete_model(
+            receipt_id=str(receipt["id"]),
+            lease_token=str(receipt["lease_token"]),
+            canonical_inbound_event_id="imessage:test:user",
+            canonical_outbound_event_id="imessage:test:assistant",
+            outbound_text="content-free reply",
+            runtime_revision=3,
+            runtime_agent_id="imessage-agent-6",
+        )
+        assert completed["status"] == "awaiting_delivery"
+        started = await runtime_repository.start_delivery(
+            receipt_id=str(receipt["id"]),
+            delivery_idempotency_key=str(receipt["delivery_idempotency_key"]),
+            binding_id=str(binding_a["id"]),
+            generation=int(binding_a["generation"]),
+            connection_ref_hmac=connection_key,
+        )
+        assert started["status"] == "sending"
+        with pytest.raises(ImessageRuntimeRepositoryError, match="imessage_delivery_outcome_uncertain"):
+            await runtime_repository.start_delivery(
+                receipt_id=str(receipt["id"]),
+                delivery_idempotency_key=str(receipt["delivery_idempotency_key"]),
+                binding_id=str(binding_a["id"]),
+                generation=int(binding_a["generation"]),
+                connection_ref_hmac=connection_key,
+            )
+        outbound_ref = hashlib.sha256(b"runtime-outbound-a").hexdigest()
+        delivered = await runtime_repository.acknowledge_delivery(
+            receipt_id=str(receipt["id"]),
+            delivery_idempotency_key=str(receipt["delivery_idempotency_key"]),
+            outbound_provider_ref_hmac=outbound_ref,
+            binding_id=str(binding_a["id"]),
+            generation=int(binding_a["generation"]),
+        )
+        duplicate_ack = await runtime_repository.acknowledge_delivery(
+            receipt_id=str(receipt["id"]),
+            delivery_idempotency_key=str(receipt["delivery_idempotency_key"]),
+            outbound_provider_ref_hmac=outbound_ref,
+            binding_id=str(binding_a["id"]),
+            generation=int(binding_a["generation"]),
+        )
+        assert delivered["status"] == duplicate_ack["status"] == "delivered"
+
+        stale = await runtime_repository.claim_message(
+            binding=authority_a,
+            inbound_provider_ref_hmac=hashlib.sha256(b"runtime-message-stale").hexdigest(),
+            inbound_payload_sha256=hashlib.sha256(b"runtime-payload-stale").hexdigest(),
+            message_text="content-free stale test",
+            occurred_at=datetime.now(timezone.utc),
+            lease_seconds=60,
+        )
+        await runtime_repository.mark_model_started(
+            receipt_id=str(stale["id"]),
+            lease_token=str(stale["lease_token"]),
+        )
+        async with pool.acquire() as connection:
+            await connection.execute(
+                "UPDATE ella_imessage_message_receipts SET lease_expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE id = $1",
+                stale["id"],
+            )
+        replay = await runtime_repository.claim_message(
+            binding=authority_a,
+            inbound_provider_ref_hmac=hashlib.sha256(b"runtime-message-stale").hexdigest(),
+            inbound_payload_sha256=hashlib.sha256(b"runtime-payload-stale").hexdigest(),
+            message_text="content-free stale test",
+            occurred_at=datetime.now(timezone.utc),
+            lease_seconds=60,
+        )
+        assert replay["status"] == "uncertain"
+        assert replay["acquired"] is False
+        assert replay["reconciliation_status"] == "manual_required"
+
+        await enrollment.submit_consent(
+            uid="imessage-runtime-owner-a",
+            submission=ImessageConsentInput(
+                request_id=uuid.uuid5(uuid.NAMESPACE_URL, "runtime-revoke-a"),
+                decision="revoked",
+                policy_version=POLICY,
+                processor_set_hash=PROCESSOR_HASH,
+                scope_version=SCOPE,
+                scope_hash=SCOPE_HASH,
+                app_version="1.0",
+                build_number="1",
+            ),
+        )
+        assert (
+            await runtime_repository.resolve_binding(
+                line_identity_hmac=line_a,
+                contact_identity_hmac=contact_a,
+            )
+            is None
+        )
+
+        async with pool.acquire() as connection:
+            owner_counts = await connection.fetch(
+                """
+                SELECT user_id, COUNT(*) AS count
+                FROM ella_imessage_message_receipts
+                GROUP BY user_id
+                """
+            )
+        assert {row["user_id"]: int(row["count"]) for row in owner_counts} == {user_a: 2}
 
     asyncio.run(_run_with_database(scenario))

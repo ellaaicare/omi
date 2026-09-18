@@ -28,6 +28,7 @@ on:
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
+      - "backend/migrations/021_create_imessage_runtime_outbox.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/synthetic_invite_admin.py"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
@@ -69,6 +70,7 @@ on:
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
+      - "backend/migrations/021_create_imessage_runtime_outbox.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/synthetic_invite_admin.py"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
@@ -170,7 +172,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 191
+          test "$collected" -eq 192
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \

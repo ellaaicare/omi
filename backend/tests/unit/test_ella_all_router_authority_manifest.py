@@ -361,6 +361,17 @@ ROUTE_GROUPS = (
         ("POST", "/v1/ella/internal/imessage/proof", "verify_imessage_proof"),
     ),
     _group(
+        "imessage_runtime",
+        "imessage_transport_only_no_subject_selector",
+        "internal_only",
+        ("POST", "/v1/ella/internal/imessage/heartbeat", "heartbeat"),
+        ("POST", "/v1/ella/internal/imessage/inbound", "inbound"),
+        ("POST", "/v1/ella/internal/imessage/delivery/start", "delivery_start"),
+        ("POST", "/v1/ella/internal/imessage/delivery/ack", "delivery_ack"),
+        ("POST", "/v1/ella/internal/imessage/delivery/uncertain", "delivery_uncertain"),
+        ("POST", "/v1/ella/internal/imessage/deregister", "deregister"),
+    ),
+    _group(
         "plato_mcp",
         "plato_mcp_fixed_profile",
         "public",
