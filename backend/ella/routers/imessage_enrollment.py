@@ -6,7 +6,7 @@ import secrets
 import uuid
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -19,6 +19,7 @@ from ella.services.imessage_enrollment import (
 from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 
 router = APIRouter(tags=["iMessage Enrollment"])
+NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 
 
 class ImessageConsentRequest(BaseModel):
@@ -78,20 +79,31 @@ def require_imessage_transport(
 
 
 def _raise_service_error(exc: ImessageEnrollmentError) -> None:
-    raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+    raise HTTPException(
+        status_code=exc.status_code,
+        detail={"code": exc.code},
+        headers=NO_STORE_HEADERS,
+    ) from exc
+
+
+def _mark_no_store(response: Response) -> None:
+    response.headers.update(NO_STORE_HEADERS)
 
 
 @router.get("/v1/ella/imessage/consent/policy")
-def get_imessage_consent_policy() -> dict:
+def get_imessage_consent_policy(response: Response) -> dict:
+    _mark_no_store(response)
     return consent_policy()
 
 
 @router.post("/v1/ella/imessage/consent")
 async def submit_imessage_consent(
     request: ImessageConsentRequest,
+    response: Response,
     uid: str = Depends(get_exact_firebase_uid),
     service: ImessageEnrollmentService = Depends(get_imessage_enrollment_service),
 ) -> dict:
+    _mark_no_store(response)
     try:
         return await service.submit_consent(
             uid=uid,
@@ -110,9 +122,11 @@ async def submit_imessage_consent(
 
 @router.get("/v1/ella/imessage/enrollment")
 async def get_imessage_enrollment(
+    response: Response,
     uid: str = Depends(get_exact_firebase_uid),
     service: ImessageEnrollmentService = Depends(get_imessage_enrollment_service),
 ) -> dict:
+    _mark_no_store(response)
     try:
         return await service.status(uid=uid)
     except ImessageEnrollmentError as exc:
@@ -134,15 +148,21 @@ async def start_imessage_enrollment(
         )
     except ImessageEnrollmentError as exc:
         _raise_service_error(exc)
-    return JSONResponse(status_code=201 if created else 200, content=body)
+    return JSONResponse(
+        status_code=201 if created else 200,
+        content=body,
+        headers=NO_STORE_HEADERS,
+    )
 
 
 @router.post("/v1/ella/imessage/enrollment/revoke")
 async def revoke_imessage_enrollment(
     request: EnrollmentRevokeRequest,
+    response: Response,
     uid: str = Depends(get_exact_firebase_uid),
     service: ImessageEnrollmentService = Depends(get_imessage_enrollment_service),
 ) -> dict:
+    _mark_no_store(response)
     try:
         return await service.revoke(
             uid=uid,
@@ -159,8 +179,10 @@ async def revoke_imessage_enrollment(
 )
 async def verify_imessage_proof(
     request: InboundProofRequest,
+    response: Response,
     service: ImessageEnrollmentService = Depends(get_imessage_enrollment_service),
 ) -> dict:
+    _mark_no_store(response)
     try:
         return await service.verify_proof(
             assigned_destination=request.assigned_destination,

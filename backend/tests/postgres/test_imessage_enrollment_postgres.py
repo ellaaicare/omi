@@ -566,3 +566,109 @@ def test_provider_registration_identity_is_unique_without_cross_owner_mutation()
         assert by_id[attempt_b["id"]]["provider_registration_ref_hmac"] is None
 
     asyncio.run(_run_with_database(scenario))
+
+
+def test_expired_pending_binding_is_atomically_retired_and_replacement_can_start():
+    async def scenario(pool):
+        repository = ImessageEnrollmentRepository(pool)
+        uid = "imessage-expired-owner"
+        _, runtime = await _seed_owner(pool, uid=uid, ordinal=6)
+        receipt = await _grant(repository, uid=uid, ordinal=6)
+        binding, _, destination_hmac = await _pending_binding(
+            repository,
+            uid=uid,
+            ordinal=6,
+            runtime=runtime,
+            receipt=receipt,
+        )
+        expired_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        async with pool.acquire() as connection:
+            await connection.execute(
+                "UPDATE ella_imessage_channel_bindings SET challenge_expires_at = $2 WHERE id = $1",
+                binding["id"],
+                expired_at,
+            )
+
+        retired = await repository.retire_expired_pending_binding(
+            uid=uid,
+            binding_id=binding["id"],
+            now=datetime.now(timezone.utc),
+        )
+
+        assert retired["status"] == "quarantined"
+        with pytest.raises(ImessageAuthorityError, match="imessage_proof_binding_not_found"):
+            await repository.resolve_proof_authority(
+                assigned_destination_ref_hmac=destination_hmac,
+                handset_ref_hmac=hashlib.sha256(b"handset-6").hexdigest(),
+            )
+        replacement, created = await repository.prepare_registration(
+            uid=uid,
+            idempotency_key=uuid.uuid5(uuid.NAMESPACE_URL, "replacement-enrollment-6"),
+            handset_ref_hmac=hashlib.sha256(b"replacement-handset-6").hexdigest(),
+            consent_receipt_id=receipt["id"],
+            consent_contract=CONSENT_CONTRACT,
+            runtime=runtime,
+        )
+        assert created is True
+        assert replacement["state"] == "prepared"
+
+        async with pool.acquire() as connection:
+            state = await connection.fetchrow(
+                """
+                SELECT b.status, b.revision, a.state AS attempt_state, a.error_code
+                FROM ella_imessage_channel_bindings b
+                JOIN ella_imessage_registration_attempts a ON a.id = b.registration_attempt_id
+                WHERE b.id = $1
+                """,
+                binding["id"],
+            )
+        assert state["status"] == "quarantined"
+        assert int(state["revision"]) == int(binding["revision"]) + 1
+        assert state["attempt_state"] == "quarantined"
+        assert state["error_code"] == "imessage_proof_expired"
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_unresolved_provider_acceptance_blocks_competing_registration_graph():
+    async def scenario(pool):
+        repository = ImessageEnrollmentRepository(pool)
+        uid = "imessage-unresolved-owner"
+        _, runtime = await _seed_owner(pool, uid=uid, ordinal=7)
+        receipt = await _grant(repository, uid=uid, ordinal=7)
+        attempt, created = await repository.prepare_registration(
+            uid=uid,
+            idempotency_key=uuid.uuid5(uuid.NAMESPACE_URL, "unresolved-enrollment-7"),
+            handset_ref_hmac=hashlib.sha256(b"unresolved-handset-7").hexdigest(),
+            consent_receipt_id=receipt["id"],
+            consent_contract=CONSENT_CONTRACT,
+            runtime=runtime,
+        )
+        assert created is True
+        accepted = await repository.mark_provider_accepted(
+            uid=uid,
+            attempt_id=attempt["id"],
+            provider_registration_ref_hmac=hashlib.sha256(b"unresolved-registration-7").hexdigest(),
+            assigned_destination_e164="+15555550700",
+            assigned_destination_ref_hmac=hashlib.sha256(b"unresolved-destination-7").hexdigest(),
+        )
+        assert accepted["state"] == "provider_accepted"
+
+        with pytest.raises(ImessageAuthorityError, match="imessage_registration_manual_reconciliation_required"):
+            await repository.prepare_registration(
+                uid=uid,
+                idempotency_key=uuid.uuid5(uuid.NAMESPACE_URL, "competing-enrollment-7"),
+                handset_ref_hmac=hashlib.sha256(b"competing-handset-7").hexdigest(),
+                consent_receipt_id=receipt["id"],
+                consent_contract=CONSENT_CONTRACT,
+                runtime=runtime,
+            )
+
+        async with pool.acquire() as connection:
+            attempts = await connection.fetch(
+                "SELECT id, state FROM ella_imessage_registration_attempts WHERE user_id = $1",
+                runtime.account_user_id,
+            )
+        assert [(row["id"], row["state"]) for row in attempts] == [(attempt["id"], "provider_accepted")]
+
+    asyncio.run(_run_with_database(scenario))
