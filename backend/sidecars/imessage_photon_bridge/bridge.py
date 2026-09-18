@@ -243,8 +243,11 @@ class SingletonLease:
 class BridgeJournal:
     """Protected SQLite journal for registration and transport crash boundaries."""
 
-    def __init__(self, state_directory: Path) -> None:
+    def __init__(self, state_directory: Path, project_id: str) -> None:
+        if not PROJECT_ID_RE.fullmatch(project_id):
+            raise BridgeError("bridge_project_id_invalid")
         self.state_directory = state_directory
+        self.project_id = project_id
         self._prepare_directory()
         self.path = state_directory / "bridge.sqlite3"
         self.connection = sqlite3.connect(self.path, isolation_level=None)
@@ -254,6 +257,7 @@ class BridgeJournal:
         self.connection.execute("PRAGMA synchronous=FULL")
         self.connection.execute("PRAGMA foreign_keys=ON")
         self._migrate()
+        self._bind_project()
 
     def close(self) -> None:
         self.connection.close()
@@ -269,6 +273,10 @@ class BridgeJournal:
     def _migrate(self) -> None:
         self.connection.executescript(
             """
+            CREATE TABLE IF NOT EXISTS bridge_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS registrations (
                 provider_request_id TEXT PRIMARY KEY,
                 project_id TEXT NOT NULL,
@@ -312,6 +320,22 @@ class BridgeJournal:
             CREATE INDEX IF NOT EXISTS deliveries_status_idx ON deliveries(status, created_at);
             """
         )
+
+    def _bind_project(self) -> None:
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute("SELECT value FROM bridge_metadata WHERE key = 'project_id'").fetchone()
+            if row is None:
+                self.connection.execute(
+                    "INSERT INTO bridge_metadata (key, value) VALUES ('project_id', ?)",
+                    (self.project_id,),
+                )
+            elif str(row["value"]) != self.project_id:
+                raise BridgeError("bridge_state_project_mismatch")
+            self.connection.execute("COMMIT")
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
 
     def begin_registration(self, provider_request_id: str, project_id: str, handset_e164: str) -> dict[str, Any]:
         now = _utc_now()

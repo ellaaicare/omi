@@ -194,7 +194,7 @@ def _delivery_ids() -> tuple[str, str]:
 
 def _bridge(tmp_path: Path) -> tuple[ImessagePhotonBridge, BridgeJournal, FakeProvider, FakeBackend]:
     config = _config(tmp_path)
-    journal = BridgeJournal(config.state_directory)
+    journal = BridgeJournal(config.state_directory, config.project_id)
     provider = FakeProvider()
     backend = FakeBackend()
     bridge = ImessagePhotonBridge(
@@ -253,10 +253,18 @@ def test_journal_and_singleton_are_owner_only_and_exclusive(tmp_path: Path) -> N
     first.close()
     second.acquire()
     second.close()
-    journal = BridgeJournal(state)
+    journal = BridgeJournal(state, PROJECT_ID)
     assert stat.S_IMODE(state.stat().st_mode) == 0o700
     assert stat.S_IMODE(journal.path.stat().st_mode) == 0o600
     journal.close()
+
+
+def test_journal_refuses_reuse_by_a_different_provider_project(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    first = BridgeJournal(state, PROJECT_ID)
+    first.close()
+    with pytest.raises(BridgeError, match="bridge_state_project_mismatch"):
+        BridgeJournal(state, "f01c81a2-6a51-4b56-928a-981a831e26af")
 
 
 @async_test
@@ -380,7 +388,7 @@ async def test_missing_mapping_group_attachment_and_non_shared_events_never_reac
 
 def test_changed_replay_payload_is_quarantined(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    journal = BridgeJournal(config.state_directory)
+    journal = BridgeJournal(config.state_directory, config.project_id)
     first = _normalize_provider_event(PROJECT_ID, _event("same-id", PHONE_A, "first"))
     second = _normalize_provider_event(PROJECT_ID, _event("same-id", PHONE_A, "changed"))
     assert journal.record_inbound(first) == "new"

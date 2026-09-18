@@ -147,9 +147,10 @@ The bridge owns an additional kernel lifetime lock and an SQLite WAL journal
 under its state directory. The journal records a provider-attempt marker before
 registration, the minimal normalized inbound event before backend inference,
 send-start before provider I/O, and the provider message ID before backend ACK.
-It removes message text after terminal processing. A second bridge process,
-insecure state directory, provider stream in `starting`/`recovering`, or suspected
-zombie stream fails closed.
+It binds the state directory permanently to the configured project and removes
+message text after terminal processing. A different project, second bridge
+process, insecure state directory, provider stream in `starting`/`recovering`,
+or suspected zombie stream fails closed.
 
 The registrar listener remains loopback-only. If the VPS backend cannot reach
 the Mini over loopback, Atlas must place a separately reviewed private HTTPS

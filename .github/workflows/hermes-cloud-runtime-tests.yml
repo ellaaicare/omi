@@ -593,7 +593,7 @@ jobs:
               tests/postgres/test_imessage_enrollment_postgres.py |
               sed '/^$/d'
           )"
-          test "$(grep -c '::' <<<"$imessage_ids")" -eq 72
+          test "$(grep -c '::' <<<"$imessage_ids")" -eq 73
           required_imessage_ids=(
             "tests/unit/test_imessage_enrollment.py::test_previous_policy_consent_is_rejected_before_authority_write"
             "tests/unit/test_imessage_enrollment.py::test_start_persists_before_provider_and_revalidates_before_finalization"
@@ -617,6 +617,7 @@ jobs:
             "tests/unit/test_imessage_runtime_openapi.py::test_internal_runtime_contract_is_transport_only_and_has_no_owner_selector"
             "tests/unit/test_imessage_photon_bridge.py::test_provider_health_requires_exact_healthy_non_zombie_stream"
             "tests/unit/test_imessage_photon_bridge.py::test_entrypoint_rejects_missing_transport_home_before_hermes_import"
+            "tests/unit/test_imessage_photon_bridge.py::test_journal_refuses_reuse_by_a_different_provider_project"
             "tests/unit/test_imessage_photon_bridge.py::test_registrar_is_idempotent_and_does_not_repeat_uncertain_create"
             "tests/unit/test_imessage_photon_bridge.py::test_registrar_waits_for_assigned_destination_without_duplicate_provider_create"
             "tests/unit/test_imessage_photon_bridge.py::test_registrar_http_requires_auth_and_returns_no_store"

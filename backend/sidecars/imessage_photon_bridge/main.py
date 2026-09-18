@@ -108,7 +108,7 @@ async def _serve(config: BridgeConfig, *, reconcile_only: bool = False) -> int:
     _prepare_state_directory(config.state_directory)
     lease = SingletonLease(config.state_directory / "bridge.lock")
     lease.acquire()
-    journal = BridgeJournal(config.state_directory)
+    journal = BridgeJournal(config.state_directory, config.project_id)
     provider = HermesPhotonProvider()
     backend = HttpEllaBackend(config)
     bridge = ImessagePhotonBridge(config=config, journal=journal, provider=provider, backend=backend)
@@ -139,7 +139,7 @@ async def _deregister(config: BridgeConfig) -> int:
     _prepare_state_directory(config.state_directory)
     lease = SingletonLease(config.state_directory / "bridge.lock")
     lease.acquire()
-    journal = BridgeJournal(config.state_directory)
+    journal = BridgeJournal(config.state_directory, config.project_id)
     backend = HttpEllaBackend(config)
     bridge = ImessagePhotonBridge(
         config=config,
