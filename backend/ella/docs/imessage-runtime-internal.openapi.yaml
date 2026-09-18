@@ -409,7 +409,7 @@ components:
         text:
           type: string
           minLength: 1
-          maxLength: 32768
+          maxLength: 8000
     ReceiptResult:
       type: object
       additionalProperties: false

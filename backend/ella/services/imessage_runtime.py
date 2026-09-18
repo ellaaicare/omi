@@ -31,6 +31,7 @@ from ella.services.runtime_resolver import (
 )
 
 IMESSAGE_CHANNEL = "imessage"
+IMESSAGE_OUTBOUND_MAX_CHARS = 8_000
 
 
 class ImessageRuntimeError(RuntimeError):
@@ -145,7 +146,7 @@ class SelfHostedHermesCompletionClient:
             text = str(message.get("content") or "").strip() if isinstance(message, dict) else ""
         except (UnicodeDecodeError, ValueError, TypeError) as exc:
             raise ImessageRuntimeError("imessage_model_response_invalid", status_code=503) from exc
-        if not text or len(text.encode("utf-8")) > 32_768:
+        if not text or len(text) > IMESSAGE_OUTBOUND_MAX_CHARS:
             raise ImessageRuntimeError("imessage_model_response_invalid", status_code=503)
         return text
 
@@ -289,6 +290,8 @@ class ImessageRuntimeService:
                 user_text=request.text,
                 session_key=session_key,
             )
+            if not reply.strip() or len(reply) > IMESSAGE_OUTBOUND_MAX_CHARS:
+                raise ImessageRuntimeError("imessage_model_response_invalid", status_code=503)
             final_runtime = await self.runtime_revalidator(identity)
             self._assert_runtime_matches(binding, final_runtime)
             final_authority = self._authority(binding, final_runtime, runtime_authority_identity(final_runtime))

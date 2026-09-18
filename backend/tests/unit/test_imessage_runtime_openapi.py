@@ -88,5 +88,6 @@ def test_internal_runtime_contract_separates_model_claim_from_fenced_delivery():
         "text",
     ]
     assert schemas["DeliveryStartResult"]["properties"]["status"] == {"const": "sending"}
+    assert schemas["DeliveryStartResult"]["properties"]["text"]["maxLength"] == 8000
     assert "unknown_sender" in schemas["InboundResult"]["properties"]["status"]["enum"]
     assert "uncertain" in schemas["ReceiptResult"]["properties"]["status"]["enum"]

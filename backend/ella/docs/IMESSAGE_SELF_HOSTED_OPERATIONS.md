@@ -1,9 +1,10 @@
 # Self-hosted iMessage operations contract
 
 This document is the source-side handoff for the isolated Ella Photon bridge.
-It does not authorize deployment, registration, live messaging, or flag changes.
-Atlas owns launch and service templates; the backend owns the HTTP and authority
-contracts described here.
+Deployment authority and the one-owner canary are tracked only in
+`ellaaicare/ella-ai#1259`; merging this file alone does not authorize either.
+Atlas owns launch and service templates; the backend owns the executable, HTTP,
+and authority contracts described here.
 
 ## Boundaries
 
@@ -33,6 +34,9 @@ contracts described here.
 - Runtime service: `backend/ella/services/imessage_runtime.py`
 - Repository: `backend/database/imessage_enrollment.py`
 - Runtime repository: `backend/database/imessage_runtime.py`
+- Bridge executable: `backend/sidecars/imessage_photon_bridge/main.py`
+- Crash-safe bridge core: `backend/sidecars/imessage_photon_bridge/bridge.py`
+- Bridge lifecycle tests: `backend/tests/unit/test_imessage_photon_bridge.py`
 
 The app flow is:
 
@@ -59,7 +63,8 @@ The backend calls one fixed registrar authority:
 The bridge delivers an inbound proof to:
 
 - `POST /v1/ella/internal/imessage/proof`
-- `X-Ella-Imessage-Transport` from `ELLA_IMESSAGE_TRANSPORT_TOKEN`
+- `X-Ella-Imessage-Transport-Token` from
+  `ELLA_IMESSAGE_TRANSPORT_TOKEN`
 - Body contains assigned destination, handset, one-time code, provider message
   ID, line identity, and contact identity. It never contains a UID.
 
@@ -101,6 +106,79 @@ The backend writes canonical `imessage` user and assistant events under the
 owner's stable OMI session. It performs one bounded non-stream request against
 the already authorized self-hosted Hermes target. There is no Cloud, retained,
 or Plato fallback and no second inference on an empty or malformed response.
+Replies longer than the pinned Photon adapter's 8,000-character transport limit
+are rejected before the assistant event or delivery intent is committed; the
+bridge never relies on the adapter's silent truncation.
+
+## Runnable bridge contract
+
+The reviewed long-lived command is:
+
+```text
+@@ELLA_VENV@@/bin/python @@OMI_RELEASE_ROOT@@/backend/sidecars/imessage_photon_bridge/main.py serve
+```
+
+`@@OMI_RELEASE_ROOT@@` must be the immutable deployed OMI release containing the
+reviewed bridge head. `@@ELLA_VENV@@` and `HERMES_IMPORT_ROOT` must resolve the
+dedicated Ella Hermes checkout pinned to
+`00cb8895d4bb60aef24b282cde968745b6f3977f` and Spectrum `12.7.0`. The launch
+preflight owns those readbacks. The command accepts no UID, profile, workspace,
+contact, project secret, or service token argument.
+
+Required non-secret launch configuration:
+
+- `HERMES_HOME=/Users/ellaai/.hermes/profiles/ella-photon-transport`
+- `HERMES_IMPORT_ROOT` points to the immutable Ella-only Hermes checkout.
+- `ELLA_IMESSAGE_BRIDGE_STATE_DIR` is an absolute owner-only directory under
+  the isolated transport home.
+- `ELLA_IMESSAGE_REGISTRAR_BIND=127.0.0.1`; wildcard/public binds are refused.
+- `ELLA_IMESSAGE_REGISTRAR_PORT` defaults to `8796`.
+- `ELLA_IMESSAGE_HEARTBEAT_SECONDS` defaults to 30 seconds.
+- `ELLA_IMESSAGE_BACKEND_TIMEOUT_SECONDS` defaults to 90 seconds.
+
+Required protected values are `PHOTON_PROJECT_ID`, `PHOTON_PROJECT_SECRET`,
+`ELLA_IMESSAGE_TRANSPORT_TOKEN`, and `ELLA_IMESSAGE_REGISTRAR_TOKEN`. Load them
+from the separately reviewed owner-only environment file at
+`/Users/ellaai/.hermes/profiles/ella-photon-transport/.env`; never put values in
+the plist, argv, Git, logs, or receipts. The two Ella service tokens must be
+distinct.
+
+The bridge owns an additional kernel lifetime lock and an SQLite WAL journal
+under its state directory. The journal records a provider-attempt marker before
+registration, the minimal normalized inbound event before backend inference,
+send-start before provider I/O, and the provider message ID before backend ACK.
+It removes message text after terminal processing. A second bridge process,
+insecure state directory, provider stream in `starting`/`recovering`, or suspected
+zombie stream fails closed.
+
+The registrar listener remains loopback-only. If the VPS backend cannot reach
+the Mini over loopback, Atlas must place a separately reviewed private HTTPS
+proxy/tunnel in front of this listener and pin
+`ELLA_IMESSAGE_REGISTRAR_URL` to that private coordinate. Do not publish the
+registrar or bind the bridge to a public or wildcard address. The registrar
+requires its dedicated bearer and idempotency UUID; `/healthz` is coarse and
+contains no project, contact, credential, or runtime detail.
+
+Supported operator commands use the same protected environment and immutable
+paths:
+
+```text
+.../main.py health       # loopback bridge/provider readiness only
+.../main.py reconcile    # no new send after an ambiguous send-start
+.../main.py deregister   # backend quarantine first, then local mapping disable
+```
+
+`reconcile` retries only a backend ACK after a provider message ID was durably
+stored. A send-start without a stored provider ID becomes `uncertain`; it is
+never resent. Normal service stop does not deregister. Deregistration is an
+explicit lifecycle operation and must complete before disabling the runtime
+flag.
+
+The bridge has no owner-to-agent selector. For the authorized owner canary, the
+backend operator must separately read back that the exact active invitation,
+entitlement, consent epoch, runtime binding, and `hermes-chat` target resolve to
+the preserved `plato-eval` agent. Missing or mismatched authority blocks the
+turn; the bridge cannot substitute a profile or workspace.
 
 ## Required protected configuration
 
@@ -114,6 +192,10 @@ All settings default to disabled or unavailable:
 - `ELLA_IMESSAGE_BINDING_HMAC_KEY` (at least 32 bytes)
 - `ELLA_IMESSAGE_PROOF_KEY` (at least 32 bytes and distinct from the binding key)
 - `ELLA_IMESSAGE_HEALTH_MAX_AGE_SECONDS` (default 300, minimum 30)
+
+Bridge-only settings are listed in the runnable contract above. Backend and
+bridge must share the transport and registrar references by protected secret
+reference, not by copying values into an operations receipt.
 
 Store values only in the approved root-owned secret mechanism. Never place
 values in Git, argv, logs, receipts, issue comments, or this document.
@@ -142,18 +224,18 @@ synthetic identities and content-free receipts:
    sends are quarantined without automatic model or send retries.
 10. The app only advertises iMessage when the authoritative status is `ready`.
 
-Do not activate either flag until Atlas's bridge/service implementation, exact
+Do not activate either flag until the exact bridge/service installation,
 transport health reporting, deletion cleanup/absence proof, secret installation,
-and rollback rehearsal are separately reviewed. This source contract does not
-create a Photon registration, connection, or live message.
+and rollback rehearsal are reviewed. Source-complete is not running, and running
+is not handset-verified.
 
 ## Rollback
 
 Source rollback is a normal application commit rollback while both flags remain
-false. A deployed schema rollback must not drop migration-020 or migration-021
-tables while any row exists. Disable enrollment and runtime ingress first,
-quarantine pending or active bindings, prove no in-flight registration, proof,
-model, or delivery work, then use a reviewed data-preserving migration. A
-`sending` or `uncertain` receipt is a manual reconciliation blocker, not proof
-that no message was sent. Never repoint this lane to the Cloud canary or a
-retained workspace as a fallback.
+false. For an activated bridge, stop new enrollment, complete explicit backend
+deregistration while runtime ingress is still enabled, prove no in-flight proof,
+model, or delivery work, then stop the bridge and preserve its journal as a
+rollback artifact. A `sending` or `uncertain` receipt is a manual reconciliation
+blocker, not proof that no message was sent. A deployed schema rollback must not
+drop migration-020 or migration-021 tables while any row exists. Never repoint
+this lane to the Cloud canary or a retained workspace as a fallback.

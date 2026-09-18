@@ -158,9 +158,10 @@ class FakeRepository:
 
 
 class FakeCompletionClient:
-    def __init__(self, events, *, error=None):
+    def __init__(self, events, *, error=None, response="A concise reply"):
         self.events = events
         self.error = error
+        self.response = response
         self.calls = 0
 
     async def complete(self, **kwargs):
@@ -168,7 +169,7 @@ class FakeCompletionClient:
         self.events.append(("model", kwargs))
         if self.error:
             raise self.error
-        return "A concise reply"
+        return self.response
 
 
 def _service(repository, completion_client, runtime=None, *, revalidator=None):
@@ -280,6 +281,23 @@ def test_text_dm_claim_precedes_model_and_delivery_requires_send_start(monkeypat
         service.acknowledge_delivery(_delivery(), outbound_provider_message_id="outbound-message-a")
     )
     assert acknowledged == {"status": "delivered", "receipt_id": str(RECEIPT_ID)}
+
+
+def test_provider_length_reply_is_rejected_before_canonical_write_or_delivery(monkeypatch):
+    monkeypatch.setenv("ELLA_IMESSAGE_RUNTIME_ENABLED", "true")
+    runtime = _runtime()
+    repository = FakeRepository(_binding(runtime))
+    client = FakeCompletionClient(repository.events, response="x" * 8_001)
+    service = _service(repository, client, runtime)
+    asyncio.run(service.heartbeat(line_identity="line-a", contact_identity="contact-a", connection_id="connection-a"))
+
+    with pytest.raises(ImessageRuntimeError, match="imessage_model_response_invalid"):
+        asyncio.run(service.ingest(_inbound()))
+
+    events = asyncio.run(service.event_store.timeline(uid="owner-a", since=None, limit=10, channels=["imessage"]))
+    assert [(event["role"], event["text"]) for event in events] == [("user", "Hello Ella")]
+    assert repository.receipt["status"] == "uncertain"
+    assert not any(name == "model_complete" for name, _payload in repository.events)
 
 
 def test_group_and_attachment_are_rejected_before_claim_or_model(monkeypatch):
