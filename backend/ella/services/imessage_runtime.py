@@ -14,7 +14,11 @@ from typing import Any, Awaitable, Callable, Optional, Protocol
 import httpx
 
 from database.honcho_attestation import authority_credential
-from database.imessage_runtime import ImessageRuntimeRepository, ImessageRuntimeRepositoryError
+from database.imessage_runtime import (
+    ImessageRuntimeAuthority,
+    ImessageRuntimeRepository,
+    ImessageRuntimeRepositoryError,
+)
 from ella.routers.canonical_events import CanonicalEventIn, CanonicalEventStore, PostgresCanonicalEventStore
 from ella.services.hermes_session import canonical_omi_session_key
 from ella.services.runtime_errors import ProvisioningError
@@ -27,7 +31,6 @@ from ella.services.runtime_resolver import (
 )
 
 IMESSAGE_CHANNEL = "imessage"
-UNKNOWN_SENDER_REPLY = "This number is not connected to an Ella account. Open Ella to connect Messages."
 
 
 class ImessageRuntimeError(RuntimeError):
@@ -57,6 +60,7 @@ class ImessageDeliveryIdentity:
     connection_id: str
     receipt_id: str
     delivery_idempotency_key: str
+    binding_generation: int
 
 
 class HermesCompletionTransport(Protocol):
@@ -190,11 +194,12 @@ class ImessageRuntimeService:
         if not binding:
             return {"status": "unknown_sender", "model_invoked": False}
         try:
-            await self._runtime(binding)
+            _, _, authority = await self._runtime(binding)
             updated = await self.repository.record_heartbeat(
                 binding_id=str(binding["id"]),
                 generation=int(binding["generation"]),
                 connection_ref_hmac=self._reference("connection", connection_id),
+                authority=authority,
             )
         except (ImessageRuntimeRepositoryError, ProvisioningError) as exc:
             raise self._error(exc) from exc
@@ -215,10 +220,9 @@ class ImessageRuntimeService:
             return {
                 "status": "unknown_sender",
                 "model_invoked": False,
-                "fixed_reply": UNKNOWN_SENDER_REPLY,
             }
         self._assert_live_connection(binding, request.connection_id)
-        runtime, identity = await self._runtime(binding)
+        runtime, identity, authority = await self._runtime(binding)
         inbound_ref = self._reference("inbound-message", request.provider_message_id)
         payload_hash = hashlib.sha256(
             json.dumps(
@@ -241,6 +245,7 @@ class ImessageRuntimeService:
                 message_text=request.text,
                 occurred_at=request.occurred_at.astimezone(timezone.utc),
                 lease_seconds=180,
+                authority=authority,
             )
         except ImessageRuntimeRepositoryError as exc:
             raise self._error(exc) from exc
@@ -272,7 +277,12 @@ class ImessageRuntimeService:
             )
             current_runtime = await self.runtime_revalidator(identity)
             self._assert_runtime_matches(binding, current_runtime)
-            await self.repository.mark_model_started(receipt_id=receipt_id, lease_token=lease_token)
+            current_authority = self._authority(binding, current_runtime, runtime_authority_identity(current_runtime))
+            await self.repository.mark_model_started(
+                receipt_id=receipt_id,
+                lease_token=lease_token,
+                authority=current_authority,
+            )
             model_started = True
             reply = await self.completion_client.complete(
                 runtime=current_runtime,
@@ -281,6 +291,7 @@ class ImessageRuntimeService:
             )
             final_runtime = await self.runtime_revalidator(identity)
             self._assert_runtime_matches(binding, final_runtime)
+            final_authority = self._authority(binding, final_runtime, runtime_authority_identity(final_runtime))
             ended_at = self.now()
             await self.event_store.write_batch(
                 [
@@ -302,8 +313,7 @@ class ImessageRuntimeService:
                 canonical_inbound_event_id=inbound_event_id,
                 canonical_outbound_event_id=outbound_event_id,
                 outbound_text=reply,
-                runtime_revision=final_runtime.revision,
-                runtime_agent_id=final_runtime.agent_id,
+                authority=final_authority,
             )
             return self._receipt_status(completed, duplicate=False)
         except (ImessageRuntimeError, ImessageRuntimeRepositoryError, ProvisioningError) as exc:
@@ -317,14 +327,15 @@ class ImessageRuntimeService:
             raise self._error(exc, uncertain=model_started) from exc
 
     async def start_delivery(self, request: ImessageDeliveryIdentity) -> dict[str, Any]:
-        binding = await self._authorized_delivery_binding(request)
+        binding, authority = await self._authorized_delivery_binding(request)
         try:
             receipt = await self.repository.start_delivery(
                 receipt_id=request.receipt_id,
                 delivery_idempotency_key=request.delivery_idempotency_key,
                 binding_id=str(binding["id"]),
-                generation=int(binding["generation"]),
+                generation=request.binding_generation,
                 connection_ref_hmac=self._reference("connection", request.connection_id),
+                authority=authority,
             )
         except ImessageRuntimeRepositoryError as exc:
             raise self._error(exc) from exc
@@ -332,6 +343,7 @@ class ImessageRuntimeService:
             "status": "sending",
             "receipt_id": str(receipt["id"]),
             "delivery_idempotency_key": str(receipt["delivery_idempotency_key"]),
+            "binding_generation": int(receipt["binding_generation"]),
             "text": str(receipt["outbound_text"]),
         }
 
@@ -341,14 +353,16 @@ class ImessageRuntimeService:
         *,
         outbound_provider_message_id: str,
     ) -> dict[str, Any]:
-        binding = await self._authorized_delivery_binding(request)
+        await self._require_storage_ready()
         try:
             receipt = await self.repository.acknowledge_delivery(
                 receipt_id=request.receipt_id,
                 delivery_idempotency_key=request.delivery_idempotency_key,
                 outbound_provider_ref_hmac=self._reference("outbound-message", outbound_provider_message_id),
-                binding_id=str(binding["id"]),
-                generation=int(binding["generation"]),
+                binding_generation=request.binding_generation,
+                line_identity_hmac=self._reference("line", request.line_identity),
+                contact_identity_hmac=self._reference("contact", request.contact_identity),
+                connection_ref_hmac=self._reference("connection", request.connection_id),
             )
         except ImessageRuntimeRepositoryError as exc:
             raise self._error(exc) from exc
@@ -360,13 +374,15 @@ class ImessageRuntimeService:
         *,
         error_code: str,
     ) -> dict[str, Any]:
-        binding = await self._authorized_delivery_binding(request)
+        await self._require_storage_ready()
         try:
             receipt = await self.repository.mark_delivery_uncertain(
                 receipt_id=request.receipt_id,
                 delivery_idempotency_key=request.delivery_idempotency_key,
-                binding_id=str(binding["id"]),
-                generation=int(binding["generation"]),
+                binding_generation=request.binding_generation,
+                line_identity_hmac=self._reference("line", request.line_identity),
+                contact_identity_hmac=self._reference("contact", request.contact_identity),
+                connection_ref_hmac=self._reference("connection", request.connection_id),
                 error_code=error_code,
             )
         except ImessageRuntimeRepositoryError as exc:
@@ -380,6 +396,7 @@ class ImessageRuntimeService:
         contact_identity: str,
         connection_id: str,
     ) -> dict[str, Any]:
+        await self._require_ready()
         binding = await self._binding(line_identity=line_identity, contact_identity=contact_identity)
         if not binding:
             return {"status": "not_connected"}
@@ -394,7 +411,9 @@ class ImessageRuntimeService:
             raise self._error(exc) from exc
         return {"status": "quarantined", "binding_generation": int(quarantined["generation"])}
 
-    async def _authorized_delivery_binding(self, request: ImessageDeliveryIdentity) -> dict[str, Any]:
+    async def _authorized_delivery_binding(
+        self, request: ImessageDeliveryIdentity
+    ) -> tuple[dict[str, Any], ImessageRuntimeAuthority]:
         await self._require_ready()
         binding = await self._binding(
             line_identity=request.line_identity,
@@ -402,9 +421,11 @@ class ImessageRuntimeService:
         )
         if not binding:
             raise ImessageRuntimeError("imessage_sender_not_authorized", status_code=403)
+        if int(binding["generation"]) != request.binding_generation:
+            raise ImessageRuntimeError("imessage_delivery_authority_changed", status_code=409)
         self._assert_live_connection(binding, request.connection_id)
-        await self._runtime(binding)
-        return binding
+        _, _, authority = await self._runtime(binding)
+        return binding, authority
 
     async def _binding(self, *, line_identity: str, contact_identity: str) -> Optional[dict[str, Any]]:
         try:
@@ -415,7 +436,9 @@ class ImessageRuntimeService:
         except ImessageRuntimeRepositoryError as exc:
             raise self._error(exc) from exc
 
-    async def _runtime(self, binding: dict[str, Any]) -> tuple[IsolatedRuntime, CloudRuntimeAuthorityIdentity]:
+    async def _runtime(
+        self, binding: dict[str, Any]
+    ) -> tuple[IsolatedRuntime, CloudRuntimeAuthorityIdentity, ImessageRuntimeAuthority]:
         runtime = await self.runtime_resolver(str(binding["omi_uid"]), target_mode="hermes-chat")
         if runtime is None:
             raise ImessageRuntimeError("imessage_runtime_unavailable", status_code=503, retryable=True)
@@ -423,7 +446,37 @@ class ImessageRuntimeService:
         identity = runtime_authority_identity(runtime)
         if not hmac.compare_digest(identity.digest, str(binding["runtime_authority_digest"])):
             raise ImessageRuntimeError("imessage_runtime_authority_changed", status_code=409)
-        return runtime, identity
+        return runtime, identity, self._authority(binding, runtime, identity)
+
+    @staticmethod
+    def _authority(
+        binding: dict[str, Any],
+        runtime: IsolatedRuntime,
+        identity: CloudRuntimeAuthorityIdentity,
+    ) -> ImessageRuntimeAuthority:
+        try:
+            target_updated_at = datetime.fromisoformat(runtime.runtime_target_updated_at.replace("Z", "+00:00"))
+            if target_updated_at.tzinfo is None or target_updated_at.utcoffset() is None:
+                raise ValueError("runtime target timestamp is naive")
+            authority = ImessageRuntimeAuthority(
+                uid=runtime.uid,
+                user_id=uuid.UUID(runtime.account_user_id),
+                profile_user_id=uuid.UUID(runtime.profile_user_id),
+                runtime_binding_id=uuid.UUID(runtime.binding_id),
+                runtime_target_id=uuid.UUID(runtime.runtime_target_id),
+                runtime_binding_revision=runtime.revision,
+                runtime_target_entitlement_revision=runtime.target_entitlement_revision,
+                runtime_target_updated_at=target_updated_at.astimezone(timezone.utc),
+                runtime_authority_digest=identity.digest,
+                runtime_agent_id=runtime.agent_id,
+                runtime_instance_id=runtime.runtime_instance_id or None,
+                runtime_profile_name=runtime.profile_name,
+            )
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ImessageRuntimeError("imessage_runtime_authority_invalid", status_code=409) from exc
+        if authority.user_id != binding["user_id"] or authority.profile_user_id != binding["user_id"]:
+            raise ImessageRuntimeError("imessage_runtime_authority_changed", status_code=409)
+        return authority
 
     @staticmethod
     def _assert_runtime_matches(binding: dict[str, Any], runtime: IsolatedRuntime) -> None:
@@ -449,6 +502,9 @@ class ImessageRuntimeService:
     async def _require_ready(self) -> None:
         if not imessage_runtime_enabled():
             raise ImessageRuntimeError("imessage_runtime_disabled", status_code=503)
+        await self._require_storage_ready()
+
+    async def _require_storage_ready(self) -> None:
         if len(self.hmac_key) < 32 or self.hmac_key != self.hmac_key.strip():
             raise ImessageRuntimeError("imessage_runtime_key_unavailable", status_code=503)
         try:
@@ -512,6 +568,7 @@ class ImessageRuntimeService:
             "status": str(receipt["status"]),
             "receipt_id": str(receipt["id"]),
             "delivery_idempotency_key": str(receipt["delivery_idempotency_key"]),
+            "binding_generation": int(receipt["binding_generation"]),
             "duplicate": duplicate,
             "model_invoked": bool(receipt.get("model_started")),
         }

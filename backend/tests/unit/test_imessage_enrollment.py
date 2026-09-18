@@ -651,7 +651,7 @@ def test_mounted_transport_proof_denies_before_service(monkeypatch, configured, 
         monkeypatch.setenv("ELLA_IMESSAGE_TRANSPORT_TOKEN", configured)
     service = RouteService()
     client = _route_client(service)
-    headers = {"X-Ella-Imessage-Transport": provided} if provided is not None else {}
+    headers = {"X-Ella-Imessage-Transport-Token": provided} if provided is not None else {}
 
     response = client.post(
         "/v1/ella/internal/imessage/proof",
@@ -677,7 +677,7 @@ def test_mounted_transport_proof_has_no_uid_selector(monkeypatch):
 
     response = client.post(
         "/v1/ella/internal/imessage/proof",
-        headers={"X-Ella-Imessage-Transport": TRANSPORT_TOKEN},
+        headers={"X-Ella-Imessage-Transport-Token": TRANSPORT_TOKEN},
         json={
             "uid": "owner-b",
             "assigned_destination": "+15555550100",
@@ -700,7 +700,7 @@ def test_mounted_transport_proof_accepts_configured_transport_without_owner_sele
 
     response = client.post(
         "/v1/ella/internal/imessage/proof",
-        headers={"X-Ella-Imessage-Transport": TRANSPORT_TOKEN},
+        headers={"X-Ella-Imessage-Transport-Token": TRANSPORT_TOKEN},
         json={
             "assigned_destination": "+15555550100",
             "handset_e164": "+15555550123",
@@ -752,7 +752,7 @@ def test_mounted_enrollment_surfaces_are_no_store_including_start_json_response(
         ),
         client.post(
             "/v1/ella/internal/imessage/proof",
-            headers={"X-Ella-Imessage-Transport": TRANSPORT_TOKEN},
+            headers={"X-Ella-Imessage-Transport-Token": TRANSPORT_TOKEN},
             json={
                 "assigned_destination": "+15555550100",
                 "handset_e164": "+15555550123",

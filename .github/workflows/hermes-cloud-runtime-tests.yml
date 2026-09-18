@@ -581,7 +581,7 @@ jobs:
               tests/postgres/test_imessage_enrollment_postgres.py |
               sed '/^$/d'
           )"
-          test "$(grep -c '::' <<<"$imessage_ids")" -eq 46
+          test "$(grep -c '::' <<<"$imessage_ids")" -eq 50
           required_imessage_ids=(
             "tests/unit/test_imessage_enrollment.py::test_previous_policy_consent_is_rejected_before_authority_write"
             "tests/unit/test_imessage_enrollment.py::test_start_persists_before_provider_and_revalidates_before_finalization"
@@ -594,7 +594,12 @@ jobs:
             "tests/unit/test_imessage_enrollment_openapi.py::test_all_literal_service_statuses_and_reasons_are_declared_in_openapi"
             "tests/unit/test_imessage_enrollment.py::test_mounted_transport_proof_denies_before_service[None-None-503]"
             "tests/unit/test_imessage_runtime.py::test_text_dm_claim_precedes_model_and_delivery_requires_send_start"
+            "tests/unit/test_imessage_runtime.py::test_unknown_sender_returns_status_only_without_model_write_or_replayable_reply"
             "tests/unit/test_imessage_runtime.py::test_model_error_after_send_boundary_is_quarantined_without_retry"
+            "tests/unit/test_imessage_runtime.py::test_deregister_feature_flag_defaults_off_before_repository_mutation"
+            "tests/unit/test_imessage_runtime.py::test_terminal_delivery_callbacks_use_started_receipt_without_current_authority"
+            "tests/unit/test_imessage_runtime.py::test_terminal_delivery_uncertain_works_with_runtime_flag_off_after_send_start"
+            "tests/unit/test_imessage_runtime.py::test_transport_private_successes_and_errors_are_no_store"
             "tests/unit/test_imessage_runtime.py::test_transport_routes_fail_closed_and_forbid_uid_selectors"
             "tests/unit/test_imessage_runtime_openapi.py::test_internal_runtime_contract_is_transport_only_and_has_no_owner_selector"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_migration_and_repository_enforce_consent_proof_replay_and_revoke"

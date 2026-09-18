@@ -16,7 +16,11 @@ from database.imessage_enrollment import (
     ImessageEnrollmentRepository,
     ImessageRuntimeSnapshot,
 )
-from database.imessage_runtime import ImessageRuntimeRepository, ImessageRuntimeRepositoryError
+from database.imessage_runtime import (
+    ImessageRuntimeAuthority,
+    ImessageRuntimeRepository,
+    ImessageRuntimeRepositoryError,
+)
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
 MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
@@ -272,6 +276,28 @@ async def _grant(repository, *, uid: str, ordinal: int):
             app_version="1.0",
             build_number="1",
         ),
+    )
+
+
+async def _runtime_authority(pool, *, uid: str, ordinal: int, runtime: ImessageRuntimeSnapshot):
+    async with pool.acquire() as connection:
+        target_updated_at = await connection.fetchval(
+            "SELECT updated_at FROM ella_runtime_targets WHERE id = $1",
+            runtime.target_id,
+        )
+    return ImessageRuntimeAuthority(
+        uid=uid,
+        user_id=runtime.account_user_id,
+        profile_user_id=runtime.profile_user_id,
+        runtime_binding_id=runtime.binding_id,
+        runtime_target_id=runtime.target_id,
+        runtime_binding_revision=runtime.binding_revision,
+        runtime_target_entitlement_revision=runtime.entitlement_revision,
+        runtime_target_updated_at=target_updated_at,
+        runtime_authority_digest=runtime.authority_digest,
+        runtime_agent_id=f"imessage-agent-{ordinal}",
+        runtime_instance_id=None,
+        runtime_profile_name=f"imessage-profile-{ordinal}",
     )
 
 
@@ -580,7 +606,7 @@ def test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners():
         await runtime_repository.assert_schema_ready()
 
         user_a, runtime_a = await _seed_owner(pool, uid="imessage-runtime-owner-a", ordinal=6)
-        _, runtime_b = await _seed_owner(pool, uid="imessage-runtime-owner-b", ordinal=7)
+        user_b, runtime_b = await _seed_owner(pool, uid="imessage-runtime-owner-b", ordinal=7)
         consent_a = await _grant(enrollment, uid="imessage-runtime-owner-a", ordinal=6)
         consent_b = await _grant(enrollment, uid="imessage-runtime-owner-b", ordinal=7)
         binding_a, code_a, destination_a = await _pending_binding(
@@ -628,6 +654,12 @@ def test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners():
             line_identity_hmac=line_a,
             contact_identity_hmac=contact_a,
         )
+        runtime_authority_a = await _runtime_authority(
+            pool,
+            uid="imessage-runtime-owner-a",
+            ordinal=6,
+            runtime=runtime_a,
+        )
         assert authority_a["omi_uid"] == "imessage-runtime-owner-a"
         assert (
             await runtime_repository.resolve_binding(
@@ -637,10 +669,30 @@ def test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners():
             is None
         )
         connection_key = hashlib.sha256(b"runtime-connection-a").hexdigest()
+        async with pool.acquire() as connection:
+            await connection.execute(
+                "UPDATE ella_runtime_bindings SET profile_user_id = $2 WHERE id = $1",
+                runtime_a.binding_id,
+                user_b,
+            )
+        with pytest.raises(ImessageRuntimeRepositoryError, match="imessage_transport_authority_changed"):
+            await runtime_repository.record_heartbeat(
+                binding_id=str(authority_a["id"]),
+                generation=int(authority_a["generation"]),
+                connection_ref_hmac=connection_key,
+                authority=runtime_authority_a,
+            )
+        async with pool.acquire() as connection:
+            await connection.execute(
+                "UPDATE ella_runtime_bindings SET profile_user_id = $2 WHERE id = $1",
+                runtime_a.binding_id,
+                user_a,
+            )
         await runtime_repository.record_heartbeat(
             binding_id=str(authority_a["id"]),
             generation=int(authority_a["generation"]),
             connection_ref_hmac=connection_key,
+            authority=runtime_authority_a,
         )
         authority_a = await runtime_repository.resolve_binding(
             line_identity_hmac=line_a,
@@ -659,6 +711,7 @@ def test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners():
                 message_text="content-free denied test",
                 occurred_at=datetime.now(timezone.utc),
                 lease_seconds=60,
+                authority=runtime_authority_a,
             )
         async with pool.acquire() as connection:
             assert (
@@ -672,6 +725,32 @@ def test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners():
                 "UPDATE ella_imessage_consent_authority SET decision = 'granted' WHERE user_id = $1",
                 user_a,
             )
+            await connection.execute(
+                "UPDATE ella_runtime_targets SET entitlement_revision = 5 WHERE id = $1",
+                runtime_a.target_id,
+            )
+        with pytest.raises(ImessageRuntimeRepositoryError, match="imessage_authority_changed"):
+            await runtime_repository.claim_message(
+                binding=authority_a,
+                inbound_provider_ref_hmac=hashlib.sha256(b"runtime-message-entitlement-drift").hexdigest(),
+                inbound_payload_sha256=hashlib.sha256(b"runtime-payload-entitlement-drift").hexdigest(),
+                message_text="content-free entitlement drift",
+                occurred_at=datetime.now(timezone.utc),
+                lease_seconds=60,
+                authority=runtime_authority_a,
+            )
+        async with pool.acquire() as connection:
+            assert (
+                await connection.fetchval(
+                    "SELECT COUNT(*) FROM ella_imessage_message_receipts WHERE user_id = $1",
+                    user_a,
+                )
+                == 0
+            )
+            await connection.execute(
+                "UPDATE ella_runtime_targets SET entitlement_revision = 4 WHERE id = $1",
+                runtime_a.target_id,
+            )
         receipt = await runtime_repository.claim_message(
             binding=authority_a,
             inbound_provider_ref_hmac=hashlib.sha256(b"runtime-message-a").hexdigest(),
@@ -679,6 +758,7 @@ def test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners():
             message_text="content-free runtime test",
             occurred_at=datetime.now(timezone.utc),
             lease_seconds=60,
+            authority=runtime_authority_a,
         )
         assert receipt["acquired"] is True
         async with pool.acquire() as connection:
@@ -690,6 +770,7 @@ def test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners():
             await runtime_repository.mark_model_started(
                 receipt_id=str(receipt["id"]),
                 lease_token=str(receipt["lease_token"]),
+                authority=runtime_authority_a,
             )
         async with pool.acquire() as connection:
             state = await connection.fetchrow(
@@ -701,9 +782,32 @@ def test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners():
                 "UPDATE ella_imessage_consent_authority SET decision = 'granted' WHERE user_id = $1",
                 user_a,
             )
+            await connection.execute(
+                "UPDATE ella_runtime_bindings SET account_user_id = $2 WHERE id = $1",
+                runtime_a.binding_id,
+                user_b,
+            )
+        with pytest.raises(ImessageRuntimeRepositoryError, match="imessage_message_claim_conflict"):
+            await runtime_repository.mark_model_started(
+                receipt_id=str(receipt["id"]),
+                lease_token=str(receipt["lease_token"]),
+                authority=runtime_authority_a,
+            )
+        async with pool.acquire() as connection:
+            state = await connection.fetchrow(
+                "SELECT status, model_started FROM ella_imessage_message_receipts WHERE id = $1",
+                receipt["id"],
+            )
+            assert dict(state) == {"status": "claimed", "model_started": False}
+            await connection.execute(
+                "UPDATE ella_runtime_bindings SET account_user_id = $2 WHERE id = $1",
+                runtime_a.binding_id,
+                user_a,
+            )
         await runtime_repository.mark_model_started(
             receipt_id=str(receipt["id"]),
             lease_token=str(receipt["lease_token"]),
+            authority=runtime_authority_a,
         )
         completed = await runtime_repository.complete_model(
             receipt_id=str(receipt["id"]),
@@ -711,16 +815,42 @@ def test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners():
             canonical_inbound_event_id="imessage:test:user",
             canonical_outbound_event_id="imessage:test:assistant",
             outbound_text="content-free reply",
-            runtime_revision=3,
-            runtime_agent_id="imessage-agent-6",
+            authority=runtime_authority_a,
         )
         assert completed["status"] == "awaiting_delivery"
+        async with pool.acquire() as connection:
+            await connection.execute(
+                "UPDATE ella_runtime_targets SET entitlement_revision = 5 WHERE id = $1",
+                runtime_a.target_id,
+            )
+        with pytest.raises(ImessageRuntimeRepositoryError, match="imessage_delivery_authority_changed"):
+            await runtime_repository.start_delivery(
+                receipt_id=str(receipt["id"]),
+                delivery_idempotency_key=str(receipt["delivery_idempotency_key"]),
+                binding_id=str(binding_a["id"]),
+                generation=int(binding_a["generation"]),
+                connection_ref_hmac=connection_key,
+                authority=runtime_authority_a,
+            )
+        async with pool.acquire() as connection:
+            assert (
+                await connection.fetchval(
+                    "SELECT status FROM ella_imessage_message_receipts WHERE id = $1",
+                    receipt["id"],
+                )
+                == "awaiting_delivery"
+            )
+            await connection.execute(
+                "UPDATE ella_runtime_targets SET entitlement_revision = 4 WHERE id = $1",
+                runtime_a.target_id,
+            )
         started = await runtime_repository.start_delivery(
             receipt_id=str(receipt["id"]),
             delivery_idempotency_key=str(receipt["delivery_idempotency_key"]),
             binding_id=str(binding_a["id"]),
             generation=int(binding_a["generation"]),
             connection_ref_hmac=connection_key,
+            authority=runtime_authority_a,
         )
         assert started["status"] == "sending"
         with pytest.raises(ImessageRuntimeRepositoryError, match="imessage_delivery_outcome_uncertain"):
@@ -730,23 +860,118 @@ def test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners():
                 binding_id=str(binding_a["id"]),
                 generation=int(binding_a["generation"]),
                 connection_ref_hmac=connection_key,
+                authority=runtime_authority_a,
+            )
+        async with pool.acquire() as connection:
+            await connection.execute(
+                "UPDATE ella_imessage_consent_authority SET decision = 'revoked' WHERE user_id = $1",
+                user_a,
+            )
+            await connection.execute(
+                "UPDATE ella_runtime_bindings SET account_user_id = $2 WHERE id = $1",
+                runtime_a.binding_id,
+                user_b,
             )
         outbound_ref = hashlib.sha256(b"runtime-outbound-a").hexdigest()
         delivered = await runtime_repository.acknowledge_delivery(
             receipt_id=str(receipt["id"]),
             delivery_idempotency_key=str(receipt["delivery_idempotency_key"]),
             outbound_provider_ref_hmac=outbound_ref,
-            binding_id=str(binding_a["id"]),
-            generation=int(binding_a["generation"]),
+            binding_generation=int(binding_a["generation"]),
+            line_identity_hmac=line_a,
+            contact_identity_hmac=contact_a,
+            connection_ref_hmac=connection_key,
         )
         duplicate_ack = await runtime_repository.acknowledge_delivery(
             receipt_id=str(receipt["id"]),
             delivery_idempotency_key=str(receipt["delivery_idempotency_key"]),
             outbound_provider_ref_hmac=outbound_ref,
-            binding_id=str(binding_a["id"]),
-            generation=int(binding_a["generation"]),
+            binding_generation=int(binding_a["generation"]),
+            line_identity_hmac=line_a,
+            contact_identity_hmac=contact_a,
+            connection_ref_hmac=connection_key,
         )
         assert delivered["status"] == duplicate_ack["status"] == "delivered"
+        async with pool.acquire() as connection:
+            await connection.execute(
+                "UPDATE ella_imessage_consent_authority SET decision = 'granted' WHERE user_id = $1",
+                user_a,
+            )
+            await connection.execute(
+                "UPDATE ella_runtime_bindings SET account_user_id = $2 WHERE id = $1",
+                runtime_a.binding_id,
+                user_a,
+            )
+
+        uncertain_delivery = await runtime_repository.claim_message(
+            binding=authority_a,
+            inbound_provider_ref_hmac=hashlib.sha256(b"runtime-message-delivery-uncertain").hexdigest(),
+            inbound_payload_sha256=hashlib.sha256(b"runtime-payload-delivery-uncertain").hexdigest(),
+            message_text="content-free uncertain delivery test",
+            occurred_at=datetime.now(timezone.utc),
+            lease_seconds=60,
+            authority=runtime_authority_a,
+        )
+        await runtime_repository.mark_model_started(
+            receipt_id=str(uncertain_delivery["id"]),
+            lease_token=str(uncertain_delivery["lease_token"]),
+            authority=runtime_authority_a,
+        )
+        uncertain_delivery = await runtime_repository.complete_model(
+            receipt_id=str(uncertain_delivery["id"]),
+            lease_token=str(uncertain_delivery["lease_token"]),
+            canonical_inbound_event_id="imessage:test:uncertain:user",
+            canonical_outbound_event_id="imessage:test:uncertain:assistant",
+            outbound_text="content-free uncertain reply",
+            authority=runtime_authority_a,
+        )
+        await runtime_repository.start_delivery(
+            receipt_id=str(uncertain_delivery["id"]),
+            delivery_idempotency_key=str(uncertain_delivery["delivery_idempotency_key"]),
+            binding_id=str(binding_a["id"]),
+            generation=int(binding_a["generation"]),
+            connection_ref_hmac=connection_key,
+            authority=runtime_authority_a,
+        )
+        async with pool.acquire() as connection:
+            await connection.execute(
+                "UPDATE ella_imessage_consent_authority SET decision = 'revoked' WHERE user_id = $1",
+                user_a,
+            )
+            await connection.execute(
+                "UPDATE ella_runtime_bindings SET profile_user_id = $2 WHERE id = $1",
+                runtime_a.binding_id,
+                user_b,
+            )
+        uncertain = await runtime_repository.mark_delivery_uncertain(
+            receipt_id=str(uncertain_delivery["id"]),
+            delivery_idempotency_key=str(uncertain_delivery["delivery_idempotency_key"]),
+            binding_generation=int(binding_a["generation"]),
+            line_identity_hmac=line_a,
+            contact_identity_hmac=contact_a,
+            connection_ref_hmac=connection_key,
+            error_code="provider_outcome_unconfirmed",
+        )
+        duplicate_uncertain = await runtime_repository.mark_delivery_uncertain(
+            receipt_id=str(uncertain_delivery["id"]),
+            delivery_idempotency_key=str(uncertain_delivery["delivery_idempotency_key"]),
+            binding_generation=int(binding_a["generation"]),
+            line_identity_hmac=line_a,
+            contact_identity_hmac=contact_a,
+            connection_ref_hmac=connection_key,
+            error_code="provider_outcome_unconfirmed",
+        )
+        assert uncertain["status"] == duplicate_uncertain["status"] == "uncertain"
+        async with pool.acquire() as connection:
+            await connection.execute(
+                "UPDATE ella_imessage_consent_authority SET decision = 'granted' WHERE user_id = $1",
+                user_a,
+            )
+            await connection.execute(
+                "UPDATE ella_runtime_bindings SET profile_user_id = $2 WHERE id = $1",
+                runtime_a.binding_id,
+                user_a,
+            )
 
         stale = await runtime_repository.claim_message(
             binding=authority_a,
@@ -755,10 +980,12 @@ def test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners():
             message_text="content-free stale test",
             occurred_at=datetime.now(timezone.utc),
             lease_seconds=60,
+            authority=runtime_authority_a,
         )
         await runtime_repository.mark_model_started(
             receipt_id=str(stale["id"]),
             lease_token=str(stale["lease_token"]),
+            authority=runtime_authority_a,
         )
         async with pool.acquire() as connection:
             await connection.execute(
@@ -772,6 +999,7 @@ def test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners():
             message_text="content-free stale test",
             occurred_at=datetime.now(timezone.utc),
             lease_seconds=60,
+            authority=runtime_authority_a,
         )
         assert replay["status"] == "uncertain"
         assert replay["acquired"] is False
@@ -806,7 +1034,7 @@ def test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners():
                 GROUP BY user_id
                 """
             )
-        assert {row["user_id"]: int(row["count"]) for row in owner_counts} == {user_a: 2}
+        assert {row["user_id"]: int(row["count"]) for row in owner_counts} == {user_a: 3}
 
     asyncio.run(_run_with_database(scenario))
 

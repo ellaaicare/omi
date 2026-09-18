@@ -50,6 +50,11 @@ CREATE TABLE ella_imessage_message_receipts (
     runtime_agent_id TEXT,
     model_started BOOLEAN NOT NULL DEFAULT false,
     send_started BOOLEAN NOT NULL DEFAULT false,
+    send_connection_ref_hmac CHAR(64) COLLATE "C"
+        CHECK (
+            send_connection_ref_hmac IS NULL
+            OR send_connection_ref_hmac ~ '^[0-9a-f]{64}$'
+        ),
     outbound_provider_ref_hmac CHAR(64) COLLATE "C"
         CHECK (
             outbound_provider_ref_hmac IS NULL
@@ -78,7 +83,11 @@ CREATE TABLE ella_imessage_message_receipts (
         OR status NOT IN ('awaiting_delivery', 'sending', 'delivered')
     ),
     CONSTRAINT ella_imessage_message_receipts_send_shape CHECK (
-        (status = 'sending' AND send_started)
+        (
+            status = 'sending'
+            AND send_started
+            AND send_connection_ref_hmac IS NOT NULL
+        )
         OR status <> 'sending'
     ),
     UNIQUE (binding_id, inbound_provider_ref_hmac),

@@ -37,6 +37,7 @@ def test_internal_runtime_contract_is_transport_only_and_has_no_owner_selector()
     contract = _contract()
 
     assert contract["x-ella-contract-id"] == "ella.imessage_runtime_transport.v1"
+    assert contract["x-ella-cache-policy"] == "no-store"
     assert contract["x-ella-authority"] == {
         "owner-source": "server-binding",
         "runtime-mode": "hermes-chat",
@@ -77,10 +78,13 @@ def test_internal_runtime_contract_separates_model_claim_from_fenced_delivery():
 
     assert "text" not in schemas["InboundResult"]["required"]
     assert "text" not in schemas["InboundResult"]["properties"]
+    assert "fixed_reply" not in schemas["InboundResult"]["properties"]
+    assert "binding_generation" in schemas["DeliveryIdentity"]["required"]
     assert schemas["DeliveryStartResult"]["required"] == [
         "status",
         "receipt_id",
         "delivery_idempotency_key",
+        "binding_generation",
         "text",
     ]
     assert schemas["DeliveryStartResult"]["properties"]["status"] == {"const": "sending"}

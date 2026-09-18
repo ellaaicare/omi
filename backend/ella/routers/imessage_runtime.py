@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime
 from typing import Awaitable, Callable, Optional
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from database.honcho_attestation import authority_credential
@@ -17,6 +17,8 @@ from ella.services.imessage_runtime import (
     ImessageRuntimeError,
     ImessageRuntimeService,
 )
+
+NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 
 
 class StrictTransportModel(BaseModel):
@@ -40,6 +42,7 @@ class InboundMessageIn(TransportIdentityIn):
 class DeliveryIdentityIn(TransportIdentityIn):
     receipt_id: uuid.UUID
     delivery_idempotency_key: uuid.UUID
+    binding_generation: int = Field(ge=1)
 
 
 class DeliveryAckIn(DeliveryIdentityIn):
@@ -53,16 +56,29 @@ class DeliveryUncertainIn(DeliveryIdentityIn):
 def _require_transport(presented: Optional[str]) -> None:
     expected = authority_credential("ELLA_IMESSAGE_TRANSPORT_TOKEN", strip=False) or ""
     if len(expected) < 32 or expected != expected.strip():
-        raise HTTPException(status_code=503, detail={"code": "imessage_transport_auth_not_configured"})
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "imessage_transport_auth_not_configured"},
+            headers=NO_STORE_HEADERS,
+        )
     if not presented or presented != presented.strip() or not hmac.compare_digest(presented, expected):
-        raise HTTPException(status_code=401, detail={"code": "invalid_imessage_transport_token"})
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "invalid_imessage_transport_token"},
+            headers=NO_STORE_HEADERS,
+        )
 
 
 def _http_error(exc: ImessageRuntimeError) -> HTTPException:
     return HTTPException(
         status_code=exc.status_code,
         detail={"code": exc.code, "retryable": exc.retryable},
+        headers=NO_STORE_HEADERS,
     )
+
+
+def _mark_no_store(response: Response) -> None:
+    response.headers.update(NO_STORE_HEADERS)
 
 
 def create_imessage_runtime_router(
@@ -80,14 +96,17 @@ def create_imessage_runtime_router(
             connection_id=payload.connection_id,
             receipt_id=str(payload.receipt_id),
             delivery_idempotency_key=str(payload.delivery_idempotency_key),
+            binding_generation=payload.binding_generation,
         )
 
     @router.post("/heartbeat")
     async def heartbeat(
         payload: TransportIdentityIn,
+        response: Response,
         token: Optional[str] = Header(default=None, alias="X-Ella-Imessage-Transport-Token"),
     ) -> dict:
         _require_transport(token)
+        _mark_no_store(response)
         try:
             return await (await service()).heartbeat(**payload.model_dump())
         except ImessageRuntimeError as exc:
@@ -96,9 +115,11 @@ def create_imessage_runtime_router(
     @router.post("/inbound")
     async def inbound(
         payload: InboundMessageIn,
+        response: Response,
         token: Optional[str] = Header(default=None, alias="X-Ella-Imessage-Transport-Token"),
     ) -> dict:
         _require_transport(token)
+        _mark_no_store(response)
         try:
             return await (await service()).ingest(ImessageInbound(**payload.model_dump()))
         except ImessageRuntimeError as exc:
@@ -107,9 +128,11 @@ def create_imessage_runtime_router(
     @router.post("/delivery/start")
     async def delivery_start(
         payload: DeliveryIdentityIn,
+        response: Response,
         token: Optional[str] = Header(default=None, alias="X-Ella-Imessage-Transport-Token"),
     ) -> dict:
         _require_transport(token)
+        _mark_no_store(response)
         try:
             return await (await service()).start_delivery(identity(payload))
         except ImessageRuntimeError as exc:
@@ -118,9 +141,11 @@ def create_imessage_runtime_router(
     @router.post("/delivery/ack")
     async def delivery_ack(
         payload: DeliveryAckIn,
+        response: Response,
         token: Optional[str] = Header(default=None, alias="X-Ella-Imessage-Transport-Token"),
     ) -> dict:
         _require_transport(token)
+        _mark_no_store(response)
         try:
             return await (await service()).acknowledge_delivery(
                 identity(payload),
@@ -132,9 +157,11 @@ def create_imessage_runtime_router(
     @router.post("/delivery/uncertain")
     async def delivery_uncertain(
         payload: DeliveryUncertainIn,
+        response: Response,
         token: Optional[str] = Header(default=None, alias="X-Ella-Imessage-Transport-Token"),
     ) -> dict:
         _require_transport(token)
+        _mark_no_store(response)
         try:
             return await (await service()).mark_delivery_uncertain(
                 identity(payload),
@@ -146,9 +173,11 @@ def create_imessage_runtime_router(
     @router.post("/deregister")
     async def deregister(
         payload: TransportIdentityIn,
+        response: Response,
         token: Optional[str] = Header(default=None, alias="X-Ella-Imessage-Transport-Token"),
     ) -> dict:
         _require_transport(token)
+        _mark_no_store(response)
         try:
             return await (await service()).deregister(**payload.model_dump())
         except ImessageRuntimeError as exc:

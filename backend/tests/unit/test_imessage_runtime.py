@@ -9,7 +9,6 @@ from fastapi.testclient import TestClient
 from ella.routers.canonical_events import InMemoryCanonicalEventStore
 from ella.routers.imessage_runtime import create_imessage_runtime_router
 from ella.services.imessage_runtime import (
-    UNKNOWN_SENDER_REPLY,
     ImessageDeliveryIdentity,
     ImessageInbound,
     ImessageRuntimeError,
@@ -95,6 +94,7 @@ class FakeRepository:
             "id": RECEIPT_ID,
             "status": "claimed",
             "delivery_idempotency_key": DELIVERY_KEY,
+            "binding_generation": 3,
             "lease_token": LEASE_TOKEN,
             "model_started": False,
             "outbound_text": None,
@@ -213,6 +213,7 @@ def _delivery() -> ImessageDeliveryIdentity:
         connection_id="connection-a",
         receipt_id=str(RECEIPT_ID),
         delivery_idempotency_key=str(DELIVERY_KEY),
+        binding_generation=3,
     )
 
 
@@ -229,7 +230,7 @@ def test_feature_flag_defaults_off_before_repository_or_model(monkeypatch):
     assert client.calls == 0
 
 
-def test_unknown_sender_returns_fixed_help_without_model_or_write(monkeypatch):
+def test_unknown_sender_returns_status_only_without_model_write_or_replayable_reply(monkeypatch):
     monkeypatch.setenv("ELLA_IMESSAGE_RUNTIME_ENABLED", "true")
     repository = FakeRepository(None)
     client = FakeCompletionClient(repository.events)
@@ -239,7 +240,6 @@ def test_unknown_sender_returns_fixed_help_without_model_or_write(monkeypatch):
     assert result == {
         "status": "unknown_sender",
         "model_invoked": False,
-        "fixed_reply": UNKNOWN_SENDER_REPLY,
     }
     assert [event[0] for event in repository.events] == ["schema", "resolve"]
     assert client.calls == 0
@@ -273,6 +273,7 @@ def test_text_dm_claim_precedes_model_and_delivery_requires_send_start(monkeypat
         "status": "sending",
         "receipt_id": str(RECEIPT_ID),
         "delivery_idempotency_key": str(DELIVERY_KEY),
+        "binding_generation": 3,
         "text": "A concise reply",
     }
     acknowledged = asyncio.run(
@@ -393,6 +394,7 @@ def test_transport_routes_fail_closed_and_forbid_uid_selectors(monkeypatch):
             **payload,
             "receipt_id": "not-a-uuid",
             "delivery_idempotency_key": str(DELIVERY_KEY),
+            "binding_generation": 3,
         },
         headers={"X-Ella-Imessage-Transport-Token": TRANSPORT_TOKEN},
     )
@@ -405,4 +407,111 @@ def test_transport_routes_fail_closed_and_forbid_uid_selectors(monkeypatch):
         headers={"X-Ella-Imessage-Transport-Token": TRANSPORT_TOKEN},
     )
     assert allowed.status_code == 200
+    assert allowed.headers["cache-control"] == "no-store"
     assert calls == [payload]
+
+
+def test_deregister_feature_flag_defaults_off_before_repository_mutation(monkeypatch):
+    monkeypatch.delenv("ELLA_IMESSAGE_RUNTIME_ENABLED", raising=False)
+    runtime = _runtime()
+    repository = FakeRepository(_binding(runtime))
+    client = FakeCompletionClient(repository.events)
+
+    with pytest.raises(ImessageRuntimeError, match="imessage_runtime_disabled"):
+        asyncio.run(
+            _service(repository, client, runtime).deregister(
+                line_identity="line-a",
+                contact_identity="contact-a",
+                connection_id="connection-a",
+            )
+        )
+
+    assert repository.events == []
+
+
+def test_terminal_delivery_callbacks_use_started_receipt_without_current_authority(monkeypatch):
+    monkeypatch.setenv("ELLA_IMESSAGE_RUNTIME_ENABLED", "true")
+    runtime = _runtime()
+    repository = FakeRepository(_binding(runtime))
+    client = FakeCompletionClient(repository.events)
+    service = _service(repository, client, runtime)
+    asyncio.run(service.heartbeat(line_identity="line-a", contact_identity="contact-a", connection_id="connection-a"))
+    asyncio.run(service.ingest(_inbound()))
+    asyncio.run(service.start_delivery(_delivery()))
+
+    repository.binding = None
+    before = len(repository.events)
+    acknowledged = asyncio.run(
+        service.acknowledge_delivery(_delivery(), outbound_provider_message_id="outbound-message-a")
+    )
+
+    assert acknowledged == {"status": "delivered", "receipt_id": str(RECEIPT_ID)}
+    terminal_events = repository.events[before:]
+    assert [name for name, _ in terminal_events] == ["schema", "delivery_ack"]
+    assert "binding_id" not in terminal_events[-1][1]
+    assert "line_identity_hmac" in terminal_events[-1][1]
+    assert "connection_ref_hmac" in terminal_events[-1][1]
+
+
+def test_terminal_delivery_uncertain_works_with_runtime_flag_off_after_send_start(monkeypatch):
+    monkeypatch.setenv("ELLA_IMESSAGE_RUNTIME_ENABLED", "true")
+    runtime = _runtime()
+    repository = FakeRepository(_binding(runtime))
+    service = _service(repository, FakeCompletionClient(repository.events), runtime)
+    asyncio.run(service.heartbeat(line_identity="line-a", contact_identity="contact-a", connection_id="connection-a"))
+    asyncio.run(service.ingest(_inbound()))
+    asyncio.run(service.start_delivery(_delivery()))
+
+    monkeypatch.setenv("ELLA_IMESSAGE_RUNTIME_ENABLED", "false")
+    result = asyncio.run(service.mark_delivery_uncertain(_delivery(), error_code="provider_outcome_unconfirmed"))
+
+    assert result == {"status": "uncertain", "receipt_id": str(RECEIPT_ID), "retryable": False}
+    assert repository.events[-2][0] == "schema"
+    assert repository.events[-1][0] == "delivery_uncertain"
+
+
+def test_transport_private_successes_and_errors_are_no_store(monkeypatch):
+    calls = []
+
+    class RouteService:
+        async def heartbeat(self, **kwargs):
+            calls.append(kwargs)
+            return {"status": "ready"}
+
+        async def start_delivery(self, _identity):
+            raise ImessageRuntimeError("imessage_delivery_not_ready", status_code=409)
+
+    async def factory():
+        return RouteService()
+
+    monkeypatch.setenv("ELLA_IMESSAGE_TRANSPORT_TOKEN", TRANSPORT_TOKEN)
+    app = FastAPI()
+    app.include_router(create_imessage_runtime_router(factory))
+    client = TestClient(app)
+    identity = {
+        "line_identity": "line-a",
+        "contact_identity": "contact-a",
+        "connection_id": "connection-a",
+    }
+
+    success = client.post(
+        "/v1/ella/internal/imessage/heartbeat",
+        json=identity,
+        headers={"X-Ella-Imessage-Transport-Token": TRANSPORT_TOKEN},
+    )
+    error = client.post(
+        "/v1/ella/internal/imessage/delivery/start",
+        json={
+            **identity,
+            "receipt_id": str(RECEIPT_ID),
+            "delivery_idempotency_key": str(DELIVERY_KEY),
+            "binding_generation": 3,
+        },
+        headers={"X-Ella-Imessage-Transport-Token": TRANSPORT_TOKEN},
+    )
+    unauthenticated = client.post("/v1/ella/internal/imessage/heartbeat", json=identity)
+
+    assert success.status_code == 200
+    assert error.status_code == 409
+    assert unauthenticated.status_code == 401
+    assert {response.headers.get("cache-control") for response in (success, error, unauthenticated)} == {"no-store"}
