@@ -18,6 +18,7 @@ on:
       - "backend/database/ella_postgres.py"
       - "backend/database/honcho_attestation.py"
       - "backend/database/hermes_cloud_enrichment_outbox.py"
+      - "backend/database/imessage_enrollment.py"
       - "backend/database/invitations.py"
       - "backend/database/managed_cloud_consent.py"
       - "backend/database/runtime_targets.py"
@@ -41,6 +42,7 @@ on:
       - "backend/ella/routers/observer.py"
       - "backend/ella/routers/plato_mcp.py"
       - "backend/ella/routers/photon.py"
+      - "backend/ella/routers/imessage_enrollment.py"
       - "backend/ella/routers/resolve.py"
       - "backend/ella/routers/trace.py"
       - "backend/ella/routers/voice.py"
@@ -60,6 +62,7 @@ on:
       - "backend/ella/services/observer_extractor.py"
       - "backend/ella/services/hermes_cloud_photon.py"
       - "backend/ella/services/hermes_cloud_runtime.py"
+      - "backend/ella/services/imessage_enrollment.py"
       - "backend/ella/services/provisioning.py"
       - "backend/ella/services/runtime_errors.py"
       - "backend/ella/services/runtime_resolver.py"
@@ -78,6 +81,7 @@ on:
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
       - "backend/migrations/016_create_today_cards.sql"
+      - "backend/migrations/020_create_imessage_enrollment_authority.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
@@ -97,6 +101,8 @@ on:
       - "backend/ella/docs/HERMES_PRODUCT_FIT_CANARY.md"
       - "backend/ella/docs/UNIFIED_MEMORY_CONTEXT.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
+      - "backend/ella/docs/imessage-enrollment.openapi.yaml"
+      - "backend/ella/docs/IMESSAGE_SELF_HOSTED_OPERATIONS.md"
       - "backend/tests/fixtures/hermes_product_fit_callback_v1.json"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
       - "backend/tests/unit/test_authority_advisory_lock.py"
@@ -106,6 +112,7 @@ on:
       - "backend/tests/postgres/test_authority_advisory_lock_postgres.py"
       - "backend/tests/postgres/test_invitation_redemption_postgres.py"
       - "backend/tests/postgres/test_runtime_migration_atomicity_postgres.py"
+      - "backend/tests/postgres/test_imessage_enrollment_postgres.py"
       - "backend/tests/fixtures/hermes_binding_envelope_v1.json"
       - "backend/tests/fixtures/hermes_binding_envelope_v1.schema.json"
       - "backend/tests/unit/test_hermes_binding_envelope_contract.py"
@@ -113,6 +120,8 @@ on:
       - "backend/tests/unit/test_ella_ai_consent.py"
       - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
       - "backend/tests/unit/test_ella_runtime_route_isolation.py"
+      - "backend/tests/unit/test_imessage_enrollment.py"
+      - "backend/tests/unit/test_imessage_enrollment_openapi.py"
       - "backend/tests/unit/test_hermes_cloud_*.py"
       - "backend/tests/unit/test_ella_postprocess_cloud_routing.py"
       - "backend/tests/unit/test_voice_proxy_auth.py"
@@ -159,6 +168,7 @@ on:
       - "backend/database/ella_postgres.py"
       - "backend/database/honcho_attestation.py"
       - "backend/database/hermes_cloud_enrichment_outbox.py"
+      - "backend/database/imessage_enrollment.py"
       - "backend/database/invitations.py"
       - "backend/database/managed_cloud_consent.py"
       - "backend/database/runtime_targets.py"
@@ -182,6 +192,7 @@ on:
       - "backend/ella/routers/observer.py"
       - "backend/ella/routers/plato_mcp.py"
       - "backend/ella/routers/photon.py"
+      - "backend/ella/routers/imessage_enrollment.py"
       - "backend/ella/routers/resolve.py"
       - "backend/ella/routers/trace.py"
       - "backend/ella/routers/voice.py"
@@ -201,6 +212,7 @@ on:
       - "backend/ella/services/observer_extractor.py"
       - "backend/ella/services/hermes_cloud_photon.py"
       - "backend/ella/services/hermes_cloud_runtime.py"
+      - "backend/ella/services/imessage_enrollment.py"
       - "backend/ella/services/provisioning.py"
       - "backend/ella/services/runtime_errors.py"
       - "backend/ella/services/runtime_resolver.py"
@@ -219,6 +231,7 @@ on:
       - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
       - "backend/migrations/016_create_today_cards.sql"
+      - "backend/migrations/020_create_imessage_enrollment_authority.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
@@ -238,6 +251,8 @@ on:
       - "backend/ella/docs/HERMES_PRODUCT_FIT_CANARY.md"
       - "backend/ella/docs/UNIFIED_MEMORY_CONTEXT.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
+      - "backend/ella/docs/imessage-enrollment.openapi.yaml"
+      - "backend/ella/docs/IMESSAGE_SELF_HOSTED_OPERATIONS.md"
       - "backend/tests/fixtures/hermes_product_fit_callback_v1.json"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
       - "backend/tests/unit/test_authority_advisory_lock.py"
@@ -247,6 +262,7 @@ on:
       - "backend/tests/postgres/test_authority_advisory_lock_postgres.py"
       - "backend/tests/postgres/test_invitation_redemption_postgres.py"
       - "backend/tests/postgres/test_runtime_migration_atomicity_postgres.py"
+      - "backend/tests/postgres/test_imessage_enrollment_postgres.py"
       - "backend/tests/fixtures/hermes_binding_envelope_v1.json"
       - "backend/tests/fixtures/hermes_binding_envelope_v1.schema.json"
       - "backend/tests/unit/test_hermes_binding_envelope_contract.py"
@@ -254,6 +270,8 @@ on:
       - "backend/tests/unit/test_ella_ai_consent.py"
       - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
       - "backend/tests/unit/test_ella_runtime_route_isolation.py"
+      - "backend/tests/unit/test_imessage_enrollment.py"
+      - "backend/tests/unit/test_imessage_enrollment_openapi.py"
       - "backend/tests/unit/test_hermes_cloud_*.py"
       - "backend/tests/unit/test_ella_postprocess_cloud_routing.py"
       - "backend/tests/unit/test_voice_proxy_auth.py"
@@ -346,6 +364,7 @@ jobs:
           database/ella_postgres.py
           database/honcho_attestation.py
           database/hermes_cloud_enrichment_outbox.py
+          database/imessage_enrollment.py
           database/invitations.py
           database/managed_cloud_consent.py
           database/runtime_targets.py
@@ -371,6 +390,7 @@ jobs:
           ella/routers/onboarding.py
           ella/routers/observer.py
           ella/routers/plato_mcp.py
+          ella/routers/imessage_enrollment.py
           ella/routers/resolve.py
           ella/routers/settings.py
           ella/routers/trace.py
@@ -391,6 +411,7 @@ jobs:
           ella/services/memory_reinterpretation.py
           ella/services/observer_extractor.py
           ella/services/hermes_cloud_runtime.py
+          ella/services/imessage_enrollment.py
           ella/routers/photon.py
           ella/services/provisioning.py
           ella/services/runtime_errors.py
@@ -426,6 +447,7 @@ jobs:
           black --check --line-length 120 --skip-string-normalization
           database/authority_advisory_lock.py
           database/ella_caregivers.py
+          database/imessage_enrollment.py
           database/ella_provisioning.py database/honcho_attestation.py database/invitations.py
           database/ella_postgres.py
           database/managed_cloud_consent.py
@@ -440,6 +462,7 @@ jobs:
           ella/routers/debug_metadata.py ella/routers/escalations.py
           ella/routers/guardian.py ella/routers/hermes_cloud_enrichment.py ella/routers/invites.py
           ella/routers/memory_reinterpretation.py ella/routers/observer.py ella/routers/photon.py
+          ella/routers/imessage_enrollment.py
           ella/routers/onboarding.py ella/routers/plato_mcp.py ella/routers/resolve.py
           ella/routers/settings.py ella/routers/trace.py
           ella/services/hermes_cloud_policy.py
@@ -448,6 +471,7 @@ jobs:
           ella/services/hermes_cloud.py ella/services/hermes_cloud_enrichment.py
           ella/services/hermes_cloud_staged_attestation.py
           ella/services/hermes_cloud_runtime.py
+          ella/services/imessage_enrollment.py
           ella/services/consent_authority.py ella/services/invitation_authority.py
           ella/services/correction_honcho_contract.py
           ella/services/memory_reinterpretation.py
@@ -482,6 +506,8 @@ jobs:
           tests/unit/test_ella_guardian_delivery.py
           tests/unit/test_ella_reviewed_route_integration.py
           tests/unit/test_ella_runtime_route_isolation.py
+          tests/unit/test_imessage_enrollment.py
+          tests/unit/test_imessage_enrollment_openapi.py
           tests/unit/test_ella_scanner_batching.py
           tests/unit/test_ella_listen_runtime_gate.py
           tests/unit/test_ella_observer.py tests/unit/test_invitation_redemption.py
@@ -513,12 +539,51 @@ jobs:
           tests/postgres/test_authority_advisory_lock_postgres.py
           tests/postgres/test_invitation_redemption_postgres.py
           tests/postgres/test_runtime_migration_atomicity_postgres.py
+          tests/postgres/test_imessage_enrollment_postgres.py
           &&
           black --check --line-length 120 --skip-string-normalization
           --line-ranges 900-925 --line-ranges 1210-1225 --line-ranges 1555-1585
           ella/routers/voice.py
           &&
-          python -c "import yaml; from openapi_spec_validator import validate; validate(yaml.safe_load(open('ella/docs/hermes-cloud-runtime-targets.openapi.yaml', encoding='utf-8')))"
+          python -c "import yaml; from openapi_spec_validator import validate; validate(yaml.safe_load(open('ella/docs/hermes-cloud-runtime-targets.openapi.yaml', encoding='utf-8'))); validate(yaml.safe_load(open('ella/docs/imessage-enrollment.openapi.yaml', encoding='utf-8')))"
+
+      - name: Run self-hosted iMessage enrollment authority
+        run: |
+          set -euo pipefail
+          imessage_ids="$(
+            pytest --collect-only -q \
+              tests/unit/test_imessage_enrollment.py \
+              tests/unit/test_imessage_enrollment_openapi.py \
+              tests/postgres/test_imessage_enrollment_postgres.py |
+              sed '/^$/d'
+          )"
+          test "$(grep -c '::' <<<"$imessage_ids")" -eq 36
+          required_imessage_ids=(
+            "tests/unit/test_imessage_enrollment.py::test_previous_policy_consent_is_rejected_before_authority_write"
+            "tests/unit/test_imessage_enrollment.py::test_start_persists_before_provider_and_revalidates_before_finalization"
+            "tests/unit/test_imessage_enrollment.py::test_provider_accepted_retry_skips_second_external_registration"
+            "tests/unit/test_imessage_enrollment.py::test_ambiguous_provider_result_is_durable_and_never_finalized"
+            "tests/unit/test_imessage_enrollment.py::test_provider_accepted_finalization_drift_is_quarantined_without_repeat_registration"
+            "tests/unit/test_imessage_enrollment.py::test_status_atomically_retires_expired_pending_challenge"
+            "tests/unit/test_imessage_enrollment.py::test_finalized_retry_retires_expired_proof_instead_of_reissuing"
+            "tests/unit/test_imessage_enrollment.py::test_mounted_enrollment_surfaces_are_no_store_including_start_json_response"
+            "tests/unit/test_imessage_enrollment_openapi.py::test_all_literal_service_statuses_and_reasons_are_declared_in_openapi"
+            "tests/unit/test_imessage_enrollment.py::test_mounted_transport_proof_denies_before_service[None-None-503]"
+            "tests/postgres/test_imessage_enrollment_postgres.py::test_migration_and_repository_enforce_consent_proof_replay_and_revoke"
+            "tests/postgres/test_imessage_enrollment_postgres.py::test_two_owner_identity_collision_has_zero_cross_write"
+            "tests/postgres/test_imessage_enrollment_postgres.py::test_provider_registration_identity_is_unique_without_cross_owner_mutation"
+            "tests/postgres/test_imessage_enrollment_postgres.py::test_expired_pending_binding_is_atomically_retired_and_replacement_can_start"
+            "tests/postgres/test_imessage_enrollment_postgres.py::test_unresolved_provider_acceptance_blocks_competing_registration_graph"
+          )
+          for required_id in "${required_imessage_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$imessage_ids"
+          done
+          pytest \
+            tests/unit/test_imessage_enrollment.py \
+            tests/unit/test_imessage_enrollment_openapi.py \
+            tests/postgres/test_imessage_enrollment_postgres.py \
+            -v | tee /tmp/imessage-enrollment-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/imessage-enrollment-pytest.log
 
       - name: Run incident 1182 mounted-route exploit controls
         run: |
@@ -729,7 +794,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 19
-          test "$collected" -eq 548
+          test "$collected" -eq 549
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
