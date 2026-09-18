@@ -591,7 +591,7 @@ class ImessageEnrollmentController extends ChangeNotifier {
       if (!preserveProof) {
         _proof = null;
       }
-      if (response.state != ImessageEnrollmentState.verificationPending) {
+      if (response.state != ImessageEnrollmentState.verificationPending && !_isNotEnrolled(response)) {
         _pendingStartAttempt = null;
       }
       if (_isBindingRevoked(response)) {
@@ -610,9 +610,10 @@ class ImessageEnrollmentController extends ChangeNotifier {
       }
       final pendingBindingRevoke = _pendingBindingRevoke;
       if (pendingBindingRevoke != null &&
-          pendingBindingRevoke.expectedGeneration != response.authorityGeneration &&
+          pendingBindingRevoke.expectedGeneration < response.authorityGeneration &&
           !_isBindingRevoked(response) &&
           !_isConsentRevoked(response)) {
+        _pendingBindingRevoke = null;
         _failure = const ImessageEnrollmentFailure(
           ImessageEnrollmentFailureKind.conflict,
           code: 'imessage_revoke_reconciliation_required',
@@ -730,6 +731,11 @@ class ImessageEnrollmentController extends ChangeNotifier {
         true,
       _ => false,
     };
+  }
+
+  bool _isNotEnrolled(ImessageEnrollmentStatus status) {
+    return status.state == ImessageEnrollmentState.notConnected &&
+        status.reason == ImessageEnrollmentReason.notEnrolled;
   }
 
   bool _isBindingRevoked(ImessageEnrollmentStatus status) {
