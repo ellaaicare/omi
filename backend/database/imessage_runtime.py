@@ -48,7 +48,8 @@ class ImessageRuntimeRepository:
         return cls(await get_pool())
 
     async def assert_schema_ready(self) -> None:
-        ready = await self.pool.fetchval("""
+        ready = await self.pool.fetchval(
+            """
             SELECT
                 to_regclass('ella_imessage_message_receipts') IS NOT NULL
                 AND EXISTS (
@@ -68,7 +69,8 @@ class ImessageRuntimeRepository:
                       )
                       AND column_name = 'runtime_authority_kind'
                 )
-            """)
+            """
+        )
         if ready is not True:
             raise ImessageRuntimeRepositoryError("imessage_runtime_schema_not_ready")
 

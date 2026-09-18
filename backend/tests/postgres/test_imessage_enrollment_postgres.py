@@ -143,20 +143,24 @@ async def _run_with_database(scenario):
             await connection.execute(
                 (MIGRATIONS / "009_create_hermes_cloud_runtime_pool.sql").read_text(encoding="utf-8")
             )
-            photon_columns_before = await connection.fetchval("""
+            photon_columns_before = await connection.fetchval(
+                """
                 SELECT jsonb_agg(column_name ORDER BY ordinal_position)
                 FROM information_schema.columns
                 WHERE table_schema = current_schema()
                   AND table_name = 'ella_photon_channel_bindings'
-                """)
+                """
+            )
             for name in MIGRATION_CHAIN[2:]:
                 await connection.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
-            photon_columns_after = await connection.fetchval("""
+            photon_columns_after = await connection.fetchval(
+                """
                 SELECT jsonb_agg(column_name ORDER BY ordinal_position)
                 FROM information_schema.columns
                 WHERE table_schema = current_schema()
                   AND table_name = 'ella_photon_channel_bindings'
-                """)
+                """
+            )
             assert photon_columns_after == photon_columns_before
         await scenario(pool)
     finally:
@@ -1057,11 +1061,13 @@ def test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners():
         )
 
         async with pool.acquire() as connection:
-            owner_counts = await connection.fetch("""
+            owner_counts = await connection.fetch(
+                """
                 SELECT user_id, COUNT(*) AS count
                 FROM ella_imessage_message_receipts
                 GROUP BY user_id
-                """)
+                """
+            )
         assert {row["user_id"]: int(row["count"]) for row in owner_counts} == {user_a: 3}
 
     asyncio.run(_run_with_database(scenario))
