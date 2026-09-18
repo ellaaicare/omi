@@ -9,6 +9,7 @@ from pathlib import Path
 import asyncpg
 import pytest
 
+from database import authority_advisory_lock
 from database.imessage_enrollment import (
     ImessageAuthorityError,
     ImessageConsentContract,
@@ -126,7 +127,7 @@ def _proof_hash(*, salt: str, code: str) -> str:
     ).hexdigest()
 
 
-async def _run_with_database(scenario):
+async def _run_with_database(scenario, *, migration_chain=MIGRATION_CHAIN):
     schema = f"imessage_enrollment_{uuid.uuid4().hex}"
     admin = await asyncpg.connect(TEST_DSN)
     await admin.execute(f'CREATE SCHEMA "{schema}"')
@@ -151,7 +152,7 @@ async def _run_with_database(scenario):
                   AND table_name = 'ella_photon_channel_bindings'
                 """
             )
-            for name in MIGRATION_CHAIN[2:]:
+            for name in migration_chain[2:]:
                 await connection.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
             photon_columns_after = await connection.fetchval(
                 """
@@ -479,6 +480,144 @@ def test_migration_and_repository_enforce_consent_proof_replay_and_revoke():
                 )
 
     asyncio.run(_run_with_database(scenario))
+
+
+def test_retained_authority_migration_upgrades_existing_target_rows_without_rewriting_identity():
+    async def scenario(pool):
+        repository = ImessageEnrollmentRepository(pool)
+        uid = "imessage-pre-retained-migration"
+        user_id, runtime = await _seed_owner(pool, uid=uid, ordinal=17)
+        consent = await _grant(repository, uid=uid, ordinal=17)
+        attempt_id = uuid.uuid4()
+        channel_id = uuid.uuid4()
+        receipt_id = uuid.uuid4()
+        authority_digest = hashlib.sha256(b"pre-retained-authority").hexdigest()
+        async with pool.acquire() as connection:
+            authority_epoch = await connection.fetchval(
+                "SELECT authority_epoch FROM ella_imessage_consent_authority WHERE user_id = $1",
+                user_id,
+            )
+            await connection.execute(
+                """
+                INSERT INTO ella_imessage_registration_attempts (
+                    id, user_id, idempotency_key, handset_ref_hmac,
+                    consent_receipt_id, consent_authority_epoch,
+                    runtime_binding_id, runtime_target_id, runtime_authority_digest,
+                    state, provider_request_id, provider_registration_ref_hmac,
+                    assigned_destination_e164, assigned_destination_ref_hmac
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                    'provider_accepted', $10, $11, $12, $13
+                )
+                """,
+                attempt_id,
+                user_id,
+                uuid.uuid4(),
+                hashlib.sha256(b"pre-retained-handset").hexdigest(),
+                consent["id"],
+                authority_epoch,
+                runtime.binding_id,
+                runtime.target_id,
+                authority_digest,
+                uuid.uuid4(),
+                hashlib.sha256(b"pre-retained-registration").hexdigest(),
+                "+15555550117",
+                hashlib.sha256(b"pre-retained-destination").hexdigest(),
+            )
+            await connection.execute(
+                """
+                INSERT INTO ella_imessage_channel_bindings (
+                    id, user_id, registration_attempt_id, status, generation,
+                    handset_ref_hmac, assigned_destination_e164,
+                    assigned_destination_ref_hmac, line_identity_hmac,
+                    contact_identity_hmac, provider_registration_ref_hmac,
+                    runtime_binding_id, runtime_target_id, runtime_authority_digest,
+                    consent_receipt_id, consent_authority_epoch,
+                    challenge_salt, challenge_hash, challenge_expires_at, verified_at
+                ) VALUES (
+                    $1, $2, $3, 'active', 1, $4, $5, $6, $7, $8, $9,
+                    $10, $11, $12, $13, $14, $15, $16,
+                    CURRENT_TIMESTAMP + INTERVAL '15 minutes', CURRENT_TIMESTAMP
+                )
+                """,
+                channel_id,
+                user_id,
+                attempt_id,
+                hashlib.sha256(b"pre-retained-handset").hexdigest(),
+                "+15555550117",
+                hashlib.sha256(b"pre-retained-destination").hexdigest(),
+                hashlib.sha256(b"pre-retained-line").hexdigest(),
+                hashlib.sha256(b"pre-retained-contact").hexdigest(),
+                hashlib.sha256(b"pre-retained-registration").hexdigest(),
+                runtime.binding_id,
+                runtime.target_id,
+                authority_digest,
+                consent["id"],
+                authority_epoch,
+                "1" * 32,
+                "2" * 64,
+            )
+            await connection.execute(
+                """
+                INSERT INTO ella_imessage_message_receipts (
+                    id, binding_id, user_id, inbound_provider_ref_hmac,
+                    inbound_payload_sha256, message_text, occurred_at,
+                    binding_generation, consent_receipt_id, consent_authority_epoch,
+                    runtime_binding_id, runtime_target_id, runtime_authority_digest,
+                    status, lease_token, lease_expires_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP,
+                    1, $7, $8, $9, $10, $11,
+                    'claimed', $12, CURRENT_TIMESTAMP + INTERVAL '1 minute'
+                )
+                """,
+                receipt_id,
+                channel_id,
+                user_id,
+                hashlib.sha256(b"pre-retained-message").hexdigest(),
+                hashlib.sha256(b"pre-retained-payload").hexdigest(),
+                "content-free migration fixture",
+                consent["id"],
+                authority_epoch,
+                runtime.binding_id,
+                runtime.target_id,
+                authority_digest,
+                uuid.uuid4(),
+            )
+            await connection.execute(
+                (MIGRATIONS / "022_add_imessage_retained_runtime_authority.sql").read_text(encoding="utf-8")
+            )
+            rows = await connection.fetchrow(
+                """
+                SELECT
+                    a.runtime_authority_kind AS attempt_kind,
+                    a.runtime_target_id AS attempt_target,
+                    b.runtime_authority_kind AS binding_kind,
+                    b.runtime_target_id AS binding_target,
+                    r.runtime_authority_kind AS receipt_kind,
+                    r.runtime_target_id AS receipt_target
+                FROM ella_imessage_registration_attempts a
+                JOIN ella_imessage_channel_bindings b ON b.registration_attempt_id = a.id
+                JOIN ella_imessage_message_receipts r ON r.binding_id = b.id
+                WHERE a.id = $1
+                """,
+                attempt_id,
+            )
+            assert dict(rows) == {
+                "attempt_kind": "target",
+                "attempt_target": runtime.target_id,
+                "binding_kind": "target",
+                "binding_target": runtime.target_id,
+                "receipt_kind": "target",
+                "receipt_target": runtime.target_id,
+            }
+            with pytest.raises(asyncpg.CheckViolationError):
+                await connection.execute(
+                    "UPDATE ella_imessage_message_receipts SET runtime_target_id = NULL WHERE id = $1",
+                    receipt_id,
+                )
+
+    asyncio.run(_run_with_database(scenario, migration_chain=MIGRATION_CHAIN[:-1]))
 
 
 def test_two_owner_identity_collision_has_zero_cross_write():
@@ -1208,6 +1347,96 @@ def test_retained_owner_authority_is_targetless_and_fails_closed_if_a_target_app
             authority=authority,
         )
         assert started["status"] == "sending"
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_retained_runtime_transition_serializes_with_concurrent_target_creation():
+    async def scenario(pool):
+        enrollment = ImessageEnrollmentRepository(pool)
+        runtime_repository = ImessageRuntimeRepository(pool)
+        uid = "imessage-retained-target-race"
+        user_id, runtime = await _seed_retained_owner(pool, uid=uid, ordinal=18)
+        consent = await _grant(enrollment, uid=uid, ordinal=18)
+        _, code, destination = await _pending_binding(
+            enrollment,
+            uid=uid,
+            ordinal=18,
+            runtime=runtime,
+            receipt=consent,
+        )
+        line = hashlib.sha256(b"retained-race-line").hexdigest()
+        contact = hashlib.sha256(b"retained-race-contact").hexdigest()
+        binding = await enrollment.verify_inbound_proof(
+            assigned_destination_ref_hmac=destination,
+            handset_ref_hmac=hashlib.sha256(b"handset-18").hexdigest(),
+            line_identity_hmac=line,
+            contact_identity_hmac=contact,
+            provider_message_ref_hmac=hashlib.sha256(b"retained-race-proof").hexdigest(),
+            candidate_challenge_hash=_proof_hash(salt=f"{18:032x}", code=code),
+            consent_contract=CONSENT_CONTRACT,
+            runtime=runtime,
+            now=datetime.now(timezone.utc),
+        )
+        authority = await _runtime_authority(pool, uid=uid, ordinal=18, runtime=runtime)
+        owner = authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
+        async with pool.acquire() as connection:
+            original_last_healthy = await connection.fetchval(
+                "SELECT last_transport_healthy_at FROM ella_imessage_channel_bindings WHERE id = $1",
+                binding["id"],
+            )
+        heartbeat = None
+        async with pool.acquire() as writer:
+            async with writer.transaction():
+                proof = await authority_advisory_lock.acquire_authority_lock(writer, owner=owner)
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    writer,
+                    uid=uid,
+                    owner=owner,
+                    proof=proof,
+                )
+                heartbeat = asyncio.create_task(
+                    runtime_repository.record_heartbeat(
+                        binding_id=str(binding["id"]),
+                        generation=int(binding["generation"]),
+                        connection_ref_hmac=hashlib.sha256(b"retained-race-connection").hexdigest(),
+                        authority=authority,
+                    )
+                )
+                done, pending = await asyncio.wait({heartbeat}, timeout=0.1)
+                assert done == set()
+                assert pending == {heartbeat}
+                await writer.execute(
+                    """
+                    INSERT INTO ella_runtime_targets (
+                        account_user_id, profile_user_id, role, mode, provider,
+                        runtime_binding_id, candidate_runtime_instance_id,
+                        endpoint_ref, credential_ref, status, policy_version,
+                        processor_set_hash, scope_version, scope_hash,
+                        entitlement_revision
+                    ) VALUES (
+                        $1, $1, 'user', 'hermes-cloud-chat', 'hermes_cloud',
+                        $2, 'concurrent-instance', 'concurrent-endpoint-ref',
+                        'concurrent-credential-ref', 'ready', $3, $4, $5, $6, 1
+                    )
+                    """,
+                    user_id,
+                    runtime.binding_id,
+                    POLICY,
+                    PROCESSOR_HASH,
+                    SCOPE,
+                    SCOPE_HASH,
+                )
+
+        assert heartbeat is not None
+        with pytest.raises(ImessageRuntimeRepositoryError, match="imessage_transport_authority_changed"):
+            await heartbeat
+        async with pool.acquire() as connection:
+            last_healthy = await connection.fetchval(
+                "SELECT last_transport_healthy_at FROM ella_imessage_channel_bindings WHERE id = $1",
+                binding["id"],
+            )
+        assert last_healthy == original_last_healthy
 
     asyncio.run(_run_with_database(scenario))
 

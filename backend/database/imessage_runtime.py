@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 import asyncpg
 
+from database import authority_advisory_lock
 from database.ella_provisioning import get_pool
 
 
@@ -73,6 +74,46 @@ class ImessageRuntimeRepository:
         )
         if ready is not True:
             raise ImessageRuntimeRepositoryError("imessage_runtime_schema_not_ready")
+
+    @staticmethod
+    async def _lock_runtime_authority(
+        connection: asyncpg.Connection,
+        *,
+        authority: ImessageRuntimeAuthority,
+        error_code: str,
+    ) -> None:
+        try:
+            owner = authority_advisory_lock.AuthorityOwner.from_values(
+                authority.user_id,
+                authority.profile_user_id,
+            )
+            proof = await authority_advisory_lock.acquire_authority_lock(connection, owner=owner)
+            user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                connection,
+                uid=authority.uid,
+                owner=owner,
+                proof=proof,
+            )
+        except authority_advisory_lock.AuthorityLockError as exc:
+            raise ImessageRuntimeRepositoryError(error_code) from exc
+        if user_id != authority.user_id:
+            raise ImessageRuntimeRepositoryError(error_code)
+
+    async def _fetchrow_with_authority_lock(
+        self,
+        query: str,
+        *args: Any,
+        authority: ImessageRuntimeAuthority,
+        error_code: str,
+    ) -> Optional[asyncpg.Record]:
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                await self._lock_runtime_authority(
+                    connection,
+                    authority=authority,
+                    error_code=error_code,
+                )
+                return await connection.fetchrow(query, *args)
 
     async def resolve_binding(
         self,
@@ -170,7 +211,7 @@ class ImessageRuntimeRepository:
         connection_ref_hmac: str,
         authority: ImessageRuntimeAuthority,
     ) -> dict[str, Any]:
-        row = await self.pool.fetchrow(
+        row = await self._fetchrow_with_authority_lock(
             """
             UPDATE ella_imessage_channel_bindings b
             SET transport_connection_ref_hmac = $3,
@@ -258,6 +299,8 @@ class ImessageRuntimeRepository:
             authority.runtime_target_entitlement_revision,
             authority.runtime_target_updated_at,
             authority.runtime_authority_kind,
+            authority=authority,
+            error_code="imessage_transport_authority_changed",
         )
         if not row:
             raise ImessageRuntimeRepositoryError("imessage_transport_authority_changed")
@@ -280,6 +323,11 @@ class ImessageRuntimeRepository:
         binding_id = uuid.UUID(str(binding["id"]))
         async with self.pool.acquire() as connection:
             async with connection.transaction():
+                await self._lock_runtime_authority(
+                    connection,
+                    authority=authority,
+                    error_code="imessage_authority_changed",
+                )
                 current = await connection.fetchrow(
                     """
                     SELECT b.*
@@ -494,7 +542,7 @@ class ImessageRuntimeRepository:
         lease_token: str,
         authority: ImessageRuntimeAuthority,
     ) -> dict[str, Any]:
-        row = await self.pool.fetchrow(
+        row = await self._fetchrow_with_authority_lock(
             """
             UPDATE ella_imessage_message_receipts r
             SET status = 'running',
@@ -591,6 +639,8 @@ class ImessageRuntimeRepository:
             authority.runtime_target_entitlement_revision,
             authority.runtime_target_updated_at,
             authority.runtime_authority_kind,
+            authority=authority,
+            error_code="imessage_message_claim_conflict",
         )
         if not row:
             raise ImessageRuntimeRepositoryError("imessage_message_claim_conflict")
@@ -606,7 +656,7 @@ class ImessageRuntimeRepository:
         outbound_text: str,
         authority: ImessageRuntimeAuthority,
     ) -> dict[str, Any]:
-        row = await self.pool.fetchrow(
+        row = await self._fetchrow_with_authority_lock(
             """
             UPDATE ella_imessage_message_receipts r
             SET status = 'awaiting_delivery',
@@ -713,6 +763,8 @@ class ImessageRuntimeRepository:
             authority.runtime_target_entitlement_revision,
             authority.runtime_target_updated_at,
             authority.runtime_authority_kind,
+            authority=authority,
+            error_code="imessage_model_completion_conflict",
         )
         if not row:
             raise ImessageRuntimeRepositoryError("imessage_model_completion_conflict")
@@ -757,6 +809,11 @@ class ImessageRuntimeRepository:
     ) -> dict[str, Any]:
         async with self.pool.acquire() as connection:
             async with connection.transaction():
+                await self._lock_runtime_authority(
+                    connection,
+                    authority=authority,
+                    error_code="imessage_delivery_authority_changed",
+                )
                 receipt = await connection.fetchrow(
                     """
                     SELECT r.*

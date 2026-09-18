@@ -596,9 +596,10 @@ jobs:
               tests/postgres/test_imessage_enrollment_postgres.py |
               sed '/^$/d'
           )"
-          test "$(grep -c '::' <<<"$imessage_ids")" -eq 110
+          test "$(grep -c '::' <<<"$imessage_ids")" -eq 114
           required_imessage_ids=(
             "tests/unit/test_imessage_enrollment.py::test_previous_policy_consent_is_rejected_before_authority_write"
+            "tests/unit/test_imessage_enrollment.py::test_enrollment_runtime_accepts_only_exact_configured_retained_owner"
             "tests/unit/test_imessage_enrollment.py::test_revoke_requires_exact_local_cleanup_and_reports_retained_provider_user"
             "tests/unit/test_imessage_enrollment.py::test_revoke_stays_typed_unavailable_when_local_cleanup_is_ambiguous"
             "tests/unit/test_imessage_enrollment_openapi.py::test_revoke_cleanup_contract_never_claims_provider_user_deletion"
@@ -607,6 +608,7 @@ jobs:
             "tests/unit/test_imessage_enrollment.py::test_ambiguous_provider_result_is_durable_and_never_finalized"
             "tests/unit/test_imessage_enrollment.py::test_provider_accepted_finalization_drift_is_quarantined_without_repeat_registration"
             "tests/unit/test_imessage_enrollment.py::test_status_atomically_retires_expired_pending_challenge"
+            "tests/unit/test_imessage_enrollment.py::test_status_refuses_ready_when_persisted_runtime_authority_is_stale"
             "tests/unit/test_imessage_enrollment.py::test_finalized_retry_retires_expired_proof_instead_of_reissuing"
             "tests/unit/test_imessage_enrollment.py::test_consent_withdrawal_revokes_then_proves_exact_local_cleanup"
             "tests/unit/test_imessage_enrollment.py::test_account_deletion_cleanup_fences_before_exact_local_absence_proof"
@@ -664,10 +666,12 @@ jobs:
             "tests/unit/test_imessage_photon_bridge.py::test_cleanup_http_is_authenticated_content_free_and_reports_provider_retained"
             "tests/unit/test_imessage_photon_bridge.py::test_lost_delivery_start_response_is_quarantined_without_provider_send"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_migration_and_repository_enforce_consent_proof_replay_and_revoke"
+            "tests/postgres/test_imessage_enrollment_postgres.py::test_retained_authority_migration_upgrades_existing_target_rows_without_rewriting_identity"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_two_owner_identity_collision_has_zero_cross_write"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_provider_registration_identity_is_unique_without_cross_owner_mutation"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_retained_owner_authority_is_targetless_and_fails_closed_if_a_target_appears"
+            "tests/postgres/test_imessage_enrollment_postgres.py::test_retained_runtime_transition_serializes_with_concurrent_target_creation"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_revoke_returns_exact_provider_request_for_idempotent_local_cleanup"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_expired_pending_binding_is_atomically_retired_and_replacement_can_start"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_unresolved_provider_acceptance_blocks_competing_registration_graph"

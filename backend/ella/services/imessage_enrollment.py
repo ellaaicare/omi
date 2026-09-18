@@ -412,6 +412,13 @@ class ImessageEnrollmentService:
             runtime = await self._runtime(uid)
         except ImessageEnrollmentError:
             return self._binding_status(state, status="temporarily_unavailable", reason="runtime_unavailable")
+        try:
+            await self.repository.validate_runtime_authority(
+                uid=uid,
+                runtime=runtime[1],
+            )
+        except ImessageAuthorityError:
+            return self._binding_status(state, status="temporarily_unavailable", reason="authority_stale")
         if not hmac.compare_digest(str(state.get("runtime_authority_digest") or ""), runtime[1].authority_digest):
             return self._binding_status(state, status="temporarily_unavailable", reason="authority_stale")
         healthy_at = state.get("last_transport_healthy_at")

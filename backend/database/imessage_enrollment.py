@@ -265,6 +265,38 @@ class ImessageEnrollmentRepository:
             raise ImessageAuthorityError("imessage_owner_not_found")
         return dict(row)
 
+    async def validate_runtime_authority(
+        self,
+        *,
+        uid: str,
+        runtime: ImessageRuntimeSnapshot,
+    ) -> None:
+        owner = authority_advisory_lock.AuthorityOwner.from_values(
+            runtime.account_user_id,
+            runtime.profile_user_id,
+        )
+        try:
+            async with self.pool.acquire() as connection:
+                async with connection.transaction():
+                    proof = await authority_advisory_lock.acquire_authority_lock(connection, owner=owner)
+                    user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                        connection,
+                        uid=uid,
+                        owner=owner,
+                        proof=proof,
+                    )
+                    if not await self._active_user(connection, user_id=user_id):
+                        raise ImessageAuthorityError("imessage_owner_not_active")
+                    if runtime.account_user_id != user_id or runtime.profile_user_id != user_id:
+                        raise ImessageAuthorityError("imessage_runtime_owner_mismatch")
+                    await self._require_runtime(
+                        connection,
+                        user_id=user_id,
+                        runtime=runtime,
+                    )
+        except authority_advisory_lock.AuthorityLockError as exc:
+            raise ImessageAuthorityError("imessage_runtime_authority_changed") from exc
+
     async def get_binding_for_attempt(self, *, uid: str, attempt_id: uuid.UUID) -> Optional[dict[str, Any]]:
         row = await self.pool.fetchrow(
             """
