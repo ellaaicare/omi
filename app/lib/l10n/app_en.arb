@@ -10212,5 +10212,7 @@
   "conversationEllaEnrichedLabel": "Summary enriched by Ella",
   "@conversationEllaEnrichedLabel": {
     "description": "Accessible label and tooltip for the Ella-enriched memory badge"
-  }
+  },
+  "ellaAlertChannelsUnavailableBadge": "Unavailable",
+  "ellaAlertChannelsImessageUnavailable": "iMessage is unavailable while Ella upgrades messaging."
 }
