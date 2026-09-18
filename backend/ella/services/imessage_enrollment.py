@@ -34,7 +34,7 @@ from ella.services.runtime_resolver import (
 
 CONTRACT_ID = "ella.imessage_enrollment.v1"
 CONSENT_RECEIPT_SCHEMA = "ella.imessage_consent_receipt.v1"
-CONSENT_POLICY_VERSION = "ella-imessage-data-v1"
+CONSENT_POLICY_VERSION = "ella-imessage-data-v2"
 CONSENT_SCOPE_VERSION = "ella.imessage_text_dm.v1"
 CANONICAL_PROCESSORS = "ella-self-hosted-hermes:reasoning|honcho-self-hosted:memory|photon:imessage-transport"
 CONSENT_PROCESSOR_SET_HASH = f"sha256:{hashlib.sha256(CANONICAL_PROCESSORS.encode()).hexdigest()}"
@@ -188,6 +188,7 @@ def consent_policy() -> dict[str, Any]:
             "Photon iMessage transport",
         ],
         "data_classes": [
+            "your handset phone number used for iMessage transport registration",
             "the text messages you send to Ella",
             "Ella's text replies",
             "messaging delivery identifiers",
