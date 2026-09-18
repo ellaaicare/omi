@@ -228,7 +228,7 @@ class _FakePool:
         return []
 
 
-def test_load_context_uses_canonical_phone_number_for_user_imessage(monkeypatch):
+def test_load_context_does_not_advertise_imessage_from_phone_alone(monkeypatch):
     pool = _FakePool(
         {
             "id": "user-1",
@@ -251,8 +251,8 @@ def test_load_context_uses_canonical_phone_number_for_user_imessage(monkeypatch)
     assert user.user_phone == "+15550000001"
     assert policy["user"]["channels"][1] == {
         "channel": "imessage",
-        "enabled": True,
-        "reason": "Phone number on file",
+        "enabled": False,
+        "reason": "iMessage is not currently available",
     }
     assert pool.fetchrow_queries[0][1] == ("canonical-uid",)
     assert "WHERE omi_uid = $1" in pool.fetchrow_queries[0][0]

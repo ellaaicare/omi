@@ -15,6 +15,10 @@ from unittest.mock import MagicMock, patch
 BACKEND = Path(__file__).resolve().parents[2]
 
 
+class CaptureReconnectAuthorityBusy(RuntimeError):
+    pass
+
+
 @cache
 def _nested_code(relative_path: str, name: str) -> types.CodeType:
     root = compile((BACKEND / relative_path).read_text(), relative_path, "exec")
@@ -724,6 +728,7 @@ def test_production_reconnect_path_does_not_let_overlapping_socket_steal_authori
             "routers/transcribe.py",
             "_prepare_in_progess_conversations",
             {
+                "CaptureReconnectAuthorityBusy": CaptureReconnectAuthorityBusy,
                 "asyncio": asyncio,
                 "claim_capture_authority_for_reconnect": claim_capture_authority_for_reconnect,
                 "conversations_db": SimpleNamespace(),
@@ -758,7 +763,7 @@ def test_production_reconnect_path_does_not_let_overlapping_socket_steal_authori
     overlapping_prepare = make_prepare("socket-c", "generation-c")
     try:
         asyncio.run(overlapping_prepare())
-    except RuntimeError as exc:
+    except CaptureReconnectAuthorityBusy as exc:
         assert str(exc) == "active conversation ownership changed during reconnect"
     else:
         raise AssertionError("the overlapping production reconnect must fail closed")
@@ -767,6 +772,147 @@ def test_production_reconnect_path_does_not_let_overlapping_socket_steal_authori
     assert conversation_ref.data["capture_owner_id"] == "socket-b"
     assert redis.claims == [("conversation-a", "socket-b")]
     assert ready_receipts == [("conversation-a", "generation-b", "socket-b")]
+
+
+def test_undelivered_capture_ready_releases_only_its_exact_authority():
+    calls = []
+
+    class ReadyEvent:
+        def __init__(self, **values):
+            self.values = values
+
+    class Redis:
+        @staticmethod
+        def release_owned_in_progress_conversation_id(uid, conversation_id, owner_token):
+            calls.append(("release", uid, conversation_id, owner_token))
+            return True
+
+    async def send_ready(event):
+        calls.append(("send", dict(event.values)))
+        return False
+
+    def install_authority(uid, conversation_id, generation, owner_token, **options):
+        calls.append(("install", uid, conversation_id, generation, owner_token, options))
+        return True
+
+    def mark_drained(uid, conversation_id, generation, owner_token):
+        calls.append(("drain", uid, conversation_id, generation, owner_token))
+        return True
+
+    latency = []
+    publish_ready = _nested_function(
+        "routers/transcribe.py",
+        "_publish_capture_protocol_ready",
+        {
+            "CAPTURE_PROTOCOL_VERSION": 2,
+            "MessageServiceStatusEvent": ReadyEvent,
+            "install_capture_authority": install_authority,
+            "mark_capture_drained": mark_drained,
+            "redis_db": Redis(),
+        },
+        {
+            "_asend_message_event": send_ready,
+            "_latency_log": lambda event, **metadata: latency.append((event, metadata)),
+            "generation_id": "generation-a",
+            "owner_token": "socket-a",
+            "uid": "uid-a",
+            "websocket_active": True,
+            "websocket_close_code": 1000,
+        },
+    )
+
+    assert (
+        asyncio.run(
+            publish_ready(
+                "conversation-a",
+                expected_conversation_id=None,
+                adopt=True,
+            )
+        )
+        is False
+    )
+    assert [call[0] for call in calls] == ["install", "send", "drain", "release"]
+    assert calls[-2] == ("drain", "uid-a", "conversation-a", "generation-a", "socket-a")
+    assert calls[-1] == ("release", "uid-a", "conversation-a", "socket-a")
+    assert latency == [
+        (
+            "capture_protocol_ready_delivery_failed",
+            {
+                "conversation_id": "conversation-a",
+                "authority_drained": True,
+                "redis_owner_released": True,
+                "cleanup_error_class": None,
+            },
+        )
+    ]
+    closure = dict(zip(publish_ready.__code__.co_freevars, (cell.cell_contents for cell in publish_ready.__closure__)))
+    assert closure["websocket_active"] is False
+    assert closure["websocket_close_code"] == 1013
+
+
+def test_undelivered_capture_ready_does_not_release_after_authority_drift():
+    releases = []
+
+    class ReadyEvent:
+        def __init__(self, **values):
+            self.values = values
+
+    class Redis:
+        @staticmethod
+        def release_owned_in_progress_conversation_id(*args):
+            releases.append(args)
+            return True
+
+    async def send_ready(_event):
+        return False
+
+    publish_ready = _nested_function(
+        "routers/transcribe.py",
+        "_publish_capture_protocol_ready",
+        {
+            "CAPTURE_PROTOCOL_VERSION": 2,
+            "MessageServiceStatusEvent": ReadyEvent,
+            "install_capture_authority": lambda *_args, **_kwargs: True,
+            "mark_capture_drained": lambda *_args: False,
+            "redis_db": Redis(),
+        },
+        {
+            "_asend_message_event": send_ready,
+            "_latency_log": lambda *_args, **_kwargs: None,
+            "generation_id": "generation-a",
+            "owner_token": "socket-a",
+            "uid": "uid-a",
+            "websocket_active": True,
+            "websocket_close_code": 1000,
+        },
+    )
+
+    assert (
+        asyncio.run(
+            publish_ready(
+                "conversation-a",
+                expected_conversation_id=None,
+                adopt=False,
+            )
+        )
+        is False
+    )
+    assert releases == []
+
+
+def test_reconnect_conflict_is_converted_to_typed_temporary_close():
+    source = (BACKEND / "routers" / "transcribe.py").read_text()
+    startup = source.split(
+        "timed_out_conversation_id = await _prepare_in_progess_conversations()",
+        maxsplit=1,
+    )[
+        1
+    ].split("# STT", maxsplit=1)[0]
+
+    assert "except CaptureReconnectAuthorityBusy:" in startup
+    assert 'status="capture_reconnect_busy"' in startup
+    assert "websocket_close_code = 1013" in startup
+    assert "websocket_active = False" in startup
 
 
 def test_production_reconnect_rotates_expired_drained_candidate_behind_terminal_authority():

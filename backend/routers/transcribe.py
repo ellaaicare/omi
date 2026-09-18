@@ -208,6 +208,10 @@ class CustomSttMode(str, Enum):
     enabled = "enabled"
 
 
+class CaptureReconnectAuthorityBusy(RuntimeError):
+    """The active capture still belongs to another live socket generation."""
+
+
 def _utc_iso_from_ts(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
@@ -868,7 +872,32 @@ async def _stream_handler(
             )
         )
         if not delivered:
-            websocket_close_code = 1008
+            authority_drained = False
+            redis_owner_released = False
+            cleanup_error_class = None
+            try:
+                authority_drained = mark_capture_drained(
+                    uid,
+                    conversation_id,
+                    generation_id,
+                    owner_token,
+                )
+                if authority_drained:
+                    redis_owner_released = redis_db.release_owned_in_progress_conversation_id(
+                        uid,
+                        conversation_id,
+                        owner_token,
+                    )
+            except Exception as error:
+                cleanup_error_class = type(error).__name__
+            _latency_log(
+                "capture_protocol_ready_delivery_failed",
+                conversation_id=conversation_id,
+                authority_drained=authority_drained,
+                redis_owner_released=redis_owner_released,
+                cleanup_error_class=cleanup_error_class,
+            )
+            websocket_close_code = 1013
             websocket_active = False
             return False
         return True
@@ -1234,12 +1263,23 @@ async def _stream_handler(
                 return None
             await asyncio.sleep(0)
 
-        raise RuntimeError("active conversation ownership changed during reconnect")
+        raise CaptureReconnectAuthorityBusy("active conversation ownership changed during reconnect")
 
     _send_message_event(
         MessageServiceStatusEvent(status="in_progress_conversations_processing", status_text="Processing Conversations")
     )
-    timed_out_conversation_id = await _prepare_in_progess_conversations()
+    try:
+        timed_out_conversation_id = await _prepare_in_progess_conversations()
+    except CaptureReconnectAuthorityBusy:
+        await _asend_message_event(
+            MessageServiceStatusEvent(
+                status="capture_reconnect_busy",
+                status_text="Capture reconnect is temporarily busy",
+            )
+        )
+        websocket_close_code = 1013
+        websocket_active = False
+        timed_out_conversation_id = None
     capture_recovery_conversation_ids.update(
         conversation_id for conversation_id in (current_conversation_id, timed_out_conversation_id) if conversation_id
     )
