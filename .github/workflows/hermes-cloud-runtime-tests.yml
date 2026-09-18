@@ -610,7 +610,7 @@ jobs:
               tests/postgres/test_imessage_enrollment_postgres.py |
               sed '/^$/d'
           )"
-          test "$(grep -c '::' <<<"$imessage_ids")" -eq 122
+          test "$(grep -c '::' <<<"$imessage_ids")" -eq 123
           required_imessage_ids=(
             "tests/unit/test_imessage_enrollment.py::test_previous_policy_consent_is_rejected_before_authority_write"
             "tests/unit/test_imessage_enrollment.py::test_enrollment_runtime_accepts_only_exact_configured_retained_owner"
@@ -686,7 +686,8 @@ jobs:
             "tests/unit/test_imessage_photon_bridge.py::test_lost_delivery_start_response_is_quarantined_without_provider_send"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_migration_and_repository_enforce_consent_proof_replay_and_revoke"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_retained_authority_migration_upgrades_existing_target_rows_without_rewriting_identity"
-            "tests/postgres/test_imessage_enrollment_postgres.py::test_runtime_binding_role_migration_upgrades_published_022_retained_rows"
+            "tests/postgres/test_imessage_enrollment_postgres.py::test_runtime_binding_role_migration_refuses_published_022_retained_user_binding_without_mutation"
+            "tests/postgres/test_imessage_enrollment_postgres.py::test_runtime_binding_role_migration_fresh_chain_is_ready_and_rerunnable"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_retained_imessage_binding_admin_is_two_phase_exact_and_rollback_safe"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_invitation_revocation_preserves_retained_role_but_account_deletion_disables_it"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_two_owner_identity_collision_has_zero_cross_write"

@@ -19,8 +19,12 @@ and authority contracts described here.
   `022_add_imessage_retained_runtime_authority.sql` and its additive role
   successor `023_add_imessage_runtime_binding_role.sql`, do not alter migration
   009 or any `ella_photon_*` Cloud-canary table. Migration 022 retains its
-  published shape; 023 upgrades both fresh installs and databases that already
-  applied 022.
+  published shape. Migration 023 upgrades fresh installs and clean published-022
+  databases. If published 022 contains a retained-owner graph that still points
+  to an ordinary `role=user` binding, 023 aborts transactionally and preserves
+  the original schema and rows. Operators must complete the separately reviewed,
+  provider-confirmed retirement/re-enrollment path before retrying it; migration
+  SQL never fabricates or repoints the preserved runtime authority.
 - App calls use an exact Firebase bearer. The app cannot select a UID, account,
   profile, project, runtime, endpoint, credential, or provider route.
 - The bridge uses a dedicated transport credential. That credential cannot
@@ -333,8 +337,11 @@ and an opaque binding fingerprint. It never prints the owner or credential.
 Before any live enablement, an operator must prove all of the following with
 synthetic identities and content-free receipts:
 
-1. Migrations 020, 021, and 022 apply in sequence after 019 and the migration-009
-   Cloud tables are unchanged.
+1. Migrations 020 through 023 apply in sequence after 019 and the migration-009
+   Cloud tables are unchanged. A published-022 retained graph that references a
+   `role=user` binding must produce
+   `imessage_legacy_runtime_authority_requires_retirement` with no partial
+   schema, constraint, or row mutation.
 2. Enrollment flag false returns `rollout_disabled` and performs no provider or
    database write.
 3. Missing/malformed Firebase and transport credentials fail before repository

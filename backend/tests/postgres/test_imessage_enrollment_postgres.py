@@ -673,15 +673,16 @@ def test_retained_authority_migration_upgrades_existing_target_rows_without_rewr
     asyncio.run(_run_with_database(scenario, migration_chain=MIGRATION_CHAIN[:-2]))
 
 
-def test_runtime_binding_role_migration_upgrades_published_022_retained_rows():
+def test_runtime_binding_role_migration_refuses_published_022_retained_user_binding_without_mutation():
     async def scenario(pool):
         repository = ImessageEnrollmentRepository(pool)
         uid = "imessage-published-022-retained"
-        user_id, runtime = await _seed_retained_owner(pool, uid=uid, ordinal=18)
+        user_id, runtime = await _seed_owner(pool, uid=uid, ordinal=18)
         consent = await _grant(repository, uid=uid, ordinal=18)
         attempt_id = uuid.uuid4()
         channel_id = uuid.uuid4()
         receipt_id = uuid.uuid4()
+        authority_digest = hashlib.sha256(b"published-022-retained-authority").hexdigest()
 
         async with pool.acquire() as connection:
             role_column_count = await connection.fetchval(
@@ -728,7 +729,7 @@ def test_runtime_binding_role_migration_upgrades_published_022_retained_rows():
                 consent["id"],
                 authority_epoch,
                 runtime.binding_id,
-                runtime.authority_digest,
+                authority_digest,
                 uuid.uuid4(),
                 registration_hmac,
                 "+15555550118",
@@ -761,7 +762,7 @@ def test_runtime_binding_role_migration_upgrades_published_022_retained_rows():
                 hashlib.sha256(b"published-022-contact").hexdigest(),
                 registration_hmac,
                 runtime.binding_id,
-                runtime.authority_digest,
+                authority_digest,
                 consent["id"],
                 authority_epoch,
                 "3" * 32,
@@ -790,22 +791,28 @@ def test_runtime_binding_role_migration_upgrades_published_022_retained_rows():
                 consent["id"],
                 authority_epoch,
                 runtime.binding_id,
-                runtime.authority_digest,
+                authority_digest,
                 uuid.uuid4(),
             )
 
-            await connection.execute(
-                (MIGRATIONS / "023_add_imessage_runtime_binding_role.sql").read_text(encoding="utf-8")
-            )
-            migrated = await connection.fetchrow(
+            original_rows = await connection.fetchrow(
                 """
                 SELECT
                     a.id AS attempt_id,
-                    a.runtime_binding_role AS attempt_role,
+                    a.runtime_binding_id AS attempt_runtime_binding_id,
+                    a.runtime_authority_kind AS attempt_kind,
+                    a.runtime_target_id AS attempt_target_id,
+                    a.runtime_authority_digest AS attempt_digest,
                     b.id AS binding_id,
-                    b.runtime_binding_role AS binding_role,
+                    b.runtime_binding_id AS binding_runtime_binding_id,
+                    b.runtime_authority_kind AS binding_kind,
+                    b.runtime_target_id AS binding_target_id,
+                    b.runtime_authority_digest AS binding_digest,
                     r.id AS receipt_id,
-                    r.runtime_binding_role AS receipt_role
+                    r.runtime_binding_id AS receipt_runtime_binding_id,
+                    r.runtime_authority_kind AS receipt_kind,
+                    r.runtime_target_id AS receipt_target_id,
+                    r.runtime_authority_digest AS receipt_digest
                 FROM ella_imessage_registration_attempts a
                 JOIN ella_imessage_channel_bindings b ON b.registration_attempt_id = a.id
                 JOIN ella_imessage_message_receipts r ON r.binding_id = b.id
@@ -813,32 +820,140 @@ def test_runtime_binding_role_migration_upgrades_published_022_retained_rows():
                 """,
                 attempt_id,
             )
-            assert dict(migrated) == {
-                "attempt_id": attempt_id,
-                "attempt_role": "imessage",
-                "binding_id": channel_id,
-                "binding_role": "imessage",
-                "receipt_id": receipt_id,
-                "receipt_role": "imessage",
-            }
-            with pytest.raises(asyncpg.CheckViolationError):
-                await connection.execute(
-                    "UPDATE ella_imessage_channel_bindings SET runtime_binding_role = 'user' WHERE id = $1",
-                    channel_id,
+            original_constraints = await connection.fetch(
+                """
+                SELECT conname, pg_get_constraintdef(oid) AS definition
+                FROM pg_constraint
+                WHERE conname IN (
+                    'ella_imessage_registration_attempts_runtime_authority_shape',
+                    'ella_imessage_channel_bindings_runtime_authority_shape',
+                    'ella_imessage_message_receipts_runtime_authority_shape'
+                )
+                ORDER BY conname
+                """
+            )
+            assert len(original_constraints) == 3
+            assert (
+                await connection.fetchval(
+                    "SELECT role FROM ella_runtime_bindings WHERE id = $1",
+                    runtime.binding_id,
+                )
+                == "user"
+            )
+
+            migration = (MIGRATIONS / "023_add_imessage_runtime_binding_role.sql").read_text(encoding="utf-8")
+            for _ in range(2):
+                with pytest.raises(
+                    asyncpg.CheckViolationError,
+                    match="imessage_legacy_runtime_authority_requires_retirement",
+                ):
+                    await connection.execute(migration)
+                await connection.execute("ROLLBACK")
+
+                assert (
+                    await connection.fetchval(
+                        """
+                        SELECT count(*)
+                        FROM information_schema.columns
+                        WHERE table_schema = current_schema()
+                          AND table_name IN (
+                              'ella_imessage_registration_attempts',
+                              'ella_imessage_channel_bindings',
+                              'ella_imessage_message_receipts'
+                          )
+                          AND column_name = 'runtime_binding_role'
+                        """
+                    )
+                    == 0
+                )
+                current_rows = await connection.fetchrow(
+                    """
+                    SELECT
+                        a.id AS attempt_id,
+                        a.runtime_binding_id AS attempt_runtime_binding_id,
+                        a.runtime_authority_kind AS attempt_kind,
+                        a.runtime_target_id AS attempt_target_id,
+                        a.runtime_authority_digest AS attempt_digest,
+                        b.id AS binding_id,
+                        b.runtime_binding_id AS binding_runtime_binding_id,
+                        b.runtime_authority_kind AS binding_kind,
+                        b.runtime_target_id AS binding_target_id,
+                        b.runtime_authority_digest AS binding_digest,
+                        r.id AS receipt_id,
+                        r.runtime_binding_id AS receipt_runtime_binding_id,
+                        r.runtime_authority_kind AS receipt_kind,
+                        r.runtime_target_id AS receipt_target_id,
+                        r.runtime_authority_digest AS receipt_digest
+                    FROM ella_imessage_registration_attempts a
+                    JOIN ella_imessage_channel_bindings b ON b.registration_attempt_id = a.id
+                    JOIN ella_imessage_message_receipts r ON r.binding_id = b.id
+                    WHERE a.id = $1
+                    """,
+                    attempt_id,
+                )
+                assert dict(current_rows) == dict(original_rows)
+                current_constraints = await connection.fetch(
+                    """
+                    SELECT conname, pg_get_constraintdef(oid) AS definition
+                    FROM pg_constraint
+                    WHERE conname IN (
+                        'ella_imessage_registration_attempts_runtime_authority_shape',
+                        'ella_imessage_channel_bindings_runtime_authority_shape',
+                        'ella_imessage_message_receipts_runtime_authority_shape'
+                    )
+                    ORDER BY conname
+                    """
+                )
+                assert [dict(row) for row in current_constraints] == [dict(row) for row in original_constraints]
+                assert (
+                    await connection.fetchval(
+                        "SELECT role FROM ella_runtime_bindings WHERE id = $1",
+                        runtime.binding_id,
+                    )
+                    == "user"
                 )
 
+    asyncio.run(_run_with_database(scenario, migration_chain=MIGRATION_CHAIN[:-1]))
+
+
+def test_runtime_binding_role_migration_fresh_chain_is_ready_and_rerunnable():
+    async def scenario(pool):
+        async with pool.acquire() as connection:
+            assert (
+                await connection.fetchval(
+                    """
+                    SELECT count(*)
+                    FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name IN (
+                          'ella_imessage_registration_attempts',
+                          'ella_imessage_channel_bindings',
+                          'ella_imessage_message_receipts'
+                      )
+                      AND column_name = 'runtime_binding_role'
+                    """
+                )
+                == 3
+            )
             await connection.execute(
                 (MIGRATIONS / "023_add_imessage_runtime_binding_role.sql").read_text(encoding="utf-8")
             )
             assert (
                 await connection.fetchval(
-                    "SELECT count(*) FROM ella_imessage_message_receipts WHERE id = $1",
-                    receipt_id,
+                    """
+                    SELECT count(*)
+                    FROM pg_constraint
+                    WHERE conname IN (
+                        'ella_imessage_registration_attempts_runtime_authority_shape',
+                        'ella_imessage_channel_bindings_runtime_authority_shape',
+                        'ella_imessage_message_receipts_runtime_authority_shape'
+                    )
+                    """
                 )
-                == 1
+                == 3
             )
 
-    asyncio.run(_run_with_database(scenario, migration_chain=MIGRATION_CHAIN[:-1]))
+    asyncio.run(_run_with_database(scenario))
 
 
 def test_retained_imessage_binding_admin_is_two_phase_exact_and_rollback_safe():
