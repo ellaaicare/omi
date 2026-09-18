@@ -110,6 +110,7 @@ MIGRATION_CHAIN = (
     "020_create_imessage_enrollment_authority.sql",
     "021_create_imessage_runtime_outbox.sql",
     "022_add_imessage_retained_runtime_authority.sql",
+    "023_add_imessage_runtime_binding_role.sql",
 )
 
 POLICY = "ella-imessage-data-v2"
@@ -625,9 +626,8 @@ def test_retained_authority_migration_upgrades_existing_target_rows_without_rewr
                 authority_digest,
                 uuid.uuid4(),
             )
-            await connection.execute(
-                (MIGRATIONS / "022_add_imessage_retained_runtime_authority.sql").read_text(encoding="utf-8")
-            )
+            for name in MIGRATION_CHAIN[-2:]:
+                await connection.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
             rows = await connection.fetchrow(
                 """
                 SELECT
@@ -663,6 +663,180 @@ def test_retained_authority_migration_upgrades_existing_target_rows_without_rewr
                     "UPDATE ella_imessage_message_receipts SET runtime_target_id = NULL WHERE id = $1",
                     receipt_id,
                 )
+
+            # The successor remains safe for the final schema shape that was
+            # briefly shipped by the rewritten migration 022.
+            await connection.execute(
+                (MIGRATIONS / "023_add_imessage_runtime_binding_role.sql").read_text(encoding="utf-8")
+            )
+
+    asyncio.run(_run_with_database(scenario, migration_chain=MIGRATION_CHAIN[:-2]))
+
+
+def test_runtime_binding_role_migration_upgrades_published_022_retained_rows():
+    async def scenario(pool):
+        repository = ImessageEnrollmentRepository(pool)
+        uid = "imessage-published-022-retained"
+        user_id, runtime = await _seed_retained_owner(pool, uid=uid, ordinal=18)
+        consent = await _grant(repository, uid=uid, ordinal=18)
+        attempt_id = uuid.uuid4()
+        channel_id = uuid.uuid4()
+        receipt_id = uuid.uuid4()
+
+        async with pool.acquire() as connection:
+            role_column_count = await connection.fetchval(
+                """
+                SELECT count(*)
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name IN (
+                      'ella_imessage_registration_attempts',
+                      'ella_imessage_channel_bindings',
+                      'ella_imessage_message_receipts'
+                  )
+                  AND column_name = 'runtime_binding_role'
+                """
+            )
+            assert role_column_count == 0
+
+            authority_epoch = await connection.fetchval(
+                "SELECT authority_epoch FROM ella_imessage_consent_authority WHERE user_id = $1",
+                user_id,
+            )
+            registration_hmac = hashlib.sha256(b"published-022-registration").hexdigest()
+            handset_hmac = hashlib.sha256(b"published-022-handset").hexdigest()
+            destination_hmac = hashlib.sha256(b"published-022-destination").hexdigest()
+            await connection.execute(
+                """
+                INSERT INTO ella_imessage_registration_attempts (
+                    id, user_id, idempotency_key, handset_ref_hmac,
+                    consent_receipt_id, consent_authority_epoch,
+                    runtime_binding_id, runtime_target_id, runtime_authority_kind,
+                    runtime_authority_digest, state, provider_request_id,
+                    provider_registration_ref_hmac, assigned_destination_e164,
+                    assigned_destination_ref_hmac
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6,
+                    $7, NULL, 'retained_owner', $8, 'provider_accepted', $9,
+                    $10, $11, $12
+                )
+                """,
+                attempt_id,
+                user_id,
+                uuid.uuid4(),
+                handset_hmac,
+                consent["id"],
+                authority_epoch,
+                runtime.binding_id,
+                runtime.authority_digest,
+                uuid.uuid4(),
+                registration_hmac,
+                "+15555550118",
+                destination_hmac,
+            )
+            await connection.execute(
+                """
+                INSERT INTO ella_imessage_channel_bindings (
+                    id, user_id, registration_attempt_id, status, generation,
+                    handset_ref_hmac, assigned_destination_e164,
+                    assigned_destination_ref_hmac, line_identity_hmac,
+                    contact_identity_hmac, provider_registration_ref_hmac,
+                    runtime_binding_id, runtime_target_id, runtime_authority_kind,
+                    runtime_authority_digest, consent_receipt_id,
+                    consent_authority_epoch, challenge_salt, challenge_hash,
+                    challenge_expires_at, verified_at
+                ) VALUES (
+                    $1, $2, $3, 'active', 1, $4, $5, $6, $7, $8, $9,
+                    $10, NULL, 'retained_owner', $11, $12, $13, $14, $15,
+                    CURRENT_TIMESTAMP + INTERVAL '15 minutes', CURRENT_TIMESTAMP
+                )
+                """,
+                channel_id,
+                user_id,
+                attempt_id,
+                handset_hmac,
+                "+15555550118",
+                destination_hmac,
+                hashlib.sha256(b"published-022-line").hexdigest(),
+                hashlib.sha256(b"published-022-contact").hexdigest(),
+                registration_hmac,
+                runtime.binding_id,
+                runtime.authority_digest,
+                consent["id"],
+                authority_epoch,
+                "3" * 32,
+                "4" * 64,
+            )
+            await connection.execute(
+                """
+                INSERT INTO ella_imessage_message_receipts (
+                    id, binding_id, user_id, inbound_provider_ref_hmac,
+                    inbound_payload_sha256, message_text, occurred_at,
+                    binding_generation, consent_receipt_id, consent_authority_epoch,
+                    runtime_binding_id, runtime_target_id, runtime_authority_kind,
+                    runtime_authority_digest, status, lease_token, lease_expires_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP,
+                    1, $7, $8, $9, NULL, 'retained_owner', $10,
+                    'claimed', $11, CURRENT_TIMESTAMP + INTERVAL '1 minute'
+                )
+                """,
+                receipt_id,
+                channel_id,
+                user_id,
+                hashlib.sha256(b"published-022-message").hexdigest(),
+                hashlib.sha256(b"published-022-payload").hexdigest(),
+                "content-free published migration fixture",
+                consent["id"],
+                authority_epoch,
+                runtime.binding_id,
+                runtime.authority_digest,
+                uuid.uuid4(),
+            )
+
+            await connection.execute(
+                (MIGRATIONS / "023_add_imessage_runtime_binding_role.sql").read_text(encoding="utf-8")
+            )
+            migrated = await connection.fetchrow(
+                """
+                SELECT
+                    a.id AS attempt_id,
+                    a.runtime_binding_role AS attempt_role,
+                    b.id AS binding_id,
+                    b.runtime_binding_role AS binding_role,
+                    r.id AS receipt_id,
+                    r.runtime_binding_role AS receipt_role
+                FROM ella_imessage_registration_attempts a
+                JOIN ella_imessage_channel_bindings b ON b.registration_attempt_id = a.id
+                JOIN ella_imessage_message_receipts r ON r.binding_id = b.id
+                WHERE a.id = $1
+                """,
+                attempt_id,
+            )
+            assert dict(migrated) == {
+                "attempt_id": attempt_id,
+                "attempt_role": "imessage",
+                "binding_id": channel_id,
+                "binding_role": "imessage",
+                "receipt_id": receipt_id,
+                "receipt_role": "imessage",
+            }
+            with pytest.raises(asyncpg.CheckViolationError):
+                await connection.execute(
+                    "UPDATE ella_imessage_channel_bindings SET runtime_binding_role = 'user' WHERE id = $1",
+                    channel_id,
+                )
+
+            await connection.execute(
+                (MIGRATIONS / "023_add_imessage_runtime_binding_role.sql").read_text(encoding="utf-8")
+            )
+            assert (
+                await connection.fetchval(
+                    "SELECT count(*) FROM ella_imessage_message_receipts WHERE id = $1",
+                    receipt_id,
+                )
+                == 1
+            )
 
     asyncio.run(_run_with_database(scenario, migration_chain=MIGRATION_CHAIN[:-1]))
 

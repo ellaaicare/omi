@@ -89,6 +89,7 @@ on:
       - "backend/migrations/020_create_imessage_enrollment_authority.sql"
       - "backend/migrations/021_create_imessage_runtime_outbox.sql"
       - "backend/migrations/022_add_imessage_retained_runtime_authority.sql"
+      - "backend/migrations/023_add_imessage_runtime_binding_role.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
@@ -252,6 +253,7 @@ on:
       - "backend/migrations/020_create_imessage_enrollment_authority.sql"
       - "backend/migrations/021_create_imessage_runtime_outbox.sql"
       - "backend/migrations/022_add_imessage_retained_runtime_authority.sql"
+      - "backend/migrations/023_add_imessage_runtime_binding_role.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
@@ -608,7 +610,7 @@ jobs:
               tests/postgres/test_imessage_enrollment_postgres.py |
               sed '/^$/d'
           )"
-          test "$(grep -c '::' <<<"$imessage_ids")" -eq 121
+          test "$(grep -c '::' <<<"$imessage_ids")" -eq 122
           required_imessage_ids=(
             "tests/unit/test_imessage_enrollment.py::test_previous_policy_consent_is_rejected_before_authority_write"
             "tests/unit/test_imessage_enrollment.py::test_enrollment_runtime_accepts_only_exact_configured_retained_owner"
@@ -684,6 +686,7 @@ jobs:
             "tests/unit/test_imessage_photon_bridge.py::test_lost_delivery_start_response_is_quarantined_without_provider_send"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_migration_and_repository_enforce_consent_proof_replay_and_revoke"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_retained_authority_migration_upgrades_existing_target_rows_without_rewriting_identity"
+            "tests/postgres/test_imessage_enrollment_postgres.py::test_runtime_binding_role_migration_upgrades_published_022_retained_rows"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_retained_imessage_binding_admin_is_two_phase_exact_and_rollback_safe"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_invitation_revocation_preserves_retained_role_but_account_deletion_disables_it"
             "tests/postgres/test_imessage_enrollment_postgres.py::test_two_owner_identity_collision_has_zero_cross_write"

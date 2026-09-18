@@ -16,8 +16,11 @@ and authority contracts described here.
   does not create another agent or permit a caller-selected or global fallback.
 - Migrations `020_create_imessage_enrollment_authority.sql` and
   `021_create_imessage_runtime_outbox.sql`, plus the authority-shape migration
-  `022_add_imessage_retained_runtime_authority.sql`, are additive and do not
-  alter migration 009 or any `ella_photon_*` Cloud-canary table.
+  `022_add_imessage_retained_runtime_authority.sql` and its additive role
+  successor `023_add_imessage_runtime_binding_role.sql`, do not alter migration
+  009 or any `ella_photon_*` Cloud-canary table. Migration 022 retains its
+  published shape; 023 upgrades both fresh installs and databases that already
+  applied 022.
 - App calls use an exact Firebase bearer. The app cannot select a UID, account,
   profile, project, runtime, endpoint, credential, or provider route.
 - The bridge uses a dedicated transport credential. That credential cannot
@@ -32,7 +35,7 @@ and authority contracts described here.
 - Internal transport OpenAPI:
   `backend/ella/docs/imessage-runtime-internal.openapi.yaml`
 - Migrations: `backend/migrations/020_create_imessage_enrollment_authority.sql`
-  through `backend/migrations/022_add_imessage_retained_runtime_authority.sql`
+  through `backend/migrations/023_add_imessage_runtime_binding_role.sql`
 - App router: `backend/ella/routers/imessage_enrollment.py`
 - Internal runtime router: `backend/ella/routers/imessage_runtime.py`
 - Service: `backend/ella/services/imessage_enrollment.py`
