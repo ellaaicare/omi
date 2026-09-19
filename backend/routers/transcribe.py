@@ -2998,7 +2998,10 @@ async def _stream_handler(
                             )
                             continue
 
-                    delivery_receipt.record_decoded_pcm(bytes(data))
+                    delivery_receipt.record_decoded_pcm(
+                        bytes(data),
+                        sample_width=1 if codec == 'pcm8' else 2,
+                    )
                     if delivery_receipt.progress_due():
                         _delivery_log("progress")
 

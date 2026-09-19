@@ -104,6 +104,18 @@ def test_delivery_receipt_tracks_every_content_free_boundary():
     assert not any(key in snapshot for key in ("uid", "text", "transcript", "audio", "pcm"))
 
 
+def test_delivery_receipt_normalizes_unsigned_pcm8_signal_without_fabricating_silence():
+    receipt = SttSessionDeliveryReceipt()
+
+    receipt.record_decoded_pcm(b"\x80" * 160, sample_width=1)
+    assert receipt.pcm_peak_abs == 0
+    assert receipt.signal_frames_above_floor == 0
+
+    receipt.record_decoded_pcm(b"\x80\x81\x7f\xff\x00", sample_width=1)
+    assert receipt.pcm_peak_abs == 32768
+    assert receipt.signal_frames_above_floor == 1
+
+
 def test_deepgram_send_rejection_is_terminal_and_counted():
     receipt = SttSessionDeliveryReceipt()
     socket = _Socket(False)
@@ -316,7 +328,8 @@ def test_production_route_wires_receipt_and_does_not_log_transcript_text():
     streaming_source = (BACKEND / "utils" / "stt" / "streaming.py").read_text()
 
     assert "delivery_receipt.record_ingress(len(data))" in source
-    assert "delivery_receipt.record_decoded_pcm(bytes(data))" in source
+    assert "delivery_receipt.record_decoded_pcm(" in source
+    assert "sample_width=1 if codec == 'pcm8' else 2" in source
     assert "forward_deepgram_audio(dg_socket, chunk, delivery_receipt)" in source
     assert "forward_deepgram_audio(deepgram_socket, data, delivery_receipt)" in source
     assert "forward_async_provider_audio(soniox_sock.send, chunk, delivery_receipt)" in source
