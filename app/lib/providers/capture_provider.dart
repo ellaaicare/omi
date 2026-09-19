@@ -304,6 +304,18 @@ class _DeviceCaptureAttempt {
   }
 }
 
+class _PendingSegmentHandler {
+  const _PendingSegmentHandler({
+    required this.captureGeneration,
+    required this.transcriptMomentGeneration,
+    required this.future,
+  });
+
+  final int captureGeneration;
+  final int transcriptMomentGeneration;
+  final Future<void> future;
+}
+
 class _DeviceCaptureSession {
   _DeviceCaptureSession({
     required this.id,
@@ -755,6 +767,7 @@ class CaptureProvider extends ChangeNotifier
   ServerConversation? _conversation;
   List<TranscriptSegment> segments = [];
   List<ConversationPhoto> photos = [];
+  final Set<_PendingSegmentHandler> _pendingSegmentHandlers = <_PendingSegmentHandler>{};
   // Version counter for segments/photos content changes. Incremented on in-place mutations
   // (e.g., translation updates, photo description changes) to signal UI rebuilds when
   // list length and last-text remain unchanged.
@@ -3380,6 +3393,7 @@ class CaptureProvider extends ChangeNotifier
     required int maxAttempts,
     required Duration retryDelay,
   }) async {
+    if (!await _awaitPendingSegmentHandlers(operation)) return FinalCapturableContentResult.failed;
     var finalResult = FinalCapturableContentResult.failed;
     for (var attempt = 0; attempt < maxAttempts; attempt++) {
       final visibleBeforeRefresh = segments.where((segment) => segment.text.trim().isNotEmpty).toList();
@@ -3444,6 +3458,33 @@ class CaptureProvider extends ChangeNotifier
       }
     }
     return finalResult;
+  }
+
+  Future<bool> _awaitPendingSegmentHandlers(CaptureFinalizationOperation operation) async {
+    final transcriptMomentGeneration = _transcriptMomentGeneration;
+
+    // Let an already queued socket callback synchronously register its handler
+    // before finalization decides which transcript evidence must be durable.
+    await Future<void>.delayed(Duration.zero);
+    while (operation.isCurrent) {
+      final pending = _pendingSegmentHandlers
+          .where(
+            (handler) =>
+                handler.captureGeneration == operation.captureGeneration &&
+                handler.transcriptMomentGeneration == transcriptMomentGeneration,
+          )
+          .map((handler) => handler.future)
+          .toList(growable: false);
+      if (pending.isEmpty) return true;
+      try {
+        await Future.wait(pending);
+      } catch (error) {
+        Logger.error('Could not settle pending transcript segments before finalization: $error');
+        return false;
+      }
+      await Future<void>.delayed(Duration.zero);
+    }
+    return false;
   }
 
   List<TranscriptSegment> _mergeVisibleTranscriptEvidence(
@@ -4045,14 +4086,33 @@ class CaptureProvider extends ChangeNotifier
 
   @override
   void onSegmentReceived(List<TranscriptSegment> newSegments) {
-    _processNewSegmentReceived(newSegments);
-  }
-
-  void _processNewSegmentReceived(List<TranscriptSegment> newSegments) async {
     if (newSegments.isEmpty) return;
     final captureGeneration = _captureGeneration;
     final transcriptMomentGeneration = _transcriptMomentGeneration;
+    late final _PendingSegmentHandler handler;
+    final operation = _processNewSegmentReceived(
+      newSegments,
+      captureGeneration: captureGeneration,
+      transcriptMomentGeneration: transcriptMomentGeneration,
+    );
+    handler = _PendingSegmentHandler(
+      captureGeneration: captureGeneration,
+      transcriptMomentGeneration: transcriptMomentGeneration,
+      future: operation,
+    );
+    _pendingSegmentHandlers.add(handler);
+    unawaited(
+      operation.whenComplete(() => _pendingSegmentHandlers.remove(handler)).catchError((Object error, StackTrace _) {
+        Logger.error('Could not apply streamed transcript segment: $error');
+      }),
+    );
+  }
 
+  Future<void> _processNewSegmentReceived(
+    List<TranscriptSegment> newSegments, {
+    required int captureGeneration,
+    required int transcriptMomentGeneration,
+  }) async {
     if (segments.isEmpty && !_isLoadingInProgressConversation) {
       _isLoadingInProgressConversation = true;
       if (!PlatformService.isDesktop) {
@@ -4062,6 +4122,11 @@ class CaptureProvider extends ChangeNotifier
         await refreshInProgressConversations(
           expectedTranscriptMomentGeneration: transcriptMomentGeneration,
         );
+      } catch (error) {
+        // The streamed tail remains authoritative local evidence even when
+        // its bootstrap read fails. Finalization will require the backend to
+        // cover it before issuing the processing request.
+        Logger.error('Could not bootstrap conversation before applying streamed segment: $error');
       } finally {
         if (transcriptMomentGeneration == _transcriptMomentGeneration) {
           _isLoadingInProgressConversation = false;

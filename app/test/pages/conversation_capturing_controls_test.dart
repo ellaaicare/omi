@@ -218,9 +218,9 @@ void main() {
       onProcessNow: () async {
         ownerCalls++;
         expect(capture.phoneStops, 0, reason: 'the page must not close the transcript socket before its owner');
-        final finalized = await capture.stopStreamRecordingAndFinalize();
+        await capture.stopStreamRecordingAndFinalize();
         await ownerGate.future;
-        return finalized;
+        return ConversationProcessNowResult.failedReported;
       },
     );
 
@@ -246,6 +246,31 @@ void main() {
     expect(find.text('Processing Failed'), findsNothing);
   });
 
+  testWidgets('an unreported owner callback failure renders the local finalization error', (tester) async {
+    final capture = _FakeCaptureProvider(
+      RecordingState.stop,
+      transcriptReady: false,
+      phoneOwnsMobileAudio: true,
+      diagnostics: const CaptureDiagnostics(
+        source: CaptureDiagnosticSource.phone,
+        phase: CaptureDiagnosticPhase.failed,
+        failure: CaptureDiagnosticFailure.finalizationFailed,
+      ),
+    );
+    await _pumpCapturePage(
+      tester,
+      capture,
+      onProcessNow: () async => ConversationProcessNowResult.failedUnreported,
+    );
+
+    await tester.tap(find.byKey(const Key('conversation-process-now')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('Processing Failed'), findsOneWidget);
+    expect(find.byType(ConversationCapturingPage), findsOneWidget);
+  });
+
   testWidgets('content Process Now remains serialized until the owner final transcript settles', (tester) async {
     final capture = _FakeCaptureProvider(RecordingState.record, transcriptReady: true)
       ..segments = [_transcriptSegment()];
@@ -258,7 +283,7 @@ void main() {
         ownerCalls++;
         await capture.stopStreamRecordingAndFinalize();
         await finalTranscriptGate.future;
-        return true;
+        return ConversationProcessNowResult.processed;
       },
     );
 
@@ -423,7 +448,7 @@ TranscriptSegment _transcriptSegment() => TranscriptSegment(
 Future<void> _pumpCapturePage(
   WidgetTester tester,
   _FakeCaptureProvider capture, {
-  Future<bool> Function()? onProcessNow,
+  Future<ConversationProcessNowResult> Function()? onProcessNow,
   DeviceProvider? device,
   EllaCaptureSource? preferredCaptureSource,
 }) async {

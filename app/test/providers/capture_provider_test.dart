@@ -2182,7 +2182,7 @@ void main() {
     expect(processCalls, 1);
   });
 
-  test('a delayed first-segment refresh cannot repopulate the next continuous necklace moment', () async {
+  test('continuous necklace finalization joins a queued first-segment refresh before processing', () async {
     await _grantCaptureEgressAuthority('uid-a');
     final authority = _CaptureAuthority('uid-a');
     final initialSocket = _FakeTranscriptSocket();
@@ -2190,7 +2190,8 @@ void main() {
     final conversations = ConversationProvider();
     final delayedBootstrap = Completer<List<ServerConversation>>();
     addTearDown(conversations.dispose);
-    final oldSegment = _segment('old-moment-segment', 'Words from the completed necklace moment');
+    final priorSegment = _segment('prior-segment', 'Earlier durable words');
+    final queuedTail = _segment('queued-tail', 'Queued tail must become durable before processing');
     var socketPreparations = 0;
     var fetchCalls = 0;
     var processCalls = 0;
@@ -2211,7 +2212,7 @@ void main() {
         fetchCalls++;
         if (fetchCalls == 1) return delayedBootstrap.future;
         return Future.value([
-          _conversationWithEvidence('old-moment', [oldSegment]),
+          _conversationWithEvidence('old-moment', [priorSegment]),
         ]);
       },
       inProgressConversationProcess: (
@@ -2222,6 +2223,7 @@ void main() {
           conversation: _conversation('completed-old-moment', 'Completed', status: ConversationStatus.completed),
         );
       },
+      devicePhysicalFrameTimeout: const Duration(seconds: 20),
       geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
     )..updateProviderInstances(conversations, null, null, null);
     addTearDown(provider.dispose);
@@ -2231,21 +2233,22 @@ void main() {
     );
     _bindCaptureAuthority(initialSocket, 'old-moment');
     provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 1], codec: BleAudioCodec.pcm8);
-    provider.onSegmentReceived([oldSegment]);
+    provider.onSegmentReceived([queuedTail]);
     await pumpEventQueue();
     expect(fetchCalls, 1);
 
-    expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isTrue);
-    expect(processCalls, 1);
-    expect(provider.segments, isEmpty);
+    final finalization = provider.finalizeCurrentDeviceConversationAndContinue();
+    await pumpEventQueue();
+    expect(processCalls, 0, reason: 'processing must join the already registered segment handler');
 
     delayedBootstrap.complete([
-      _conversationWithEvidence('old-moment', [oldSegment]),
+      _conversationWithEvidence('old-moment', [priorSegment]),
     ]);
-    await pumpEventQueue(times: 5);
-
-    expect(provider.segments, isEmpty, reason: 'the completed moment must not leak into its successor');
-    expect(provider.recordingState, RecordingState.deviceRecord);
+    expect(await finalization, isFalse);
+    expect(processCalls, 0, reason: 'the queued tail is not yet present in the authoritative conversation');
+    expect(fetchCalls, greaterThan(1));
+    expect(provider.segments.map((segment) => segment.id), ['prior-segment', 'queued-tail']);
+    expect(provider.captureDiagnostics.failure, CaptureDiagnosticFailure.finalizationFailed);
   });
 
   test('an automatic socket refresh cannot overwrite the next continuous necklace moment', () async {

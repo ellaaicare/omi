@@ -1450,19 +1450,27 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
           onProcessNow: () async {
             if (_externalCaptureFinalizationSource != null) {
               await _finishExternalCapture(capture);
-              return _externalCaptureFinalizationSource == null;
+              return _externalCaptureFinalizationSource == null
+                  ? ConversationProcessNowResult.processed
+                  : ConversationProcessNowResult.failedReported;
             }
             if (_homeCaptureActive || _homeCaptureFinalizationPending || _homeCaptureFinalizationInFlight != null) {
-              return _finishHomeCapture(capture);
+              return await _finishHomeCapture(capture)
+                  ? ConversationProcessNowResult.processed
+                  : ConversationProcessNowResult.failedReported;
             }
             if (capture.recordingState == RecordingState.deviceRecord) {
-              return _finalizeHomeMoment(capture);
+              return await _finalizeHomeMoment(capture)
+                  ? ConversationProcessNowResult.processed
+                  : ConversationProcessNowResult.failedReported;
             }
             if (capture.phoneCaptureOwnsMobileAudio || capture.recordingState == RecordingState.record) {
               await _finishExternalCapture(capture);
-              return _externalCaptureFinalizationSource == null;
+              return _externalCaptureFinalizationSource == null
+                  ? ConversationProcessNowResult.processed
+                  : ConversationProcessNowResult.failedReported;
             }
-            return false;
+            return ConversationProcessNowResult.failedUnreported;
           },
         ),
       ),

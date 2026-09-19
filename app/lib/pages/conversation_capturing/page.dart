@@ -27,6 +27,8 @@ import 'package:omi/ella/ella_theme.dart';
 
 enum _CaptureStopTarget { none, phone, necklace, systemAudio }
 
+enum ConversationProcessNowResult { processed, failedReported, failedUnreported }
+
 EllaCaptureSource conversationCaptureSource({
   required RecordingState state,
   required bool phoneCaptureOwnsMobileAudio,
@@ -56,7 +58,7 @@ _CaptureStopTarget _captureStopTarget(CaptureProvider provider) {
 
 class ConversationCapturingPage extends StatefulWidget {
   final String? topConversationId;
-  final Future<bool> Function()? onProcessNow;
+  final Future<ConversationProcessNowResult> Function()? onProcessNow;
   final EllaCaptureSource? preferredCaptureSource;
 
   const ConversationCapturingPage({
@@ -78,7 +80,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
   bool _isMuted = false;
   _CaptureStopTarget _mutedCaptureTarget = _CaptureStopTarget.none;
   bool _isProcessDialogOpen = false;
-  Future<bool>? _processNowInFlight;
+  Future<ConversationProcessNowResult>? _processNowInFlight;
   final ScrollController _timelineScrollController = ScrollController();
 
   String _phoneCaptureFailureMessage(PhoneCaptureStartResult result) => switch (result) {
@@ -97,8 +99,8 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
           ? context.l10n.todayNoWordsCaptured
           : context.l10n.processingFailed;
 
-  void _showOwnedFinalizationFailure(CaptureProvider provider) {
-    if (!mounted || widget.onProcessNow != null) return;
+  void _showOwnedFinalizationFailure(CaptureProvider provider, ConversationProcessNowResult result) {
+    if (!mounted || result == ConversationProcessNowResult.failedReported) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_finalizationFailureMessage(provider))));
   }
 
@@ -214,22 +216,27 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
     }
   }
 
-  Future<bool> _runProcessNow(CaptureProvider provider) {
+  Future<ConversationProcessNowResult> _runProcessNow(CaptureProvider provider) {
     final existing = _processNowInFlight;
     if (existing != null) return existing;
 
     final processNow = widget.onProcessNow;
     final stopTarget = _captureStopTarget(provider);
-    final operation = Future<bool>.sync(() async {
-      if (processNow != null) return processNow();
-      return switch (stopTarget) {
-        _CaptureStopTarget.phone => provider.stopStreamRecordingAndFinalize(),
-        _CaptureStopTarget.necklace => provider.stopStreamDeviceRecordingAndFinalize(),
-        _CaptureStopTarget.systemAudio || _CaptureStopTarget.none => () async {
-            await _stopCaptureTransport(provider, stopTarget);
-            return provider.forceProcessingCurrentConversation();
-          }(),
-      };
+    final operation = Future<ConversationProcessNowResult>.sync(() async {
+      try {
+        if (processNow != null) return processNow();
+        final processed = await switch (stopTarget) {
+          _CaptureStopTarget.phone => provider.stopStreamRecordingAndFinalize(),
+          _CaptureStopTarget.necklace => provider.stopStreamDeviceRecordingAndFinalize(),
+          _CaptureStopTarget.systemAudio || _CaptureStopTarget.none => () async {
+              await _stopCaptureTransport(provider, stopTarget);
+              return provider.forceProcessingCurrentConversation();
+            }(),
+        };
+        return processed ? ConversationProcessNowResult.processed : ConversationProcessNowResult.failedUnreported;
+      } catch (_) {
+        return ConversationProcessNowResult.failedUnreported;
+      }
     });
     _processNowInFlight = operation;
     if (mounted) setState(() {});
@@ -242,7 +249,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
     return operation;
   }
 
-  void _clearProcessNow(Future<bool> operation) {
+  void _clearProcessNow(Future<ConversationProcessNowResult> operation) {
     if (!identical(_processNowInFlight, operation)) return;
     _processNowInFlight = null;
     if (mounted) setState(() {});
@@ -252,21 +259,21 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
     if (_processNowInFlight != null || _isProcessDialogOpen) return;
     final hasContent = provider.segments.isNotEmpty || provider.photos.isNotEmpty;
     if (!hasContent) {
-      final processed = await _runProcessNow(provider);
-      if (processed && mounted) {
+      final result = await _runProcessNow(provider);
+      if (result == ConversationProcessNowResult.processed && mounted) {
         Navigator.of(context).pop();
       } else {
-        _showOwnedFinalizationFailure(provider);
+        _showOwnedFinalizationFailure(provider, result);
       }
       return;
     }
     if (hasContent) {
       if (!showSummarizeConfirmation) {
-        final processed = await _runProcessNow(provider);
-        if (processed && mounted) {
+        final result = await _runProcessNow(provider);
+        if (result == ConversationProcessNowResult.processed && mounted) {
           Navigator.of(context).pop();
         } else {
-          _showOwnedFinalizationFailure(provider);
+          _showOwnedFinalizationFailure(provider, result);
         }
         return;
       }
@@ -306,13 +313,13 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                     if (confirmationInFlight) return;
                     setState(() => confirmationInFlight = true);
                     SharedPreferencesUtil().showSummarizeConfirmation = showSummarizeConfirmation;
-                    final processed = await _runProcessNow(provider);
+                    final result = await _runProcessNow(provider);
                     if (!context.mounted) return;
                     Navigator.of(context).pop();
-                    if (processed && mounted) {
+                    if (result == ConversationProcessNowResult.processed && mounted) {
                       Navigator.of(this.context).pop();
                     } else {
-                      _showOwnedFinalizationFailure(provider);
+                      _showOwnedFinalizationFailure(provider, result);
                     }
                   },
                 );
