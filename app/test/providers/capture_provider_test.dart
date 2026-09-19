@@ -857,8 +857,64 @@ void main() {
     );
     addTearDown(provider.dispose);
 
-    expect(await provider.awaitFinalCapturableContent(maxAttempts: 3, retryDelay: Duration.zero), isFalse);
+    expect(
+      await provider.awaitFinalCapturableContent(maxAttempts: 3, retryDelay: Duration.zero),
+      FinalCapturableContentResult.failed,
+    );
     expect(refreshes, 3);
+  });
+
+  test('a successful authoritative empty read is distinguished from a failed final read', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async => const [],
+    );
+    addTearDown(provider.dispose);
+
+    expect(
+      await provider.awaitFinalCapturableContent(maxAttempts: 1, retryDelay: Duration.zero),
+      FinalCapturableContentResult.confirmedEmpty,
+    );
+  });
+
+  test('a failed final read after physical necklace audio is a finalization failure, not no transcript', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final socket = _FakeTranscriptSocket();
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async => socket.service,
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        throw StateError('transient final read failure');
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    )..updateProviderInstances(conversations, null, null, null);
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    _bindCaptureAuthority(socket, 'physical-read-failure');
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 1], codec: BleAudioCodec.pcm8);
+
+    expect(
+      await provider.finalizeCurrentConversation(
+        maxTranscriptAttempts: 1,
+        transcriptRetryDelay: Duration.zero,
+      ),
+      isFalse,
+    );
+    expect(provider.captureDiagnostics.failure, CaptureDiagnosticFailure.finalizationFailed);
   });
 
   test('delayed final transcript cannot cross an account and capture transition', () async {

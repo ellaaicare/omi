@@ -286,6 +286,35 @@ void main() {
     expect(find.text('Record'), findsOneWidget);
   });
 
+  testWidgets('failed final read keeps the retry target and never reports proven empty', (tester) async {
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      initialRecordingState: RecordingState.record,
+      captureHasContent: false,
+      captureFinalContentResult: FinalCapturableContentResult.failed,
+      finalizationResults: const [false, false],
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('Finish'), findsOneWidget);
+    expect(find.text("Recording isn't available right now."), findsOneWidget);
+    expect(find.text('No words were captured, so no memory was created.'), findsNothing);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(harness.capture.finalContentChecks, greaterThanOrEqualTo(2));
+    expect(find.text('Finish'), findsOneWidget, reason: 'an ambiguous final read must remain retryable');
+    expect(find.text("Recording isn't available right now."), findsOneWidget);
+    expect(find.text('No words were captured, so no memory was created.'), findsNothing);
+  });
+
   testWidgets('first phone finalization failure from Transcript preserves the exact retry target', (tester) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
     final harness = await _pumpHome(
@@ -2639,6 +2668,7 @@ Future<_HomeHarness> _pumpHome(
   PhoneCaptureStartResult phoneStartResult = PhoneCaptureStartResult.started,
   bool captureHasContent = true,
   bool captureHasFinalContent = false,
+  FinalCapturableContentResult? captureFinalContentResult,
   bool captureHasDeviceBoundaryEvidence = false,
   List<bool> finalizationResults = const [],
   Completer<void>? finalizationGate,
@@ -2661,6 +2691,7 @@ Future<_HomeHarness> _pumpHome(
     phoneStartResult: phoneStartResult,
     hasContent: captureHasContent,
     hasFinalContent: captureHasFinalContent,
+    finalContentResult: captureFinalContentResult,
     hasDeviceBoundaryEvidence: captureHasDeviceBoundaryEvidence,
     finalizationResults: finalizationResults,
     finalizationGate: finalizationGate,
@@ -2829,6 +2860,7 @@ class _FakeCaptureProvider extends CaptureProvider {
     required this.phoneStartResult,
     required this.hasContent,
     required this.hasFinalContent,
+    this.finalContentResult,
     required this.hasDeviceBoundaryEvidence,
     required List<bool> finalizationResults,
     this.finalizationGate,
@@ -2840,6 +2872,7 @@ class _FakeCaptureProvider extends CaptureProvider {
   final PhoneCaptureStartResult phoneStartResult;
   final bool hasContent;
   final bool hasFinalContent;
+  final FinalCapturableContentResult? finalContentResult;
   final bool hasDeviceBoundaryEvidence;
   final List<bool> finalizationResults;
   final Completer<void>? finalizationGate;
@@ -2864,12 +2897,13 @@ class _FakeCaptureProvider extends CaptureProvider {
   bool get hasActiveDeviceCaptureBoundaryEvidence => hasDeviceBoundaryEvidence;
 
   @override
-  Future<bool> awaitFinalCapturableContent({
+  Future<FinalCapturableContentResult> awaitFinalCapturableContent({
     int maxAttempts = 3,
     Duration retryDelay = const Duration(milliseconds: 250),
   }) async {
     finalContentChecks++;
-    return hasFinalContent;
+    return finalContentResult ??
+        (hasFinalContent ? FinalCapturableContentResult.ready : FinalCapturableContentResult.confirmedEmpty);
   }
 
   @override
@@ -2933,7 +2967,11 @@ class _FakeCaptureProvider extends CaptureProvider {
     await stopStreamRecording();
     final finalized = await finalizeCurrentConversation();
     if (finalized) return PhoneCaptureStopResult.finalized;
-    return hasContent || hasFinalContent ? PhoneCaptureStopResult.failed : PhoneCaptureStopResult.empty;
+    final terminalContent = finalContentResult ??
+        (hasFinalContent ? FinalCapturableContentResult.ready : FinalCapturableContentResult.confirmedEmpty);
+    return !hasContent && terminalContent == FinalCapturableContentResult.confirmedEmpty
+        ? PhoneCaptureStopResult.empty
+        : PhoneCaptureStopResult.failed;
   }
 
   @override

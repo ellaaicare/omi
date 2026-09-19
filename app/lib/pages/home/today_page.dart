@@ -1495,7 +1495,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       if (existingSource != null) {
         finished = await capture.finalizeCurrentConversation(closeTranscriptTransportBeforeProcessing: true);
         if (!finished && !capture.captureDiagnostics.hasPhysicalAudio && !capture.hasCapturableContent) {
-          confirmedEmpty = !await capture.awaitFinalCapturableContent();
+          confirmedEmpty = await capture.awaitFinalCapturableContent() == FinalCapturableContentResult.confirmedEmpty;
         }
       } else if (source == _ExternalCaptureSource.phone) {
         final result = await capture.stopPhoneCaptureForVoiceTakeover();
@@ -1505,7 +1505,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         final hadCaptureEvidence = capture.captureDiagnostics.hasPhysicalAudio || capture.hasCapturableContent;
         finished = await capture.stopStreamDeviceRecordingAndFinalize();
         if (!finished && !hadCaptureEvidence && !capture.captureDiagnostics.hasPhysicalAudio) {
-          confirmedEmpty = !await capture.awaitFinalCapturableContent();
+          confirmedEmpty = await capture.awaitFinalCapturableContent() == FinalCapturableContentResult.confirmedEmpty;
         }
       }
 

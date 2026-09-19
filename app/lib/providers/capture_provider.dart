@@ -73,6 +73,8 @@ enum PhoneCaptureStartResult {
 
 enum PhoneCaptureStopResult { empty, finalized, failed }
 
+enum FinalCapturableContentResult { ready, confirmedEmpty, failed }
+
 enum CaptureDiagnosticSource { none, phone, necklace }
 
 enum CaptureDiagnosticPhase {
@@ -1097,11 +1099,7 @@ class CaptureProvider extends ChangeNotifier
       if (finalized) {
         _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.completed, clearFailure: true);
       } else {
-        _failCaptureDiagnostics(
-          _captureDiagnostics.hasTranscript
-              ? CaptureDiagnosticFailure.finalizationFailed
-              : CaptureDiagnosticFailure.noTranscript,
-        );
+        _failCaptureDiagnostics(CaptureDiagnosticFailure.finalizationFailed);
         succeeded = false;
       }
     }
@@ -2795,12 +2793,12 @@ class CaptureProvider extends ChangeNotifier
   }) async {
     final expectedConversationId = operation.captureProtocolAuthority?.conversationId.trim() ?? '';
     if (expectedConversationId.isEmpty) return null;
-    final hasFinalContent = await _awaitFinalCapturableContent(
+    final finalContent = await _awaitFinalCapturableContent(
       operation,
       maxAttempts: maxAttempts,
       retryDelay: retryDelay,
     );
-    if (!hasFinalContent || !operation.isCurrent) return null;
+    if (finalContent != FinalCapturableContentResult.ready || !operation.isCurrent) return null;
     final conversationId = (_conversation?.id ?? '').trim();
     return conversationId == expectedConversationId ? conversationId : null;
   }
@@ -3301,11 +3299,7 @@ class CaptureProvider extends ChangeNotifier
     } else if (empty) {
       _failCaptureDiagnostics(failure);
     } else {
-      _failCaptureDiagnostics(
-        _captureDiagnostics.hasTranscript
-            ? CaptureDiagnosticFailure.finalizationFailed
-            : CaptureDiagnosticFailure.noTranscript,
-      );
+      _failCaptureDiagnostics(CaptureDiagnosticFailure.finalizationFailed);
     }
   }
 
@@ -3361,12 +3355,12 @@ class CaptureProvider extends ChangeNotifier
   /// Gives the transcription service a short, bounded window to publish its
   /// final segment after microphone/socket shutdown. Empty placeholder
   /// segments never qualify, so Home cannot create a blank processing memory.
-  Future<bool> awaitFinalCapturableContent({
+  Future<FinalCapturableContentResult> awaitFinalCapturableContent({
     int maxAttempts = 12,
     Duration retryDelay = const Duration(milliseconds: 500),
   }) async {
     final operation = _beginFinalizationOperation();
-    if (operation == null) return false;
+    if (operation == null) return FinalCapturableContentResult.failed;
     try {
       return await _awaitFinalCapturableContent(
         operation,
@@ -3378,11 +3372,12 @@ class CaptureProvider extends ChangeNotifier
     }
   }
 
-  Future<bool> _awaitFinalCapturableContent(
+  Future<FinalCapturableContentResult> _awaitFinalCapturableContent(
     CaptureFinalizationOperation operation, {
     required int maxAttempts,
     required Duration retryDelay,
   }) async {
+    var finalResult = FinalCapturableContentResult.failed;
     for (var attempt = 0; attempt < maxAttempts; attempt++) {
       final visibleBeforeRefresh = segments.where((segment) => segment.text.trim().isNotEmpty).toList();
       final visiblePhotosBeforeRefresh = _capturablePhotos(photos);
@@ -3395,14 +3390,14 @@ class CaptureProvider extends ChangeNotifier
       var loadedAuthoritativeSnapshot = false;
       try {
         loadedAuthoritativeSnapshot = await _loadInProgressConversation(operation, preserveVisibleContentOnEmpty: true);
-        if (!loadedAuthoritativeSnapshot) return false;
+        if (!loadedAuthoritativeSnapshot) return FinalCapturableContentResult.failed;
       } on ExactAccountAuthorityChangedException {
-        return false;
+        return FinalCapturableContentResult.failed;
       } catch (_) {
         // Never reuse a cached conversation after a failed final read. Only a
         // successful snapshot from this attempt can authorize processing.
       }
-      if (!operation.isCurrent) return false;
+      if (!operation.isCurrent) return FinalCapturableContentResult.failed;
       if (loadedAuthoritativeSnapshot) {
         final authoritativeConversation = _conversation;
         final authoritativeSegments = authoritativeConversation?.transcriptSegments ?? const <TranscriptSegment>[];
@@ -3430,15 +3425,20 @@ class CaptureProvider extends ChangeNotifier
         if (authoritativeHasContent &&
             (!expectsAuthoritativeTranscript || (authoritativeHasTranscript && authoritativeCoversVisible)) &&
             (!expectsAuthoritativePhotos || authoritativeCoversVisiblePhotos)) {
-          return true;
+          return FinalCapturableContentResult.ready;
         }
+        finalResult = !authoritativeHasContent && !expectsAuthoritativeTranscript && !expectsAuthoritativePhotos
+            ? FinalCapturableContentResult.confirmedEmpty
+            : FinalCapturableContentResult.failed;
+      } else {
+        finalResult = FinalCapturableContentResult.failed;
       }
       if (attempt + 1 < maxAttempts && retryDelay > Duration.zero) {
         await Future<void>.delayed(retryDelay);
-        if (!operation.isCurrent) return false;
+        if (!operation.isCurrent) return FinalCapturableContentResult.failed;
       }
     }
-    return false;
+    return finalResult;
   }
 
   List<TranscriptSegment> _mergeVisibleTranscriptEvidence(
@@ -3514,43 +3514,49 @@ class CaptureProvider extends ChangeNotifier
     List<ConversationPhoto> afterRefresh,
   ) {
     final merged = _capturablePhotos(beforeRefresh);
-    final matchedBeforeRefresh = <int>{};
-    for (final photo in _capturablePhotos(afterRefresh)) {
-      final index = _matchingPhotoIndex(merged, photo, excluding: matchedBeforeRefresh);
-      if (index == -1) {
-        merged.add(photo);
-      } else {
-        matchedBeforeRefresh.add(index);
-      }
+    final afterPhotos = _capturablePhotos(afterRefresh);
+    final matches = _matchingPhotoIndexes(merged, afterPhotos);
+    for (var index = 0; index < afterPhotos.length; index++) {
+      if (matches[index] == null) merged.add(afterPhotos[index]);
     }
     return merged;
   }
 
   bool _authoritativePhotosCover(List<ConversationPhoto> authoritative, List<ConversationPhoto> visible) {
-    final available = _capturablePhotos(authoritative);
-    for (final visiblePhoto in _capturablePhotos(visible)) {
-      final index = _matchingPhotoIndex(available, visiblePhoto);
-      if (index == -1) return false;
-      available.removeAt(index);
-    }
-    return true;
+    final visiblePhotos = _capturablePhotos(visible);
+    return _matchingPhotoIndexes(_capturablePhotos(authoritative), visiblePhotos).every((index) => index != null);
   }
 
-  int _matchingPhotoIndex(
-    List<ConversationPhoto> candidates,
-    ConversationPhoto photo, {
-    Set<int> excluding = const <int>{},
-  }) {
-    final photoId = photo.id.trim();
-    if (photoId.isNotEmpty) {
-      for (var index = 0; index < candidates.length; index++) {
-        if (!excluding.contains(index) && candidates[index].id.trim() == photoId) return index;
+  List<int?> _matchingPhotoIndexes(List<ConversationPhoto> candidates, List<ConversationPhoto> photosToMatch) {
+    final matches = List<int?>.filled(photosToMatch.length, null);
+    final usedCandidates = <int>{};
+
+    // Reserve every exact durable ID before a temporary photo can use the
+    // payload fallback and consume that candidate.
+    for (var photoIndex = 0; photoIndex < photosToMatch.length; photoIndex++) {
+      final photoId = photosToMatch[photoIndex].id.trim();
+      if (photoId.isEmpty) continue;
+      for (var candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
+        if (!usedCandidates.contains(candidateIndex) && candidates[candidateIndex].id.trim() == photoId) {
+          matches[photoIndex] = candidateIndex;
+          usedCandidates.add(candidateIndex);
+          break;
+        }
       }
     }
-    for (var index = 0; index < candidates.length; index++) {
-      if (!excluding.contains(index) && _sameConversationPhoto(candidates[index], photo)) return index;
+
+    for (var photoIndex = 0; photoIndex < photosToMatch.length; photoIndex++) {
+      if (matches[photoIndex] != null) continue;
+      for (var candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
+        if (!usedCandidates.contains(candidateIndex) &&
+            _sameConversationPhoto(candidates[candidateIndex], photosToMatch[photoIndex])) {
+          matches[photoIndex] = candidateIndex;
+          usedCandidates.add(candidateIndex);
+          break;
+        }
+      }
     }
-    return -1;
+    return matches;
   }
 
   bool _sameConversationPhoto(ConversationPhoto left, ConversationPhoto right) {
@@ -3570,13 +3576,13 @@ class CaptureProvider extends ChangeNotifier
     List<ConversationPhoto> visible,
   ) {
     final merged = List<ConversationPhoto>.from(authoritative);
-    final matchedAuthoritative = <int>{};
-    for (final visiblePhoto in visible) {
-      final index = _matchingPhotoIndex(merged, visiblePhoto, excluding: matchedAuthoritative);
-      if (index == -1) {
+    final matches = _matchingPhotoIndexes(authoritative, visible);
+    for (var visibleIndex = 0; visibleIndex < visible.length; visibleIndex++) {
+      final visiblePhoto = visible[visibleIndex];
+      final index = matches[visibleIndex];
+      if (index == null) {
         merged.add(visiblePhoto);
       } else {
-        matchedAuthoritative.add(index);
         if (!visiblePhoto.discarded &&
             visiblePhoto.base64.trim().isNotEmpty &&
             (merged[index].discarded || merged[index].base64 != visiblePhoto.base64)) {
@@ -3739,18 +3745,18 @@ class CaptureProvider extends ChangeNotifier
         await _socket?.stop(reason: 'capture transport drained before final transcript read');
         if (!operation.isCurrent) return false;
       }
-      final hasContent = await _awaitFinalCapturableContent(
+      final finalContent = await _awaitFinalCapturableContent(
         operation,
         maxAttempts: maxTranscriptAttempts,
         retryDelay: transcriptRetryDelay,
       );
-      if (!hasContent || !operation.isCurrent) {
+      if (finalContent != FinalCapturableContentResult.ready || !operation.isCurrent) {
         if (_captureDiagnostics.source != CaptureDiagnosticSource.none) {
           final visibleContentObserved = hadVisibleContent || hasCapturableContent || _captureDiagnostics.hasTranscript;
           _failCaptureDiagnostics(
-            visibleContentObserved
-                ? CaptureDiagnosticFailure.finalizationFailed
-                : CaptureDiagnosticFailure.noTranscript,
+            finalContent == FinalCapturableContentResult.confirmedEmpty && !visibleContentObserved
+                ? CaptureDiagnosticFailure.noTranscript
+                : CaptureDiagnosticFailure.finalizationFailed,
           );
         }
         return false;
