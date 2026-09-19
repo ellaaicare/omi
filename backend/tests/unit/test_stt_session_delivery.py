@@ -260,6 +260,57 @@ def test_deepgram_callbacks_report_empty_error_and_close_without_error_content(m
     assert "secret-bearing-detail" not in capsys.readouterr().out
 
 
+def test_soniox_setup_rejection_logs_and_raises_without_provider_detail(monkeypatch, capsys):
+    streaming = _load_streaming(monkeypatch)
+    monkeypatch.setenv("SONIOX_API_KEY", "test-only-soniox-key")
+    provider_detail = "synthetic-content-bearing-provider-detail"
+
+    class _SonioxSocket:
+        def __init__(self):
+            self.closed = False
+            self.sent = []
+
+        async def send(self, payload):
+            self.sent.append(payload)
+
+        async def recv(self):
+            return streaming.json.dumps(
+                {
+                    "error_code": 429,
+                    "error_message": provider_detail,
+                }
+            )
+
+        async def close(self):
+            self.closed = True
+
+    socket = _SonioxSocket()
+
+    async def connect(*_args, **_kwargs):
+        return socket
+
+    monkeypatch.setattr(streaming.websockets, "connect", connect)
+
+    with pytest.raises(ValueError) as exc_info:
+        asyncio.run(
+            streaming.process_audio_soniox(
+                lambda _segments: None,
+                16000,
+                "en",
+                "fixture-uid",
+            )
+        )
+
+    output = capsys.readouterr().out
+    assert socket.closed is True
+    assert len(socket.sent) == 1
+    assert "code=429" in str(exc_info.value)
+    assert "class=ValueError" in output
+    assert provider_detail not in str(exc_info.value)
+    assert provider_detail not in output
+    assert "test-only-soniox-key" not in output
+
+
 def test_production_route_wires_receipt_and_does_not_log_transcript_text():
     source = (BACKEND / "routers" / "transcribe.py").read_text()
     streaming_source = (BACKEND / "utils" / "stt" / "streaming.py").read_text()
