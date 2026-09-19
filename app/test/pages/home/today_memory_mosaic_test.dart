@@ -2918,6 +2918,13 @@ class _FakeCaptureProvider extends CaptureProvider {
   @override
   Future<bool> stopStreamRecordingAndFinalize() async {
     await stopStreamRecording();
+    if (!hasContent && !hasFinalContent) {
+      captureDiagnosticsOverride = const CaptureDiagnostics(
+        source: CaptureDiagnosticSource.phone,
+        phase: CaptureDiagnosticPhase.failed,
+        failure: CaptureDiagnosticFailure.noTranscript,
+      );
+    }
     return finalizeCurrentConversation();
   }
 
