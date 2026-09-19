@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import random
 import time
@@ -795,7 +796,7 @@ async def process_audio_soniox(
     language: str,
     uid: str,
     preseconds: int = 0,
-    language_hints: List[str] = [],
+    language_hints: Optional[List[str]] = None,
     stt_event_callback: Optional[Callable] = None,
 ):
     # Soniox supports diarization primarily for English
@@ -813,6 +814,10 @@ async def process_audio_soniox(
 
     # Determine audio format based on sample rate
     audio_format = "s16le" if sample_rate == 16000 else "mulaw"
+
+    # Single-language callers do not supply hints. Normalize before request
+    # construction so setup and content-free diagnostics share one list value.
+    language_hints = language_hints or []
 
     # Construct the initial request with all required and optional parameters
     request = {
@@ -838,7 +843,11 @@ async def process_audio_soniox(
 
         # Send the initial request
         await soniox_socket.send(json.dumps(request))
-        print(f"Sent initial request: {request}")
+        print(
+            "Sent Soniox initial request: "
+            f"sample_rate={sample_rate} audio_format={audio_format} "
+            f"language_hints_count={len(language_hints)}"
+        )
 
         # Quick check for immediate auth/balance errors from Soniox (0.3s timeout)
         try:
@@ -846,10 +855,9 @@ async def process_audio_soniox(
             _first_msg = json.loads(_first_raw)
             if 'error_code' in _first_msg:
                 _err_code = _first_msg.get('error_code', 0)
-                _err_msg = _first_msg.get('error_message', 'Unknown error')
                 await soniox_socket.close()
-                raise ValueError(f"Soniox error {_err_code}: {_err_msg}")
-            print(f"Soniox first message (not error): {_first_msg}")
+                raise ValueError(f"Soniox provider rejected setup: code={_err_code}")
+            print("Soniox first message received.")
         except asyncio.TimeoutError:
             pass  # Normal: Soniox is ready, waiting for audio
 
@@ -871,10 +879,9 @@ async def process_audio_soniox(
 
                     # Check for error responses
                     if 'error_code' in response:
-                        error_message = response.get('error_message', 'Unknown error')
                         error_code = response.get('error_code', 0)
-                        print(f"Soniox error: {error_code} - {error_message}")
-                        raise Exception(f"Soniox error: {error_code} - {error_message}")
+                        print(f"Soniox provider error: code={error_code}")
+                        raise RuntimeError(f"Soniox provider error: code={error_code}")
 
                     # Process response based on tokens field
                     if 'tokens' in response:
@@ -990,11 +997,11 @@ async def process_audio_soniox(
                             current_segment['end'] = end_time
 
                     else:
-                        print(f"Unexpected Soniox response format: {response}")
+                        print("Unexpected Soniox response format.")
             except websockets.exceptions.ConnectionClosedOK:
                 print("Soniox connection closed normally.")
             except Exception as e:
-                print(f"Error receiving from Soniox: {e}")
+                print(f"Error receiving from Soniox: class={type(e).__name__}")
             finally:
                 if not soniox_socket.closed:
                     await soniox_socket.close()
@@ -1008,7 +1015,7 @@ async def process_audio_soniox(
         return soniox_socket
 
     except Exception as e:
-        print(f"Exception in process_audio_soniox: {e}")
+        print(f"Exception in process_audio_soniox: class={type(e).__name__}")
         raise  # Re-raise the exception to be handled by the caller
 
 

@@ -1338,7 +1338,7 @@ async def _stream_handler(
             first_segment = segments[0] if isinstance(segments[0], dict) else {}
             result_provider = (
                 first_segment.get("stt_provider") if isinstance(first_segment, dict) else None
-            ) or _stt_service_value(stt_service)
+            ) or _stt_service_value(selected_stt_service)
             _latency_log(
                 "first_final_result",
                 segment_count=len(segments),
@@ -1349,13 +1349,13 @@ async def _stream_handler(
         for segment in segments or []:
             if isinstance(segment, dict):
                 segment.setdefault("id", str(uuid.uuid4()))
-                segment.setdefault("stt_provider", _stt_service_value(stt_service))
+                segment.setdefault("stt_provider", _stt_service_value(selected_stt_service))
                 bind_capture_conversation(segment)
         realtime_segment_buffers.extend(segments)
 
     async def _process_stt():
         nonlocal websocket_close_code
-        nonlocal stt_service, selected_stt_service, selected_stt_model
+        nonlocal selected_stt_service, selected_stt_model
         nonlocal soniox_socket
         nonlocal soniox_profile_socket
         nonlocal speechmatics_socket
@@ -1401,6 +1401,24 @@ async def _stream_handler(
             # If no speech profile, mark as complete immediately
             if not has_speech_profile:
                 speech_profile_complete.set()
+
+            profile_loader_required = has_speech_profile
+
+            def complete_profile_without_preload(reason: str) -> None:
+                nonlocal profile_loader_required, speech_profile_preseconds
+                profile_loader_required = False
+                speech_profile_preseconds = 0
+                speech_profile_complete.set()
+                speech_profile_state.update(
+                    {
+                        "preseconds": 0,
+                        "speech_profile_processed_initial": True,
+                        "speech_profile_processed": True,
+                        "preload_skipped_reason": reason,
+                        "completed_at": _utc_iso_from_ts(time.time()),
+                    }
+                )
+                _latency_log("speech_profile_complete", speech_profile=speech_profile_state)
 
             stt_connect_started_at = time.time()
             _latency_log(
@@ -1467,16 +1485,25 @@ async def _stream_handler(
                             stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
                         )
                 except ValueError as e:
-                    print(f"Soniox unavailable ({e}), falling back to Deepgram nova-3")
-                    stt_service = STTService.deepgram
+                    # A profile socket can fail after the primary Soniox socket
+                    # has opened. Prove that authority is gone before selecting a
+                    # second provider, otherwise live PCM can reach both vendors.
+                    if soniox_profile_socket is not None:
+                        await soniox_profile_socket.close()
+                        soniox_profile_socket = None
+                    if soniox_socket is not None:
+                        await soniox_socket.close()
+                        soniox_socket = None
+                    print(f"Soniox unavailable ({type(e).__name__}), falling back to Deepgram nova-3")
                     selected_stt_service = STTService.deepgram
                     selected_stt_model = 'nova-3'
+                    complete_profile_without_preload("provider_fallback_zero_preload")
                     deepgram_socket = await process_audio_dg(
                         stream_transcript,
                         stt_language,
                         sample_rate,
                         1,
-                        preseconds=speech_profile_preseconds,
+                        preseconds=0,
                         model='nova-3',
                         keywords=vocabulary[:100] if vocabulary else None,
                         stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
@@ -1486,15 +1513,15 @@ async def _stream_handler(
             # GROK (disabled - Whisper-based, hallucinates on ambient background noise)
             elif stt_service == STTService.grok:
                 print("Grok STT selected but disabled for ambient use; routing to Deepgram nova-2")
-                stt_service = STTService.deepgram
                 selected_stt_service = STTService.deepgram
                 selected_stt_model = 'nova-2-general'
+                complete_profile_without_preload("provider_fallback_zero_preload")
                 deepgram_socket = await process_audio_dg(
                     stream_transcript,
                     stt_language if stt_language != 'multi' else 'multi',
                     sample_rate,
                     1,
-                    preseconds=speech_profile_preseconds,
+                    preseconds=0,
                     model='nova-2-general',
                     keywords=vocabulary[:100] if vocabulary else None,
                     stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
@@ -1511,11 +1538,11 @@ async def _stream_handler(
             _latency_log(
                 "stt_connection_ready",
                 connect_latency_ms=_elapsed_ms(stt_connect_started_at, stt_connect_ready_at),
-                provider=_stt_service_value(stt_service),
+                provider=_stt_service_value(selected_stt_service),
             )
 
             # Return background task to load and send speech profile
-            if has_speech_profile:
+            if profile_loader_required:
                 return _create_speech_profile_loader_task(lambda: websocket_active, sample_rate)
             return None
 
@@ -1523,7 +1550,7 @@ async def _stream_handler(
             _latency_log(
                 "stt_connection_error",
                 error_class=type(e).__name__,
-                provider=_stt_service_value(stt_service),
+                provider=_stt_service_value(selected_stt_service),
             )
             print(f"Initial STT processing error class: {type(e).__name__}", uid, session_id)
             websocket_close_code = 1011
@@ -1534,6 +1561,7 @@ async def _stream_handler(
         """Create async task to load speech profile and send to STT in background."""
 
         async def _process_speech_profile():
+            nonlocal websocket_active, websocket_close_code
             try:
                 # Check if we should stop before doing any work
                 if not is_active():
@@ -1624,6 +1652,12 @@ async def _stream_handler(
                     )
                     await asyncio.sleep(SPEECH_PROFILE_STABILIZE_DELAY)
 
+            except ProviderAudioSendRejected:
+                websocket_close_code = 1011
+                websocket_active = False
+                _delivery_log("provider_send_rejected", terminal_reason="profile_provider_send_rejected")
+                if websocket.client_state == WebSocketState.CONNECTED:
+                    await websocket.close(code=websocket_close_code)
             except Exception as e:
                 _latency_log("speech_profile_error", error_class=type(e).__name__)
                 print(f"Speech profile error class: {type(e).__name__}", uid, session_id)

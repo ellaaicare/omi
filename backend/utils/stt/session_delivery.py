@@ -39,9 +39,11 @@ class SttSessionDeliveryReceipt:
     def record_decode_error(self) -> None:
         self.decode_errors += 1
 
-    def record_decoded_pcm(self, pcm: bytes, *, signal_floor: int = 128) -> None:
+    def record_decoded_pcm(self, pcm: bytes, *, sample_width: int = 2, signal_floor: int = 128) -> None:
         self.decoded_frames += 1
         self.decoded_pcm_bytes += len(pcm)
+        if sample_width != 2:
+            raise ValueError("unsupported_pcm_sample_width")
         even_length = len(pcm) - (len(pcm) % 2)
         if even_length <= 0:
             return
@@ -101,7 +103,7 @@ async def forward_async_provider_audio(send, chunk: bytes, receipt: SttSessionDe
         result = await send(chunk)
     except Exception:
         receipt.record_provider_send(len(chunk), accepted=False)
-        raise
+        raise ProviderAudioSendRejected("stt_provider_send_failed") from None
     accepted = result is not False
     receipt.record_provider_send(len(chunk), accepted=accepted)
     if not accepted:
