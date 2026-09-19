@@ -201,7 +201,22 @@ def test_production_route_wires_receipt_and_does_not_log_transcript_text():
     assert "delivery_receipt.record_ingress(len(data))" in source
     assert "delivery_receipt.record_decoded_pcm(bytes(data))" in source
     assert "forward_deepgram_audio(dg_socket, chunk, delivery_receipt)" in source
+    assert "forward_deepgram_audio(deepgram_socket, data, delivery_receipt)" in source
     assert '"[STT-DELIVERY]' in source
     assert 'text=event.get("text")' not in source
     assert '"text": sentence[:120]' not in streaming_source
     assert "delivery_event_callback=_provider_delivery_event_callback," in source
+
+
+def test_deepgram_fallbacks_report_the_effective_provider():
+    source = (BACKEND / "routers" / "transcribe.py").read_text()
+
+    soniox_fallback = source.index("Soniox unavailable")
+    soniox_deepgram = source.index("deepgram_socket = await process_audio_dg", soniox_fallback)
+    grok_fallback = source.index("Grok STT selected but disabled")
+    grok_deepgram = source.index("deepgram_socket = await process_audio_dg", grok_fallback)
+
+    assert "selected_stt_service = STTService.deepgram" in source[soniox_fallback:soniox_deepgram]
+    assert "selected_stt_model = 'nova-3'" in source[soniox_fallback:soniox_deepgram]
+    assert "selected_stt_service = STTService.deepgram" in source[grok_fallback:grok_deepgram]
+    assert "selected_stt_model = 'nova-2-general'" in source[grok_fallback:grok_deepgram]

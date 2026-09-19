@@ -1353,6 +1353,7 @@ async def _stream_handler(
 
     async def _process_stt():
         nonlocal websocket_close_code
+        nonlocal selected_stt_service, selected_stt_model
         nonlocal soniox_socket
         nonlocal soniox_profile_socket
         nonlocal speechmatics_socket
@@ -1465,6 +1466,8 @@ async def _stream_handler(
                         )
                 except ValueError as e:
                     print(f"Soniox unavailable ({e}), falling back to Deepgram nova-3")
+                    selected_stt_service = STTService.deepgram
+                    selected_stt_model = 'nova-3'
                     deepgram_socket = await process_audio_dg(
                         stream_transcript,
                         stt_language,
@@ -1480,6 +1483,8 @@ async def _stream_handler(
             # GROK (disabled - Whisper-based, hallucinates on ambient background noise)
             elif stt_service == STTService.grok:
                 print("Grok STT selected but disabled for ambient use; routing to Deepgram nova-2")
+                selected_stt_service = STTService.deepgram
+                selected_stt_model = 'nova-2-general'
                 deepgram_socket = await process_audio_dg(
                     stream_transcript,
                     stt_language if stt_language != 'multi' else 'multi',
@@ -1554,7 +1559,8 @@ async def _stream_handler(
                 if stt_service == STTService.deepgram and deepgram_socket:
 
                     async def deepgram_socket_send(data):
-                        return deepgram_socket.send(data)
+                        forward_deepgram_audio(deepgram_socket, data, delivery_receipt)
+                        return True
 
                     await send_initial_file_path(
                         file_path,
