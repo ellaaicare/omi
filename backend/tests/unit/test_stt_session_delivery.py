@@ -1,7 +1,10 @@
 import asyncio
 import importlib.util
 import sys
+import time
 import types
+import uuid
+from enum import Enum
 from pathlib import Path
 
 import pytest
@@ -14,6 +17,39 @@ from utils.stt.session_delivery import (
 )
 
 BACKEND = Path(__file__).resolve().parents[2]
+
+
+def _nested_code(name):
+    root = compile((BACKEND / "routers" / "transcribe.py").read_text(), "routers/transcribe.py", "exec")
+    pending = [root]
+    while pending:
+        code = pending.pop()
+        for constant in code.co_consts:
+            if not isinstance(constant, types.CodeType):
+                continue
+            if constant.co_name == name:
+                return constant
+            pending.append(constant)
+    raise AssertionError(f"nested production function not found: {name}")
+
+
+def _cell(value):
+    return (lambda: value).__closure__[0]
+
+
+def _nested_function(name, globals_, cells):
+    code = _nested_code(name)
+    missing = set(code.co_freevars) - set(cells)
+    assert not missing, f"missing closure values for {name}: {sorted(missing)}"
+    closure = tuple(cells[freevar] for freevar in code.co_freevars)
+    return types.FunctionType(code, {"__builtins__": __builtins__, **globals_}, name, closure=closure)
+
+
+class _STTService(str, Enum):
+    deepgram = "deepgram"
+    soniox = "soniox"
+    grok = "grok"
+    speechmatics = "speechmatics"
 
 
 class _Socket:
@@ -263,3 +299,164 @@ def test_deepgram_fallbacks_report_the_effective_provider():
     assert "selected_stt_model = 'nova-2-general'" in source[grok_fallback:grok_deepgram]
     assert "preseconds=0" in source[grok_deepgram : source.index("# SPEECHMATICS", grok_deepgram)]
     assert 'segment.setdefault("stt_provider", _stt_service_value(selected_stt_service))' in source
+
+
+def test_soniox_partial_profile_start_closes_before_single_deepgram_fallback(capsys):
+    events = []
+    deepgram_kwargs = []
+    deepgram_callbacks = []
+    transcript_segments = []
+    receipt = SttSessionDeliveryReceipt()
+
+    class _SonioxSocket:
+        def __init__(self):
+            self.chunks = []
+            self.closed = False
+
+        async def send(self, chunk):
+            events.append("soniox_send")
+            self.chunks.append(chunk)
+
+        async def close(self):
+            events.append("soniox_primary_close")
+            self.closed = True
+
+    class _DeepgramSocket:
+        def __init__(self):
+            self.chunks = []
+
+        def send(self, chunk):
+            events.append("deepgram_send")
+            self.chunks.append(chunk)
+            return True
+
+    soniox_socket = _SonioxSocket()
+    deepgram_socket = _DeepgramSocket()
+    soniox_calls = 0
+
+    async def process_soniox(callback, *_args, **_kwargs):
+        nonlocal soniox_calls
+        soniox_calls += 1
+        if soniox_calls == 1:
+            events.append("soniox_primary_open")
+            return soniox_socket
+        events.append("soniox_profile_rejected")
+        raise ValueError("synthetic-content-bearing-provider-detail")
+
+    async def process_deepgram(callback, *_args, **kwargs):
+        events.append("deepgram_open")
+        deepgram_callbacks.append(callback)
+        deepgram_kwargs.append(kwargs)
+        return deepgram_socket
+
+    async def exercise():
+        selected_service = _cell(_STTService.soniox)
+
+        def bind_capture_conversation(segment):
+            segment["_capture_conversation_id"] = "fixture-conversation"
+            return segment
+
+        stream_cells = {
+            "_latency_log": _cell(lambda *_args, **_kwargs: None),
+            "bind_capture_conversation": _cell(bind_capture_conversation),
+            "delivery_receipt": _cell(receipt),
+            "first_stt_result_at": _cell(None),
+            "realtime_segment_buffers": _cell(transcript_segments),
+            "selected_stt_service": selected_service,
+            "stt_connect_ready_at": _cell(1.0),
+            "stt_connect_started_at": _cell(1.0),
+        }
+        stream_transcript = _nested_function(
+            "stream_transcript",
+            {
+                "time": time,
+                "uuid": uuid,
+                "_elapsed_ms": lambda *_args: 0,
+                "_stt_service_value": lambda service: service.value,
+            },
+            stream_cells,
+        )
+
+        class _WebSocket:
+            async def close(self, **_kwargs):
+                raise AssertionError("the valid fallback must not close the client")
+
+        cells = {
+            "_create_speech_profile_loader_task": _cell(lambda *_args, **_kwargs: "profile-loader"),
+            "_latency_log": _cell(lambda *_args, **_kwargs: None),
+            "_provider_delivery_event_callback": _cell(lambda *_args, **_kwargs: None),
+            "_stt_event_callback": _cell(lambda *_args, **_kwargs: None),
+            "codec": _cell("pcm16"),
+            "deepgram_profile_socket": _cell(None),
+            "deepgram_socket": _cell(None),
+            "grok_socket": _cell(None),
+            "include_speech_profile": _cell(True),
+            "language": _cell("en"),
+            "sample_rate": _cell(16000),
+            "selected_stt_model": _cell("test-soniox"),
+            "selected_stt_service": selected_service,
+            "session_id": _cell("fixture-session"),
+            "soniox_profile_socket": _cell(None),
+            "soniox_socket": _cell(None),
+            "speech_profile_complete": _cell(asyncio.Event()),
+            "speech_profile_preseconds": _cell(0),
+            "speech_profile_state": _cell({}),
+            "speechmatics_socket": _cell(None),
+            "stream_transcript": _cell(stream_transcript),
+            "stt_connect_ready_at": _cell(None),
+            "stt_connect_started_at": _cell(None),
+            "stt_language": _cell("en"),
+            "stt_model": _cell("test-soniox"),
+            "stt_service": _cell(_STTService.soniox),
+            "uid": _cell("fixture-uid"),
+            "use_custom_stt": _cell(False),
+            "vocabulary": _cell([]),
+            "websocket": _cell(_WebSocket()),
+            "websocket_active": _cell(True),
+            "websocket_close_code": _cell(1001),
+        }
+        process_stt = _nested_function(
+            "_process_stt",
+            {
+                "Exception": Exception,
+                "SPEECH_PROFILE_FIXED_DURATION": 12,
+                "SPEECH_PROFILE_PADDING_DURATION": 3,
+                "SPEECH_PROFILE_STABILIZE_DELAY": 0,
+                "STTService": _STTService,
+                "STT_LATENCY_LOGS_ENABLED": False,
+                "ValueError": ValueError,
+                "_elapsed_ms": lambda *_args: 0,
+                "_stt_service_value": lambda service: service.value,
+                "get_user_has_speech_profile": lambda *_args: True,
+                "process_audio_dg": process_deepgram,
+                "process_audio_soniox": process_soniox,
+                "process_audio_speechmatics": lambda *_args, **_kwargs: None,
+                "time": time,
+            },
+            cells,
+        )
+
+        assert await process_stt() == "profile-loader"
+        assert cells["soniox_socket"].cell_contents is None
+        assert cells["soniox_profile_socket"].cell_contents is None
+        assert cells["deepgram_socket"].cell_contents is deepgram_socket
+        assert selected_service.cell_contents is _STTService.deepgram
+        assert cells["selected_stt_model"].cell_contents == "nova-3"
+
+        chunk = b"\x01\x00" * 480
+        if cells["soniox_socket"].cell_contents is not None:
+            await forward_async_provider_audio(cells["soniox_socket"].cell_contents.send, chunk, receipt)
+        if cells["deepgram_socket"].cell_contents is not None:
+            forward_deepgram_audio(cells["deepgram_socket"].cell_contents, chunk, receipt)
+        deepgram_callbacks[0]([{"text": "fixture"}])
+
+    asyncio.run(exercise())
+
+    assert soniox_calls == 2
+    assert soniox_socket.closed is True
+    assert soniox_socket.chunks == []
+    assert deepgram_socket.chunks == [b"\x01\x00" * 480]
+    assert deepgram_kwargs[0]["preseconds"] == 0
+    assert events.index("soniox_primary_close") < events.index("deepgram_open") < events.index("deepgram_send")
+    assert transcript_segments[0]["stt_provider"] == "deepgram"
+    assert "synthetic-content-bearing-provider-detail" not in capsys.readouterr().out

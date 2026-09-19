@@ -1467,7 +1467,16 @@ async def _stream_handler(
                             stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
                         )
                 except ValueError as e:
-                    print(f"Soniox unavailable ({e}), falling back to Deepgram nova-3")
+                    # A profile socket can fail after the primary Soniox socket
+                    # has opened. Prove that authority is gone before selecting a
+                    # second provider, otherwise live PCM can reach both vendors.
+                    if soniox_profile_socket is not None:
+                        await soniox_profile_socket.close()
+                        soniox_profile_socket = None
+                    if soniox_socket is not None:
+                        await soniox_socket.close()
+                        soniox_socket = None
+                    print(f"Soniox unavailable ({type(e).__name__}), falling back to Deepgram nova-3")
                     selected_stt_service = STTService.deepgram
                     selected_stt_model = 'nova-3'
                     deepgram_socket = await process_audio_dg(
