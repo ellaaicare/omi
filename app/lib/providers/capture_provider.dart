@@ -75,6 +75,8 @@ enum PhoneCaptureStopResult { empty, finalized, failed }
 
 enum FinalCapturableContentResult { ready, confirmedEmpty, failed }
 
+enum _InProgressConversationLoadResult { loaded, missingExpectedCapture, rejected }
+
 enum CaptureDiagnosticSource { none, phone, necklace }
 
 enum CaptureDiagnosticPhase {
@@ -3341,10 +3343,11 @@ class CaptureProvider extends ChangeNotifier
     if (operation == null) return false;
     try {
       return await _loadInProgressConversation(
-        operation,
-        preserveVisibleContentOnEmpty: true,
-        commitGuard: () => commitMomentGeneration == _transcriptMomentGeneration,
-      );
+            operation,
+            preserveVisibleContentOnEmpty: true,
+            commitGuard: () => commitMomentGeneration == _transcriptMomentGeneration,
+          ) ==
+          _InProgressConversationLoadResult.loaded;
     } on ExactAccountAuthorityChangedException {
       return false;
     } finally {
@@ -3387,10 +3390,12 @@ class CaptureProvider extends ChangeNotifier
           finalizationAttempts: attempt + 1,
         );
       }
-      var loadedAuthoritativeSnapshot = false;
+      var loadResult = _InProgressConversationLoadResult.rejected;
       try {
-        loadedAuthoritativeSnapshot = await _loadInProgressConversation(operation, preserveVisibleContentOnEmpty: true);
-        if (!loadedAuthoritativeSnapshot) return FinalCapturableContentResult.failed;
+        loadResult = await _loadInProgressConversation(operation, preserveVisibleContentOnEmpty: true);
+        if (loadResult == _InProgressConversationLoadResult.rejected) {
+          return FinalCapturableContentResult.failed;
+        }
       } on ExactAccountAuthorityChangedException {
         return FinalCapturableContentResult.failed;
       } catch (_) {
@@ -3398,7 +3403,7 @@ class CaptureProvider extends ChangeNotifier
         // successful snapshot from this attempt can authorize processing.
       }
       if (!operation.isCurrent) return FinalCapturableContentResult.failed;
-      if (loadedAuthoritativeSnapshot) {
+      if (loadResult == _InProgressConversationLoadResult.loaded) {
         final authoritativeConversation = _conversation;
         final authoritativeSegments = authoritativeConversation?.transcriptSegments ?? const <TranscriptSegment>[];
         final authoritativePhotos = authoritativeConversation?.photos ?? const <ConversationPhoto>[];
@@ -3593,24 +3598,33 @@ class CaptureProvider extends ChangeNotifier
     return merged;
   }
 
-  Future<bool> _loadInProgressConversation(
+  Future<_InProgressConversationLoadResult> _loadInProgressConversation(
     CaptureFinalizationOperation operation, {
     bool preserveVisibleContentOnEmpty = false,
     bool Function()? commitGuard,
   }) async {
-    if (!operation.isCurrent || commitGuard?.call() == false) return false;
+    if (!operation.isCurrent || commitGuard?.call() == false) {
+      return _InProgressConversationLoadResult.rejected;
+    }
     final convos = await _inProgressConversationFetch(
       expectedAuthenticatedUid: operation.uid,
       exactAuthority: operation,
     );
-    if (!operation.isCurrent || commitGuard?.call() == false) return false;
+    if (!operation.isCurrent || commitGuard?.call() == false) {
+      return _InProgressConversationLoadResult.rejected;
+    }
     final expectedConversationId = operation.captureProtocolAuthority?.conversationId.trim() ?? '';
     final fetchedConversation = expectedConversationId.isEmpty
         ? convos.firstOrNull
         : convos.firstWhereOrNull((conversation) => conversation.id.trim() == expectedConversationId);
-    final rejectedDifferentCapture =
-        expectedConversationId.isNotEmpty && convos.isNotEmpty && fetchedConversation == null;
+    final missingExpectedCapture = expectedConversationId.isNotEmpty && fetchedConversation == null;
     _conversation = fetchedConversation;
+    if (missingExpectedCapture) {
+      // A successful list response does not prove this capture was empty when
+      // its exact protocol conversation is absent. Preserve visible evidence
+      // and keep finalization retryable instead of reporting "no words".
+      return _InProgressConversationLoadResult.missingExpectedCapture;
+    }
     if (_conversation != null) {
       if (preserveVisibleContentOnEmpty) {
         segments = _mergeAuthoritativeAndVisibleSegments(_conversation!.transcriptSegments, segments);
@@ -3621,7 +3635,7 @@ class CaptureProvider extends ChangeNotifier
       final visiblePhotos =
           preserveVisibleContentOnEmpty ? photos : photos.where((photo) => photo.id.startsWith('temp_img_')).toList();
       photos = _mergeAuthoritativeAndVisiblePhotos(serverPhotos, visiblePhotos);
-    } else if (!preserveVisibleContentOnEmpty && !rejectedDifferentCapture) {
+    } else if (!preserveVisibleContentOnEmpty) {
       segments = [];
       photos = [];
     }
@@ -3631,7 +3645,7 @@ class CaptureProvider extends ChangeNotifier
       _recordTranscriptDiagnostics(preservePhase: true);
     }
     notifyListeners();
-    return true;
+    return _InProgressConversationLoadResult.loaded;
   }
 
   @override

@@ -1288,6 +1288,44 @@ void main() {
     expect(provider.segments.map((segment) => segment.text), ['Words from the active capture']);
   });
 
+  test('final read for a different capture without visible text remains failed instead of proven empty', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final transcriptSocket = _FakeTranscriptSocket();
+    var processCalls = 0;
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        return [_conversation('capture-b', 'Words from another capture')];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        processCalls++;
+        return null;
+      },
+    )..reconnectDeviceCaptureSocketForTesting(transcriptSocket.service);
+    addTearDown(provider.dispose);
+    transcriptSocket.pure.onMessage(jsonEncode({
+      'type': 'service_status',
+      'status': 'capture_protocol_ready',
+      'protocol_version': 2,
+      'conversation_id': 'capture-a',
+      'generation': 'generation-a',
+      'owner_token': 'owner-a',
+    }));
+    await pumpEventQueue();
+
+    expect(
+      await provider.awaitFinalCapturableContent(maxAttempts: 1, retryDelay: Duration.zero),
+      FinalCapturableContentResult.failed,
+    );
+    expect(
+      await provider.finalizeCurrentConversation(maxTranscriptAttempts: 1, transcriptRetryDelay: Duration.zero),
+      isFalse,
+    );
+    expect(processCalls, 0);
+    expect(provider.captureDiagnostics.failure, isNot(CaptureDiagnosticFailure.noTranscript));
+  });
+
   test('stale final read waits for the authoritative transcript before processing', () async {
     final authority = _CaptureAuthority('uid-a');
     final conversations = ConversationProvider();
