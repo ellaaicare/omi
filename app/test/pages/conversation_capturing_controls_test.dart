@@ -282,6 +282,31 @@ void main() {
     expect(find.byType(ConversationCapturingPage), findsNothing);
   });
 
+  testWidgets('visible transcript finalization failure is not reported as no words', (tester) async {
+    final capture = _FakeCaptureProvider(
+      RecordingState.deviceRecord,
+      transcriptReady: true,
+      finalizationResult: false,
+      diagnostics: const CaptureDiagnostics(
+        source: CaptureDiagnosticSource.necklace,
+        phase: CaptureDiagnosticPhase.failed,
+        transcriptSegments: 1,
+        latestTranscript: 'Words already visible in the transcript',
+        failure: CaptureDiagnosticFailure.finalizationFailed,
+      ),
+    )..segments = [_transcriptSegment()];
+    await _pumpCapturePage(tester, capture, preferredCaptureSource: EllaCaptureSource.necklace);
+
+    await tester.tap(find.byKey(const Key('conversation-process-now')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('Processing Failed'), findsOneWidget);
+    expect(find.text('No words were captured, so no memory was created.'), findsNothing);
+    expect(capture.segments.single.text, 'A final transcript is ready to process.');
+    expect(find.byType(ConversationCapturingPage), findsOneWidget);
+  });
+
   testWidgets('mute targets active phone capture even when a stale necklace reference exists', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     final capture = _FakeCaptureProvider(

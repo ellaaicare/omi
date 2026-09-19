@@ -92,6 +92,11 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
         PhoneCaptureStartResult.started => context.l10n.todayRecordingUnavailable,
       };
 
+  String _finalizationFailureMessage(CaptureProvider provider) =>
+      provider.captureDiagnostics.failure == CaptureDiagnosticFailure.finalizationFailed
+          ? context.l10n.processingFailed
+          : context.l10n.todayNoWordsCaptured;
+
   @override
   void initState() {
     _controller = TabController(length: 2, vsync: this, initialIndex: 0);
@@ -246,14 +251,18 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
       if (processed && mounted) {
         Navigator.of(context).pop();
       } else if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayNoWordsCaptured)));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_finalizationFailureMessage(provider))));
       }
       return;
     }
     if (hasContent) {
       if (!showSummarizeConfirmation) {
         final processed = await _runProcessNow(provider);
-        if (processed && mounted) Navigator.of(context).pop();
+        if (processed && mounted) {
+          Navigator.of(context).pop();
+        } else if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_finalizationFailureMessage(provider))));
+        }
         return;
       }
       setState(() => _isProcessDialogOpen = true);
@@ -295,7 +304,13 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                     final processed = await _runProcessNow(provider);
                     if (!context.mounted) return;
                     Navigator.of(context).pop();
-                    if (processed && mounted) Navigator.of(this.context).pop();
+                    if (processed && mounted) {
+                      Navigator.of(this.context).pop();
+                    } else if (mounted) {
+                      ScaffoldMessenger.of(
+                        this.context,
+                      ).showSnackBar(SnackBar(content: Text(_finalizationFailureMessage(provider))));
+                    }
                   },
                 );
               },

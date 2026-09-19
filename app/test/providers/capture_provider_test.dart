@@ -967,6 +967,111 @@ void main() {
     expect(conversations.conversations.single.id, 'processed');
   });
 
+  test('visible streamed transcript survives an empty authoritative finalization snapshot', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final transcriptSocket = _FakeTranscriptSocket();
+    var processCalls = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async => transcriptSocket.service,
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async => [],
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        processCalls++;
+        return null;
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    );
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    provider.onSegmentReceived([_segment('visible', 'Words already visible in the transcript')]);
+    await pumpEventQueue();
+
+    expect(
+      await provider.finalizeCurrentConversation(
+        maxTranscriptAttempts: 1,
+        transcriptRetryDelay: Duration.zero,
+      ),
+      isFalse,
+    );
+    expect(provider.segments.map((segment) => segment.text), ['Words already visible in the transcript']);
+    expect(provider.captureDiagnostics.transcriptSegments, 1);
+    expect(provider.captureDiagnostics.failure, CaptureDiagnosticFailure.finalizationFailed);
+    expect(processCalls, 0);
+  });
+
+  test('a segment arriving during a stale final read is not erased', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final refresh = Completer<List<ServerConversation>>();
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) => refresh.future,
+    )..segments = [_segment('first', 'First visible words')];
+    addTearDown(provider.dispose);
+
+    final finalization = provider.finalizeCurrentConversation(
+      maxTranscriptAttempts: 1,
+      transcriptRetryDelay: Duration.zero,
+    );
+    await pumpEventQueue();
+    provider.onSegmentReceived([_segment('second', 'Words received during the final read')]);
+    refresh.complete([]);
+
+    expect(await finalization, isFalse);
+    expect(provider.segments.map((segment) => segment.text), [
+      'First visible words',
+      'Words received during the final read',
+    ]);
+  });
+
+  test('stale final read waits for the authoritative transcript before processing', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    var fetches = 0;
+    var processes = 0;
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        fetches++;
+        return fetches == 1 ? [] : [_conversation('authoritative', 'Durable final words')];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        processes++;
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation(
+            'processed',
+            'Durable final words',
+            status: ConversationStatus.completed,
+          ),
+        );
+      },
+    )
+      ..updateProviderInstances(conversations, null, null, null)
+      ..segments = [_segment('visible', 'Visible streamed words')];
+    addTearDown(provider.dispose);
+
+    expect(
+      await provider.finalizeCurrentConversation(maxTranscriptAttempts: 2, transcriptRetryDelay: Duration.zero),
+      isTrue,
+    );
+    expect(fetches, 2);
+    expect(processes, 1);
+    expect(conversations.conversations.single.id, 'processed');
+  });
+
   test('contentful phone stop closes its transcript socket before exact processing', () async {
     final authority = _CaptureAuthority('uid-a');
     final mic = _FakeMicRecorder();

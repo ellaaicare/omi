@@ -1254,6 +1254,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         PhoneCaptureStartResult.started => context.l10n.todayRecordingUnavailable,
       };
 
+  String _finalizationFailureMessage(CaptureProvider capture) =>
+      capture.captureDiagnostics.failure == CaptureDiagnosticFailure.finalizationFailed
+          ? context.l10n.processingFailed
+          : context.l10n.todayNoWordsCaptured;
+
   Future<bool> _finalizeHomeMoment(CaptureProvider capture, {bool Function()? isCurrent}) async {
     final finalized = capture.recordingState == RecordingState.deviceRecord
         ? await capture.finalizeCurrentDeviceConversationAndContinue()
@@ -1261,7 +1266,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (isCurrent != null && !isCurrent()) return false;
     if (finalized) return true;
     if (!mounted) return false;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayNoWordsCaptured)));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_finalizationFailureMessage(capture))));
     return false;
   }
 
@@ -1393,7 +1398,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         return true;
       }
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayNoWordsCaptured)));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_finalizationFailureMessage(capture))));
       }
       return false;
     }
@@ -1553,7 +1558,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     try {
       final saved = await capture.finalizeCurrentDeviceConversationAndContinue();
       if (!saved && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayNoWordsCaptured)));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_finalizationFailureMessage(capture))));
       }
     } catch (_) {
       if (!mounted) return;

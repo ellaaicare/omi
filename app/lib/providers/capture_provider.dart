@@ -3353,6 +3353,8 @@ class CaptureProvider extends ChangeNotifier
     required Duration retryDelay,
   }) async {
     for (var attempt = 0; attempt < maxAttempts; attempt++) {
+      final expectsAuthoritativeTranscript =
+          segments.any((segment) => segment.text.trim().isNotEmpty) || _captureDiagnostics.hasTranscript;
       if (_captureDiagnostics.source != CaptureDiagnosticSource.none) {
         _updateCaptureDiagnostics(
           phase: CaptureDiagnosticPhase.finalizing,
@@ -3360,7 +3362,7 @@ class CaptureProvider extends ChangeNotifier
         );
       }
       try {
-        if (!await _loadInProgressConversation(operation)) return false;
+        if (!await _loadInProgressConversation(operation, preserveVisibleContentOnEmpty: true)) return false;
       } on ExactAccountAuthorityChangedException {
         return false;
       } catch (_) {
@@ -3368,7 +3370,17 @@ class CaptureProvider extends ChangeNotifier
         // server memory. Keep the retry bounded and report no content.
       }
       if (!operation.isCurrent) return false;
-      if (hasCapturableContent) return true;
+      final authoritativeConversation = _conversation;
+      final authoritativeHasTranscript =
+          authoritativeConversation?.transcriptSegments.any((segment) => segment.text.trim().isNotEmpty) ?? false;
+      final authoritativeHasContent = authoritativeConversation != null &&
+          (authoritativeHasTranscript ||
+              authoritativeConversation.photos.any((photo) => !photo.discarded && photo.base64.trim().isNotEmpty));
+      final nowExpectsAuthoritativeTranscript =
+          expectsAuthoritativeTranscript || segments.any((segment) => segment.text.trim().isNotEmpty);
+      if (authoritativeHasContent && (!nowExpectsAuthoritativeTranscript || authoritativeHasTranscript)) {
+        return true;
+      }
       if (attempt + 1 < maxAttempts && retryDelay > Duration.zero) {
         await Future<void>.delayed(retryDelay);
         if (!operation.isCurrent) return false;
@@ -3377,7 +3389,10 @@ class CaptureProvider extends ChangeNotifier
     return false;
   }
 
-  Future<bool> _loadInProgressConversation(CaptureFinalizationOperation operation) async {
+  Future<bool> _loadInProgressConversation(
+    CaptureFinalizationOperation operation, {
+    bool preserveVisibleContentOnEmpty = false,
+  }) async {
     if (!operation.isCurrent) return false;
     final convos = await _inProgressConversationFetch(
       expectedAuthenticatedUid: operation.uid,
@@ -3386,7 +3401,11 @@ class CaptureProvider extends ChangeNotifier
     if (!operation.isCurrent) return false;
     _conversation = convos.isNotEmpty ? convos.first : null;
     if (_conversation != null) {
-      segments = _conversation!.transcriptSegments;
+      final authoritativeHasTranscript =
+          _conversation!.transcriptSegments.any((segment) => segment.text.trim().isNotEmpty);
+      if (!preserveVisibleContentOnEmpty || authoritativeHasTranscript) {
+        segments = _conversation!.transcriptSegments;
+      }
       // Merge server photos with locally-captured temp photos to avoid losing
       // photos that haven't been processed server-side yet.
       final serverPhotos = _conversation!.photos;
@@ -3400,7 +3419,7 @@ class CaptureProvider extends ChangeNotifier
         }
       }
       photos = mergedPhotos;
-    } else {
+    } else if (!preserveVisibleContentOnEmpty) {
       segments = [];
       photos = [];
     }
@@ -3504,6 +3523,8 @@ class CaptureProvider extends ChangeNotifier
     Duration transcriptRetryDelay = const Duration(milliseconds: 500),
     bool closeTranscriptTransportBeforeProcessing = false,
   }) async {
+    final hadVisibleTranscript =
+        segments.any((segment) => segment.text.trim().isNotEmpty) || _captureDiagnostics.hasTranscript;
     if (_captureDiagnostics.source != CaptureDiagnosticSource.none) {
       _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.finalizing);
     }
@@ -3530,7 +3551,9 @@ class CaptureProvider extends ChangeNotifier
       );
       if (!hasContent || !operation.isCurrent) {
         if (_captureDiagnostics.source != CaptureDiagnosticSource.none) {
-          _failCaptureDiagnostics(CaptureDiagnosticFailure.noTranscript);
+          _failCaptureDiagnostics(
+            hadVisibleTranscript ? CaptureDiagnosticFailure.finalizationFailed : CaptureDiagnosticFailure.noTranscript,
+          );
         }
         return false;
       }
