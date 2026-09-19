@@ -730,13 +730,14 @@ jobs:
             "tests/unit/test_stt_session_delivery.py::test_production_route_wires_receipt_and_does_not_log_transcript_text"
             "tests/unit/test_stt_session_delivery.py::test_soniox_partial_profile_start_closes_before_single_deepgram_fallback"
             "tests/unit/test_stt_session_delivery.py::test_disabled_grok_fallback_completes_profile_without_loader"
+            "tests/unit/test_stt_session_delivery.py::test_fallback_connection_errors_report_effective_deepgram_provider"
             "tests/unit/test_capture_task_sync_idempotency.py::test_task_sync_retry_release_is_exact_claim_cas"
             "tests/unit/test_capture_task_sync_idempotency.py::test_auto_sync_transient_failure_releases_then_retries_same_operation_once"
             "tests/unit/test_capture_task_sync_idempotency.py::test_auto_sync_explicit_terminal_failure_completes_without_provider_retry"
             "tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[todoist]"
             "tests/unit/test_capture_webhook_delivery.py::test_capture_developer_webhook_failure_is_not_acknowledged"
           )
-          test "$(grep -c '::' <<<"$capture_ids")" -eq 102
+          test "$(grep -c '::' <<<"$capture_ids")" -eq 103
           for required_id in "${required_capture_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$capture_ids"
           done

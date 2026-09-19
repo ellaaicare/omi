@@ -416,10 +416,13 @@ def test_deepgram_fallbacks_report_the_effective_provider():
     assert "selected_stt_model = 'nova-2-general'" in source[grok_fallback:grok_deepgram]
     assert "preseconds=0" in source[grok_deepgram : source.index("# SPEECHMATICS", grok_deepgram)]
     assert 'segment.setdefault("stt_provider", _stt_service_value(selected_stt_service))' in source
+    assert '"requested_stt_provider": _stt_service_value(requested_stt_service)' in source
+    assert '"selected_stt_provider": _stt_service_value(selected_stt_service)' in source
 
 
 def test_soniox_partial_profile_start_closes_before_single_deepgram_fallback(capsys):
     events = []
+    latency_events = []
     deepgram_kwargs = []
     deepgram_callbacks = []
     transcript_segments = []
@@ -470,6 +473,9 @@ def test_soniox_partial_profile_start_closes_before_single_deepgram_fallback(cap
     async def exercise():
         selected_service = _cell(_STTService.soniox)
 
+        def latency_log(event, **metadata):
+            latency_events.append((event, metadata))
+
         def bind_capture_conversation(segment):
             segment["_capture_conversation_id"] = "fixture-conversation"
             return segment
@@ -505,7 +511,7 @@ def test_soniox_partial_profile_start_closes_before_single_deepgram_fallback(cap
 
         cells = {
             "_create_speech_profile_loader_task": _cell(create_profile_loader),
-            "_latency_log": _cell(lambda *_args, **_kwargs: None),
+            "_latency_log": _cell(latency_log),
             "_provider_delivery_event_callback": _cell(lambda *_args, **_kwargs: None),
             "_stt_event_callback": _cell(lambda *_args, **_kwargs: None),
             "codec": _cell("pcm16"),
@@ -587,11 +593,14 @@ def test_soniox_partial_profile_start_closes_before_single_deepgram_fallback(cap
     assert deepgram_kwargs[0]["preseconds"] == 0
     assert events.index("soniox_primary_close") < events.index("deepgram_open") < events.index("deepgram_send")
     assert transcript_segments[0]["stt_provider"] == "deepgram"
+    ready_event = next(metadata for event, metadata in latency_events if event == "stt_connection_ready")
+    assert ready_event["provider"] == "deepgram"
     assert "synthetic-content-bearing-provider-detail" not in capsys.readouterr().out
 
 
 def test_disabled_grok_fallback_completes_profile_without_loader():
     deepgram_kwargs = []
+    latency_events = []
     profile_loader_calls = []
 
     class _DeepgramSocket:
@@ -605,6 +614,9 @@ def test_disabled_grok_fallback_completes_profile_without_loader():
     async def exercise():
         selected_service = _cell(_STTService.grok)
 
+        def latency_log(event, **metadata):
+            latency_events.append((event, metadata))
+
         def create_profile_loader(*args, **kwargs):
             profile_loader_calls.append((args, kwargs))
             return "profile-loader"
@@ -615,7 +627,7 @@ def test_disabled_grok_fallback_completes_profile_without_loader():
 
         cells = {
             "_create_speech_profile_loader_task": _cell(create_profile_loader),
-            "_latency_log": _cell(lambda *_args, **_kwargs: None),
+            "_latency_log": _cell(latency_log),
             "_provider_delivery_event_callback": _cell(lambda *_args, **_kwargs: None),
             "_stt_event_callback": _cell(lambda *_args, **_kwargs: None),
             "codec": _cell("pcm16"),
@@ -680,3 +692,93 @@ def test_disabled_grok_fallback_completes_profile_without_loader():
 
     assert profile_loader_calls == []
     assert deepgram_kwargs[0]["preseconds"] == 0
+    ready_event = next(metadata for event, metadata in latency_events if event == "stt_connection_ready")
+    assert ready_event["provider"] == "deepgram"
+
+
+def test_fallback_connection_errors_report_effective_deepgram_provider():
+    async def exercise(requested_service):
+        latency_events = []
+        close_codes = []
+        selected_service = _cell(requested_service)
+
+        def latency_log(event, **metadata):
+            latency_events.append((event, metadata))
+
+        async def process_soniox(*_args, **_kwargs):
+            raise ValueError("synthetic-soniox-setup-failure")
+
+        async def process_deepgram(*_args, **_kwargs):
+            raise ConnectionError("synthetic-deepgram-open-failure")
+
+        class _WebSocket:
+            async def close(self, *, code):
+                close_codes.append(code)
+
+        cells = {
+            "_create_speech_profile_loader_task": _cell(lambda *_args, **_kwargs: None),
+            "_latency_log": _cell(latency_log),
+            "_provider_delivery_event_callback": _cell(lambda *_args, **_kwargs: None),
+            "_stt_event_callback": _cell(lambda *_args, **_kwargs: None),
+            "codec": _cell("pcm16"),
+            "deepgram_profile_socket": _cell(None),
+            "deepgram_socket": _cell(None),
+            "grok_socket": _cell(None),
+            "include_speech_profile": _cell(False),
+            "language": _cell("en"),
+            "sample_rate": _cell(16000),
+            "selected_stt_model": _cell(f"test-{requested_service.value}"),
+            "selected_stt_service": selected_service,
+            "session_id": _cell("fixture-session"),
+            "soniox_profile_socket": _cell(None),
+            "soniox_socket": _cell(None),
+            "speech_profile_complete": _cell(asyncio.Event()),
+            "speech_profile_preseconds": _cell(0),
+            "speech_profile_state": _cell({}),
+            "speechmatics_socket": _cell(None),
+            "stream_transcript": _cell(lambda _segments: None),
+            "stt_connect_ready_at": _cell(None),
+            "stt_connect_started_at": _cell(None),
+            "stt_language": _cell("en"),
+            "stt_model": _cell(f"test-{requested_service.value}"),
+            "stt_service": _cell(requested_service),
+            "uid": _cell("fixture-uid"),
+            "use_custom_stt": _cell(False),
+            "vocabulary": _cell([]),
+            "websocket": _cell(_WebSocket()),
+            "websocket_active": _cell(True),
+            "websocket_close_code": _cell(1001),
+        }
+        process_stt = _nested_function(
+            "_process_stt",
+            {
+                "Exception": Exception,
+                "SPEECH_PROFILE_FIXED_DURATION": 12,
+                "SPEECH_PROFILE_PADDING_DURATION": 3,
+                "SPEECH_PROFILE_STABILIZE_DELAY": 0,
+                "STTService": _STTService,
+                "STT_LATENCY_LOGS_ENABLED": False,
+                "ValueError": ValueError,
+                "_elapsed_ms": lambda *_args: 0,
+                "_stt_service_value": lambda service: service.value,
+                "_utc_iso_from_ts": lambda _value: "fixture-time",
+                "get_user_has_speech_profile": lambda *_args: False,
+                "process_audio_dg": process_deepgram,
+                "process_audio_soniox": process_soniox,
+                "process_audio_speechmatics": lambda *_args, **_kwargs: None,
+                "time": time,
+            },
+            cells,
+        )
+
+        assert await process_stt() is None
+        assert selected_service.cell_contents is _STTService.deepgram
+        assert close_codes == [1011]
+        start_event = next(metadata for event, metadata in latency_events if event == "stt_connection_start")
+        error_event = next(metadata for event, metadata in latency_events if event == "stt_connection_error")
+        assert start_event["provider"] == requested_service.value
+        assert error_event["provider"] == "deepgram"
+        assert error_event["error_class"] == "ConnectionError"
+
+    for requested_service in (_STTService.soniox, _STTService.grok):
+        asyncio.run(exercise(requested_service))

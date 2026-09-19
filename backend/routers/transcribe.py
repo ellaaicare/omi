@@ -1538,7 +1538,7 @@ async def _stream_handler(
             _latency_log(
                 "stt_connection_ready",
                 connect_latency_ms=_elapsed_ms(stt_connect_started_at, stt_connect_ready_at),
-                provider=_stt_service_value(stt_service),
+                provider=_stt_service_value(selected_stt_service),
             )
 
             # Return background task to load and send speech profile
@@ -1550,7 +1550,7 @@ async def _stream_handler(
             _latency_log(
                 "stt_connection_error",
                 error_class=type(e).__name__,
-                provider=_stt_service_value(stt_service),
+                provider=_stt_service_value(selected_stt_service),
             )
             print(f"Initial STT processing error class: {type(e).__name__}", uid, session_id)
             websocket_close_code = 1011
