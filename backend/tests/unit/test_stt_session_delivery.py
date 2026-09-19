@@ -9,6 +9,7 @@ import pytest
 from utils.stt.session_delivery import (
     ProviderAudioSendRejected,
     SttSessionDeliveryReceipt,
+    forward_async_provider_audio,
     forward_deepgram_audio,
 )
 
@@ -90,6 +91,35 @@ def test_deepgram_send_acceptance_is_counted():
     assert receipt.provider_send_accepted == 1
     assert receipt.provider_send_rejected == 0
     assert receipt.provider_pcm_bytes_accepted == 2
+
+
+def test_async_provider_send_acceptance_is_counted():
+    receipt = SttSessionDeliveryReceipt()
+
+    async def send(_chunk):
+        return None
+
+    asyncio.run(forward_async_provider_audio(send, b"\x00\x00", receipt))
+
+    assert receipt.provider_send_attempts == 1
+    assert receipt.provider_send_accepted == 1
+    assert receipt.provider_send_rejected == 0
+    assert receipt.provider_pcm_bytes_accepted == 2
+
+
+def test_async_provider_send_failure_is_terminal_and_counted():
+    receipt = SttSessionDeliveryReceipt()
+
+    async def send(_chunk):
+        raise ConnectionError("content-bearing-error")
+
+    with pytest.raises(ConnectionError, match="content-bearing-error"):
+        asyncio.run(forward_async_provider_audio(send, b"\x00\x00", receipt))
+
+    assert receipt.provider_send_attempts == 1
+    assert receipt.provider_send_accepted == 0
+    assert receipt.provider_send_rejected == 1
+    assert receipt.provider_pcm_bytes_accepted == 0
 
 
 def test_progress_receipt_is_rate_limited():
@@ -202,10 +232,19 @@ def test_production_route_wires_receipt_and_does_not_log_transcript_text():
     assert "delivery_receipt.record_decoded_pcm(bytes(data))" in source
     assert "forward_deepgram_audio(dg_socket, chunk, delivery_receipt)" in source
     assert "forward_deepgram_audio(deepgram_socket, data, delivery_receipt)" in source
+    assert "forward_async_provider_audio(soniox_sock.send, chunk, delivery_receipt)" in source
+    assert "forward_async_provider_audio(speechmatics_sock.send, chunk, delivery_receipt)" in source
     assert '"[STT-DELIVERY]' in source
     assert 'text=event.get("text")' not in source
     assert '"text": sentence[:120]' not in streaming_source
     assert "delivery_event_callback=_provider_delivery_event_callback," in source
+
+
+def test_custom_stt_receipt_uses_client_provider_authority():
+    source = (BACKEND / "routers" / "transcribe.py").read_text()
+
+    assert 'delivery_provider_override = "client" if custom_stt_mode == CustomSttMode.enabled else None' in source
+    assert '"provider": delivery_provider_override or _stt_service_value(selected_stt_service)' in source
 
 
 def test_deepgram_fallbacks_report_the_effective_provider():
@@ -216,7 +255,9 @@ def test_deepgram_fallbacks_report_the_effective_provider():
     grok_fallback = source.index("Grok STT selected but disabled")
     grok_deepgram = source.index("deepgram_socket = await process_audio_dg", grok_fallback)
 
+    assert "stt_service = STTService.deepgram" in source[soniox_fallback:soniox_deepgram]
     assert "selected_stt_service = STTService.deepgram" in source[soniox_fallback:soniox_deepgram]
     assert "selected_stt_model = 'nova-3'" in source[soniox_fallback:soniox_deepgram]
+    assert "stt_service = STTService.deepgram" in source[grok_fallback:grok_deepgram]
     assert "selected_stt_service = STTService.deepgram" in source[grok_fallback:grok_deepgram]
     assert "selected_stt_model = 'nova-2-general'" in source[grok_fallback:grok_deepgram]

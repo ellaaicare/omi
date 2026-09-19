@@ -117,6 +117,7 @@ from utils.stt.streaming import (
 from utils.stt.session_delivery import (
     ProviderAudioSendRejected,
     SttSessionDeliveryReceipt,
+    forward_async_provider_audio,
     forward_deepgram_audio,
 )
 from utils.subscription import has_transcription_credits, get_remaining_transcription_seconds
@@ -271,6 +272,7 @@ async def _stream_handler(
     generation_id = str(uuid.uuid4())
     owner_token = session_id
     delivery_correlation = hashlib.sha256(session_id.encode()).hexdigest()[:16]
+    delivery_provider_override = "client" if custom_stt_mode == CustomSttMode.enabled else None
     delivery_receipt = SttSessionDeliveryReceipt()
     if not await require_capture_protocol_before_creation(websocket, capture_protocol):
         return
@@ -348,7 +350,7 @@ async def _stream_handler(
         payload = {
             "event": event,
             "correlation": delivery_correlation,
-            "provider": _stt_service_value(selected_stt_service),
+            "provider": delivery_provider_override or _stt_service_value(selected_stt_service),
             "codec": codec,
             "sample_rate": sample_rate,
         }
@@ -1353,7 +1355,7 @@ async def _stream_handler(
 
     async def _process_stt():
         nonlocal websocket_close_code
-        nonlocal selected_stt_service, selected_stt_model
+        nonlocal stt_service, selected_stt_service, selected_stt_model
         nonlocal soniox_socket
         nonlocal soniox_profile_socket
         nonlocal speechmatics_socket
@@ -1466,6 +1468,7 @@ async def _stream_handler(
                         )
                 except ValueError as e:
                     print(f"Soniox unavailable ({e}), falling back to Deepgram nova-3")
+                    stt_service = STTService.deepgram
                     selected_stt_service = STTService.deepgram
                     selected_stt_model = 'nova-3'
                     deepgram_socket = await process_audio_dg(
@@ -1483,6 +1486,7 @@ async def _stream_handler(
             # GROK (disabled - Whisper-based, hallucinates on ambient background noise)
             elif stt_service == STTService.grok:
                 print("Grok STT selected but disabled for ambient use; routing to Deepgram nova-2")
+                stt_service = STTService.deepgram
                 selected_stt_service = STTService.deepgram
                 selected_stt_model = 'nova-2-general'
                 deepgram_socket = await process_audio_dg(
@@ -1570,25 +1574,37 @@ async def _stream_handler(
                         target_duration=SPEECH_PROFILE_FIXED_DURATION,
                     )
                 elif stt_service == STTService.soniox and soniox_socket:
+
+                    async def soniox_socket_send(data):
+                        await forward_async_provider_audio(soniox_socket.send, data, delivery_receipt)
+
                     await send_initial_file_path(
                         file_path,
-                        soniox_socket.send,
+                        soniox_socket_send,
                         is_active,
                         sample_rate=audio_sample_rate,
                         target_duration=SPEECH_PROFILE_FIXED_DURATION,
                     )
                 elif stt_service == STTService.grok and grok_socket:
+
+                    async def grok_socket_send(data):
+                        await forward_async_provider_audio(grok_socket.send, data, delivery_receipt)
+
                     await send_initial_file_path(
                         file_path,
-                        grok_socket.send,
+                        grok_socket_send,
                         is_active,
                         sample_rate=audio_sample_rate,
                         target_duration=SPEECH_PROFILE_FIXED_DURATION,
                     )
                 elif stt_service == STTService.speechmatics and speechmatics_socket:
+
+                    async def speechmatics_socket_send(data):
+                        await forward_async_provider_audio(speechmatics_socket.send, data, delivery_receipt)
+
                     await send_initial_file_path(
                         file_path,
-                        speechmatics_socket.send,
+                        speechmatics_socket_send,
                         is_active,
                         sample_rate=audio_sample_rate,
                         target_duration=SPEECH_PROFILE_FIXED_DURATION,
@@ -2781,7 +2797,7 @@ async def _stream_handler(
 
             if soniox_sock is not None:
                 if profile_complete or not soniox_profile_socket:
-                    await soniox_sock.send(chunk)
+                    await forward_async_provider_audio(soniox_sock.send, chunk, delivery_receipt)
                     if soniox_profile_socket:
                         print('Scheduling delayed close of soniox_profile_socket', uid, session_id)
                         socket_to_close = soniox_profile_socket
@@ -2794,7 +2810,7 @@ async def _stream_handler(
 
                         asyncio.create_task(close_soniox_profile())
                 else:
-                    await soniox_profile_socket.send(chunk)
+                    await forward_async_provider_audio(soniox_profile_socket.send, chunk, delivery_receipt)
 
             if grok_sock is not None:
                 # Proactively reconnect if Grok closed the connection (internal error, timeout, etc.)
@@ -2824,7 +2840,7 @@ async def _stream_handler(
                         grok_sock = None
                 if grok_sock is not None:
                     try:
-                        await grok_sock.send(bytes(chunk))
+                        await forward_async_provider_audio(grok_sock.send, bytes(chunk), delivery_receipt)
                     except Exception as _grok_send_err:
                         print(f"[GROK] send error ({_grok_send_err}), reconnecting...")
                         try:
@@ -2839,14 +2855,14 @@ async def _stream_handler(
                                 preseconds=speech_profile_preseconds,
                                 stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
                             )
-                            await grok_sock.send(bytes(chunk))
+                            await forward_async_provider_audio(grok_sock.send, bytes(chunk), delivery_receipt)
                             print("[GROK] reconnected and sent chunk")
                         except Exception as _grok_reconnect_err2:
                             print(f"[GROK] reconnect failed: {_grok_reconnect_err2}, dropping Grok")
                             grok_sock = None
 
             if speechmatics_sock is not None:
-                await speechmatics_sock.send(chunk)
+                await forward_async_provider_audio(speechmatics_sock.send, chunk, delivery_receipt)
 
         async def finish_stt_inputs_for_drain() -> None:
             await flush_stt_buffer(force=True)

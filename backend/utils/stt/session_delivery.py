@@ -94,3 +94,15 @@ def forward_deepgram_audio(socket, chunk: bytes, receipt: SttSessionDeliveryRece
     receipt.record_provider_send(len(chunk), accepted=accepted)
     if not accepted:
         raise ProviderAudioSendRejected("stt_provider_send_rejected")
+
+
+async def forward_async_provider_audio(send, chunk: bytes, receipt: SttSessionDeliveryReceipt) -> None:
+    try:
+        result = await send(chunk)
+    except Exception:
+        receipt.record_provider_send(len(chunk), accepted=False)
+        raise
+    accepted = result is not False
+    receipt.record_provider_send(len(chunk), accepted=accepted)
+    if not accepted:
+        raise ProviderAudioSendRejected("stt_provider_send_rejected")
