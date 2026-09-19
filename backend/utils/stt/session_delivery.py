@@ -42,14 +42,6 @@ class SttSessionDeliveryReceipt:
     def record_decoded_pcm(self, pcm: bytes, *, sample_width: int = 2, signal_floor: int = 128) -> None:
         self.decoded_frames += 1
         self.decoded_pcm_bytes += len(pcm)
-        if sample_width == 1:
-            # PCM8 is unsigned. Normalize to the same signed 16-bit-equivalent
-            # scale used by decoded PCM16 before comparing signal strength.
-            peak = max((abs(int(sample) - 128) * 256 for sample in pcm), default=0)
-            self.pcm_peak_abs = max(self.pcm_peak_abs, peak)
-            if peak >= signal_floor:
-                self.signal_frames_above_floor += 1
-            return
         if sample_width != 2:
             raise ValueError("unsupported_pcm_sample_width")
         even_length = len(pcm) - (len(pcm) % 2)

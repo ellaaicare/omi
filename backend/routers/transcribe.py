@@ -1402,6 +1402,24 @@ async def _stream_handler(
             if not has_speech_profile:
                 speech_profile_complete.set()
 
+            profile_loader_required = has_speech_profile
+
+            def complete_profile_without_preload(reason: str) -> None:
+                nonlocal profile_loader_required, speech_profile_preseconds
+                profile_loader_required = False
+                speech_profile_preseconds = 0
+                speech_profile_complete.set()
+                speech_profile_state.update(
+                    {
+                        "preseconds": 0,
+                        "speech_profile_processed_initial": True,
+                        "speech_profile_processed": True,
+                        "preload_skipped_reason": reason,
+                        "completed_at": _utc_iso_from_ts(time.time()),
+                    }
+                )
+                _latency_log("speech_profile_complete", speech_profile=speech_profile_state)
+
             stt_connect_started_at = time.time()
             _latency_log(
                 "stt_connection_start",
@@ -1479,6 +1497,7 @@ async def _stream_handler(
                     print(f"Soniox unavailable ({type(e).__name__}), falling back to Deepgram nova-3")
                     selected_stt_service = STTService.deepgram
                     selected_stt_model = 'nova-3'
+                    complete_profile_without_preload("provider_fallback_zero_preload")
                     deepgram_socket = await process_audio_dg(
                         stream_transcript,
                         stt_language,
@@ -1496,6 +1515,7 @@ async def _stream_handler(
                 print("Grok STT selected but disabled for ambient use; routing to Deepgram nova-2")
                 selected_stt_service = STTService.deepgram
                 selected_stt_model = 'nova-2-general'
+                complete_profile_without_preload("provider_fallback_zero_preload")
                 deepgram_socket = await process_audio_dg(
                     stream_transcript,
                     stt_language if stt_language != 'multi' else 'multi',
@@ -1522,7 +1542,7 @@ async def _stream_handler(
             )
 
             # Return background task to load and send speech profile
-            if has_speech_profile:
+            if profile_loader_required:
                 return _create_speech_profile_loader_task(lambda: websocket_active, sample_rate)
             return None
 
@@ -2998,10 +3018,7 @@ async def _stream_handler(
                             )
                             continue
 
-                    delivery_receipt.record_decoded_pcm(
-                        bytes(data),
-                        sample_width=1 if codec == 'pcm8' else 2,
-                    )
+                    delivery_receipt.record_decoded_pcm(bytes(data))
                     if delivery_receipt.progress_due():
                         _delivery_log("progress")
 

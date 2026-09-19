@@ -104,15 +104,16 @@ def test_delivery_receipt_tracks_every_content_free_boundary():
     assert not any(key in snapshot for key in ("uid", "text", "transcript", "audio", "pcm"))
 
 
-def test_delivery_receipt_normalizes_unsigned_pcm8_signal_without_fabricating_silence():
+def test_delivery_receipt_measures_pcm8_int16_silence_and_signal():
     receipt = SttSessionDeliveryReceipt()
 
-    receipt.record_decoded_pcm(b"\x80" * 160, sample_width=1)
+    # The pcm8 route name denotes an 8 kHz stream; its samples are Int16.
+    receipt.record_decoded_pcm(b"\x00\x00" * 80, sample_width=2)
     assert receipt.pcm_peak_abs == 0
     assert receipt.signal_frames_above_floor == 0
 
-    receipt.record_decoded_pcm(b"\x80\x81\x7f\xff\x00", sample_width=1)
-    assert receipt.pcm_peak_abs == 32768
+    receipt.record_decoded_pcm(b"\x00\x40" * 80, sample_width=2)
+    assert receipt.pcm_peak_abs == 16384
     assert receipt.signal_frames_above_floor == 1
 
 
@@ -328,8 +329,8 @@ def test_production_route_wires_receipt_and_does_not_log_transcript_text():
     streaming_source = (BACKEND / "utils" / "stt" / "streaming.py").read_text()
 
     assert "delivery_receipt.record_ingress(len(data))" in source
-    assert "delivery_receipt.record_decoded_pcm(" in source
-    assert "sample_width=1 if codec == 'pcm8' else 2" in source
+    assert "delivery_receipt.record_decoded_pcm(bytes(data))" in source
+    assert "sample_width=1 if codec == 'pcm8' else 2" not in source
     assert "forward_deepgram_audio(dg_socket, chunk, delivery_receipt)" in source
     assert "forward_deepgram_audio(deepgram_socket, data, delivery_receipt)" in source
     assert "forward_async_provider_audio(soniox_sock.send, chunk, delivery_receipt)" in source
@@ -371,6 +372,7 @@ def test_soniox_partial_profile_start_closes_before_single_deepgram_fallback(cap
     deepgram_callbacks = []
     transcript_segments = []
     receipt = SttSessionDeliveryReceipt()
+    profile_loader_calls = []
 
     class _SonioxSocket:
         def __init__(self):
@@ -445,8 +447,12 @@ def test_soniox_partial_profile_start_closes_before_single_deepgram_fallback(cap
             async def close(self, **_kwargs):
                 raise AssertionError("the valid fallback must not close the client")
 
+        def create_profile_loader(*args, **kwargs):
+            profile_loader_calls.append((args, kwargs))
+            return "profile-loader"
+
         cells = {
-            "_create_speech_profile_loader_task": _cell(lambda *_args, **_kwargs: "profile-loader"),
+            "_create_speech_profile_loader_task": _cell(create_profile_loader),
             "_latency_log": _cell(lambda *_args, **_kwargs: None),
             "_provider_delivery_event_callback": _cell(lambda *_args, **_kwargs: None),
             "_stt_event_callback": _cell(lambda *_args, **_kwargs: None),
@@ -491,6 +497,7 @@ def test_soniox_partial_profile_start_closes_before_single_deepgram_fallback(cap
                 "ValueError": ValueError,
                 "_elapsed_ms": lambda *_args: 0,
                 "_stt_service_value": lambda service: service.value,
+                "_utc_iso_from_ts": lambda _value: "fixture-time",
                 "get_user_has_speech_profile": lambda *_args: True,
                 "process_audio_dg": process_deepgram,
                 "process_audio_soniox": process_soniox,
@@ -500,12 +507,16 @@ def test_soniox_partial_profile_start_closes_before_single_deepgram_fallback(cap
             cells,
         )
 
-        assert await process_stt() == "profile-loader"
+        assert await process_stt() is None
         assert cells["soniox_socket"].cell_contents is None
         assert cells["soniox_profile_socket"].cell_contents is None
         assert cells["deepgram_socket"].cell_contents is deepgram_socket
         assert selected_service.cell_contents is _STTService.deepgram
         assert cells["selected_stt_model"].cell_contents == "nova-3"
+        assert cells["speech_profile_complete"].cell_contents.is_set()
+        assert cells["speech_profile_preseconds"].cell_contents == 0
+        assert cells["speech_profile_state"].cell_contents["speech_profile_processed"] is True
+        assert cells["speech_profile_state"].cell_contents["preload_skipped_reason"] == "provider_fallback_zero_preload"
 
         chunk = b"\x01\x00" * 480
         if cells["soniox_socket"].cell_contents is not None:
@@ -517,6 +528,7 @@ def test_soniox_partial_profile_start_closes_before_single_deepgram_fallback(cap
     asyncio.run(exercise())
 
     assert soniox_calls == 2
+    assert profile_loader_calls == []
     assert soniox_socket.closed is True
     assert soniox_socket.chunks == []
     assert deepgram_socket.chunks == [b"\x01\x00" * 480]
@@ -524,3 +536,95 @@ def test_soniox_partial_profile_start_closes_before_single_deepgram_fallback(cap
     assert events.index("soniox_primary_close") < events.index("deepgram_open") < events.index("deepgram_send")
     assert transcript_segments[0]["stt_provider"] == "deepgram"
     assert "synthetic-content-bearing-provider-detail" not in capsys.readouterr().out
+
+
+def test_disabled_grok_fallback_completes_profile_without_loader():
+    deepgram_kwargs = []
+    profile_loader_calls = []
+
+    class _DeepgramSocket:
+        def send(self, _chunk):
+            return True
+
+    async def process_deepgram(_callback, *_args, **kwargs):
+        deepgram_kwargs.append(kwargs)
+        return _DeepgramSocket()
+
+    async def exercise():
+        selected_service = _cell(_STTService.grok)
+
+        def create_profile_loader(*args, **kwargs):
+            profile_loader_calls.append((args, kwargs))
+            return "profile-loader"
+
+        class _WebSocket:
+            async def close(self, **_kwargs):
+                raise AssertionError("the valid fallback must not close the client")
+
+        cells = {
+            "_create_speech_profile_loader_task": _cell(create_profile_loader),
+            "_latency_log": _cell(lambda *_args, **_kwargs: None),
+            "_provider_delivery_event_callback": _cell(lambda *_args, **_kwargs: None),
+            "_stt_event_callback": _cell(lambda *_args, **_kwargs: None),
+            "codec": _cell("pcm16"),
+            "deepgram_profile_socket": _cell(None),
+            "deepgram_socket": _cell(None),
+            "grok_socket": _cell(None),
+            "include_speech_profile": _cell(True),
+            "language": _cell("en"),
+            "sample_rate": _cell(16000),
+            "selected_stt_model": _cell("test-grok"),
+            "selected_stt_service": selected_service,
+            "session_id": _cell("fixture-session"),
+            "soniox_profile_socket": _cell(None),
+            "soniox_socket": _cell(None),
+            "speech_profile_complete": _cell(asyncio.Event()),
+            "speech_profile_preseconds": _cell(0),
+            "speech_profile_state": _cell({}),
+            "speechmatics_socket": _cell(None),
+            "stream_transcript": _cell(lambda _segments: None),
+            "stt_connect_ready_at": _cell(None),
+            "stt_connect_started_at": _cell(None),
+            "stt_language": _cell("en"),
+            "stt_model": _cell("test-grok"),
+            "stt_service": _cell(_STTService.grok),
+            "uid": _cell("fixture-uid"),
+            "use_custom_stt": _cell(False),
+            "vocabulary": _cell([]),
+            "websocket": _cell(_WebSocket()),
+            "websocket_active": _cell(True),
+            "websocket_close_code": _cell(1001),
+        }
+        process_stt = _nested_function(
+            "_process_stt",
+            {
+                "Exception": Exception,
+                "SPEECH_PROFILE_FIXED_DURATION": 12,
+                "SPEECH_PROFILE_PADDING_DURATION": 3,
+                "SPEECH_PROFILE_STABILIZE_DELAY": 0,
+                "STTService": _STTService,
+                "STT_LATENCY_LOGS_ENABLED": False,
+                "ValueError": ValueError,
+                "_elapsed_ms": lambda *_args: 0,
+                "_stt_service_value": lambda service: service.value,
+                "_utc_iso_from_ts": lambda _value: "fixture-time",
+                "get_user_has_speech_profile": lambda *_args: True,
+                "process_audio_dg": process_deepgram,
+                "process_audio_soniox": lambda *_args, **_kwargs: None,
+                "process_audio_speechmatics": lambda *_args, **_kwargs: None,
+                "time": time,
+            },
+            cells,
+        )
+
+        assert await process_stt() is None
+        assert selected_service.cell_contents is _STTService.deepgram
+        assert cells["selected_stt_model"].cell_contents == "nova-2-general"
+        assert cells["speech_profile_complete"].cell_contents.is_set()
+        assert cells["speech_profile_preseconds"].cell_contents == 0
+        assert cells["speech_profile_state"].cell_contents["speech_profile_processed"] is True
+
+    asyncio.run(exercise())
+
+    assert profile_loader_calls == []
+    assert deepgram_kwargs[0]["preseconds"] == 0
