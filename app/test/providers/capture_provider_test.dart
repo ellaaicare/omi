@@ -2043,6 +2043,13 @@ void main() {
       },
       inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
         fetchCalls++;
+        if (fetchCalls == 3) {
+          expect(
+            provider.photos.map((photo) => photo.id),
+            ['photo-a', 'temp_img_photo-b'],
+            reason: 'the exact durable photo must not be consumed by the other temporary photo',
+          );
+        }
         return [
           _conversationWithEvidence(
             'photo-capture',
@@ -2206,6 +2213,44 @@ void main() {
     ]);
     expect(await staleRefresh, isFalse);
     expect(provider.segments, isEmpty, reason: 'a socket-start refresh belongs only to the moment that launched it');
+  });
+
+  test('an automatic refresh preserves transcript content that arrives in the same moment', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final conversations = ConversationProvider();
+    final delayedAutomaticRefresh = Completer<List<ServerConversation>>();
+    addTearDown(conversations.dispose);
+    final visibleSegment = _segment('same-moment-segment', 'Words arrived while the refresh was in flight');
+    final visiblePhoto = ConversationPhoto(
+      id: 'temp_img_same-moment',
+      base64: 'same-moment-photo-bytes',
+      createdAt: DateTime.parse('2026-08-10T20:00:00Z'),
+    );
+    var fetchCalls = 0;
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) {
+        fetchCalls++;
+        return delayedAutomaticRefresh.future;
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    )..updateProviderInstances(conversations, null, null, null);
+    addTearDown(provider.dispose);
+
+    final refresh = provider.refreshInProgressConversations();
+    await pumpEventQueue();
+    expect(fetchCalls, 1);
+
+    provider.segments = [visibleSegment];
+    provider.photos = [visiblePhoto];
+    delayedAutomaticRefresh.complete(const []);
+
+    expect(await refresh, isTrue);
+    expect(provider.segments, [visibleSegment]);
+    expect(provider.photos, [visiblePhoto]);
   });
 
   test('continuous necklace boundary without protocol authority preserves content and never reaches processing',

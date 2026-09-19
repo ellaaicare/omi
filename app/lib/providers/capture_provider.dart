@@ -3348,6 +3348,7 @@ class CaptureProvider extends ChangeNotifier
     try {
       return await _loadInProgressConversation(
         operation,
+        preserveVisibleContentOnEmpty: true,
         commitGuard: () => commitMomentGeneration == _transcriptMomentGeneration,
       );
     } on ExactAccountAuthorityChangedException {
@@ -3540,6 +3541,12 @@ class CaptureProvider extends ChangeNotifier
     ConversationPhoto photo, {
     Set<int> excluding = const <int>{},
   }) {
+    final photoId = photo.id.trim();
+    if (photoId.isNotEmpty) {
+      for (var index = 0; index < candidates.length; index++) {
+        if (!excluding.contains(index) && candidates[index].id.trim() == photoId) return index;
+      }
+    }
     for (var index = 0; index < candidates.length; index++) {
       if (!excluding.contains(index) && _sameConversationPhoto(candidates[index], photo)) return index;
     }
