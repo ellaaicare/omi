@@ -1109,14 +1109,18 @@ class CaptureProvider extends ChangeNotifier
     return succeeded;
   }
 
-  Future<void> _failDeviceCaptureSession(_DeviceCaptureSession session, String reason) async {
+  Future<void> _failDeviceCaptureSession(
+    _DeviceCaptureSession session,
+    String reason, {
+    CaptureDiagnosticFailure failure = CaptureDiagnosticFailure.necklaceConnectionUnavailable,
+  }) async {
     if (!_isDeviceCaptureCurrent(session)) return;
     _deviceCaptureFailureTransitions++;
     Logger.error(reason);
     _deviceCaptureGeneration++;
     _isPaused = false;
     updateRecordingState(RecordingState.error);
-    _failCaptureDiagnostics(CaptureDiagnosticFailure.necklaceConnectionUnavailable);
+    _failCaptureDiagnostics(failure);
     await _closeDeviceCaptureSession(session, stopSocket: true);
   }
 
@@ -1652,6 +1656,7 @@ class CaptureProvider extends ChangeNotifier
     _DeviceCaptureSession session, {
     required String reason,
     Future<bool> Function()? afterOldSocketStopped,
+    CaptureDiagnosticFailure deniedReplacementFailure = CaptureDiagnosticFailure.necklaceConnectionUnavailable,
   }) async {
     if (!_isDeviceCaptureCurrent(session)) return false;
     final device = _recordingDevice;
@@ -1672,7 +1677,11 @@ class CaptureProvider extends ChangeNotifier
       await oldSocket.stop(reason: reason);
       final mayConnectReplacement = await afterOldSocketStopped?.call() ?? true;
       if (!mayConnectReplacement) {
-        await _failDeviceCaptureSession(session, 'Necklace transcription replacement authority is ambiguous');
+        await _failDeviceCaptureSession(
+          session,
+          'Necklace transcription replacement authority is ambiguous',
+          failure: deniedReplacementFailure,
+        );
         return false;
       }
       if (!_isDeviceCaptureCurrent(session)) return false;
@@ -2712,11 +2721,19 @@ class CaptureProvider extends ChangeNotifier
     if (session == null || !_isDeviceCaptureCurrent(session) || recordingState != RecordingState.deviceRecord) {
       return false;
     }
-    final operation = _beginFinalizationOperation();
+    final operation = _beginFinalizationOperation(owningDeviceSocket: session.socket);
     if (operation == null) return false;
     try {
       final hasBoundaryEvidence = hasCapturableContent || hasActiveDeviceCaptureBoundaryEvidence;
       if (!hasBoundaryEvidence || !operation.isCurrent || !_isDeviceCaptureCurrent(session)) {
+        return false;
+      }
+      if (operation.captureProtocolAuthority == null) {
+        await _failDeviceCaptureSession(
+          session,
+          'Necklace moment cannot finalize without capture protocol authority',
+          failure: CaptureDiagnosticFailure.finalizationFailed,
+        );
         return false;
       }
 
@@ -2739,13 +2756,18 @@ class CaptureProvider extends ChangeNotifier
             // send to this conversation) until its terminal result is known.
             // BLE frames remain inside the bounded replacement buffer while
             // the exact-authority POST and polling complete.
-            finalized = await _forceProcessingConversationId(exactConversationId, operation);
+            finalized = await _forceProcessingConversationId(
+              exactConversationId,
+              operation,
+              requireCaptureProtocolAuthority: true,
+            );
             final boundaryBuffer = session.socketReplacementBuffer;
             if (!finalized || !_isDeviceCaptureCurrent(session) || boundaryBuffer == null) return false;
             await _resetStateVariables();
             _beginNextContinuousDeviceMoment(boundaryBuffer);
             return true;
           },
+          deniedReplacementFailure: CaptureDiagnosticFailure.finalizationFailed,
         );
         if (!replaced || !operation.isCurrent || !_isDeviceCaptureCurrent(session)) return false;
       } finally {
@@ -2766,27 +2788,16 @@ class CaptureProvider extends ChangeNotifier
     required int maxAttempts,
     required Duration retryDelay,
   }) async {
-    for (var attempt = 0; attempt < maxAttempts; attempt++) {
-      if (!operation.isCurrent) return null;
-      _updateCaptureDiagnostics(
-        phase: CaptureDiagnosticPhase.finalizing,
-        finalizationAttempts: attempt + 1,
-      );
-      try {
-        if (!await _loadInProgressConversation(operation)) return null;
-      } on ExactAccountAuthorityChangedException {
-        return null;
-      } catch (_) {
-        // The socket is already fenced and BLE frames are buffered. Retry only
-        // within the same bounded finalization lease.
-      }
-      final conversationId = (_conversation?.id ?? '').trim();
-      if (conversationId.isNotEmpty) return conversationId;
-      if (attempt + 1 < maxAttempts && retryDelay > Duration.zero) {
-        await Future<void>.delayed(retryDelay);
-      }
-    }
-    return null;
+    final expectedConversationId = operation.captureProtocolAuthority?.conversationId.trim() ?? '';
+    if (expectedConversationId.isEmpty) return null;
+    final hasFinalContent = await _awaitFinalCapturableContent(
+      operation,
+      maxAttempts: maxAttempts,
+      retryDelay: retryDelay,
+    );
+    if (!hasFinalContent || !operation.isCurrent) return null;
+    final conversationId = (_conversation?.id ?? '').trim();
+    return conversationId == expectedConversationId ? conversationId : null;
   }
 
   Future<bool> streamSystemAudioRecording() {
@@ -3308,7 +3319,9 @@ class CaptureProvider extends ChangeNotifier
     notifyListeners();
   }
 
-  CaptureFinalizationOperation? _beginFinalizationOperation() {
+  CaptureFinalizationOperation? _beginFinalizationOperation({
+    TranscriptSegmentSocketService? owningDeviceSocket,
+  }) {
     final accountLease = EllaAccountCommitBarrier.begin(
       authorityProvider: _activeAccountAuthority,
       onInvalidated: reset,
@@ -3317,7 +3330,7 @@ class CaptureProvider extends ChangeNotifier
     return CaptureFinalizationOperation(
       accountLease: accountLease,
       captureGeneration: _captureGeneration,
-      captureProtocolAuthority: _socket?.captureAuthority,
+      captureProtocolAuthority: (owningDeviceSocket ?? _socket)?.captureAuthority,
       currentCaptureGeneration: () => _captureGeneration,
     );
   }
@@ -3361,6 +3374,7 @@ class CaptureProvider extends ChangeNotifier
   }) async {
     for (var attempt = 0; attempt < maxAttempts; attempt++) {
       final visibleBeforeRefresh = segments.where((segment) => segment.text.trim().isNotEmpty).toList();
+      final visiblePhotosBeforeRefresh = _capturablePhotos(photos);
       if (_captureDiagnostics.source != CaptureDiagnosticSource.none) {
         _updateCaptureDiagnostics(
           phase: CaptureDiagnosticPhase.finalizing,
@@ -3381,21 +3395,30 @@ class CaptureProvider extends ChangeNotifier
       if (loadedAuthoritativeSnapshot) {
         final authoritativeConversation = _conversation;
         final authoritativeSegments = authoritativeConversation?.transcriptSegments ?? const <TranscriptSegment>[];
+        final authoritativePhotos = authoritativeConversation?.photos ?? const <ConversationPhoto>[];
         final authoritativeHasTranscript = authoritativeSegments.any((segment) => segment.text.trim().isNotEmpty);
         final authoritativeHasContent = authoritativeConversation != null &&
             (authoritativeHasTranscript ||
-                authoritativeConversation.photos.any((photo) => !photo.discarded && photo.base64.trim().isNotEmpty));
+                authoritativePhotos.any((photo) => !photo.discarded && photo.base64.trim().isNotEmpty));
         final visibleAfterRefresh = segments.where((segment) => segment.text.trim().isNotEmpty).toList();
+        final visiblePhotosAfterRefresh = _capturablePhotos(photos);
         final expectedVisibleTranscript = _mergeVisibleTranscriptEvidence(
           visibleBeforeRefresh,
           visibleAfterRefresh,
         );
+        final expectedVisiblePhotos = _mergeVisiblePhotoEvidence(
+          visiblePhotosBeforeRefresh,
+          visiblePhotosAfterRefresh,
+        );
         final expectsAuthoritativeTranscript =
             expectedVisibleTranscript.isNotEmpty || _captureDiagnostics.hasTranscript;
+        final expectsAuthoritativePhotos = expectedVisiblePhotos.isNotEmpty;
         final authoritativeCoversVisible =
             _authoritativeTranscriptCovers(authoritativeSegments, expectedVisibleTranscript);
+        final authoritativeCoversVisiblePhotos = _authoritativePhotosCover(authoritativePhotos, expectedVisiblePhotos);
         if (authoritativeHasContent &&
-            (!expectsAuthoritativeTranscript || (authoritativeHasTranscript && authoritativeCoversVisible))) {
+            (!expectsAuthoritativeTranscript || (authoritativeHasTranscript && authoritativeCoversVisible)) &&
+            (!expectsAuthoritativePhotos || authoritativeCoversVisiblePhotos)) {
           return true;
         }
       }
@@ -3417,7 +3440,8 @@ class CaptureProvider extends ChangeNotifier
       final index = merged.indexWhere((candidate) => _sameTranscriptSegment(candidate, segment));
       if (index == -1) {
         merged.add(segment);
-      } else if (segment.end > merged[index].end) {
+      } else if (segment.end > merged[index].end ||
+          _normalizedTranscriptText(segment.text) != _normalizedTranscriptText(merged[index].text)) {
         merged[index] = segment;
       }
     }
@@ -3433,9 +3457,19 @@ class CaptureProvider extends ChangeNotifier
           (authoritativeSegment) =>
               _sameTranscriptSegment(authoritativeSegment, visibleSegment) &&
               authoritativeSegment.text.trim().isNotEmpty &&
+              _transcriptTextCovers(authoritativeSegment.text, visibleSegment.text) &&
               authoritativeSegment.end + 0.001 >= visibleSegment.end,
         ),
       );
+
+  String _normalizedTranscriptText(String text) => text.trim().replaceAll(RegExp(r'\s+'), ' ');
+
+  bool _transcriptTextCovers(String authoritative, String visible) {
+    final normalizedAuthoritative = _normalizedTranscriptText(authoritative);
+    final normalizedVisible = _normalizedTranscriptText(visible);
+    if (normalizedVisible.isEmpty) return true;
+    return normalizedAuthoritative == normalizedVisible || normalizedAuthoritative.startsWith('$normalizedVisible ');
+  }
 
   bool _sameTranscriptSegment(TranscriptSegment left, TranscriptSegment right) {
     final leftId = left.id.trim();
@@ -3453,8 +3487,64 @@ class CaptureProvider extends ChangeNotifier
       final index = merged.indexWhere((candidate) => _sameTranscriptSegment(candidate, visibleSegment));
       if (index == -1) {
         merged.add(visibleSegment);
-      } else if (merged[index].end + 0.001 < visibleSegment.end) {
+      } else if (merged[index].end + 0.001 < visibleSegment.end ||
+          !_transcriptTextCovers(merged[index].text, visibleSegment.text)) {
         merged[index] = visibleSegment;
+      }
+    }
+    return merged;
+  }
+
+  List<ConversationPhoto> _capturablePhotos(List<ConversationPhoto> candidates) =>
+      candidates.where((photo) => !photo.discarded && photo.base64.trim().isNotEmpty).toList();
+
+  List<ConversationPhoto> _mergeVisiblePhotoEvidence(
+    List<ConversationPhoto> beforeRefresh,
+    List<ConversationPhoto> afterRefresh,
+  ) {
+    final merged = <ConversationPhoto>[];
+    for (final photo in [...beforeRefresh, ...afterRefresh]) {
+      if (photo.discarded || photo.base64.trim().isEmpty) continue;
+      if (!merged.any((candidate) => _sameConversationPhoto(candidate, photo))) {
+        merged.add(photo);
+      }
+    }
+    return merged;
+  }
+
+  bool _authoritativePhotosCover(
+    List<ConversationPhoto> authoritative,
+    List<ConversationPhoto> visible,
+  ) =>
+      visible.every(
+        (visiblePhoto) => authoritative.any(
+          (authoritativePhoto) =>
+              _sameConversationPhoto(authoritativePhoto, visiblePhoto) &&
+              !authoritativePhoto.discarded &&
+              authoritativePhoto.base64.trim().isNotEmpty,
+        ),
+      );
+
+  bool _sameConversationPhoto(ConversationPhoto left, ConversationPhoto right) {
+    final leftId = left.id.trim();
+    final rightId = right.id.trim();
+    if (leftId.isNotEmpty && rightId.isNotEmpty) return leftId == rightId;
+    return left.base64 == right.base64 && left.createdAt == right.createdAt;
+  }
+
+  List<ConversationPhoto> _mergeAuthoritativeAndVisiblePhotos(
+    List<ConversationPhoto> authoritative,
+    List<ConversationPhoto> visible,
+  ) {
+    final merged = List<ConversationPhoto>.from(authoritative);
+    for (final visiblePhoto in visible) {
+      final index = merged.indexWhere((candidate) => _sameConversationPhoto(candidate, visiblePhoto));
+      if (index == -1) {
+        merged.add(visiblePhoto);
+      } else if (!visiblePhoto.discarded &&
+          visiblePhoto.base64.trim().isNotEmpty &&
+          (merged[index].discarded || merged[index].base64 != visiblePhoto.base64)) {
+        merged[index] = visiblePhoto;
       }
     }
     return merged;
@@ -3483,19 +3573,10 @@ class CaptureProvider extends ChangeNotifier
       } else {
         segments = _conversation!.transcriptSegments;
       }
-      // Merge server photos with locally-captured temp photos to avoid losing
-      // photos that haven't been processed server-side yet.
       final serverPhotos = _conversation!.photos;
-      final localTempPhotos = photos.where((p) => p.id.startsWith('temp_img_')).toList();
-      final serverPhotoIds = serverPhotos.map((p) => p.id).toSet();
-      // Keep local temp photos that aren't already on the server
-      final mergedPhotos = List<ConversationPhoto>.from(serverPhotos);
-      for (final local in localTempPhotos) {
-        if (!serverPhotoIds.contains(local.id)) {
-          mergedPhotos.add(local);
-        }
-      }
-      photos = mergedPhotos;
+      final visiblePhotos =
+          preserveVisibleContentOnEmpty ? photos : photos.where((photo) => photo.id.startsWith('temp_img_')).toList();
+      photos = _mergeAuthoritativeAndVisiblePhotos(serverPhotos, visiblePhotos);
     } else if (!preserveVisibleContentOnEmpty && !rejectedDifferentCapture) {
       segments = [];
       photos = [];
@@ -3676,10 +3757,16 @@ class CaptureProvider extends ChangeNotifier
 
   Future<bool> _forceProcessingConversationId(
     String conversationId,
-    CaptureFinalizationOperation activeOperation,
-  ) async {
+    CaptureFinalizationOperation activeOperation, {
+    bool requireCaptureProtocolAuthority = false,
+  }) async {
     final conversations = conversationProvider;
     if (conversations == null || !activeOperation.isCurrent) return false;
+    final captureAuthority = activeOperation.captureProtocolAuthority;
+    if (requireCaptureProtocolAuthority &&
+        (captureAuthority == null || captureAuthority.conversationId != conversationId)) {
+      return false;
+    }
     try {
       conversations.addProcessingConversation(
         ServerConversation(

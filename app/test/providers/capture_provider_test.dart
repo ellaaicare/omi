@@ -197,6 +197,17 @@ class _FakeTranscriptSocket {
   late final TranscriptSegmentSocketService service;
 }
 
+void _bindCaptureAuthority(_FakeTranscriptSocket socket, String conversationId) {
+  socket.pure.onMessage(jsonEncode({
+    'type': 'service_status',
+    'status': 'capture_protocol_ready',
+    'protocol_version': 2,
+    'conversation_id': conversationId,
+    'generation': 'generation-a',
+    'owner_token': 'owner-a',
+  }));
+}
+
 Future<TranscriptSegmentSocketService?> _connectedDeviceSocket(BtDevice device, {required bool force}) async =>
     _FakeTranscriptSocket().service;
 
@@ -248,6 +259,19 @@ ServerConversation _conversation(
   String transcript, {
   ConversationStatus status = ConversationStatus.in_progress,
 }) {
+  return _conversationWithEvidence(
+    id,
+    [_segment('segment-$id', transcript)],
+    status: status,
+  );
+}
+
+ServerConversation _conversationWithEvidence(
+  String id,
+  List<TranscriptSegment> transcriptSegments, {
+  List<ConversationPhoto> photos = const [],
+  ConversationStatus status = ConversationStatus.in_progress,
+}) {
   final startedAt = DateTime.parse('2026-08-10T20:00:00Z');
   return ServerConversation(
     id: id,
@@ -256,7 +280,8 @@ ServerConversation _conversation(
     finishedAt: startedAt.add(const Duration(minutes: 1)),
     structured: Structured('Memory $id', 'Overview'),
     status: status,
-    transcriptSegments: [_segment('segment-$id', transcript)],
+    transcriptSegments: transcriptSegments,
+    photos: photos,
   );
 }
 
@@ -954,7 +979,7 @@ void main() {
       },
     )
       ..updateProviderInstances(conversations, null, null, null)
-      ..segments = [_segment('segment-authoritative', 'Local partial')];
+      ..segments = [_segment('segment-authoritative', 'Authoritative final')];
     addTearDown(provider.dispose);
 
     expect(
@@ -1067,6 +1092,36 @@ void main() {
     expect(provider.segments.single.text, 'Visible words with a later tail');
   });
 
+  test('a same-id correction arriving during the final read remains visible and blocks stale processing', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final refresh = Completer<List<ServerConversation>>();
+    var processCalls = 0;
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) => refresh.future,
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        processCalls++;
+        return null;
+      },
+    )..segments = [_segment('stable-segment', 'Draft words')];
+    addTearDown(provider.dispose);
+
+    final finalization = provider.finalizeCurrentConversation(
+      maxTranscriptAttempts: 1,
+      transcriptRetryDelay: Duration.zero,
+    );
+    await pumpEventQueue();
+    provider.onSegmentReceived([_segment('stable-segment', 'Corrected final words')]);
+    refresh.complete([
+      _conversationWithEvidence('authoritative', [_segment('stable-segment', 'Draft words')]),
+    ]);
+
+    expect(await finalization, isFalse);
+    expect(processCalls, 0);
+    expect(provider.segments.single.text, 'Corrected final words');
+  });
+
   test('failed final read cannot reuse a previously cached conversation for processing', () async {
     final authority = _CaptureAuthority('uid-a');
     var fetches = 0;
@@ -1161,7 +1216,7 @@ void main() {
       },
     )
       ..updateProviderInstances(conversations, null, null, null)
-      ..segments = [_segment('segment-authoritative', 'Visible streamed words')];
+      ..segments = [_segment('segment-authoritative', 'Durable final')];
     addTearDown(provider.dispose);
 
     expect(
@@ -1732,6 +1787,8 @@ void main() {
       inProgressConversationProcess: (
           {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
         expect(conversationId, 'pre-boundary-necklace');
+        final operation = exactAuthority as CaptureFinalizationOperation;
+        expect(operation.captureProtocolAuthority?.conversationId, 'pre-boundary-necklace');
         expect(socketPreparations, 1, reason: 'replacement connect must remain fenced until A is terminal');
         processCalls++;
         processEntered.complete();
@@ -1750,7 +1807,8 @@ void main() {
     addTearDown(provider.dispose);
 
     await provider.streamDeviceRecording(device: necklace);
-    provider.segments = [_segment('local-pre-boundary', 'Local words before the boundary')];
+    _bindCaptureAuthority(initialSocket, 'pre-boundary-necklace');
+    provider.segments = [_segment('segment-pre-boundary-necklace', 'Words before the Home moment')];
 
     final boundary = provider.finalizeCurrentDeviceConversationAndContinue();
     await processEntered.future;
@@ -1771,6 +1829,297 @@ void main() {
     expect(transportStarts, 1, reason: 'BLE capture must continue without a physical restart');
     expect(provider.recordingState, RecordingState.deviceRecord);
     expect(provider.segments, isEmpty, reason: 'the replacement socket starts a fresh local moment');
+  });
+
+  test('continuous necklace boundary waits for every visible segment before one exact processing request', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final initialSocket = _FakeTranscriptSocket();
+    final replacementSocket = _FakeTranscriptSocket();
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    final segmentA = _segment('segment-a', 'First visible words');
+    final segmentB = _segment('segment-b', 'Visible tail words');
+    var socketPreparations = 0;
+    var fetchCalls = 0;
+    var processCalls = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async {
+        socketPreparations++;
+        return socketPreparations == 1 ? initialSocket.service : replacementSocket.service;
+      },
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        fetchCalls++;
+        return [
+          _conversationWithEvidence(
+            'capture-a',
+            fetchCalls == 1 ? [segmentA] : [segmentA, segmentB],
+          ),
+        ];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        expect(conversationId, 'capture-a');
+        expect(fetchCalls, 2, reason: 'a stale durable transcript must not cross the processing boundary');
+        expect((exactAuthority as CaptureFinalizationOperation).captureProtocolAuthority?.conversationId, 'capture-a');
+        processCalls++;
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation('completed-capture-a', 'Completed', status: ConversationStatus.completed),
+        );
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    )..updateProviderInstances(conversations, null, null, null);
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    _bindCaptureAuthority(initialSocket, 'capture-a');
+    provider.segments = [segmentA, segmentB];
+
+    expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isTrue);
+    expect(fetchCalls, 2);
+    expect(processCalls, 1);
+    expect(socketPreparations, 2);
+    expect(provider.segments, isEmpty);
+  });
+
+  test('continuous necklace boundary retains same-id corrected text until durable', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final initialSocket = _FakeTranscriptSocket();
+    final replacementSocket = _FakeTranscriptSocket();
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    final staleSegment = _segment('stable-segment', 'Draft necklace words');
+    final correctedSegment = _segment('stable-segment', 'Corrected necklace words');
+    var socketPreparations = 0;
+    var fetchCalls = 0;
+    var processCalls = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async {
+        socketPreparations++;
+        return socketPreparations == 1 ? initialSocket.service : replacementSocket.service;
+      },
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        fetchCalls++;
+        if (fetchCalls == 1) {
+          expect(provider.segments.single.text, 'Corrected necklace words');
+        }
+        return [
+          _conversationWithEvidence(
+            'corrected-capture',
+            [fetchCalls == 1 ? staleSegment : correctedSegment],
+          ),
+        ];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        expect(fetchCalls, 2, reason: 'same-id stale text must not authorize processing');
+        expect(provider.segments.single.text, 'Corrected necklace words');
+        processCalls++;
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation('completed-corrected', 'Completed', status: ConversationStatus.completed),
+        );
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    )..updateProviderInstances(conversations, null, null, null);
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    _bindCaptureAuthority(initialSocket, 'corrected-capture');
+    provider.segments = [correctedSegment];
+
+    expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isTrue);
+    expect(fetchCalls, 2);
+    expect(processCalls, 1);
+  });
+
+  test('continuous necklace boundary retains a pending photo until the durable snapshot covers it', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final initialSocket = _FakeTranscriptSocket();
+    final replacementSocket = _FakeTranscriptSocket();
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    final transcript = _segment('photo-segment', 'Words with a visible photo');
+    final pendingPhoto = ConversationPhoto(
+      id: 'temp_img_photo-a',
+      base64: 'visible-photo-bytes',
+      createdAt: DateTime.parse('2026-08-10T20:00:00Z'),
+    );
+    var socketPreparations = 0;
+    var fetchCalls = 0;
+    var processCalls = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async {
+        socketPreparations++;
+        return socketPreparations == 1 ? initialSocket.service : replacementSocket.service;
+      },
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        fetchCalls++;
+        return [
+          _conversationWithEvidence(
+            'photo-capture',
+            [transcript],
+            photos: fetchCalls == 1 ? const [] : [pendingPhoto],
+          ),
+        ];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        expect(fetchCalls, 2, reason: 'a pending visible photo must not be dropped at the processing boundary');
+        processCalls++;
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation('completed-photo', 'Completed', status: ConversationStatus.completed),
+        );
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    )..updateProviderInstances(conversations, null, null, null);
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    _bindCaptureAuthority(initialSocket, 'photo-capture');
+    provider.segments = [transcript];
+    provider.photos = [pendingPhoto];
+
+    expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isTrue);
+    expect(fetchCalls, 2);
+    expect(processCalls, 1);
+  });
+
+  test('continuous necklace boundary without protocol authority preserves content and never reaches processing',
+      () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final initialSocket = _FakeTranscriptSocket();
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    var fetchCalls = 0;
+    var processCalls = 0;
+    var socketPreparations = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async {
+        socketPreparations++;
+        return initialSocket.service;
+      },
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        fetchCalls++;
+        return [_conversation('unbound-capture', 'Durable words')];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        processCalls++;
+        return null;
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    )..updateProviderInstances(conversations, null, null, null);
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 1], codec: BleAudioCodec.pcm8);
+    provider.segments = [_segment('visible-unbound', 'Visible necklace words')];
+
+    expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isFalse);
+    expect(fetchCalls, 0);
+    expect(processCalls, 0);
+    expect(socketPreparations, 1);
+    expect(provider.segments.map((segment) => segment.text), ['Visible necklace words']);
+    expect(provider.captureDiagnostics.failure, CaptureDiagnosticFailure.finalizationFailed);
+    expect(provider.recordingState, RecordingState.error);
+  });
+
+  test('continuous necklace boundary rejects a mismatched durable capture without erasing visible content', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final initialSocket = _FakeTranscriptSocket();
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    var fetchCalls = 0;
+    var processCalls = 0;
+    var socketPreparations = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async {
+        socketPreparations++;
+        return initialSocket.service;
+      },
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        fetchCalls++;
+        return [_conversation('capture-b', 'Words from another capture')];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        processCalls++;
+        return null;
+      },
+      devicePhysicalFrameTimeout: const Duration(seconds: 10),
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    )..updateProviderInstances(conversations, null, null, null);
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    _bindCaptureAuthority(initialSocket, 'capture-a');
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 1], codec: BleAudioCodec.pcm8);
+    provider.segments = [_segment('segment-capture-a', 'Visible words from capture A')];
+
+    expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isFalse);
+    expect(fetchCalls, 12);
+    expect(processCalls, 0);
+    expect(socketPreparations, 1);
+    expect(provider.segments.map((segment) => segment.text), ['Visible words from capture A']);
+    expect(provider.captureDiagnostics.failure, CaptureDiagnosticFailure.finalizationFailed);
+    expect(provider.recordingState, RecordingState.error);
   });
 
   test('ambiguous necklace finalization fails closed before replacement connect or replay', () async {
@@ -1812,6 +2161,7 @@ void main() {
     await provider.streamDeviceRecording(
       device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
     );
+    _bindCaptureAuthority(initialSocket, 'ambiguous-boundary');
     provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 1], codec: BleAudioCodec.pcm8);
     initialSocket.pure.sent.clear();
 
@@ -1880,6 +2230,7 @@ void main() {
       final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
 
       await provider.streamDeviceRecording(device: necklace);
+      _bindCaptureAuthority(initialSocket, 'pre-tap-necklace');
       provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 1], codec: BleAudioCodec.pcm8);
       initialSocket.pure.sent.clear();
       expect(provider.segments, isEmpty);
@@ -1952,6 +2303,7 @@ void main() {
     await provider.streamDeviceRecording(
       device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
     );
+    _bindCaptureAuthority(initialSocket, 'replay-failure-boundary');
     provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 1], codec: BleAudioCodec.pcm8);
     final boundary = provider.finalizeCurrentDeviceConversationAndContinue();
     await replacementEntered.future;
@@ -2011,6 +2363,7 @@ void main() {
     await provider.streamDeviceRecording(
       device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
     );
+    _bindCaptureAuthority(initialSocket, 'overflow-boundary');
     provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 1], codec: BleAudioCodec.pcm8);
     final boundary = provider.finalizeCurrentDeviceConversationAndContinue();
     await replacementEntered.future;
@@ -2070,6 +2423,7 @@ void main() {
     await provider.streamDeviceRecording(
       device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
     );
+    _bindCaptureAuthority(initialSocket, 'failed-boundary');
     provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 1], codec: BleAudioCodec.pcm8);
 
     expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isFalse);
@@ -2119,6 +2473,7 @@ void main() {
     await provider.streamDeviceRecording(
       device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
     );
+    _bindCaptureAuthority(sockets[0], 'boundary-1');
     provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 1], codec: BleAudioCodec.pcm8);
 
     expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isTrue);
@@ -2128,6 +2483,7 @@ void main() {
     expect(processCalls, 1);
 
     provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 2], codec: BleAudioCodec.pcm8);
+    _bindCaptureAuthority(sockets[1], 'boundary-2');
     expect(provider.hasActiveDeviceCaptureBoundaryEvidence, isTrue);
     expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isTrue);
     expect(socketPreparations, 3);
