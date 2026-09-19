@@ -3341,18 +3341,14 @@ class CaptureProvider extends ChangeNotifier
   }
 
   Future<bool> refreshInProgressConversations({int? expectedTranscriptMomentGeneration}) async {
-    if (expectedTranscriptMomentGeneration != null &&
-        expectedTranscriptMomentGeneration != _transcriptMomentGeneration) {
-      return false;
-    }
+    final commitMomentGeneration = expectedTranscriptMomentGeneration ?? _transcriptMomentGeneration;
+    if (commitMomentGeneration != _transcriptMomentGeneration) return false;
     final operation = _beginFinalizationOperation();
     if (operation == null) return false;
     try {
       return await _loadInProgressConversation(
         operation,
-        commitGuard: expectedTranscriptMomentGeneration == null
-            ? null
-            : () => expectedTranscriptMomentGeneration == _transcriptMomentGeneration,
+        commitGuard: () => commitMomentGeneration == _transcriptMomentGeneration,
       );
     } on ExactAccountAuthorityChangedException {
       return false;
@@ -3516,35 +3512,48 @@ class CaptureProvider extends ChangeNotifier
     List<ConversationPhoto> beforeRefresh,
     List<ConversationPhoto> afterRefresh,
   ) {
-    final merged = <ConversationPhoto>[];
-    for (final photo in [...beforeRefresh, ...afterRefresh]) {
-      if (photo.discarded || photo.base64.trim().isEmpty) continue;
-      if (!merged.any((candidate) => _sameConversationPhoto(candidate, photo))) {
+    final merged = _capturablePhotos(beforeRefresh);
+    final matchedBeforeRefresh = <int>{};
+    for (final photo in _capturablePhotos(afterRefresh)) {
+      final index = _matchingPhotoIndex(merged, photo, excluding: matchedBeforeRefresh);
+      if (index == -1) {
         merged.add(photo);
+      } else {
+        matchedBeforeRefresh.add(index);
       }
     }
     return merged;
   }
 
-  bool _authoritativePhotosCover(
-    List<ConversationPhoto> authoritative,
-    List<ConversationPhoto> visible,
-  ) =>
-      visible.every(
-        (visiblePhoto) => authoritative.any(
-          (authoritativePhoto) =>
-              _sameConversationPhoto(authoritativePhoto, visiblePhoto) &&
-              !authoritativePhoto.discarded &&
-              authoritativePhoto.base64.trim().isNotEmpty,
-        ),
-      );
+  bool _authoritativePhotosCover(List<ConversationPhoto> authoritative, List<ConversationPhoto> visible) {
+    final available = _capturablePhotos(authoritative);
+    for (final visiblePhoto in _capturablePhotos(visible)) {
+      final index = _matchingPhotoIndex(available, visiblePhoto);
+      if (index == -1) return false;
+      available.removeAt(index);
+    }
+    return true;
+  }
+
+  int _matchingPhotoIndex(
+    List<ConversationPhoto> candidates,
+    ConversationPhoto photo, {
+    Set<int> excluding = const <int>{},
+  }) {
+    for (var index = 0; index < candidates.length; index++) {
+      if (!excluding.contains(index) && _sameConversationPhoto(candidates[index], photo)) return index;
+    }
+    return -1;
+  }
 
   bool _sameConversationPhoto(ConversationPhoto left, ConversationPhoto right) {
     final leftId = left.id.trim();
     final rightId = right.id.trim();
     if (leftId.isNotEmpty && rightId.isNotEmpty && leftId == rightId) return true;
     final samePayload = left.base64.trim().isNotEmpty && left.base64 == right.base64;
-    if (samePayload && (leftId.startsWith('temp_img_') || rightId.startsWith('temp_img_'))) return true;
+    final leftIsTemporary = leftId.startsWith('temp_img_');
+    final rightIsTemporary = rightId.startsWith('temp_img_');
+    if (samePayload && leftIsTemporary != rightIsTemporary) return true;
     if (leftId.isNotEmpty && rightId.isNotEmpty) return false;
     return samePayload && left.createdAt == right.createdAt;
   }
@@ -3554,14 +3563,18 @@ class CaptureProvider extends ChangeNotifier
     List<ConversationPhoto> visible,
   ) {
     final merged = List<ConversationPhoto>.from(authoritative);
+    final matchedAuthoritative = <int>{};
     for (final visiblePhoto in visible) {
-      final index = merged.indexWhere((candidate) => _sameConversationPhoto(candidate, visiblePhoto));
+      final index = _matchingPhotoIndex(merged, visiblePhoto, excluding: matchedAuthoritative);
       if (index == -1) {
         merged.add(visiblePhoto);
-      } else if (!visiblePhoto.discarded &&
-          visiblePhoto.base64.trim().isNotEmpty &&
-          (merged[index].discarded || merged[index].base64 != visiblePhoto.base64)) {
-        merged[index] = visiblePhoto;
+      } else {
+        matchedAuthoritative.add(index);
+        if (!visiblePhoto.discarded &&
+            visiblePhoto.base64.trim().isNotEmpty &&
+            (merged[index].discarded || merged[index].base64 != visiblePhoto.base64)) {
+          merged[index] = visiblePhoto;
+        }
       }
     }
     return merged;
