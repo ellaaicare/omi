@@ -1430,6 +1430,72 @@ void main() {
     expect(provider.hasUnfinalizedPhoneCaptureContent, isFalse);
   });
 
+  test('phone finalization joins a queued first-segment refresh before advancing its capture generation', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final mic = _FakeMicRecorder();
+    final transcriptSocket = _FakeTranscriptSocket();
+    final conversations = ConversationProvider();
+    final delayedBootstrap = Completer<List<ServerConversation>>();
+    addTearDown(conversations.dispose);
+    final priorSegment = _segment('prior-segment', 'Earlier durable phone words');
+    final queuedTail = _segment('queued-tail', 'Queued phone tail must become durable before processing');
+    var fetchCalls = 0;
+    var processCalls = 0;
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneMicrophonePermissionChecker: () async => true,
+      phoneTranscriptionPreparer: () async => true,
+      phoneMicRecorder: mic,
+      phoneAudioSender: (_) => true,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) {
+        fetchCalls++;
+        if (fetchCalls == 1) return delayedBootstrap.future;
+        return Future.value([
+          _conversationWithEvidence('active-phone', [priorSegment]),
+        ]);
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        processCalls++;
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation('completed-phone', 'Completed', status: ConversationStatus.completed),
+        );
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    )
+      ..updateProviderInstances(conversations, null, null, null)
+      ..reconnectDeviceCaptureSocketForTesting(transcriptSocket.service);
+    addTearDown(provider.dispose);
+    _bindCaptureAuthority(transcriptSocket, 'active-phone');
+
+    final start = provider.streamRecording();
+    await pumpEventQueue();
+    mic.confirmRecording();
+    mic.emit([1, 2, 3, 4]);
+    expect(await start, PhoneCaptureStartResult.started);
+
+    provider.onSegmentReceived([queuedTail]);
+    await pumpEventQueue();
+    expect(fetchCalls, 1);
+
+    final finalization = provider.stopStreamRecordingAndFinalize();
+    await pumpEventQueue();
+    expect(processCalls, 0, reason: 'phone finalization must join the registered tail before advancing generation');
+
+    delayedBootstrap.complete([
+      _conversationWithEvidence('active-phone', [priorSegment]),
+    ]);
+    expect(await finalization, isFalse);
+    expect(processCalls, 0, reason: 'the queued phone tail is not yet present in the authoritative conversation');
+    expect(fetchCalls, greaterThan(1));
+    expect(provider.segments.map((segment) => segment.id), ['prior-segment', 'queued-tail']);
+    expect(provider.captureDiagnostics.failure, CaptureDiagnosticFailure.finalizationFailed);
+  });
+
   test('phone diagnostics cannot complete before the exact server status is literally completed', () async {
     final authority = _CaptureAuthority('uid-a');
     final mic = _FakeMicRecorder();

@@ -271,6 +271,34 @@ void main() {
     expect(find.byType(ConversationCapturingPage), findsOneWidget);
   });
 
+  testWidgets('an asynchronously throwing owner callback renders the local finalization error', (tester) async {
+    final capture = _FakeCaptureProvider(
+      RecordingState.stop,
+      transcriptReady: false,
+      phoneOwnsMobileAudio: true,
+      diagnostics: const CaptureDiagnostics(
+        source: CaptureDiagnosticSource.phone,
+        phase: CaptureDiagnosticPhase.failed,
+        failure: CaptureDiagnosticFailure.finalizationFailed,
+      ),
+    );
+    await _pumpCapturePage(
+      tester,
+      capture,
+      onProcessNow: () async {
+        await Future<void>.delayed(Duration.zero);
+        throw StateError('synthetic owner finalization failure');
+      },
+    );
+
+    await tester.tap(find.byKey(const Key('conversation-process-now')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('Processing Failed'), findsOneWidget);
+    expect(find.byType(ConversationCapturingPage), findsOneWidget);
+  });
+
   testWidgets('content Process Now remains serialized until the owner final transcript settles', (tester) async {
     final capture = _FakeCaptureProvider(RecordingState.record, transcriptReady: true)
       ..segments = [_transcriptSegment()];

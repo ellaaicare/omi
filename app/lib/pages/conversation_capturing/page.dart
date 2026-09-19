@@ -224,7 +224,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
     final stopTarget = _captureStopTarget(provider);
     final operation = Future<ConversationProcessNowResult>.sync(() async {
       try {
-        if (processNow != null) return processNow();
+        if (processNow != null) return await processNow();
         final processed = await switch (stopTarget) {
           _CaptureStopTarget.phone => provider.stopStreamRecordingAndFinalize(),
           _CaptureStopTarget.necklace => provider.stopStreamDeviceRecordingAndFinalize(),

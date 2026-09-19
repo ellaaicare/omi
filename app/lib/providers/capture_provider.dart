@@ -563,6 +563,12 @@ class CaptureProvider extends ChangeNotifier
   bool _isCaptureCurrent(int generation, ActiveWalAuthority authority) =>
       generation == _captureGeneration && authority.isCurrent();
 
+  bool _isPhoneCaptureGenerationCurrent(int generation) =>
+      _phoneCaptureReleaseOperations == 0 && generation == _captureGeneration;
+
+  bool _isPhoneCaptureCurrent(int generation, ActiveWalAuthority authority) =>
+      _isPhoneCaptureGenerationCurrent(generation) && authority.isCurrent();
+
   bool _isLoadingInProgressConversation = false;
 
   // BLE streaming metrics
@@ -2127,13 +2133,14 @@ class CaptureProvider extends ChangeNotifier
     final generation = _captureGeneration;
     _beginCaptureDiagnostics(CaptureDiagnosticSource.phone, CaptureDiagnosticPhase.checkingPermission);
     final consentCurrent = await _ensureCurrentCaptureConsentAuthority();
-    if (!consentCurrent || generation != _captureGeneration) {
+    if (!_isPhoneCaptureGenerationCurrent(generation)) return PhoneCaptureStartResult.cancelled;
+    if (!consentCurrent) {
       _failCaptureDiagnostics(CaptureDiagnosticFailure.consentUnavailable);
       return PhoneCaptureStartResult.consentUnavailable;
     }
     _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.waitingForAccount, clearFailure: true);
     final captureAuthority = await _waitForCaptureAuthority(generation);
-    if (generation != _captureGeneration) return PhoneCaptureStartResult.cancelled;
+    if (!_isPhoneCaptureGenerationCurrent(generation)) return PhoneCaptureStartResult.cancelled;
     if (captureAuthority == null) {
       _failCaptureDiagnostics(CaptureDiagnosticFailure.accountNotReady);
       return PhoneCaptureStartResult.accountNotReady;
@@ -2142,7 +2149,7 @@ class CaptureProvider extends ChangeNotifier
     if (phoneCaptureStarter != null) {
       _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.startingCapture, clearFailure: true);
       final result = await phoneCaptureStarter();
-      if (!_isCaptureCurrent(generation, captureAuthority)) return PhoneCaptureStartResult.cancelled;
+      if (!_isPhoneCaptureCurrent(generation, captureAuthority)) return PhoneCaptureStartResult.cancelled;
       if (result == PhoneCaptureStartResult.started) {
         updateRecordingState(RecordingState.record);
         _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.streaming, clearFailure: true);
@@ -2164,7 +2171,7 @@ class CaptureProvider extends ChangeNotifier
       _failCaptureDiagnostics(CaptureDiagnosticFailure.recorderUnavailable);
       return PhoneCaptureStartResult.recorderUnavailable;
     }
-    if (!_isCaptureCurrent(generation, captureAuthority)) {
+    if (!_isPhoneCaptureCurrent(generation, captureAuthority)) {
       updateRecordingState(RecordingState.stop);
       return PhoneCaptureStartResult.cancelled;
     }
@@ -2188,7 +2195,7 @@ class CaptureProvider extends ChangeNotifier
       _failCaptureDiagnostics(CaptureDiagnosticFailure.transcriptionUnavailable);
       return PhoneCaptureStartResult.transcriptionUnavailable;
     }
-    if (!_isCaptureCurrent(generation, captureAuthority)) {
+    if (!_isPhoneCaptureCurrent(generation, captureAuthority)) {
       updateRecordingState(RecordingState.stop);
       await _socket?.stop(reason: 'phone capture authority changed');
       return PhoneCaptureStartResult.cancelled;
@@ -2215,7 +2222,7 @@ class CaptureProvider extends ChangeNotifier
       );
       try {
         await mic.start(onByteReceived: (bytes) {
-          if (!_isCaptureCurrent(generation, captureAuthority) || !startProof.acceptFrame(bytes)) return;
+          if (!_isPhoneCaptureCurrent(generation, captureAuthority) || !startProof.acceptFrame(bytes)) return;
           _recordPhysicalCaptureFrame(bytes);
           final transmitted = _phoneAudioSender?.call(bytes) ??
               (() {
@@ -2225,11 +2232,11 @@ class CaptureProvider extends ChangeNotifier
               })();
           if (transmitted && startProof.acceptTransmittedFrame(bytes)) _recordTransmittedCaptureFrame(bytes);
         }, onRecording: () {
-          if (_isCaptureCurrent(generation, captureAuthority)) startProof.acceptNativeRecorderStart();
+          if (_isPhoneCaptureCurrent(generation, captureAuthority)) startProof.acceptNativeRecorderStart();
         }, onStop: () {
-          if (_isCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.stop);
+          if (_isPhoneCaptureCurrent(generation, captureAuthority)) updateRecordingState(RecordingState.stop);
         }, onInitializing: () {
-          if (_isCaptureCurrent(generation, captureAuthority)) {
+          if (_isPhoneCaptureCurrent(generation, captureAuthority)) {
             updateRecordingState(RecordingState.initialising);
             _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.waitingForAudio, clearFailure: true);
           }
@@ -2250,7 +2257,7 @@ class CaptureProvider extends ChangeNotifier
         } catch (stopError) {
           Logger.error('Phone microphone cleanup failed after start failure: $stopError');
         }
-        if (!_isCaptureCurrent(generation, captureAuthority)) return PhoneCaptureStartResult.cancelled;
+        if (!_isPhoneCaptureCurrent(generation, captureAuthority)) return PhoneCaptureStartResult.cancelled;
         if (attempt == 0) await Future<void>.delayed(const Duration(milliseconds: 100));
       }
     }
@@ -2259,7 +2266,7 @@ class CaptureProvider extends ChangeNotifier
       _failCaptureDiagnostics(startFailure ?? CaptureDiagnosticFailure.recorderUnavailable);
       return PhoneCaptureStartResult.recorderUnavailable;
     }
-    if (!_isCaptureCurrent(generation, captureAuthority)) {
+    if (!_isPhoneCaptureCurrent(generation, captureAuthority)) {
       await mic.stop();
       updateRecordingState(RecordingState.stop);
       await _socket?.stop(reason: 'phone capture authority changed');
@@ -2293,9 +2300,9 @@ class CaptureProvider extends ChangeNotifier
 
   Future<ActiveWalAuthority?> _waitForCaptureAuthority(int generation) async {
     final deadline = DateTime.now().add(_captureAuthorityWaitTimeout);
-    while (generation == _captureGeneration) {
+    while (_isPhoneCaptureGenerationCurrent(generation)) {
       final authority = _activeWalAuthority();
-      if (authority != null && _isCaptureCurrent(generation, authority)) return authority;
+      if (authority != null && _isPhoneCaptureCurrent(generation, authority)) return authority;
       if (!DateTime.now().isBefore(deadline)) return null;
       await Future<void>.delayed(_captureAuthorityPollInterval);
     }
@@ -2377,7 +2384,8 @@ class CaptureProvider extends ChangeNotifier
     _beginPhoneCaptureRelease();
     try {
       final pendingStart = _micStartFuture;
-      _captureGeneration++;
+      final stoppingCaptureGeneration = _captureGeneration;
+      final stoppingTranscriptMomentGeneration = _transcriptMomentGeneration;
       _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.stopping);
       await _cleanupCurrentState();
       final mic = _phoneMicRecorder ?? ServiceManager.instance().mic;
@@ -2392,6 +2400,21 @@ class CaptureProvider extends ChangeNotifier
         // stop only after the generation-fenced start future has settled.
         await mic.stop();
       }
+      final pendingSegmentsSettled = await _awaitPendingSegmentHandlersForGeneration(
+        captureGeneration: stoppingCaptureGeneration,
+        transcriptMomentGeneration: stoppingTranscriptMomentGeneration,
+        isCurrent: () =>
+            stoppingCaptureGeneration == _captureGeneration &&
+            stoppingTranscriptMomentGeneration == _transcriptMomentGeneration,
+      );
+      if (!pendingSegmentsSettled) {
+        if (stoppingCaptureGeneration == _captureGeneration &&
+            stoppingTranscriptMomentGeneration == _transcriptMomentGeneration) {
+          _failCaptureDiagnostics(CaptureDiagnosticFailure.finalizationFailed);
+        }
+        return PhoneCaptureStopResult.failed;
+      }
+      _captureGeneration++;
       updateRecordingState(RecordingState.stop);
       final shouldFinalize = _captureDiagnostics.hasPhysicalAudio || hasCapturableContent;
       try {
@@ -3461,16 +3484,26 @@ class CaptureProvider extends ChangeNotifier
   }
 
   Future<bool> _awaitPendingSegmentHandlers(CaptureFinalizationOperation operation) async {
-    final transcriptMomentGeneration = _transcriptMomentGeneration;
+    return _awaitPendingSegmentHandlersForGeneration(
+      captureGeneration: operation.captureGeneration,
+      transcriptMomentGeneration: _transcriptMomentGeneration,
+      isCurrent: () => operation.isCurrent,
+    );
+  }
 
+  Future<bool> _awaitPendingSegmentHandlersForGeneration({
+    required int captureGeneration,
+    required int transcriptMomentGeneration,
+    required bool Function() isCurrent,
+  }) async {
     // Let an already queued socket callback synchronously register its handler
     // before finalization decides which transcript evidence must be durable.
     await Future<void>.delayed(Duration.zero);
-    while (operation.isCurrent) {
+    while (isCurrent()) {
       final pending = _pendingSegmentHandlers
           .where(
             (handler) =>
-                handler.captureGeneration == operation.captureGeneration &&
+                handler.captureGeneration == captureGeneration &&
                 handler.transcriptMomentGeneration == transcriptMomentGeneration,
           )
           .map((handler) => handler.future)
