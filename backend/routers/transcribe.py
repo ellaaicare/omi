@@ -1532,6 +1532,7 @@ async def _stream_handler(
         """Create async task to load speech profile and send to STT in background."""
 
         async def _process_speech_profile():
+            nonlocal websocket_active, websocket_close_code
             try:
                 # Check if we should stop before doing any work
                 if not is_active():
@@ -1622,6 +1623,12 @@ async def _stream_handler(
                     )
                     await asyncio.sleep(SPEECH_PROFILE_STABILIZE_DELAY)
 
+            except ProviderAudioSendRejected:
+                websocket_close_code = 1011
+                websocket_active = False
+                _delivery_log("provider_send_rejected", terminal_reason="profile_provider_send_rejected")
+                if websocket.client_state == WebSocketState.CONNECTED:
+                    await websocket.close(code=websocket_close_code)
             except Exception as e:
                 _latency_log("speech_profile_error", error_class=type(e).__name__)
                 print(f"Speech profile error class: {type(e).__name__}", uid, session_id)

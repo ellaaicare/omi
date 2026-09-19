@@ -113,7 +113,7 @@ def test_async_provider_send_failure_is_terminal_and_counted():
     async def send(_chunk):
         raise ConnectionError("content-bearing-error")
 
-    with pytest.raises(ConnectionError, match="content-bearing-error"):
+    with pytest.raises(ProviderAudioSendRejected, match="stt_provider_send_failed"):
         asyncio.run(forward_async_provider_audio(send, b"\x00\x00", receipt))
 
     assert receipt.provider_send_attempts == 1
@@ -234,6 +234,7 @@ def test_production_route_wires_receipt_and_does_not_log_transcript_text():
     assert "forward_deepgram_audio(deepgram_socket, data, delivery_receipt)" in source
     assert "forward_async_provider_audio(soniox_sock.send, chunk, delivery_receipt)" in source
     assert "forward_async_provider_audio(speechmatics_sock.send, chunk, delivery_receipt)" in source
+    assert 'terminal_reason="profile_provider_send_rejected"' in source
     assert '"[STT-DELIVERY]' in source
     assert 'text=event.get("text")' not in source
     assert '"text": sentence[:120]' not in streaming_source

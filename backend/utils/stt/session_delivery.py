@@ -101,7 +101,7 @@ async def forward_async_provider_audio(send, chunk: bytes, receipt: SttSessionDe
         result = await send(chunk)
     except Exception:
         receipt.record_provider_send(len(chunk), accepted=False)
-        raise
+        raise ProviderAudioSendRejected("stt_provider_send_failed") from None
     accepted = result is not False
     receipt.record_provider_send(len(chunk), accepted=accepted)
     if not accepted:
