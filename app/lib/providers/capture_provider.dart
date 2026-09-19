@@ -2133,7 +2133,8 @@ class CaptureProvider extends ChangeNotifier
     final generation = _captureGeneration;
     _beginCaptureDiagnostics(CaptureDiagnosticSource.phone, CaptureDiagnosticPhase.checkingPermission);
     final consentCurrent = await _ensureCurrentCaptureConsentAuthority();
-    if (!consentCurrent || generation != _captureGeneration) {
+    if (generation != _captureGeneration) return PhoneCaptureStartResult.cancelled;
+    if (!consentCurrent) {
       _failCaptureDiagnostics(CaptureDiagnosticFailure.consentUnavailable);
       return PhoneCaptureStartResult.consentUnavailable;
     }
@@ -2418,7 +2419,9 @@ class CaptureProvider extends ChangeNotifier
       final shouldFinalize = _captureDiagnostics.hasPhysicalAudio || hasCapturableContent;
       try {
         if (!shouldFinalize) {
-          _failCaptureDiagnostics(CaptureDiagnosticFailure.noTranscript);
+          if (_captureDiagnostics.failure == CaptureDiagnosticFailure.none) {
+            _failCaptureDiagnostics(CaptureDiagnosticFailure.noTranscript);
+          }
           return PhoneCaptureStopResult.empty;
         }
         return await finalizeCurrentConversation(closeTranscriptTransportBeforeProcessing: true)

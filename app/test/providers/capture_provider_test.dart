@@ -735,10 +735,41 @@ void main() {
     provider.reset();
     consent.complete(true);
 
-    expect(await start, PhoneCaptureStartResult.consentUnavailable);
+    expect(await start, PhoneCaptureStartResult.cancelled);
     expect(authorityReads, 0);
     expect(geolocationSends, 0);
     expect(provider.recordingState, RecordingState.stop);
+  });
+
+  test('regular stop cancels a pending successful consent without reporting consent failure', () async {
+    final consent = Completer<bool>();
+    final mic = _FakeMicRecorder();
+    var authorityReads = 0;
+    final provider = CaptureProvider(
+      captureConsentAuthorityEnsurer: () => consent.future,
+      activeWalAuthority: () {
+        authorityReads++;
+        return null;
+      },
+      phoneMicRecorder: mic,
+    );
+    addTearDown(provider.dispose);
+
+    final start = provider.streamRecording();
+    await pumpEventQueue();
+    var stopCompleted = false;
+    final stop = provider.stopStreamRecording().whenComplete(() => stopCompleted = true);
+    await pumpEventQueue();
+
+    expect(stopCompleted, isFalse);
+    consent.complete(true);
+
+    expect(await start, PhoneCaptureStartResult.cancelled);
+    await stop;
+    expect(stopCompleted, isTrue);
+    expect(authorityReads, 0);
+    expect(mic.starts, 0);
+    expect(provider.captureDiagnostics.failure, CaptureDiagnosticFailure.none);
   });
 
   test('account transition clears content-bearing capture diagnostics synchronously', () async {
@@ -1735,6 +1766,37 @@ void main() {
     expect(provider.recordingState, RecordingState.stop);
     expect(mic.stops, 2);
     expect(provider.captureDiagnostics.failure, CaptureDiagnosticFailure.noTranscript);
+  });
+
+  test('voice takeover preserves a rejected pending consent diagnostic when capture is empty', () async {
+    final consent = Completer<bool>();
+    final mic = _FakeMicRecorder();
+    var authorityReads = 0;
+    final provider = CaptureProvider(
+      captureConsentAuthorityEnsurer: () => consent.future,
+      activeWalAuthority: () {
+        authorityReads++;
+        return null;
+      },
+      phoneMicRecorder: mic,
+    );
+    addTearDown(provider.dispose);
+
+    final start = provider.streamRecording();
+    await pumpEventQueue();
+    var takeoverCompleted = false;
+    final takeover = provider.stopPhoneCaptureForVoiceTakeover().whenComplete(() => takeoverCompleted = true);
+    await pumpEventQueue();
+
+    expect(takeoverCompleted, isFalse);
+    consent.complete(false);
+
+    expect(await start, PhoneCaptureStartResult.consentUnavailable);
+    expect(await takeover, PhoneCaptureStopResult.empty);
+    expect(takeoverCompleted, isTrue);
+    expect(authorityReads, 0);
+    expect(mic.starts, 0);
+    expect(provider.captureDiagnostics.failure, CaptureDiagnosticFailure.consentUnavailable);
   });
 
   test('empty necklace stop records explicit no-transcript diagnostics', () async {
