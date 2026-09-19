@@ -2133,8 +2133,7 @@ class CaptureProvider extends ChangeNotifier
     final generation = _captureGeneration;
     _beginCaptureDiagnostics(CaptureDiagnosticSource.phone, CaptureDiagnosticPhase.checkingPermission);
     final consentCurrent = await _ensureCurrentCaptureConsentAuthority();
-    if (!_isPhoneCaptureGenerationCurrent(generation)) return PhoneCaptureStartResult.cancelled;
-    if (!consentCurrent) {
+    if (!consentCurrent || generation != _captureGeneration) {
       _failCaptureDiagnostics(CaptureDiagnosticFailure.consentUnavailable);
       return PhoneCaptureStartResult.consentUnavailable;
     }
