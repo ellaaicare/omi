@@ -324,6 +324,58 @@ def test_soniox_setup_rejection_logs_and_raises_without_provider_detail(monkeypa
     assert "test-only-soniox-key" not in output
 
 
+def test_soniox_accepts_absent_language_hints(monkeypatch, capsys):
+    streaming = _load_streaming(monkeypatch)
+    monkeypatch.setenv("SONIOX_API_KEY", "test-only-soniox-key")
+
+    class _SonioxSocket:
+        def __init__(self):
+            self.closed = False
+            self.sent = []
+
+        async def send(self, payload):
+            self.sent.append(payload)
+
+        async def recv(self):
+            raise asyncio.TimeoutError
+
+        async def close(self):
+            self.closed = True
+
+        async def keepalive_ping(self):
+            return None
+
+    socket = _SonioxSocket()
+
+    async def connect(*_args, **_kwargs):
+        return socket
+
+    def close_background_coroutine(coroutine):
+        coroutine.close()
+        return types.SimpleNamespace()
+
+    monkeypatch.setattr(streaming.websockets, "connect", connect)
+    monkeypatch.setattr(streaming.asyncio, "create_task", close_background_coroutine)
+
+    result = asyncio.run(
+        streaming.process_audio_soniox(
+            lambda _segments: None,
+            16000,
+            "en",
+            "fixture-uid",
+            language_hints=None,
+        )
+    )
+
+    assert result is socket
+    assert len(socket.sent) == 1
+    request = streaming.json.loads(socket.sent[0])
+    assert request["language_hints"] == []
+    output = capsys.readouterr().out
+    assert "language_hints_count=0" in output
+    assert "test-only-soniox-key" not in output
+
+
 def test_production_route_wires_receipt_and_does_not_log_transcript_text():
     source = (BACKEND / "routers" / "transcribe.py").read_text()
     streaming_source = (BACKEND / "utils" / "stt" / "streaming.py").read_text()

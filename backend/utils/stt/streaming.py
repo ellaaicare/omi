@@ -796,7 +796,7 @@ async def process_audio_soniox(
     language: str,
     uid: str,
     preseconds: int = 0,
-    language_hints: List[str] = [],
+    language_hints: Optional[List[str]] = None,
     stt_event_callback: Optional[Callable] = None,
 ):
     # Soniox supports diarization primarily for English
@@ -814,6 +814,10 @@ async def process_audio_soniox(
 
     # Determine audio format based on sample rate
     audio_format = "s16le" if sample_rate == 16000 else "mulaw"
+
+    # Single-language callers do not supply hints. Normalize before request
+    # construction so setup and content-free diagnostics share one list value.
+    language_hints = language_hints or []
 
     # Construct the initial request with all required and optional parameters
     request = {
