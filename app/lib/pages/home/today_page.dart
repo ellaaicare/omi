@@ -1255,9 +1255,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       };
 
   String _finalizationFailureMessage(CaptureProvider capture) =>
-      capture.captureDiagnostics.failure == CaptureDiagnosticFailure.finalizationFailed
-          ? context.l10n.processingFailed
-          : context.l10n.todayNoWordsCaptured;
+      capture.captureDiagnostics.failure == CaptureDiagnosticFailure.noTranscript
+          ? context.l10n.todayNoWordsCaptured
+          : context.l10n.processingFailed;
 
   Future<bool> _finalizeHomeMoment(CaptureProvider capture, {bool Function()? isCurrent}) async {
     final finalized = capture.recordingState == RecordingState.deviceRecord

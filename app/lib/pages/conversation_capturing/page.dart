@@ -93,9 +93,14 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
       };
 
   String _finalizationFailureMessage(CaptureProvider provider) =>
-      provider.captureDiagnostics.failure == CaptureDiagnosticFailure.finalizationFailed
-          ? context.l10n.processingFailed
-          : context.l10n.todayNoWordsCaptured;
+      provider.captureDiagnostics.failure == CaptureDiagnosticFailure.noTranscript
+          ? context.l10n.todayNoWordsCaptured
+          : context.l10n.processingFailed;
+
+  void _showOwnedFinalizationFailure(CaptureProvider provider) {
+    if (!mounted || widget.onProcessNow != null) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_finalizationFailureMessage(provider))));
+  }
 
   @override
   void initState() {
@@ -250,8 +255,8 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
       final processed = await _runProcessNow(provider);
       if (processed && mounted) {
         Navigator.of(context).pop();
-      } else if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_finalizationFailureMessage(provider))));
+      } else {
+        _showOwnedFinalizationFailure(provider);
       }
       return;
     }
@@ -260,8 +265,8 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
         final processed = await _runProcessNow(provider);
         if (processed && mounted) {
           Navigator.of(context).pop();
-        } else if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_finalizationFailureMessage(provider))));
+        } else {
+          _showOwnedFinalizationFailure(provider);
         }
         return;
       }
@@ -306,10 +311,8 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                     Navigator.of(context).pop();
                     if (processed && mounted) {
                       Navigator.of(this.context).pop();
-                    } else if (mounted) {
-                      ScaffoldMessenger.of(
-                        this.context,
-                      ).showSnackBar(SnackBar(content: Text(_finalizationFailureMessage(provider))));
+                    } else {
+                      _showOwnedFinalizationFailure(provider);
                     }
                   },
                 );
