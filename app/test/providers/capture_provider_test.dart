@@ -1122,6 +1122,48 @@ void main() {
     expect(provider.segments.single.text, 'Corrected final words');
   });
 
+  test('failed processing preserves visible transcript and photos for a retry', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    final visibleSegment = _segment('retryable-segment', 'Visible words must survive a failed process request');
+    final visiblePhoto = ConversationPhoto(
+      id: 'photo-retryable',
+      base64: 'retryable-photo-bytes',
+      createdAt: DateTime.parse('2026-08-10T20:00:00Z'),
+    );
+    var processCalls = 0;
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        return [
+          _conversationWithEvidence(
+            'retryable-capture',
+            [visibleSegment],
+            photos: [visiblePhoto],
+          ),
+        ];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        processCalls++;
+        return null;
+      },
+    )
+      ..updateProviderInstances(conversations, null, null, null)
+      ..segments = [visibleSegment]
+      ..photos = [visiblePhoto];
+    addTearDown(provider.dispose);
+
+    expect(
+      await provider.finalizeCurrentConversation(maxTranscriptAttempts: 1, transcriptRetryDelay: Duration.zero),
+      isFalse,
+    );
+    expect(processCalls, 1);
+    expect(provider.segments.map((segment) => segment.text), ['Visible words must survive a failed process request']);
+    expect(provider.photos.map((photo) => photo.id), ['photo-retryable']);
+  });
+
   test('failed final read cannot reuse a previously cached conversation for processing', () async {
     final authority = _CaptureAuthority('uid-a');
     var fetches = 0;
@@ -1968,6 +2010,11 @@ void main() {
       base64: 'visible-photo-bytes',
       createdAt: DateTime.parse('2026-08-10T20:00:00Z'),
     );
+    final durablePhoto = ConversationPhoto(
+      id: 'photo-a',
+      base64: 'visible-photo-bytes',
+      createdAt: DateTime.parse('2026-08-10T20:00:01Z'),
+    );
     var socketPreparations = 0;
     var fetchCalls = 0;
     var processCalls = 0;
@@ -1990,13 +2037,14 @@ void main() {
           _conversationWithEvidence(
             'photo-capture',
             [transcript],
-            photos: fetchCalls == 1 ? const [] : [pendingPhoto],
+            photos: fetchCalls == 1 ? const [] : [durablePhoto],
           ),
         ];
       },
       inProgressConversationProcess: (
           {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
         expect(fetchCalls, 2, reason: 'a pending visible photo must not be dropped at the processing boundary');
+        expect(provider.photos.map((photo) => photo.id), ['photo-a']);
         processCalls++;
         return CreateConversationResponse(
           messages: const [],
@@ -2017,6 +2065,72 @@ void main() {
     expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isTrue);
     expect(fetchCalls, 2);
     expect(processCalls, 1);
+  });
+
+  test('a delayed first-segment refresh cannot repopulate the next continuous necklace moment', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final initialSocket = _FakeTranscriptSocket();
+    final replacementSocket = _FakeTranscriptSocket();
+    final conversations = ConversationProvider();
+    final delayedBootstrap = Completer<List<ServerConversation>>();
+    addTearDown(conversations.dispose);
+    final oldSegment = _segment('old-moment-segment', 'Words from the completed necklace moment');
+    var socketPreparations = 0;
+    var fetchCalls = 0;
+    var processCalls = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async {
+        socketPreparations++;
+        return socketPreparations == 1 ? initialSocket.service : replacementSocket.service;
+      },
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) {
+        fetchCalls++;
+        if (fetchCalls == 1) return delayedBootstrap.future;
+        return Future.value([
+          _conversationWithEvidence('old-moment', [oldSegment]),
+        ]);
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        processCalls++;
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation('completed-old-moment', 'Completed', status: ConversationStatus.completed),
+        );
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    )..updateProviderInstances(conversations, null, null, null);
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    _bindCaptureAuthority(initialSocket, 'old-moment');
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 1], codec: BleAudioCodec.pcm8);
+    provider.onSegmentReceived([oldSegment]);
+    await pumpEventQueue();
+    expect(fetchCalls, 1);
+
+    expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isTrue);
+    expect(processCalls, 1);
+    expect(provider.segments, isEmpty);
+
+    delayedBootstrap.complete([
+      _conversationWithEvidence('old-moment', [oldSegment]),
+    ]);
+    await pumpEventQueue(times: 5);
+
+    expect(provider.segments, isEmpty, reason: 'the completed moment must not leak into its successor');
+    expect(provider.recordingState, RecordingState.deviceRecord);
   });
 
   test('continuous necklace boundary without protocol authority preserves content and never reaches processing',

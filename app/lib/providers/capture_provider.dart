@@ -517,6 +517,7 @@ class CaptureProvider extends ChangeNotifier
   ActiveWalAuthority? _systemAudioCaptureAuthority;
   Timer? _systemAudioCacheTimer;
   int _captureGeneration = 0;
+  int _transcriptMomentGeneration = 0;
   int _deviceCaptureGeneration = 0;
   int _deviceCaptureFailureTransitions = 0;
   _DeviceCaptureAttempt? _deviceCaptureAttempt;
@@ -701,6 +702,8 @@ class CaptureProvider extends ChangeNotifier
 
   void reset() {
     _captureGeneration++;
+    _transcriptMomentGeneration++;
+    _isLoadingInProgressConversation = false;
     _conversation = null;
     segments = [];
     photos = [];
@@ -1133,6 +1136,8 @@ class CaptureProvider extends ChangeNotifier
   }
 
   Future _resetStateVariables() async {
+    _transcriptMomentGeneration++;
+    _isLoadingInProgressConversation = false;
     segments = [];
     photos = [];
     hasTranscripts = false;
@@ -3335,11 +3340,20 @@ class CaptureProvider extends ChangeNotifier
     );
   }
 
-  Future<bool> refreshInProgressConversations() async {
+  Future<bool> refreshInProgressConversations({int? expectedTranscriptMomentGeneration}) async {
+    if (expectedTranscriptMomentGeneration != null &&
+        expectedTranscriptMomentGeneration != _transcriptMomentGeneration) {
+      return false;
+    }
     final operation = _beginFinalizationOperation();
     if (operation == null) return false;
     try {
-      return await _loadInProgressConversation(operation);
+      return await _loadInProgressConversation(
+        operation,
+        commitGuard: expectedTranscriptMomentGeneration == null
+            ? null
+            : () => expectedTranscriptMomentGeneration == _transcriptMomentGeneration,
+      );
     } on ExactAccountAuthorityChangedException {
       return false;
     } finally {
@@ -3528,8 +3542,11 @@ class CaptureProvider extends ChangeNotifier
   bool _sameConversationPhoto(ConversationPhoto left, ConversationPhoto right) {
     final leftId = left.id.trim();
     final rightId = right.id.trim();
-    if (leftId.isNotEmpty && rightId.isNotEmpty) return leftId == rightId;
-    return left.base64 == right.base64 && left.createdAt == right.createdAt;
+    if (leftId.isNotEmpty && rightId.isNotEmpty && leftId == rightId) return true;
+    final samePayload = left.base64.trim().isNotEmpty && left.base64 == right.base64;
+    if (samePayload && (leftId.startsWith('temp_img_') || rightId.startsWith('temp_img_'))) return true;
+    if (leftId.isNotEmpty && rightId.isNotEmpty) return false;
+    return samePayload && left.createdAt == right.createdAt;
   }
 
   List<ConversationPhoto> _mergeAuthoritativeAndVisiblePhotos(
@@ -3553,13 +3570,14 @@ class CaptureProvider extends ChangeNotifier
   Future<bool> _loadInProgressConversation(
     CaptureFinalizationOperation operation, {
     bool preserveVisibleContentOnEmpty = false,
+    bool Function()? commitGuard,
   }) async {
-    if (!operation.isCurrent) return false;
+    if (!operation.isCurrent || commitGuard?.call() == false) return false;
     final convos = await _inProgressConversationFetch(
       expectedAuthenticatedUid: operation.uid,
       exactAuthority: operation,
     );
-    if (!operation.isCurrent) return false;
+    if (!operation.isCurrent || commitGuard?.call() == false) return false;
     final expectedConversationId = operation.captureProtocolAuthority?.conversationId.trim() ?? '';
     final fetchedConversation = expectedConversationId.isEmpty
         ? convos.firstOrNull
@@ -3746,8 +3764,10 @@ class CaptureProvider extends ChangeNotifier
       if (conversationId.isEmpty) return false;
       final expectedConversationId = activeOperation.captureProtocolAuthority?.conversationId.trim() ?? '';
       if (expectedConversationId.isNotEmpty && conversationId != expectedConversationId) return false;
+      final finalized = await _forceProcessingConversationId(conversationId, activeOperation);
+      if (!finalized || !activeOperation.isCurrent) return false;
       await _resetStateVariables();
-      return _forceProcessingConversationId(conversationId, activeOperation);
+      return true;
     } on ExactAccountAuthorityChangedException {
       return false;
     } finally {
@@ -3991,6 +4011,7 @@ class CaptureProvider extends ChangeNotifier
   void _processNewSegmentReceived(List<TranscriptSegment> newSegments) async {
     if (newSegments.isEmpty) return;
     final captureGeneration = _captureGeneration;
+    final transcriptMomentGeneration = _transcriptMomentGeneration;
 
     if (segments.isEmpty && !_isLoadingInProgressConversation) {
       _isLoadingInProgressConversation = true;
@@ -3998,12 +4019,16 @@ class CaptureProvider extends ChangeNotifier
         FlutterForegroundTask.sendDataToTask(jsonEncode({'location': true}));
       }
       try {
-        await refreshInProgressConversations();
+        await refreshInProgressConversations(
+          expectedTranscriptMomentGeneration: transcriptMomentGeneration,
+        );
       } finally {
-        _isLoadingInProgressConversation = false;
+        if (transcriptMomentGeneration == _transcriptMomentGeneration) {
+          _isLoadingInProgressConversation = false;
+        }
       }
     }
-    if (captureGeneration != _captureGeneration) return;
+    if (captureGeneration != _captureGeneration || transcriptMomentGeneration != _transcriptMomentGeneration) return;
 
     final remainSegments = TranscriptSegment.updateSegments(segments, newSegments);
     segments.addAll(remainSegments);
