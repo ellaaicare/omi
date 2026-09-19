@@ -1254,6 +1254,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         PhoneCaptureStartResult.started => context.l10n.todayRecordingUnavailable,
       };
 
+  String _finalizationFailureMessage(CaptureProvider capture) =>
+      capture.captureDiagnostics.failure == CaptureDiagnosticFailure.noTranscript
+          ? context.l10n.todayNoWordsCaptured
+          : context.l10n.processingFailed;
+
   Future<bool> _finalizeHomeMoment(CaptureProvider capture, {bool Function()? isCurrent}) async {
     final finalized = capture.recordingState == RecordingState.deviceRecord
         ? await capture.finalizeCurrentDeviceConversationAndContinue()
@@ -1261,7 +1266,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (isCurrent != null && !isCurrent()) return false;
     if (finalized) return true;
     if (!mounted) return false;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayNoWordsCaptured)));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_finalizationFailureMessage(capture))));
     return false;
   }
 
@@ -1393,7 +1398,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         return true;
       }
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayNoWordsCaptured)));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_finalizationFailureMessage(capture))));
       }
       return false;
     }
@@ -1445,19 +1450,27 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
           onProcessNow: () async {
             if (_externalCaptureFinalizationSource != null) {
               await _finishExternalCapture(capture);
-              return _externalCaptureFinalizationSource == null;
+              return _externalCaptureFinalizationSource == null
+                  ? ConversationProcessNowResult.processed
+                  : ConversationProcessNowResult.failedReported;
             }
             if (_homeCaptureActive || _homeCaptureFinalizationPending || _homeCaptureFinalizationInFlight != null) {
-              return _finishHomeCapture(capture);
+              return await _finishHomeCapture(capture)
+                  ? ConversationProcessNowResult.processed
+                  : ConversationProcessNowResult.failedReported;
             }
             if (capture.recordingState == RecordingState.deviceRecord) {
-              return _finalizeHomeMoment(capture);
+              return await _finalizeHomeMoment(capture)
+                  ? ConversationProcessNowResult.processed
+                  : ConversationProcessNowResult.failedReported;
             }
             if (capture.phoneCaptureOwnsMobileAudio || capture.recordingState == RecordingState.record) {
               await _finishExternalCapture(capture);
-              return _externalCaptureFinalizationSource == null;
+              return _externalCaptureFinalizationSource == null
+                  ? ConversationProcessNowResult.processed
+                  : ConversationProcessNowResult.failedReported;
             }
-            return false;
+            return ConversationProcessNowResult.failedUnreported;
           },
         ),
       ),
@@ -1490,7 +1503,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       if (existingSource != null) {
         finished = await capture.finalizeCurrentConversation(closeTranscriptTransportBeforeProcessing: true);
         if (!finished && !capture.captureDiagnostics.hasPhysicalAudio && !capture.hasCapturableContent) {
-          confirmedEmpty = !await capture.awaitFinalCapturableContent();
+          confirmedEmpty = await capture.awaitFinalCapturableContent() == FinalCapturableContentResult.confirmedEmpty;
         }
       } else if (source == _ExternalCaptureSource.phone) {
         final result = await capture.stopPhoneCaptureForVoiceTakeover();
@@ -1500,7 +1513,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         final hadCaptureEvidence = capture.captureDiagnostics.hasPhysicalAudio || capture.hasCapturableContent;
         finished = await capture.stopStreamDeviceRecordingAndFinalize();
         if (!finished && !hadCaptureEvidence && !capture.captureDiagnostics.hasPhysicalAudio) {
-          confirmedEmpty = !await capture.awaitFinalCapturableContent();
+          confirmedEmpty = await capture.awaitFinalCapturableContent() == FinalCapturableContentResult.confirmedEmpty;
         }
       }
 
@@ -1553,7 +1566,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     try {
       final saved = await capture.finalizeCurrentDeviceConversationAndContinue();
       if (!saved && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayNoWordsCaptured)));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_finalizationFailureMessage(capture))));
       }
     } catch (_) {
       if (!mounted) return;
