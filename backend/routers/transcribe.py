@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import hashlib
 import io
 import json
 import os
@@ -112,6 +113,12 @@ from utils.stt.streaming import (
     process_audio_soniox,
     process_audio_speechmatics,
     send_initial_file_path,
+)
+from utils.stt.session_delivery import (
+    ProviderAudioSendRejected,
+    SttSessionDeliveryReceipt,
+    forward_async_provider_audio,
+    forward_deepgram_audio,
 )
 from utils.subscription import has_transcription_credits, get_remaining_transcription_seconds
 from utils.translation import TranslationService
@@ -264,6 +271,9 @@ async def _stream_handler(
     session_id = str(uuid.uuid4())
     generation_id = str(uuid.uuid4())
     owner_token = session_id
+    delivery_correlation = hashlib.sha256(session_id.encode()).hexdigest()[:16]
+    delivery_provider_override = "client" if custom_stt_mode == CustomSttMode.enabled else None
+    delivery_receipt = SttSessionDeliveryReceipt()
     if not await require_capture_protocol_before_creation(websocket, capture_protocol):
         return
     session_started_at = time.time()
@@ -336,6 +346,17 @@ async def _stream_handler(
         payload.update({k: v for k, v in metadata.items() if v is not None})
         print(f"[STT-LATENCY] {json.dumps(payload, default=str)[:4000]}", flush=True)
 
+    def _delivery_log(event: str, **metadata) -> None:
+        payload = {
+            "event": event,
+            "correlation": delivery_correlation,
+            "provider": delivery_provider_override or _stt_service_value(selected_stt_service),
+            "codec": codec,
+            "sample_rate": sample_rate,
+        }
+        payload.update(delivery_receipt.snapshot(**metadata))
+        print(f"[STT-DELIVERY] {json.dumps(payload, default=str, sort_keys=True)}", flush=True)
+
     def _remember_client_latency_event(event: dict) -> None:
         name = str(event.get("event") or event.get("name") or event.get("stage") or "client_event")
         client_ts_ms = _client_ts_to_ms(
@@ -365,10 +386,12 @@ async def _stream_handler(
             _latency_log(
                 "first_interim_result",
                 provider=event.get("provider"),
-                text=event.get("text"),
                 since_stt_ready_ms=_elapsed_ms(stt_connect_ready_at, first_interim_result_at),
                 since_first_audio_ms=_elapsed_ms(first_audio_frame_at, first_interim_result_at),
             )
+
+    def _provider_delivery_event_callback(event: dict) -> None:
+        delivery_receipt.record_provider_event(event.get("result_type"))
 
     _latency_log("socket_accepted", source=source, custom_stt_mode=custom_stt_mode.value, onboarding=onboarding_mode)
     print(
@@ -504,6 +527,7 @@ async def _stream_handler(
     websocket_active = True
     accepting_capture = True
     websocket_close_code = 1001  # Going Away, don't close with good from backend
+    client_close_code: Optional[int] = None
 
     # Initialize segment buffers early (before onboarding handler needs them)
     realtime_segment_buffers = []
@@ -1308,6 +1332,7 @@ async def _stream_handler(
     def stream_transcript(segments):
         nonlocal realtime_segment_buffers
         nonlocal first_stt_result_at
+        delivery_receipt.record_transcript_callback(len(segments or []))
         if segments and first_stt_result_at is None:
             first_stt_result_at = time.time()
             first_segment = segments[0] if isinstance(segments[0], dict) else {}
@@ -1330,6 +1355,7 @@ async def _stream_handler(
 
     async def _process_stt():
         nonlocal websocket_close_code
+        nonlocal stt_service, selected_stt_service, selected_stt_model
         nonlocal soniox_socket
         nonlocal soniox_profile_socket
         nonlocal speechmatics_socket
@@ -1397,6 +1423,7 @@ async def _stream_handler(
                     model=stt_model,
                     keywords=vocabulary[:100] if vocabulary else None,
                     stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
+                    delivery_event_callback=_provider_delivery_event_callback,
                 )
                 if has_speech_profile:
                     deepgram_profile_socket = await process_audio_dg(
@@ -1407,6 +1434,7 @@ async def _stream_handler(
                         model=stt_model,
                         keywords=vocabulary[:100] if vocabulary else None,
                         stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
+                        delivery_event_callback=_provider_delivery_event_callback,
                     )
 
             # SONIOX
@@ -1440,6 +1468,9 @@ async def _stream_handler(
                         )
                 except ValueError as e:
                     print(f"Soniox unavailable ({e}), falling back to Deepgram nova-3")
+                    stt_service = STTService.deepgram
+                    selected_stt_service = STTService.deepgram
+                    selected_stt_model = 'nova-3'
                     deepgram_socket = await process_audio_dg(
                         stream_transcript,
                         stt_language,
@@ -1449,11 +1480,15 @@ async def _stream_handler(
                         model='nova-3',
                         keywords=vocabulary[:100] if vocabulary else None,
                         stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
+                        delivery_event_callback=_provider_delivery_event_callback,
                     )
 
             # GROK (disabled - Whisper-based, hallucinates on ambient background noise)
             elif stt_service == STTService.grok:
                 print("Grok STT selected but disabled for ambient use; routing to Deepgram nova-2")
+                stt_service = STTService.deepgram
+                selected_stt_service = STTService.deepgram
+                selected_stt_model = 'nova-2-general'
                 deepgram_socket = await process_audio_dg(
                     stream_transcript,
                     stt_language if stt_language != 'multi' else 'multi',
@@ -1463,6 +1498,7 @@ async def _stream_handler(
                     model='nova-2-general',
                     keywords=vocabulary[:100] if vocabulary else None,
                     stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
+                    delivery_event_callback=_provider_delivery_event_callback,
                 )
 
             # SPEECHMATICS
@@ -1484,8 +1520,12 @@ async def _stream_handler(
             return None
 
         except Exception as e:
-            _latency_log("stt_connection_error", error=str(e)[:300], provider=_stt_service_value(stt_service))
-            print(f"Initial processing error: {e}", uid, session_id)
+            _latency_log(
+                "stt_connection_error",
+                error_class=type(e).__name__,
+                provider=_stt_service_value(stt_service),
+            )
+            print(f"Initial STT processing error class: {type(e).__name__}", uid, session_id)
             websocket_close_code = 1011
             await websocket.close(code=websocket_close_code)
             return None
@@ -1523,7 +1563,8 @@ async def _stream_handler(
                 if stt_service == STTService.deepgram and deepgram_socket:
 
                     async def deepgram_socket_send(data):
-                        return deepgram_socket.send(data)
+                        forward_deepgram_audio(deepgram_socket, data, delivery_receipt)
+                        return True
 
                     await send_initial_file_path(
                         file_path,
@@ -1533,25 +1574,37 @@ async def _stream_handler(
                         target_duration=SPEECH_PROFILE_FIXED_DURATION,
                     )
                 elif stt_service == STTService.soniox and soniox_socket:
+
+                    async def soniox_socket_send(data):
+                        await forward_async_provider_audio(soniox_socket.send, data, delivery_receipt)
+
                     await send_initial_file_path(
                         file_path,
-                        soniox_socket.send,
+                        soniox_socket_send,
                         is_active,
                         sample_rate=audio_sample_rate,
                         target_duration=SPEECH_PROFILE_FIXED_DURATION,
                     )
                 elif stt_service == STTService.grok and grok_socket:
+
+                    async def grok_socket_send(data):
+                        await forward_async_provider_audio(grok_socket.send, data, delivery_receipt)
+
                     await send_initial_file_path(
                         file_path,
-                        grok_socket.send,
+                        grok_socket_send,
                         is_active,
                         sample_rate=audio_sample_rate,
                         target_duration=SPEECH_PROFILE_FIXED_DURATION,
                     )
                 elif stt_service == STTService.speechmatics and speechmatics_socket:
+
+                    async def speechmatics_socket_send(data):
+                        await forward_async_provider_audio(speechmatics_socket.send, data, delivery_receipt)
+
                     await send_initial_file_path(
                         file_path,
-                        speechmatics_socket.send,
+                        speechmatics_socket_send,
                         is_active,
                         sample_rate=audio_sample_rate,
                         target_duration=SPEECH_PROFILE_FIXED_DURATION,
@@ -1572,8 +1625,8 @@ async def _stream_handler(
                     await asyncio.sleep(SPEECH_PROFILE_STABILIZE_DELAY)
 
             except Exception as e:
-                _latency_log("speech_profile_error", error=str(e)[:300])
-                print(f"Error loading speech profile in background: {e}", uid, session_id)
+                _latency_log("speech_profile_error", error_class=type(e).__name__)
+                print(f"Speech profile error class: {type(e).__name__}", uid, session_id)
             finally:
                 # Always signal completion so main socket routing can proceed
                 speech_profile_complete.set()
@@ -2690,6 +2743,7 @@ async def _stream_handler(
         nonlocal soniox_profile_socket, deepgram_profile_socket, audio_ring_buffer
         nonlocal first_audio_frame_at
         nonlocal accepting_capture, capture_drained
+        nonlocal client_close_code
 
         timer_start = time.time()
         last_audio_received_time = timer_start
@@ -2701,6 +2755,7 @@ async def _stream_handler(
 
         async def flush_stt_buffer(force: bool = False):
             nonlocal stt_audio_buffer, soniox_profile_socket, deepgram_profile_socket, grok_sock
+            nonlocal websocket_close_code
 
             if not stt_audio_buffer:
                 return
@@ -2715,7 +2770,12 @@ async def _stream_handler(
 
             if dg_socket is not None:
                 if profile_complete or not deepgram_profile_socket:
-                    dg_socket.send(chunk)
+                    try:
+                        forward_deepgram_audio(dg_socket, chunk, delivery_receipt)
+                    except ProviderAudioSendRejected:
+                        websocket_close_code = 1011
+                        _delivery_log("provider_send_rejected", terminal_reason="provider_send_rejected")
+                        raise
                     if deepgram_profile_socket:
                         print('Scheduling delayed close of deepgram_profile_socket', uid, session_id)
                         socket_to_close = deepgram_profile_socket
@@ -2728,11 +2788,16 @@ async def _stream_handler(
 
                         asyncio.create_task(close_dg_profile())
                 else:
-                    deepgram_profile_socket.send(chunk)
+                    try:
+                        forward_deepgram_audio(deepgram_profile_socket, chunk, delivery_receipt)
+                    except ProviderAudioSendRejected:
+                        websocket_close_code = 1011
+                        _delivery_log("provider_send_rejected", terminal_reason="profile_provider_send_rejected")
+                        raise
 
             if soniox_sock is not None:
                 if profile_complete or not soniox_profile_socket:
-                    await soniox_sock.send(chunk)
+                    await forward_async_provider_audio(soniox_sock.send, chunk, delivery_receipt)
                     if soniox_profile_socket:
                         print('Scheduling delayed close of soniox_profile_socket', uid, session_id)
                         socket_to_close = soniox_profile_socket
@@ -2745,7 +2810,7 @@ async def _stream_handler(
 
                         asyncio.create_task(close_soniox_profile())
                 else:
-                    await soniox_profile_socket.send(chunk)
+                    await forward_async_provider_audio(soniox_profile_socket.send, chunk, delivery_receipt)
 
             if grok_sock is not None:
                 # Proactively reconnect if Grok closed the connection (internal error, timeout, etc.)
@@ -2775,7 +2840,7 @@ async def _stream_handler(
                         grok_sock = None
                 if grok_sock is not None:
                     try:
-                        await grok_sock.send(bytes(chunk))
+                        await forward_async_provider_audio(grok_sock.send, bytes(chunk), delivery_receipt)
                     except Exception as _grok_send_err:
                         print(f"[GROK] send error ({_grok_send_err}), reconnecting...")
                         try:
@@ -2790,14 +2855,14 @@ async def _stream_handler(
                                 preseconds=speech_profile_preseconds,
                                 stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
                             )
-                            await grok_sock.send(bytes(chunk))
+                            await forward_async_provider_audio(grok_sock.send, bytes(chunk), delivery_receipt)
                             print("[GROK] reconnected and sent chunk")
                         except Exception as _grok_reconnect_err2:
                             print(f"[GROK] reconnect failed: {_grok_reconnect_err2}, dropping Grok")
                             grok_sock = None
 
             if speechmatics_sock is not None:
-                await speechmatics_sock.send(chunk)
+                await forward_async_provider_audio(speechmatics_sock.send, chunk, delivery_receipt)
 
         async def finish_stt_inputs_for_drain() -> None:
             await flush_stt_buffer(force=True)
@@ -2846,6 +2911,7 @@ async def _stream_handler(
                 # Handle client disconnect
                 if message.get("type") == "websocket.disconnect":
                     close_code = message.get("code", 1000)
+                    client_close_code = close_code
                     close_reason = {
                         1000: "normal_closure",
                         1001: "going_away_os_or_background",
@@ -2863,6 +2929,8 @@ async def _stream_handler(
                     data = message.get("bytes")
                     if len(data) <= 2:  # Ping/keepalive, 0x8a 0x00
                         continue
+
+                    delivery_receipt.record_ingress(len(data))
 
                     last_audio_received_time = time.time()
 
@@ -2884,6 +2952,7 @@ async def _stream_handler(
                             if not data:
                                 continue
                         except Exception as e:
+                            delivery_receipt.record_decode_error()
                             print(f"[OPUS] Decoding error: {e}", uid, session_id)
                             continue
                     elif codec == 'aac':
@@ -2892,6 +2961,7 @@ async def _stream_handler(
                             if not data:
                                 continue
                         except Exception as e:
+                            delivery_receipt.record_decode_error()
                             print(f"[AAC] Decoding error: {e}", uid, session_id)
                             continue
                     elif codec == 'lc3':
@@ -2903,6 +2973,7 @@ async def _stream_handler(
                                 continue
                             data = pcm_bytes
                         except Exception as e:
+                            delivery_receipt.record_decode_error()
                             print(
                                 f"[LC3] Decoding error: {e} | "
                                 f"Data size: {len(data)} bytes (expected: {lc3_chunk_size}) | "
@@ -2912,6 +2983,10 @@ async def _stream_handler(
                                 session_id,
                             )
                             continue
+
+                    delivery_receipt.record_decoded_pcm(bytes(data))
+                    if delivery_receipt.progress_due():
+                        _delivery_log("progress")
 
                     # Feed ring buffer for speaker identification
                     if audio_ring_buffer is not None:
@@ -2930,6 +3005,7 @@ async def _stream_handler(
                         if json_data.get('type') in {'client_latency_event', 'latency_event', 'timing_event'}:
                             _remember_client_latency_event(json_data)
                         elif json_data.get('type') == 'capture_drain':
+                            delivery_receipt.drain_requested = True
                             exact_conversation_id = str(current_conversation_id or '').strip()
                             if not valid_capture_drain_body(
                                 json_data,
@@ -2976,6 +3052,7 @@ async def _stream_handler(
                                 websocket_close_code = 1008
                                 break
                             capture_drained = True
+                            delivery_receipt.drain_completed = True
                             await _asend_message_event(
                                 MessageServiceStatusEvent(
                                     status="capture_protocol_drained",
@@ -3201,6 +3278,18 @@ async def _stream_handler(
                 await speechmatics_socket.close()
         except Exception as e:
             print(f"Error closing STT sockets: {e}", uid, session_id)
+
+        terminal_reason = (
+            "capture_drained"
+            if capture_drained
+            else "disconnect_before_drain" if capture_protocol == CAPTURE_PROTOCOL_VERSION else "socket_closed"
+        )
+        _delivery_log(
+            "terminal",
+            terminal_reason=terminal_reason,
+            websocket_close_code=websocket_close_code,
+            client_close_code=client_close_code,
+        )
 
         # Client sockets
         if websocket.client_state == WebSocketState.CONNECTED:

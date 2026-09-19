@@ -199,17 +199,77 @@ deepgram_nova3_languages = {
 
 # Grok STT supports 25 languages (superset of nova-3 multi)
 grok_languages = {
-    "en", "en-US", "en-AU", "en-GB", "en-IN",
-    "es", "es-419", "fr", "fr-CA", "de", "it", "pt", "pt-BR", "pt-PT",
-    "ja", "ko", "zh", "ru", "ar", "hi", "nl", "pl", "sv", "tr",
-    "da", "fi", "no", "id", "ms", "th", "vi", "uk", "cs", "ro",
+    "en",
+    "en-US",
+    "en-AU",
+    "en-GB",
+    "en-IN",
+    "es",
+    "es-419",
+    "fr",
+    "fr-CA",
+    "de",
+    "it",
+    "pt",
+    "pt-BR",
+    "pt-PT",
+    "ja",
+    "ko",
+    "zh",
+    "ru",
+    "ar",
+    "hi",
+    "nl",
+    "pl",
+    "sv",
+    "tr",
+    "da",
+    "fi",
+    "no",
+    "id",
+    "ms",
+    "th",
+    "vi",
+    "uk",
+    "cs",
+    "ro",
 }
 grok_multi_languages = {
     "multi",
-    "en", "en-US", "en-AU", "en-GB", "en-IN",
-    "es", "es-419", "fr", "fr-CA", "de", "it", "pt", "pt-BR", "pt-PT",
-    "ja", "ko", "zh", "ru", "ar", "hi", "nl", "pl", "sv", "tr",
-    "da", "fi", "no", "id", "ms", "th", "vi", "uk", "cs", "ro",
+    "en",
+    "en-US",
+    "en-AU",
+    "en-GB",
+    "en-IN",
+    "es",
+    "es-419",
+    "fr",
+    "fr-CA",
+    "de",
+    "it",
+    "pt",
+    "pt-BR",
+    "pt-PT",
+    "ja",
+    "ko",
+    "zh",
+    "ru",
+    "ar",
+    "hi",
+    "nl",
+    "pl",
+    "sv",
+    "tr",
+    "da",
+    "fi",
+    "no",
+    "id",
+    "ms",
+    "th",
+    "vi",
+    "uk",
+    "cs",
+    "ro",
 }
 
 # Supported values: soniox-stt-rt,dg-nova-3,dg-nova-2
@@ -325,6 +385,7 @@ async def process_audio_dg(
     model: str = 'nova-2-general',
     keywords: List[str] = [],
     stt_event_callback: Optional[Callable] = None,
+    delivery_event_callback: Optional[Callable] = None,
 ):
     print('process_audio_dg', language, sample_rate, channels, preseconds)
 
@@ -333,16 +394,18 @@ async def process_audio_dg(
         sentence = result.channel.alternatives[0].transcript
         # print(sentence)
         if len(sentence) == 0:
+            if delivery_event_callback:
+                delivery_event_callback({"provider": "deepgram", "result_type": "empty"})
             return
         is_final = bool(getattr(result, "is_final", True))
+        result_event = {
+            "provider": "deepgram",
+            "result_type": "final" if is_final else "interim",
+        }
+        if delivery_event_callback:
+            delivery_event_callback(result_event)
         if stt_event_callback:
-            stt_event_callback(
-                {
-                    "provider": "deepgram",
-                    "result_type": "final" if is_final else "interim",
-                    "text": sentence[:120],
-                }
-            )
+            stt_event_callback(result_event)
         if not is_final:
             return
         # print(sentence)
@@ -385,11 +448,22 @@ async def process_audio_dg(
         stream_transcript(segments)
 
     def on_error(self, error, **kwargs):
-        print(f"Error: {error}")
+        error_class = type(error).__name__
+        if delivery_event_callback:
+            delivery_event_callback({"provider": "deepgram", "result_type": "error", "error_class": error_class})
+        print(f"Deepgram error class: {error_class}")
 
     print("Connecting to Deepgram")  # Log before connection attempt
     return connect_to_deepgram_with_backoff(
-        on_message, on_error, language, sample_rate, channels, model, keywords, stt_event_callback=stt_event_callback
+        on_message,
+        on_error,
+        language,
+        sample_rate,
+        channels,
+        model,
+        keywords,
+        stt_event_callback=stt_event_callback,
+        delivery_event_callback=delivery_event_callback,
     )
 
 
@@ -409,13 +483,22 @@ def connect_to_deepgram_with_backoff(
     model: str,
     keywords: List[str] = [],
     stt_event_callback: Optional[Callable] = None,
+    delivery_event_callback: Optional[Callable] = None,
     retries=3,
 ):
     print("connect_to_deepgram_with_backoff")
     for attempt in range(retries):
         try:
             return connect_to_deepgram(
-                on_message, on_error, language, sample_rate, channels, model, keywords, stt_event_callback
+                on_message,
+                on_error,
+                language,
+                sample_rate,
+                channels,
+                model,
+                keywords,
+                stt_event_callback,
+                delivery_event_callback,
             )
         except Exception as error:
             print(f'An error occurred: {error}')
@@ -446,6 +529,7 @@ def connect_to_deepgram(
     model: str,
     keywords: List[str] = [],
     stt_event_callback: Optional[Callable] = None,
+    delivery_event_callback: Optional[Callable] = None,
 ):
     try:
         dg_connection = deepgram.listen.websocket.v("1")
@@ -453,6 +537,8 @@ def connect_to_deepgram(
         dg_connection.on(LiveTranscriptionEvents.Error, on_error)
 
         def on_open(self, open, **kwargs):
+            if delivery_event_callback:
+                delivery_event_callback({"provider": "deepgram", "result_type": "open"})
             print("Connection Open")
 
         def on_metadata(self, metadata, **kwargs):
@@ -465,6 +551,8 @@ def connect_to_deepgram(
             pass
 
         def on_close(self, close, **kwargs):
+            if delivery_event_callback:
+                delivery_event_callback({"provider": "deepgram", "result_type": "closed"})
             print("Connection Closed")
 
         def on_unhandled(self, unhandled, **kwargs):
@@ -567,28 +655,32 @@ async def process_audio_grok(
                     w_speaker = int(word.get("speaker", 0))
                     adjusted_start = max(0.0, w_start - preseconds)
                     adjusted_end = max(0.0, w_end - preseconds)
-                    is_user = (w_speaker == 0 and preseconds > 0)
+                    is_user = w_speaker == 0 and preseconds > 0
                     if not segs:
-                        segs.append({
-                            "speaker": f"SPEAKER_{w_speaker}",
-                            "start": adjusted_start,
-                            "end": adjusted_end,
-                            "text": w_text,
-                            "is_user": is_user,
-                            "person_id": None,
-                        })
+                        segs.append(
+                            {
+                                "speaker": f"SPEAKER_{w_speaker}",
+                                "start": adjusted_start,
+                                "end": adjusted_end,
+                                "text": w_text,
+                                "is_user": is_user,
+                                "person_id": None,
+                            }
+                        )
                     elif segs[-1]["speaker"] == f"SPEAKER_{w_speaker}":
                         segs[-1]["text"] += f" {w_text}"
                         segs[-1]["end"] = adjusted_end
                     else:
-                        segs.append({
-                            "speaker": f"SPEAKER_{w_speaker}",
-                            "start": adjusted_start,
-                            "end": adjusted_end,
-                            "text": w_text,
-                            "is_user": is_user,
-                            "person_id": None,
-                        })
+                        segs.append(
+                            {
+                                "speaker": f"SPEAKER_{w_speaker}",
+                                "start": adjusted_start,
+                                "end": adjusted_end,
+                                "text": w_text,
+                                "is_user": is_user,
+                                "person_id": None,
+                            }
+                        )
                 return segs
 
             try:
@@ -616,18 +708,18 @@ async def process_audio_grok(
                     if speech_final or is_final:
                         # Flush: emit every word we have not yet emitted
                         new_words = [
-                            w for w in words
-                            if float(w.get("start", 0.0)) >= preseconds
-                            and float(w.get("end", 0.0)) > last_streamed_end
+                            w
+                            for w in words
+                            if float(w.get("start", 0.0)) >= preseconds and float(w.get("end", 0.0)) > last_streamed_end
                         ]
                     else:
                         # Partial: only emit "stable" words — all except the last 3,
                         # which Grok may still revise as the model continues.
                         stable = words[:-3] if len(words) > 3 else []
                         new_words = [
-                            w for w in stable
-                            if float(w.get("start", 0.0)) >= preseconds
-                            and float(w.get("end", 0.0)) > last_streamed_end
+                            w
+                            for w in stable
+                            if float(w.get("start", 0.0)) >= preseconds and float(w.get("end", 0.0)) > last_streamed_end
                         ]
 
                     if new_words:
@@ -637,21 +729,25 @@ async def process_audio_grok(
                             print(f"[GROK] streaming {len(segments)} seg(s): {segments[0]['text'][:60]}")
                             stream_transcript(segments)
                             if stt_event_callback:
-                                stt_event_callback({
-                                    "provider": "grok",
-                                    "result_type": "final",
-                                    "text": " ".join(s["text"] for s in segments)[:120],
-                                })
+                                stt_event_callback(
+                                    {
+                                        "provider": "grok",
+                                        "result_type": "final",
+                                        "text": " ".join(s["text"] for s in segments)[:120],
+                                    }
+                                )
                     elif not words and top_text and (speech_final or is_final):
                         # Fallback when server returns only top-level text (no word list)
-                        segments = [{
-                            "speaker": "SPEAKER_0",
-                            "start": 0.0,
-                            "end": 0.0,
-                            "text": top_text.strip(),
-                            "is_user": preseconds > 0,
-                            "person_id": None,
-                        }]
+                        segments = [
+                            {
+                                "speaker": "SPEAKER_0",
+                                "start": 0.0,
+                                "end": 0.0,
+                                "text": top_text.strip(),
+                                "is_user": preseconds > 0,
+                                "person_id": None,
+                            }
+                        ]
                         print(f"[GROK] streaming text fallback: {top_text[:60]}")
                         stream_transcript(segments)
 
@@ -674,11 +770,13 @@ async def process_audio_grok(
 
         _grok_send_count = [0]
         _orig_send = grok_socket.send
+
         async def _counted_send(data):
             _grok_send_count[0] += 1
             if _grok_send_count[0] % 50 == 1:
                 print(f"[GROK] sent chunk #{_grok_send_count[0]} ({len(data)} bytes)")
             return await _orig_send(data)
+
         grok_socket.send = _counted_send
         asyncio.create_task(on_message())
         return grok_socket

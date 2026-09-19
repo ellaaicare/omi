@@ -28,6 +28,9 @@ on:
       - "backend/models/conversation_integrity.py"
       - "backend/models/hermes_cloud_enrichment_contract.py"
       - "backend/routers/transcribe.py"
+      - "backend/utils/stt/session_delivery.py"
+      - "backend/utils/stt/streaming.py"
+      - "backend/tests/unit/test_stt_session_delivery.py"
       - "backend/routers/pusher.py"
       - "backend/routers/integration.py"
       - "backend/routers/workflow.py"
@@ -195,6 +198,9 @@ on:
       - "backend/models/conversation_integrity.py"
       - "backend/models/hermes_cloud_enrichment_contract.py"
       - "backend/routers/transcribe.py"
+      - "backend/utils/stt/session_delivery.py"
+      - "backend/utils/stt/streaming.py"
+      - "backend/tests/unit/test_stt_session_delivery.py"
       - "backend/routers/pusher.py"
       - "backend/routers/integration.py"
       - "backend/routers/workflow.py"
@@ -427,6 +433,9 @@ jobs:
           models/conversation_integrity.py
           models/hermes_cloud_enrichment_contract.py
           routers/transcribe.py
+          utils/stt/session_delivery.py
+          utils/stt/streaming.py
+          tests/unit/test_stt_session_delivery.py
           routers/conversations.py
           routers/developer.py
           routers/users.py
@@ -435,6 +444,7 @@ jobs:
           utils/conversations/postprocess_conversation.py
           utils/conversations/merge_conversations.py
           routers/pusher.py routers/transcribe.py routers/integration.py routers/workflow.py
+          utils/stt/session_delivery.py tests/unit/test_stt_session_delivery.py
           ella/__init__.py
           ella/routers/auto_provision.py
           ella/routers/callbacks.py
@@ -521,6 +531,7 @@ jobs:
           routers/users.py
           routers/conversations.py routers/developer.py
           routers/pusher.py routers/transcribe.py routers/integration.py routers/workflow.py
+          utils/stt/session_delivery.py tests/unit/test_stt_session_delivery.py
           routers/task_integrations.py
           utils/analytics.py
           utils/app_integrations.py
@@ -637,6 +648,7 @@ jobs:
               tests/unit/test_capture_buffer_retention.py \
               tests/unit/test_capture_incident_1210_regressions.py \
               tests/unit/test_capture_protocol_v2_live.py \
+              tests/unit/test_stt_session_delivery.py \
               tests/unit/test_capture_task_sync_idempotency.py \
               tests/unit/test_capture_webhook_delivery.py |
               sed '/^$/d'
@@ -711,13 +723,15 @@ jobs:
             "tests/unit/test_capture_protocol_v2_live.py::test_reconnect_claim_rejects_live_conversation_capture_lease_when_authority_expired"
             "tests/unit/test_capture_protocol_v2_live.py::test_reconnect_claim_rejects_live_conversation_finalizer_when_authority_finalizer_expired"
             "tests/unit/test_capture_protocol_v2_live.py::test_reconnect_claim_rejects_missing_or_malformed_v2_lease_evidence"
+            "tests/unit/test_stt_session_delivery.py::test_deepgram_send_rejection_is_terminal_and_counted"
+            "tests/unit/test_stt_session_delivery.py::test_production_route_wires_receipt_and_does_not_log_transcript_text"
             "tests/unit/test_capture_task_sync_idempotency.py::test_task_sync_retry_release_is_exact_claim_cas"
             "tests/unit/test_capture_task_sync_idempotency.py::test_auto_sync_transient_failure_releases_then_retries_same_operation_once"
             "tests/unit/test_capture_task_sync_idempotency.py::test_auto_sync_explicit_terminal_failure_completes_without_provider_retry"
             "tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[todoist]"
             "tests/unit/test_capture_webhook_delivery.py::test_capture_developer_webhook_failure_is_not_acknowledged"
           )
-          test "$(grep -c '::' <<<"$capture_ids")" -eq 87
+          test "$(grep -c '::' <<<"$capture_ids")" -eq 97
           for required_id in "${required_capture_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$capture_ids"
           done
@@ -725,6 +739,7 @@ jobs:
             tests/unit/test_capture_buffer_retention.py \
             tests/unit/test_capture_incident_1210_regressions.py \
             tests/unit/test_capture_protocol_v2_live.py \
+            tests/unit/test_stt_session_delivery.py \
             tests/unit/test_capture_task_sync_idempotency.py \
             tests/unit/test_capture_webhook_delivery.py \
             -v | tee /tmp/capture-buffer-retention-pytest.log
