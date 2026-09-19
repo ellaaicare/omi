@@ -1338,7 +1338,7 @@ async def _stream_handler(
             first_segment = segments[0] if isinstance(segments[0], dict) else {}
             result_provider = (
                 first_segment.get("stt_provider") if isinstance(first_segment, dict) else None
-            ) or _stt_service_value(stt_service)
+            ) or _stt_service_value(selected_stt_service)
             _latency_log(
                 "first_final_result",
                 segment_count=len(segments),
@@ -1349,13 +1349,13 @@ async def _stream_handler(
         for segment in segments or []:
             if isinstance(segment, dict):
                 segment.setdefault("id", str(uuid.uuid4()))
-                segment.setdefault("stt_provider", _stt_service_value(stt_service))
+                segment.setdefault("stt_provider", _stt_service_value(selected_stt_service))
                 bind_capture_conversation(segment)
         realtime_segment_buffers.extend(segments)
 
     async def _process_stt():
         nonlocal websocket_close_code
-        nonlocal stt_service, selected_stt_service, selected_stt_model
+        nonlocal selected_stt_service, selected_stt_model
         nonlocal soniox_socket
         nonlocal soniox_profile_socket
         nonlocal speechmatics_socket
@@ -1468,7 +1468,6 @@ async def _stream_handler(
                         )
                 except ValueError as e:
                     print(f"Soniox unavailable ({e}), falling back to Deepgram nova-3")
-                    stt_service = STTService.deepgram
                     selected_stt_service = STTService.deepgram
                     selected_stt_model = 'nova-3'
                     deepgram_socket = await process_audio_dg(
@@ -1486,7 +1485,6 @@ async def _stream_handler(
             # GROK (disabled - Whisper-based, hallucinates on ambient background noise)
             elif stt_service == STTService.grok:
                 print("Grok STT selected but disabled for ambient use; routing to Deepgram nova-2")
-                stt_service = STTService.deepgram
                 selected_stt_service = STTService.deepgram
                 selected_stt_model = 'nova-2-general'
                 deepgram_socket = await process_audio_dg(

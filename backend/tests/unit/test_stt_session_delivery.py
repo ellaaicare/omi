@@ -255,9 +255,8 @@ def test_deepgram_fallbacks_report_the_effective_provider():
     grok_fallback = source.index("Grok STT selected but disabled")
     grok_deepgram = source.index("deepgram_socket = await process_audio_dg", grok_fallback)
 
-    assert "stt_service = STTService.deepgram" in source[soniox_fallback:soniox_deepgram]
     assert "selected_stt_service = STTService.deepgram" in source[soniox_fallback:soniox_deepgram]
     assert "selected_stt_model = 'nova-3'" in source[soniox_fallback:soniox_deepgram]
-    assert "stt_service = STTService.deepgram" in source[grok_fallback:grok_deepgram]
     assert "selected_stt_service = STTService.deepgram" in source[grok_fallback:grok_deepgram]
     assert "selected_stt_model = 'nova-2-general'" in source[grok_fallback:grok_deepgram]
+    assert 'segment.setdefault("stt_provider", _stt_service_value(selected_stt_service))' in source
