@@ -2368,7 +2368,10 @@ class CaptureProvider extends ChangeNotifier
       updateRecordingState(RecordingState.stop);
       final shouldFinalize = _captureDiagnostics.hasPhysicalAudio || hasCapturableContent;
       try {
-        if (!shouldFinalize) return PhoneCaptureStopResult.empty;
+        if (!shouldFinalize) {
+          _failCaptureDiagnostics(CaptureDiagnosticFailure.noTranscript);
+          return PhoneCaptureStopResult.empty;
+        }
         return await finalizeCurrentConversation(closeTranscriptTransportBeforeProcessing: true)
             ? PhoneCaptureStopResult.finalized
             : PhoneCaptureStopResult.failed;
@@ -2651,7 +2654,11 @@ class CaptureProvider extends ChangeNotifier
     updateRecordingState(RecordingState.stop);
     final shouldFinalize = _captureDiagnostics.hasPhysicalAudio || hasCapturableContent;
     try {
-      return shouldFinalize ? await _serializedDeviceCaptureFinalization() : false;
+      if (!shouldFinalize) {
+        _failCaptureDiagnostics(CaptureDiagnosticFailure.noTranscript);
+        return false;
+      }
+      return await _serializedDeviceCaptureFinalization();
     } finally {
       if (_socket?.state == SocketServiceState.connected) {
         await _socket?.stop(reason: 'necklace capture finalized');
@@ -3353,33 +3360,44 @@ class CaptureProvider extends ChangeNotifier
     required Duration retryDelay,
   }) async {
     for (var attempt = 0; attempt < maxAttempts; attempt++) {
-      final expectsAuthoritativeTranscript =
-          segments.any((segment) => segment.text.trim().isNotEmpty) || _captureDiagnostics.hasTranscript;
+      final visibleBeforeRefresh = segments.where((segment) => segment.text.trim().isNotEmpty).toList();
       if (_captureDiagnostics.source != CaptureDiagnosticSource.none) {
         _updateCaptureDiagnostics(
           phase: CaptureDiagnosticPhase.finalizing,
           finalizationAttempts: attempt + 1,
         );
       }
+      var loadedAuthoritativeSnapshot = false;
       try {
-        if (!await _loadInProgressConversation(operation, preserveVisibleContentOnEmpty: true)) return false;
+        loadedAuthoritativeSnapshot = await _loadInProgressConversation(operation, preserveVisibleContentOnEmpty: true);
+        if (!loadedAuthoritativeSnapshot) return false;
       } on ExactAccountAuthorityChangedException {
         return false;
       } catch (_) {
-        // A final refresh failure must not turn an empty capture into a blank
-        // server memory. Keep the retry bounded and report no content.
+        // Never reuse a cached conversation after a failed final read. Only a
+        // successful snapshot from this attempt can authorize processing.
       }
       if (!operation.isCurrent) return false;
-      final authoritativeConversation = _conversation;
-      final authoritativeHasTranscript =
-          authoritativeConversation?.transcriptSegments.any((segment) => segment.text.trim().isNotEmpty) ?? false;
-      final authoritativeHasContent = authoritativeConversation != null &&
-          (authoritativeHasTranscript ||
-              authoritativeConversation.photos.any((photo) => !photo.discarded && photo.base64.trim().isNotEmpty));
-      final nowExpectsAuthoritativeTranscript =
-          expectsAuthoritativeTranscript || segments.any((segment) => segment.text.trim().isNotEmpty);
-      if (authoritativeHasContent && (!nowExpectsAuthoritativeTranscript || authoritativeHasTranscript)) {
-        return true;
+      if (loadedAuthoritativeSnapshot) {
+        final authoritativeConversation = _conversation;
+        final authoritativeSegments = authoritativeConversation?.transcriptSegments ?? const <TranscriptSegment>[];
+        final authoritativeHasTranscript = authoritativeSegments.any((segment) => segment.text.trim().isNotEmpty);
+        final authoritativeHasContent = authoritativeConversation != null &&
+            (authoritativeHasTranscript ||
+                authoritativeConversation.photos.any((photo) => !photo.discarded && photo.base64.trim().isNotEmpty));
+        final visibleAfterRefresh = segments.where((segment) => segment.text.trim().isNotEmpty).toList();
+        final expectedVisibleTranscript = _mergeVisibleTranscriptEvidence(
+          visibleBeforeRefresh,
+          visibleAfterRefresh,
+        );
+        final expectsAuthoritativeTranscript =
+            expectedVisibleTranscript.isNotEmpty || _captureDiagnostics.hasTranscript;
+        final authoritativeCoversVisible =
+            _authoritativeTranscriptCovers(authoritativeSegments, expectedVisibleTranscript);
+        if (authoritativeHasContent &&
+            (!expectsAuthoritativeTranscript || (authoritativeHasTranscript && authoritativeCoversVisible))) {
+          return true;
+        }
       }
       if (attempt + 1 < maxAttempts && retryDelay > Duration.zero) {
         await Future<void>.delayed(retryDelay);
@@ -3387,6 +3405,59 @@ class CaptureProvider extends ChangeNotifier
       }
     }
     return false;
+  }
+
+  List<TranscriptSegment> _mergeVisibleTranscriptEvidence(
+    List<TranscriptSegment> beforeRefresh,
+    List<TranscriptSegment> afterRefresh,
+  ) {
+    final merged = <TranscriptSegment>[];
+    for (final segment in [...beforeRefresh, ...afterRefresh]) {
+      if (segment.text.trim().isEmpty) continue;
+      final index = merged.indexWhere((candidate) => _sameTranscriptSegment(candidate, segment));
+      if (index == -1) {
+        merged.add(segment);
+      } else if (segment.end > merged[index].end) {
+        merged[index] = segment;
+      }
+    }
+    return merged;
+  }
+
+  bool _authoritativeTranscriptCovers(
+    List<TranscriptSegment> authoritative,
+    List<TranscriptSegment> visible,
+  ) =>
+      visible.every(
+        (visibleSegment) => authoritative.any(
+          (authoritativeSegment) =>
+              _sameTranscriptSegment(authoritativeSegment, visibleSegment) &&
+              authoritativeSegment.text.trim().isNotEmpty &&
+              authoritativeSegment.end + 0.001 >= visibleSegment.end,
+        ),
+      );
+
+  bool _sameTranscriptSegment(TranscriptSegment left, TranscriptSegment right) {
+    final leftId = left.id.trim();
+    final rightId = right.id.trim();
+    if (leftId.isNotEmpty && rightId.isNotEmpty) return leftId == rightId;
+    return left.start == right.start && left.speaker == right.speaker && left.text.trim() == right.text.trim();
+  }
+
+  List<TranscriptSegment> _mergeAuthoritativeAndVisibleSegments(
+    List<TranscriptSegment> authoritative,
+    List<TranscriptSegment> visible,
+  ) {
+    final merged = List<TranscriptSegment>.from(authoritative);
+    for (final visibleSegment in visible) {
+      final index = merged.indexWhere((candidate) => _sameTranscriptSegment(candidate, visibleSegment));
+      if (index == -1) {
+        merged.add(visibleSegment);
+      } else if (merged[index].end + 0.001 < visibleSegment.end) {
+        merged[index] = visibleSegment;
+      }
+    }
+    return merged;
   }
 
   Future<bool> _loadInProgressConversation(
@@ -3399,11 +3470,17 @@ class CaptureProvider extends ChangeNotifier
       exactAuthority: operation,
     );
     if (!operation.isCurrent) return false;
-    _conversation = convos.isNotEmpty ? convos.first : null;
+    final expectedConversationId = operation.captureProtocolAuthority?.conversationId.trim() ?? '';
+    final fetchedConversation = expectedConversationId.isEmpty
+        ? convos.firstOrNull
+        : convos.firstWhereOrNull((conversation) => conversation.id.trim() == expectedConversationId);
+    final rejectedDifferentCapture =
+        expectedConversationId.isNotEmpty && convos.isNotEmpty && fetchedConversation == null;
+    _conversation = fetchedConversation;
     if (_conversation != null) {
-      final authoritativeHasTranscript =
-          _conversation!.transcriptSegments.any((segment) => segment.text.trim().isNotEmpty);
-      if (!preserveVisibleContentOnEmpty || authoritativeHasTranscript) {
+      if (preserveVisibleContentOnEmpty) {
+        segments = _mergeAuthoritativeAndVisibleSegments(_conversation!.transcriptSegments, segments);
+      } else {
         segments = _conversation!.transcriptSegments;
       }
       // Merge server photos with locally-captured temp photos to avoid losing
@@ -3419,7 +3496,7 @@ class CaptureProvider extends ChangeNotifier
         }
       }
       photos = mergedPhotos;
-    } else if (!preserveVisibleContentOnEmpty) {
+    } else if (!preserveVisibleContentOnEmpty && !rejectedDifferentCapture) {
       segments = [];
       photos = [];
     }
@@ -3523,8 +3600,7 @@ class CaptureProvider extends ChangeNotifier
     Duration transcriptRetryDelay = const Duration(milliseconds: 500),
     bool closeTranscriptTransportBeforeProcessing = false,
   }) async {
-    final hadVisibleTranscript =
-        segments.any((segment) => segment.text.trim().isNotEmpty) || _captureDiagnostics.hasTranscript;
+    final hadVisibleContent = hasCapturableContent || _captureDiagnostics.hasTranscript;
     if (_captureDiagnostics.source != CaptureDiagnosticSource.none) {
       _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.finalizing);
     }
@@ -3551,8 +3627,11 @@ class CaptureProvider extends ChangeNotifier
       );
       if (!hasContent || !operation.isCurrent) {
         if (_captureDiagnostics.source != CaptureDiagnosticSource.none) {
+          final visibleContentObserved = hadVisibleContent || hasCapturableContent || _captureDiagnostics.hasTranscript;
           _failCaptureDiagnostics(
-            hadVisibleTranscript ? CaptureDiagnosticFailure.finalizationFailed : CaptureDiagnosticFailure.noTranscript,
+            visibleContentObserved
+                ? CaptureDiagnosticFailure.finalizationFailed
+                : CaptureDiagnosticFailure.noTranscript,
           );
         }
         return false;
@@ -3584,6 +3663,8 @@ class CaptureProvider extends ChangeNotifier
       if (!activeOperation.isCurrent) return false;
       final conversationId = (_conversation?.id ?? '').trim();
       if (conversationId.isEmpty) return false;
+      final expectedConversationId = activeOperation.captureProtocolAuthority?.conversationId.trim() ?? '';
+      if (expectedConversationId.isNotEmpty && conversationId != expectedConversationId) return false;
       await _resetStateVariables();
       return _forceProcessingConversationId(conversationId, activeOperation);
     } on ExactAccountAuthorityChangedException {
