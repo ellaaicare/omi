@@ -656,10 +656,7 @@ void main() {
       '$secondTurn:user',
       '$secondTurn:assistant',
     ]);
-    expect(
-      prefs.cachedMessages.map((message) => message.canonicalTurnOrdinal),
-      [0, 0, 1, 1],
-    );
+    expect(prefs.cachedMessages.map((message) => message.canonicalTurnOrdinal), [0, 0, 1, 1]);
   });
 
   test('V2V authority loss after backend response has zero local side effects', () async {
@@ -874,6 +871,49 @@ void main() {
       'quarantine',
       'artwork-cache',
     ]);
+  });
+
+  test('same-account reauthentication revokes artwork trust without deleting owner-scoped files', () async {
+    final calls = <String>[];
+    final service = EllaAccountIsolationService(
+      stopNotificationAudio: () => calls.add('notification-audio'),
+      stopOnDeviceTts: () => calls.add('on-device-tts'),
+      clearGuardianNotifications: () => calls.add('notification-residue'),
+      stopCapture: () => calls.add('capture'),
+      stopV2v: () => calls.add('v2v'),
+      stopGuardian: () => calls.add('guardian'),
+      stopServices: () => calls.add('wal-services'),
+      quarantineLegacy: () => calls.add('quarantine'),
+      clearArtworkCache: () => calls.add('artwork-cache'),
+      revokeArtworkCacheTrust: () => calls.add('artwork-trust'),
+    );
+
+    await service.stopForAccountTransition(preserveOwnerScopedArtworkCache: true);
+    await service.finishPreservedArtworkTransition(previousUid: 'uid-a', currentUid: 'uid-a');
+
+    expect(calls, contains('artwork-trust'));
+    expect(calls, isNot(contains('artwork-cache')));
+  });
+
+  test('replacement account deletes files retained during identity verification', () async {
+    final calls = <String>[];
+    final service = EllaAccountIsolationService(
+      stopNotificationAudio: () {},
+      stopOnDeviceTts: () {},
+      clearGuardianNotifications: () {},
+      stopCapture: () {},
+      stopV2v: () {},
+      stopGuardian: () {},
+      stopServices: () {},
+      quarantineLegacy: () {},
+      clearArtworkCache: () => calls.add('artwork-cache'),
+      revokeArtworkCacheTrust: () => calls.add('artwork-trust'),
+    );
+
+    await service.stopForAccountTransition(preserveOwnerScopedArtworkCache: true);
+    await service.finishPreservedArtworkTransition(previousUid: 'uid-a', currentUid: 'uid-b');
+
+    expect(calls, ['artwork-trust', 'artwork-cache']);
   });
 
   test('identity transition waits for a capture producer that is mid-write', () async {
@@ -1108,10 +1148,7 @@ void main() {
     final first = _LateDisconnectConnection(necklace, _LateDisconnectTransport(necklace.id));
     final second = _LateDisconnectConnection(necklace, _LateDisconnectTransport(necklace.id));
     final pendingConnections = <DeviceConnection>[first, second];
-    final service = DeviceService(
-      discoverers: [],
-      connectionCreator: (_) => pendingConnections.removeAt(0),
-    );
+    final service = DeviceService(discoverers: [], connectionCreator: (_) => pendingConnections.removeAt(0));
     final deviceProviderSubscriber = _RecordingDeviceSubscription();
     final onboardingSubscriber = _RecordingDeviceSubscription();
     final speechProfileSubscriber = _RecordingDeviceSubscription();
@@ -2249,11 +2286,7 @@ class _RecordingDeviceSubscription implements IDeviceServiceSubsciption {
   final List<DeviceConnectionState> connectionStates = [];
 
   @override
-  void onDeviceConnectionStateChanged(
-    String deviceId,
-    DeviceConnectionState state, {
-    int? connectionGeneration,
-  }) {
+  void onDeviceConnectionStateChanged(String deviceId, DeviceConnectionState state, {int? connectionGeneration}) {
     connectionStates.add(state);
   }
 

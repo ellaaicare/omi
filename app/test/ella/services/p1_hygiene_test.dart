@@ -216,7 +216,11 @@ void main() {
 
     final auth = File('${lib.path}/services/auth_service.dart').readAsStringSync();
     expect(auth, contains('Future<T> runIdentityTransition<T>'));
-    expect(auth.indexOf('stopForAccountTransition()'), lessThan(auth.indexOf('return mutation();')));
+    expect(
+      auth.indexOf('stopForAccountTransition(preserveOwnerScopedArtworkCache: preserveArtwork)'),
+      lessThan(auth.indexOf('return await mutation();')),
+    );
+    expect(auth, contains('preserveOwnerScopedArtworkCache: true'));
     expect(auth, contains('Future<void> signOutWithQuiescedCleanup'));
     expect(auth, contains('Future<void> signOut() => signOutWithQuiescedCleanup(() async {})'));
     expect(auth, contains('replaceIdentityWithCredential'));

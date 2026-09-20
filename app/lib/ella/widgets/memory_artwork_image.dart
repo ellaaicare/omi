@@ -174,7 +174,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         oldWidget.refreshEpoch != widget.refreshEpoch ||
         oldWidget.authorityEpoch != widget.authorityEpoch ||
         oldWidget.enqueueIfMissing != widget.enqueueIfMissing) {
-      _refreshRequest(invalidateCachedArtwork: oldWidget.authorityEpoch != widget.authorityEpoch);
+      _refreshRequest();
     }
   }
 
@@ -184,7 +184,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     super.dispose();
   }
 
-  void _refreshRequest({bool invalidateCachedArtwork = false}) {
+  void _refreshRequest() {
     _manualGenerationInFlight = false;
     _resetAuthorityRetryBudgetIfNeeded();
     _resetTransientRetryBudgetIfNeeded();
@@ -200,21 +200,12 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     final api = widget.api ?? MemoryArtworkApi();
     final artwork = widget.conversation.artwork;
     final cacheKey = _cacheKeyForDisplay(api, artwork);
-    final previousDisplayCacheKey = _displayCacheKey;
-    if (invalidateCachedArtwork) {
-      MemoryArtworkCache.forgetDisplayCacheKey(previousDisplayCacheKey);
-      MemoryArtworkCache.forgetDisplayCacheKey(cacheKey);
-    }
     _displayCacheKey = cacheKey;
-    final resolvedCacheKey = invalidateCachedArtwork ? cacheKey : MemoryArtworkCache.resolveDisplayCacheKey(cacheKey);
+    final resolvedCacheKey = MemoryArtworkCache.resolveDisplayCacheKey(cacheKey);
     _remoteResult = null;
-    if (_cacheKey != resolvedCacheKey || invalidateCachedArtwork) {
+    if (_cacheKey != resolvedCacheKey) {
       _cacheKey = resolvedCacheKey;
       _cachedFile = null;
-    }
-    if (invalidateCachedArtwork && resolvedCacheKey.isNotEmpty) {
-      unawaited(_evictThenLoadRemote(api, artwork, generation, resolvedCacheKey));
-      return;
     }
     if (resolvedCacheKey.isNotEmpty) {
       unawaited(_loadCachedFile(resolvedCacheKey, generation));
@@ -289,21 +280,6 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     return MemoryArtworkCache.manager.removeFile(cacheKey);
   }
 
-  Future<void> _evictThenLoadRemote(
-    MemoryArtworkApi api,
-    MemoryArtworkState? artwork,
-    int generation,
-    String cacheKey,
-  ) async {
-    try {
-      await _evictCachedFile(cacheKey);
-    } catch (_) {
-      // A stale local file is never authority for a replacement account.
-    }
-    if (!mounted || generation != _requestGeneration) return;
-    await _loadRemoteResult(api, artwork, generation, loadCachedFile: false);
-  }
-
   Future<void> _loadRemoteResult(
     MemoryArtworkApi api,
     MemoryArtworkState? artwork,
@@ -316,11 +292,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       // Queue ownership is the source of truth for generation. A card only
       // reads its current state once; it must not multiply GET traffic by
       // doing a private 30-second poll for every visible memory.
-      result = await api.loadForDisplay(
-        widget.conversation.id,
-        enqueueIfMissing: enqueueIfMissing,
-        pollAttempts: 0,
-      );
+      result = await api.loadForDisplay(widget.conversation.id, enqueueIfMissing: enqueueIfMissing, pollAttempts: 0);
       if (!enqueueIfMissing && widget.enqueueIfMissing && result.isAuthorityCurrent && result.canRequestGeneration) {
         final automaticKey = _automaticGenerationKey(api);
         if (MemoryArtworkImage.beginAutomaticGeneration(automaticKey)) {
@@ -399,10 +371,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       final recoveredDisplayCacheKey = _cacheKeyForDisplay(api, artwork);
       final provisionalCacheKey = recoveredDisplayCacheKey.isNotEmpty ? recoveredDisplayCacheKey : _displayCacheKey;
       final readyCacheKeys = {provisionalCacheKey, readyCacheKey}..removeWhere((cacheKey) => cacheKey.isEmpty);
-      await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(
-        readyCacheKeys,
-        _evictCachedFile,
-      );
+      await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(readyCacheKeys, _evictCachedFile);
       if (!mounted || generation != _requestGeneration || !result.isAuthorityCurrent) return;
       final rememberedCacheKey = await MemoryArtworkCache.rememberDisplayCacheKey(
         provisionalCacheKey: provisionalCacheKey,
@@ -441,10 +410,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
 
   String _automaticGenerationKey(MemoryArtworkApi api) {
     final sourceRevision = widget.conversation.activeSummaryVersionId?.trim() ?? '';
-    return api.automaticGenerationKey(
-      memoryId: widget.conversation.id,
-      sourceRevision: sourceRevision,
-    );
+    return api.automaticGenerationKey(memoryId: widget.conversation.id, sourceRevision: sourceRevision);
   }
 
   Future<void> _generateArtwork() async {
@@ -461,12 +427,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       _remoteResult = const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating);
     });
     try {
-      await _loadRemoteResult(
-        api,
-        widget.conversation.artwork,
-        generation,
-        enqueueIfMissing: true,
-      );
+      await _loadRemoteResult(api, widget.conversation.artwork, generation, enqueueIfMissing: true);
     } finally {
       if (mounted && generation == _requestGeneration) {
         setState(() => _manualGenerationInFlight = false);
@@ -699,11 +660,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     return _placeholder(kind);
   }
 
-  Widget _sourcePhotoFallback(
-    BuildContext context,
-    Uint8List bytes, {
-    required _MemoryArtworkFallbackKind kind,
-  }) {
+  Widget _sourcePhotoFallback(BuildContext context, Uint8List bytes, {required _MemoryArtworkFallbackKind kind}) {
     final isPreparing = kind == _MemoryArtworkFallbackKind.preparing;
     final canGenerate = !isPreparing && !_manualGenerationInFlight && _canManuallyGenerate(_remoteResult);
     final photo = Semantics(
@@ -805,11 +762,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
                   const SizedBox(width: 6),
                   Text(
                     context.l10n.memoryArtworkRetry,
-                    style: const TextStyle(
-                      color: Color(0xFF315F55),
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                    ),
+                    style: const TextStyle(color: Color(0xFF315F55), fontSize: 12, fontWeight: FontWeight.w700),
                   ),
                 ],
               ),
@@ -898,10 +851,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         child: InkWell(
           key: Key('memory-artwork-placeholder-${widget.conversation.id}'),
           onTap: _generateArtwork,
-          child: Ink(
-            decoration: decoration,
-            child: content,
-          ),
+          child: Ink(decoration: decoration, child: content),
         ),
       ),
     );

@@ -37,15 +37,30 @@ class AuthService {
 
   AuthService._internal();
 
-  Future<T> runIdentityTransition<T>(Future<T> Function() mutation) async {
-    await const EllaAccountIsolationService().stopForAccountTransition();
-    return mutation();
+  Future<T> runIdentityTransition<T>(
+    Future<T> Function() mutation, {
+    bool preserveOwnerScopedArtworkCache = false,
+  }) async {
+    final previousUid = SharedPreferencesUtil().uid.trim();
+    final preserveArtwork = preserveOwnerScopedArtworkCache && previousUid.isNotEmpty;
+    const isolation = EllaAccountIsolationService();
+    await isolation.stopForAccountTransition(preserveOwnerScopedArtworkCache: preserveArtwork);
+    try {
+      return await mutation();
+    } finally {
+      if (preserveArtwork) {
+        await isolation.finishPreservedArtworkTransition(
+          previousUid: previousUid,
+          currentUid: FirebaseAuth.instance.currentUser?.uid.trim() ?? '',
+        );
+      }
+    }
   }
 
   Future<UserCredential> replaceIdentityWithCredential(AuthCredential credential) => runIdentityTransition(() async {
         await FirebaseAuth.instance.signOut();
         return FirebaseAuth.instance.signInWithCredential(credential);
-      });
+      }, preserveOwnerScopedArtworkCache: true);
 
   bool isSignedIn() => FirebaseAuth.instance.currentUser != null && !FirebaseAuth.instance.currentUser!.isAnonymous;
 
@@ -73,7 +88,10 @@ class AuthService {
 
     // Once signed in, return the UserCredential
     try {
-      var result = await runIdentityTransition(() => FirebaseAuth.instance.signInWithCredential(credential));
+      var result = await runIdentityTransition(
+        () => FirebaseAuth.instance.signInWithCredential(credential),
+        preserveOwnerScopedArtworkCache: true,
+      );
       await _updateUserPreferences(result, 'google');
       return result;
     } catch (_) {
@@ -161,12 +179,12 @@ class AuthService {
 
   /// Quiesce account-scoped producers once, run the caller's local cleanup,
   /// then mutate Firebase identity. Cleanup remains inside the transition so
-  /// caches cannot survive into the next account, while callers that already
-  /// need cleanup do not invoke the full shutdown sequence a second time.
+  /// owner-scoped caches cannot become readable by the next account, while
+  /// callers that already need cleanup do not invoke the shutdown twice.
   Future<void> signOutWithQuiescedCleanup(Future<void> Function() cleanup) => runIdentityTransition(() async {
-    await cleanup();
-    await FirebaseAuth.instance.signOut();
-  });
+        await cleanup();
+        await FirebaseAuth.instance.signOut();
+      });
 
   Future<void> signOut() => signOutWithQuiescedCleanup(() async {});
 
@@ -330,7 +348,10 @@ class AuthService {
 
     // Use custom token if enabled and available
     if (useCustomToken && customToken != null) {
-      return runIdentityTransition(() => FirebaseAuth.instance.signInWithCustomToken(customToken));
+      return runIdentityTransition(
+        () => FirebaseAuth.instance.signInWithCustomToken(customToken),
+        preserveOwnerScopedArtworkCache: true,
+      );
     }
 
     // Fallback to OAuth credentials
@@ -339,10 +360,16 @@ class AuthService {
 
     if (provider == 'google') {
       final credential = GoogleAuthProvider.credential(idToken: idToken, accessToken: accessToken);
-      return runIdentityTransition(() => FirebaseAuth.instance.signInWithCredential(credential));
+      return runIdentityTransition(
+        () => FirebaseAuth.instance.signInWithCredential(credential),
+        preserveOwnerScopedArtworkCache: true,
+      );
     } else if (provider == 'apple') {
       final credential = OAuthProvider('apple.com').credential(idToken: idToken, accessToken: accessToken);
-      return runIdentityTransition(() => FirebaseAuth.instance.signInWithCredential(credential));
+      return runIdentityTransition(
+        () => FirebaseAuth.instance.signInWithCredential(credential),
+        preserveOwnerScopedArtworkCache: true,
+      );
     } else {
       throw Exception('Unsupported provider: $provider');
     }

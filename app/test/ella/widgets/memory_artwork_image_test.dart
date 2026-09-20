@@ -69,10 +69,7 @@ class _ManualGenerationArtworkApi extends MemoryArtworkApi {
     enqueueRequests.add(enqueueIfMissing);
     if (!enqueueIfMissing) {
       return Future.value(
-        MemoryArtworkResult(
-          status: MemoryArtworkResultStatus.unavailable,
-          failureCode: initialFailureCode,
-        ),
+        MemoryArtworkResult(status: MemoryArtworkResultStatus.unavailable, failureCode: initialFailureCode),
       );
     }
     return generationResult.future;
@@ -700,10 +697,10 @@ void main() {
       final provisionalCacheKey = 'pressure-provisional-$index';
       final authoritativeCacheKey = 'pressure-authoritative-$index';
       MemoryArtworkCache.suppressDisplayCacheKeys({provisionalCacheKey, authoritativeCacheKey});
-      await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(
-        {provisionalCacheKey, authoritativeCacheKey},
-        (_) async {},
-      );
+      await MemoryArtworkCache.evictSuppressedDisplayCacheKeys({
+        provisionalCacheKey,
+        authoritativeCacheKey,
+      }, (_) async {});
       expect(
         await MemoryArtworkCache.rememberDisplayCacheKey(
           provisionalCacheKey: provisionalCacheKey,
@@ -856,10 +853,7 @@ void main() {
     const provisionalKey = 'terminal-provisional-key';
     const authoritativeKey = 'terminal-authoritative-key';
     MemoryArtworkCache.suppressDisplayCacheKeys({provisionalKey, authoritativeKey});
-    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(
-      {provisionalKey, authoritativeKey},
-      (_) async {},
-    );
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys({provisionalKey, authoritativeKey}, (_) async {});
 
     final recoveredCacheKey = await MemoryArtworkCache.rememberDisplayCacheKey(
       provisionalCacheKey: provisionalKey,
@@ -887,22 +881,14 @@ void main() {
     var evictionCalls = 0;
     MemoryArtworkCache.suppressDisplayCacheKeys({cacheKey});
 
-    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(
-      {cacheKey},
-      (_) {
-        evictionCalls += 1;
-        return release.future;
-      },
-      waitTimeout: Duration.zero,
-    );
-    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(
-      {cacheKey},
-      (_) {
-        evictionCalls += 1;
-        return Future.value();
-      },
-      waitTimeout: Duration.zero,
-    );
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys({cacheKey}, (_) {
+      evictionCalls += 1;
+      return release.future;
+    }, waitTimeout: Duration.zero);
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys({cacheKey}, (_) {
+      evictionCalls += 1;
+      return Future.value();
+    }, waitTimeout: Duration.zero);
 
     expect(evictionCalls, 1);
     expect(MemoryArtworkCache.resolveDisplayCacheKey(cacheKey), isEmpty);
@@ -1029,11 +1015,7 @@ void main() {
       MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: MemoryArtworkImage(
-          conversation: conversation,
-          api: api,
-          cachedFileLookup: (_) async => cachedFile,
-        ),
+        home: MemoryArtworkImage(conversation: conversation, api: api, cachedFileLookup: (_) async => cachedFile),
       ),
     );
     await tester.pump();
@@ -1204,10 +1186,7 @@ void main() {
 
     expect(api.enqueueRequests, [isFalse, isTrue]);
     expect(find.byKey(const Key('memory-source-photo')), findsOneWidget);
-    expect(
-      find.byKey(const Key('memory-artwork-generation-progress-memory-source-photo-generation')),
-      findsOneWidget,
-    );
+    expect(find.byKey(const Key('memory-artwork-generation-progress-memory-source-photo-generation')), findsOneWidget);
   });
 
   testWidgets('a narrow list photo uses an unclipped icon-only artwork retry action', (tester) async {
@@ -1290,10 +1269,7 @@ void main() {
     await tester.pump();
 
     expect(api.enqueueRequests, [isFalse, isFalse, isTrue]);
-    expect(
-      find.byKey(const Key('memory-artwork-placeholder-memory-hero-recovery')),
-      findsOneWidget,
-    );
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-hero-recovery')), findsOneWidget);
   });
 
   testWidgets('automatic recovery releases a failed preflight claim and retries one enqueue', (tester) async {
@@ -1822,10 +1798,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('Preparing illustration…'), findsOneWidget);
-    expect(
-      find.byKey(const Key('memory-artwork-generation-progress-memory-generating')),
-      findsOneWidget,
-    );
+    expect(find.byKey(const Key('memory-artwork-generation-progress-memory-generating')), findsOneWidget);
 
     api.remoteResult.complete(const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating));
     await tester.pump();
@@ -1937,9 +1910,7 @@ void main() {
     expect(find.byKey(const Key('memory-generated-artwork-memory-terminal-unavailable')), findsOneWidget);
   });
 
-  testWidgets('an authority change evicts cached artwork before fetching the replacement account result', (
-    tester,
-  ) async {
+  testWidgets('a same-owner authority refresh retains cached artwork while fetching fresh authority', (tester) async {
     final api = _AuthorityRefreshArtworkApi();
     final cachedFile = File('assets/images/onboarding-bg-1.webp');
     final evicted = <String>[];
@@ -1973,8 +1944,9 @@ void main() {
     await tester.pumpWidget(buildArtwork(1));
     await tester.pump();
 
-    expect(evicted, ['authority-artwork-cache-key']);
+    expect(evicted, isEmpty);
     expect(api.loadCalls, 2);
+    expect(find.byKey(const Key('memory-cached-artwork-memory-authority-refresh')), findsOneWidget);
   });
 
   testWidgets('retries when replacement account artwork authority settles after the widget refresh', (tester) async {
