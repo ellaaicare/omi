@@ -540,7 +540,7 @@ async def resolve_imessage_retained_runtime(
         return None
     try:
         repository = repository or await EllaProvisioningRepository.create()
-        binding = await repository.resolve_self_hosted_active_direct(uid=uid, role="imessage")
+        binding = await repository.resolve_retained_owner_active_direct(uid=uid)
     except ProvisioningSchemaNotReadyError as exc:
         raise ProvisioningError("provisioning_schema_not_ready", retryable=True) from exc
     except ProvisioningError:

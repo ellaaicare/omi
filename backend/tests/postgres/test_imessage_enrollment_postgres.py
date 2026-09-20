@@ -2,15 +2,25 @@ import asyncio
 import hashlib
 import hmac
 import os
+import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import ModuleType
+from unittest.mock import AsyncMock
 
 import asyncpg
 import pytest
+from fastapi import HTTPException
+
+sys.modules.setdefault("websockets", ModuleType("websockets"))
+sys.modules.setdefault("database.proposals", ModuleType("database.proposals"))
+conversations_module = ModuleType("database.conversations")
+conversations_module._decrypt_conversation_data = lambda value, uid=None: value
+sys.modules.setdefault("database.conversations", conversations_module)
 
 from database import authority_advisory_lock
-from database.ella_provisioning import invalidate_self_hosted_authority_on_connection
+from database.ella_provisioning import EllaProvisioningRepository, invalidate_self_hosted_authority_on_connection
 from database.imessage_enrollment import (
     ImessageAuthorityError,
     ImessageConsentContract,
@@ -28,6 +38,9 @@ from database.imessage_retained_runtime import (
     RetainedImessageRuntimeRepository,
     RetainedImessageRuntimeSpec,
 )
+from ella.routers import chat, voice
+from ella.services import runtime_resolver
+from ella.services.provisioning import ProvisioningError
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
 MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
@@ -1766,7 +1779,7 @@ def test_runtime_receipt_outbox_fences_model_delivery_consent_and_owners():
     asyncio.run(_run_with_database(scenario))
 
 
-def test_retained_owner_authority_is_targetless_and_fails_closed_if_a_target_appears():
+def test_retained_owner_authority_is_targetless_and_fails_closed_if_a_target_appears(monkeypatch):
     async def scenario(pool):
         enrollment = ImessageEnrollmentRepository(pool)
         runtime_repository = ImessageRuntimeRepository(pool)
@@ -1922,6 +1935,125 @@ def test_retained_owner_authority_is_targetless_and_fails_closed_if_a_target_app
             authority=authority,
         )
         assert started["status"] == "sending"
+
+        provisioning_repository = EllaProvisioningRepository(pool)
+        async with pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE ella_runtime_bindings
+                SET profile_name = 'plato-eval',
+                    agent_id = 'plato-eval',
+                    workspace_root = '/Users/ellaai/.hermes/profiles/plato-eval/workspace',
+                    credential_ref = 'env:ELLA_HERMES_GATEWAY_KEY_IMESSAGE_16'
+                WHERE id = $1
+                """,
+                runtime.binding_id,
+            )
+            drift_user_id = await connection.fetchval(
+                "INSERT INTO users (omi_uid, profile_class) VALUES ($1, 'real') RETURNING id",
+                "imessage-retained-drift-owner",
+            )
+
+        monkeypatch.setenv("ELLA_PLATO_UID", uid)
+        monkeypatch.setenv("ELLA_RETAINED_OWNER_CHANNEL_RUNTIME_ENABLED", "true")
+        monkeypatch.setenv("ELLA_HERMES_GATEWAY_KEY_IMESSAGE_16", "synthetic-retained-gateway-token")
+        monkeypatch.setattr(
+            runtime_resolver.EllaProvisioningRepository,
+            "create",
+            AsyncMock(return_value=provisioning_repository),
+        )
+
+        selected = await runtime_resolver.resolve_retained_owner_channel_runtime(
+            uid,
+            repository=provisioning_repository,
+        )
+        assert selected is not None
+        selected_identity = runtime_resolver.runtime_authority_identity(selected)
+
+        forbidden_calls = []
+
+        async def forbidden_async(*_args, **_kwargs):
+            forbidden_calls.append("async")
+            raise AssertionError("ordinary runtime or provider work must not run")
+
+        def forbidden_sync(*_args, **_kwargs):
+            forbidden_calls.append("sync")
+            raise AssertionError("ordinary runtime or provider work must not run")
+
+        monkeypatch.setattr(chat, "resolve_isolated_runtime", forbidden_async)
+        monkeypatch.setattr(chat, "_stream_hermes_chat", forbidden_sync)
+        monkeypatch.setattr(voice, "cloud_provisioning_enabled", forbidden_sync)
+        monkeypatch.setattr(voice, "_self_hosted_voice_required", forbidden_async)
+        monkeypatch.setattr(voice, "resolve_direct_self_hosted_runtime", forbidden_async)
+
+        async def assert_chat_and_voice_fail_closed():
+            with pytest.raises(HTTPException) as chat_failure:
+                await chat.ella_chat_stream(
+                    chat.EllaChatRequest(message="synthetic authority test"),
+                    None,
+                    uid,
+                    None,
+                    "ios",
+                    None,
+                    None,
+                )
+            assert chat_failure.value.status_code == 503
+            assert chat_failure.value.detail == {"code": "retained_owner_channel_runtime_required"}
+
+            with pytest.raises(ProvisioningError) as voice_failure:
+                await voice._resolve_voice_authority(uid)
+            assert voice_failure.value.code == "retained_owner_channel_runtime_required"
+            assert forbidden_calls == []
+
+        async with pool.acquire() as connection:
+            drift_target = await connection.fetchval(
+                """
+                INSERT INTO ella_runtime_targets (
+                    account_user_id, profile_user_id, role, mode, provider,
+                    runtime_binding_id, candidate_runtime_instance_id,
+                    endpoint_ref, credential_ref, status, policy_version,
+                    processor_set_hash, scope_version, scope_hash,
+                    entitlement_revision
+                ) VALUES (
+                    $1, $1, 'user', 'hermes-cloud-chat', 'hermes_cloud',
+                    $2, 'late-instance', 'late-endpoint-ref',
+                    'late-credential-ref', 'ready', $3, $4, $5, $6, 1
+                ) RETURNING id
+                """,
+                user_id,
+                runtime.binding_id,
+                POLICY,
+                PROCESSOR_HASH,
+                SCOPE,
+                SCOPE_HASH,
+            )
+
+        with pytest.raises(ProvisioningError) as revalidation_failure:
+            await runtime_resolver.revalidate_runtime_authority(
+                selected_identity,
+                repository=provisioning_repository,
+            )
+        assert revalidation_failure.value.code == "retained_owner_channel_runtime_required"
+        await assert_chat_and_voice_fail_closed()
+
+        async with pool.acquire() as connection:
+            await connection.execute("DELETE FROM ella_runtime_targets WHERE id = $1", drift_target)
+
+            for column in ("account_user_id", "profile_user_id"):
+                await connection.execute(
+                    f"UPDATE ella_runtime_bindings SET {column} = $1 WHERE id = $2",
+                    drift_user_id,
+                    runtime.binding_id,
+                )
+                await assert_chat_and_voice_fail_closed()
+                await connection.execute(
+                    f"UPDATE ella_runtime_bindings SET {column} = $1 WHERE id = $2",
+                    user_id,
+                    runtime.binding_id,
+                )
+
+            await connection.execute("UPDATE users SET status = 'DELETION_PENDING' WHERE id = $1", user_id)
+            await assert_chat_and_voice_fail_closed()
 
     asyncio.run(_run_with_database(scenario))
 
