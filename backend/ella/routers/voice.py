@@ -56,6 +56,7 @@ from ella.services.provisioning import (
 )
 from ella.services.runtime_resolver import (
     resolve_direct_self_hosted_runtime,
+    resolve_retained_owner_channel_runtime,
     resolve_isolated_runtime,
     runtime_authority_identity,
     runtime_bindings_enabled,
@@ -88,6 +89,22 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/voice", tags=["voice"])
 entitlement_router = APIRouter(tags=["voice"])
+
+
+async def _resolve_voice_authority(uid: str) -> tuple[bool, bool, Any | None]:
+    """Resolve retained-owner authority before any ordinary voice authority."""
+
+    retained = await resolve_retained_owner_channel_runtime(uid)
+    if retained is not None:
+        return False, False, retained
+
+    cloud_required = cloud_provisioning_enabled(uid)
+    self_hosted_required = await _self_hosted_voice_required(uid)
+    direct_runtime = None
+    if not self_hosted_required and not cloud_required:
+        direct_runtime = await resolve_direct_self_hosted_runtime(uid)
+    return cloud_required, self_hosted_required, direct_runtime
+
 
 # Configuration
 ELLA_VOICE_ENDPOINT = os.getenv("ELLA_VOICE_ENDPOINT", "wss://voice.ella-ai-care.com/ws")
@@ -354,14 +371,10 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
 
 async def _resolve_voice_runtime(principal: VoiceProxyPrincipal):
     """Resolve an isolated session to the exact active Hermes receipt."""
-    self_hosted_required = await _self_hosted_voice_required(principal.uid)
-    cloud_required = cloud_provisioning_enabled(principal.uid)
-    direct_runtime = None
-    if not self_hosted_required and not cloud_required:
-        try:
-            direct_runtime = await resolve_direct_self_hosted_runtime(principal.uid)
-        except ProvisioningError as exc:
-            raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
+    try:
+        cloud_required, self_hosted_required, direct_runtime = await _resolve_voice_authority(principal.uid)
+    except ProvisioningError as exc:
+        raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
     authority_enabled = (
         runtime_bindings_enabled(principal.uid) or cloud_required or self_hosted_required or direct_runtime is not None
     )
@@ -1215,14 +1228,10 @@ async def create_voice_session(
     voice_mode = (body.voice_mode if body else None) or voice_mode
     requested_scope = body.session_scope if body else None
 
-    cloud_required = cloud_provisioning_enabled(uid)
-    self_hosted_required = await _self_hosted_voice_required(uid)
-    direct_runtime = None
-    if not cloud_required and not self_hosted_required:
-        try:
-            direct_runtime = await resolve_direct_self_hosted_runtime(uid)
-        except ProvisioningError as exc:
-            raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
+    try:
+        cloud_required, self_hosted_required, direct_runtime = await _resolve_voice_authority(uid)
+    except ProvisioningError as exc:
+        raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
     runtime_bound = (
         runtime_bindings_enabled(uid) or cloud_required or self_hosted_required or direct_runtime is not None
     )
@@ -1332,11 +1341,14 @@ async def create_voice_session(
 
     if (self_hosted_required or direct_runtime is not None) and runtime is not None:
         try:
-            current_runtime = (
-                await resolve_direct_self_hosted_runtime(uid)
-                if direct_runtime is not None
-                else await resolve_isolated_runtime(uid, target_mode="hermes-voice")
-            )
+            if direct_runtime is not None:
+                current_cloud_required, current_self_hosted_required, current_runtime = await _resolve_voice_authority(
+                    uid
+                )
+                if current_cloud_required or current_self_hosted_required:
+                    current_runtime = None
+            else:
+                current_runtime = await resolve_isolated_runtime(uid, target_mode="hermes-voice")
             if current_runtime is None:
                 raise ProvisioningError("isolated_voice_runtime_required", retryable=False)
             current_identity = runtime_authority_identity(current_runtime)

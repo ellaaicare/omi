@@ -3480,6 +3480,43 @@ class EllaProvisioningRepository:
         )
         return _row_dict(row)
 
+    async def resolve_retained_owner_active_direct(self, uid: str) -> Optional[dict[str, Any]]:
+        """Return one exact-owner, targetless retained iMessage binding.
+
+        This selector is intentionally narrower than the migrated-account fallback:
+        retained channel authority exists only while the active user owns both
+        binding coordinates and no runtime target references the binding.
+        """
+        row = await self.pool.fetchrow(
+            """
+            SELECT
+                b.*,
+                u.omi_uid,
+                u.name,
+                u.status AS user_status,
+                u.profile_class,
+                NULL::uuid AS runtime_target_id
+            FROM ella_runtime_bindings b
+            JOIN users u ON u.id = b.user_id
+            WHERE u.omi_uid = $1
+              AND u.status = 'ACTIVE'
+              AND b.account_user_id = u.id
+              AND b.profile_user_id = u.id
+              AND b.role = 'imessage'
+              AND b.provider = 'hermes'
+              AND b.active = true
+              AND b.status = 'active'
+              AND b.health_state = 'healthy'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM ella_runtime_targets target
+                  WHERE target.runtime_binding_id = b.id
+              )
+            """,
+            uid,
+        )
+        return _row_dict(row)
+
     async def _resolve_self_hosted_active_direct(
         self,
         uid: str,

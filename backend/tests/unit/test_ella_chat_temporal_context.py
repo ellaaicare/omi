@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from ella.routers import chat
 
@@ -115,11 +116,59 @@ def test_missing_client_message_id_uses_per_message_fallback_identity():
 
 
 def test_hermes_session_defaults_to_canonical(monkeypatch):
+    monkeypatch.delenv("ELLA_RETAINED_OWNER_CHANNEL_RUNTIME_ENABLED", raising=False)
     monkeypatch.setattr(chat, "HERMES_CHAT_SESSION_SCOPE", "canonical")
 
     assert chat._hermes_chat_session_key("ABC123") == "ella:omi:abc123:canonical"
     assert chat._hermes_chat_session_key("User/123") == "ella:omi:user-123:canonical"
     assert chat._hermes_chat_memory_key("User/123") == "ella:omi:user-123:canonical"
+
+    monkeypatch.setenv("ELLA_PLATO_UID", "owner-a")
+    monkeypatch.setenv("ELLA_RETAINED_OWNER_CHANNEL_RUNTIME_ENABLED", "true")
+
+    assert chat._hermes_chat_session_key("owner-a") == "ella:omi:owner-a:canonical:channel:ios-chat"
+    assert chat._hermes_chat_memory_key("owner-a") == "ella:omi:owner-a:canonical"
+    assert chat._hermes_chat_session_key("owner-b") == "ella:omi:owner-b:canonical"
+
+    runtime = SimpleNamespace(provider="hermes")
+    captured = {"retained": 0, "ordinary": 0, "stream_runtime": None}
+
+    async def retained(uid):
+        captured["retained"] += 1
+        assert uid == "owner-a"
+        return runtime
+
+    async def ordinary(*_args, **_kwargs):
+        captured["ordinary"] += 1
+        raise AssertionError("ordinary runtime must not be selected")
+
+    def stream(*_args, runtime=None, **_kwargs):
+        captured["stream_runtime"] = runtime
+
+        async def response_body():
+            yield "done: synthetic\n\n"
+
+        return response_body()
+
+    monkeypatch.setattr(chat, "resolve_retained_owner_channel_runtime", retained)
+    monkeypatch.setattr(chat, "resolve_isolated_runtime", ordinary)
+    monkeypatch.setattr(chat, "_stream_hermes_chat", stream)
+    monkeypatch.setattr(chat, "record_trace", lambda _trace: None)
+
+    response = asyncio.run(
+        chat.ella_chat_stream(
+            chat.EllaChatRequest(message="content-free test"),
+            None,
+            "owner-a",
+            None,
+            "ios",
+            None,
+            None,
+        )
+    )
+
+    assert response.media_type == "text/event-stream"
+    assert captured == {"retained": 1, "ordinary": 0, "stream_runtime": runtime}
 
 
 def test_hermes_chat_headers_include_stable_session_key():

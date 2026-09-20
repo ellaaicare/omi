@@ -20,7 +20,7 @@ from database.imessage_runtime import (
     ImessageRuntimeRepositoryError,
 )
 from ella.routers.canonical_events import CanonicalEventIn, CanonicalEventStore, PostgresCanonicalEventStore
-from ella.services.hermes_session import canonical_omi_session_key
+from ella.services.hermes_session import canonical_omi_session_key, channel_omi_session_id
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import (
     CloudRuntimeAuthorityIdentity,
@@ -73,6 +73,7 @@ class HermesCompletionTransport(Protocol):
         runtime: IsolatedRuntime,
         user_text: str,
         session_key: str,
+        memory_key: str,
     ) -> str: ...
 
 
@@ -89,6 +90,7 @@ class SelfHostedHermesCompletionClient:
         runtime: IsolatedRuntime,
         user_text: str,
         session_key: str,
+        memory_key: str,
     ) -> str:
         retained_owner = not runtime.runtime_target_id and retained_owner_uid_configured(runtime.uid)
         target_runtime = runtime.runtime_target_mode == "hermes-chat" and runtime.binding_role == "user"
@@ -109,7 +111,7 @@ class SelfHostedHermesCompletionClient:
                         "Authorization": f"Bearer {runtime.gateway_token}",
                         "Content-Type": "application/json",
                         "X-Hermes-Session-Id": session_key,
-                        "X-Hermes-Session-Key": session_key,
+                        "X-Hermes-Session-Key": memory_key,
                     },
                     content=json.dumps(
                         {
@@ -269,7 +271,12 @@ class ImessageRuntimeService:
         source_identity = f"imessage:receipt:{receipt_id}"
         inbound_event_id = f"{source_identity}:user"
         outbound_event_id = f"{source_identity}:assistant"
-        session_key = canonical_omi_session_key(str(binding["omi_uid"]))
+        memory_key = canonical_omi_session_key(str(binding["omi_uid"]))
+        session_key = (
+            channel_omi_session_id(str(binding["omi_uid"]), IMESSAGE_CHANNEL)
+            if runtime.binding_role == "imessage"
+            else memory_key
+        )
         model_started = False
         try:
             await self.event_store.write_batch(
@@ -298,6 +305,7 @@ class ImessageRuntimeService:
                 runtime=current_runtime,
                 user_text=request.text,
                 session_key=session_key,
+                memory_key=memory_key,
             )
             if not reply.strip() or len(reply) > IMESSAGE_OUTBOUND_MAX_CHARS:
                 raise ImessageRuntimeError("imessage_model_response_invalid", status_code=503)
