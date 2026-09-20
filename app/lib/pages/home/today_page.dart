@@ -46,6 +46,7 @@ typedef GuardianModeLoader = Future<GuardianModeInfo?> Function();
 typedef GuardianModeSetter = Future<bool> Function(GuardianModeState state);
 typedef GuardianNativeLifecycle = Future<void> Function();
 typedef GuardianAvailability = bool Function();
+typedef MemoryPresentationAuthorityProvider = ExactAccountAuthorityVerifier? Function();
 typedef _HomeArtworkAuthoritySnapshot = ({
   ExactAccountAuthorityVerifier authority,
   String uid,
@@ -172,6 +173,7 @@ class TodayPage extends StatefulWidget {
     this.guardianAvailability,
     this.memoryArtworkApi,
     this.memoryArtworkAuthorityProvider,
+    this.memoryPresentationAuthorityProvider,
   });
 
   final TodayCardRepository? todayCardRepository;
@@ -190,6 +192,7 @@ class TodayPage extends StatefulWidget {
   final GuardianAvailability? guardianAvailability;
   final MemoryArtworkApi? memoryArtworkApi;
   final MemoryArtworkAuthorityProvider? memoryArtworkAuthorityProvider;
+  final MemoryPresentationAuthorityProvider? memoryPresentationAuthorityProvider;
 
   @visibleForTesting
   static V2VSessionScope sessionScopeFor(TodayCard card) =>
@@ -262,8 +265,18 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   late final MemoryArtworkApi _memoryArtworkApi = widget.memoryArtworkApi ?? MemoryArtworkApi();
   late final MemoryArtworkAuthorityProvider _memoryArtworkAuthorityProvider =
       widget.memoryArtworkAuthorityProvider ?? WalOwnerAuthority.active;
+  late final MemoryPresentationAuthorityProvider _memoryPresentationAuthorityProvider =
+      widget.memoryPresentationAuthorityProvider ??
+          () => _captureMemoryPresentationAuthority() ?? _memoryArtworkAuthorityProvider();
 
   bool get _guardianAvailable => widget.guardianAvailability?.call() ?? allowsGuardianSurface();
+
+  ExactAccountAuthorityVerifier? _captureMemoryPresentationAuthority() {
+    final preferences = SharedPreferencesUtil();
+    final uid = WalOwnerAuthority.authenticatedUid;
+    if (uid.isEmpty || preferences.uid != uid) return null;
+    return _AuthenticatedMemoryPresentationAuthority(preferences: preferences, uid: uid);
+  }
 
   @override
   void initState() {
@@ -2043,7 +2056,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                 artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
                 automaticRepairMemoryIds: automaticRepairMemoryIds,
                 onOpen: () {
-                  final authority = _memoryArtworkAuthorityProvider();
+                  final authority = _memoryPresentationAuthorityProvider();
                   if (SharedPreferencesUtil.isPublicBuild && (authority == null || !authority.isExactCurrent())) {
                     return;
                   }
@@ -2135,6 +2148,18 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     }
     return deleted;
   }
+}
+
+class _AuthenticatedMemoryPresentationAuthority implements ExactAccountAuthorityVerifier {
+  const _AuthenticatedMemoryPresentationAuthority({required this.preferences, required this.uid});
+
+  final SharedPreferencesUtil preferences;
+
+  @override
+  final String uid;
+
+  @override
+  bool isExactCurrent() => uid.isNotEmpty && preferences.uid == uid && WalOwnerAuthority.authenticatedUid == uid;
 }
 
 double todayDockScrollClearance({required double textScale, required double safeBottom}) =>

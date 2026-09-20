@@ -314,8 +314,9 @@ class _TerminalThenReadyArtworkApi extends MemoryArtworkApi {
 }
 
 class _RecoveringEnrichmentArtworkApi extends MemoryArtworkApi {
-  _RecoveringEnrichmentArtworkApi() : super(authorityProvider: () => null);
+  _RecoveringEnrichmentArtworkApi({this.pendingLoads = 1}) : super(authorityProvider: () => null);
 
+  final int pendingLoads;
   int loadCalls = 0;
   final List<bool> enqueueRequests = [];
 
@@ -336,7 +337,7 @@ class _RecoveringEnrichmentArtworkApi extends MemoryArtworkApi {
   }) async {
     loadCalls += 1;
     enqueueRequests.add(enqueueIfMissing);
-    if (loadCalls == 1) {
+    if (loadCalls <= pendingLoads) {
       return const MemoryArtworkResult(
         status: MemoryArtworkResultStatus.unavailable,
         failureCode: 'memory_artwork_enrichment_not_terminal',
@@ -2466,6 +2467,77 @@ void main() {
     expect(api.loadCalls, 2);
     expect(api.enqueueRequests, [isFalse, isFalse]);
     expect(find.byKey(const Key('memory-generated-artwork-memory-enrichment-transition')), findsOneWidget);
+  });
+
+  testWidgets('visible newest-day artwork rechecks a nonterminal enrichment without a parent refresh', (tester) async {
+    final api = _RecoveringEnrichmentArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-visible-enrichment-transition',
+      createdAt: DateTime(2026, 8, 26),
+      structured: Structured('[Ella] A new memory', '[Ella] A useful generic summary.'),
+      enrichmentState: const {'status': 'processing', 'canonical_status': 'pending', 'pending': true},
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => null,
+          retryDelay: const Duration(milliseconds: 10),
+          enqueueIfMissing: true,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Illustration unavailable'), findsOneWidget);
+    expect(api.loadCalls, 1);
+    expect(api.enqueueRequests, [isFalse]);
+
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+
+    expect(api.loadCalls, 2);
+    expect(api.enqueueRequests, [isFalse, isFalse]);
+    expect(find.byKey(const Key('memory-generated-artwork-memory-visible-enrichment-transition')), findsOneWidget);
+  });
+
+  testWidgets('visible enrichment rechecks stop at the explicit read-only budget', (tester) async {
+    final api = _RecoveringEnrichmentArtworkApi(pendingLoads: 100);
+    final conversation = ServerConversation(
+      id: 'memory-persistently-pending-enrichment',
+      createdAt: DateTime(2026, 8, 26),
+      structured: Structured('[Ella] A new memory', '[Ella] A useful generic summary.'),
+      enrichmentState: const {'status': 'processing', 'canonical_status': 'pending', 'pending': true},
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => null,
+          retryDelay: const Duration(milliseconds: 10),
+          maxVisibleEnrichmentRetries: 2,
+          enqueueIfMissing: true,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(api.loadCalls, 3);
+    expect(api.enqueueRequests, everyElement(isFalse));
+    expect(find.text('Illustration unavailable'), findsOneWidget);
   });
 
   testWidgets('compact preparing state fits at 200 percent text scale', (tester) async {

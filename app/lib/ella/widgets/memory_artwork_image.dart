@@ -39,6 +39,7 @@ class MemoryArtworkImage extends StatefulWidget {
     this.retryDelay = const Duration(seconds: 5),
     this.maxAuthorityUnavailableRetries = 3,
     this.maxTransientRetries = 3,
+    this.maxVisibleEnrichmentRetries = 12,
     this.maxImageDownloadRetries = 2,
     this.refreshEpoch = 0,
     this.authorityEpoch = 0,
@@ -62,6 +63,10 @@ class MemoryArtworkImage extends StatefulWidget {
   /// transport failure gets only this many follow-up reads before the parent
   /// queue revision or an explicit refresh must ask again.
   final int maxTransientRetries;
+
+  /// The newest visible day can race enrichment publication. Recheck that
+  /// read-only state for at most one minute without reserving artwork work.
+  final int maxVisibleEnrichmentRetries;
 
   /// A failed signed URL or corrupted cached image gets a small number of
   /// recovery reads. Further failures wait for a parent queue refresh or a new
@@ -383,6 +388,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         _cacheKey = _displayCacheKey;
       });
       unawaited(_evictSuppressedCachedArtwork(suppressedCacheKeys));
+      if (_shouldRetry(result)) _scheduleRetry(api, artwork, generation, result: result);
       return;
     }
     final readyCacheKey = result.isReady ? result.cacheKey : '';
@@ -516,9 +522,13 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   bool _shouldRetry(MemoryArtworkResult result) {
     return result.refreshPending ||
         result.status == MemoryArtworkResultStatus.generating ||
+        _isVisibleEnrichmentPending(result) ||
         _isAuthorityUnavailable(result) ||
         _isTransportUnavailable(result);
   }
+
+  bool _isVisibleEnrichmentPending(MemoryArtworkResult? result) =>
+      widget.enqueueIfMissing && result?.failureCode == 'memory_artwork_enrichment_not_terminal';
 
   bool _isAuthorityUnavailable(MemoryArtworkResult? result) {
     return const {
@@ -547,8 +557,11 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     } else if (transientTransportFailure ||
         _isTransportUnavailable(result) ||
         result?.refreshPending == true ||
-        result?.status == MemoryArtworkResultStatus.generating) {
-      if (_transientRetries >= widget.maxTransientRetries) return;
+        result?.status == MemoryArtworkResultStatus.generating ||
+        _isVisibleEnrichmentPending(result)) {
+      final retryLimit =
+          _isVisibleEnrichmentPending(result) ? widget.maxVisibleEnrichmentRetries : widget.maxTransientRetries;
+      if (_transientRetries >= retryLimit) return;
       _transientRetries++;
     } else {
       return;

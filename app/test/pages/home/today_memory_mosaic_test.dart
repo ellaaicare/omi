@@ -2153,13 +2153,45 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Days'));
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.byKey(const Key('memory-day-memory-1')));
+    final unavailableArtwork = find.byKey(const Key('memory-artwork-placeholder-memory-1'));
+    await tester.ensureVisible(unavailableArtwork);
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('memory-day-memory-1')));
+    await tester.tap(unavailableArtwork);
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('memory-day-list')), findsOneWidget);
 
     authority.current = false;
+    harness.authorityChanges.value += 1;
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('memory-day-list')), findsNothing);
+    expect(find.byKey(const Key('today-scroll')), findsOneWidget);
+  });
+
+  testWidgets('Days hero opens memories when artwork authority is unavailable', (tester) async {
+    final presentationAuthority = _MutableExactAuthority('test-user');
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkAuthorityProvider: () => null,
+      memoryPresentationAuthorityProvider: () => presentationAuthority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('home-memory-layout-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Days'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const Key('memory-day-memory-1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('memory-day-memory-1')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('memory-day-list')), findsOneWidget);
+    expect(find.text('Memory 1'), findsWidgets);
+
+    presentationAuthority.current = false;
     harness.authorityChanges.value += 1;
     await tester.pumpAndSettle();
 
@@ -2680,6 +2712,7 @@ Future<_HomeHarness> _pumpHome(
   Completer<void>? initialConversationLoadGate,
   MemoryArtworkApi? memoryArtworkApi,
   MemoryArtworkAuthorityProvider? memoryArtworkAuthorityProvider,
+  MemoryPresentationAuthorityProvider? memoryPresentationAuthorityProvider,
 }) async {
   tester.view.physicalSize = viewport;
   tester.view.devicePixelRatio = 1;
@@ -2758,6 +2791,7 @@ Future<_HomeHarness> _pumpHome(
                   guardianAvailability: () => false,
                   memoryArtworkApi: memoryArtworkApi,
                   memoryArtworkAuthorityProvider: memoryArtworkAuthorityProvider,
+                  memoryPresentationAuthorityProvider: memoryPresentationAuthorityProvider,
                 ),
                 if (includeBottomNav) BottomNavBar(onTabTap: (_, __) {}),
               ],
