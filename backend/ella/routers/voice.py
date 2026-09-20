@@ -56,6 +56,7 @@ from ella.services.provisioning import (
 )
 from ella.services.runtime_resolver import (
     resolve_direct_self_hosted_runtime,
+    resolve_retained_owner_channel_runtime,
     resolve_isolated_runtime,
     runtime_authority_identity,
     runtime_bindings_enabled,
@@ -88,6 +89,16 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/voice", tags=["voice"])
 entitlement_router = APIRouter(tags=["voice"])
+
+
+async def _resolve_direct_voice_runtime(uid: str):
+    """Resolve an explicit retained-owner channel runtime or the ordinary direct runtime."""
+
+    retained = await resolve_retained_owner_channel_runtime(uid)
+    if retained is not None:
+        return retained
+    return await resolve_direct_self_hosted_runtime(uid)
+
 
 # Configuration
 ELLA_VOICE_ENDPOINT = os.getenv("ELLA_VOICE_ENDPOINT", "wss://voice.ella-ai-care.com/ws")
@@ -359,7 +370,7 @@ async def _resolve_voice_runtime(principal: VoiceProxyPrincipal):
     direct_runtime = None
     if not self_hosted_required and not cloud_required:
         try:
-            direct_runtime = await resolve_direct_self_hosted_runtime(principal.uid)
+            direct_runtime = await _resolve_direct_voice_runtime(principal.uid)
         except ProvisioningError as exc:
             raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
     authority_enabled = (
@@ -1220,7 +1231,7 @@ async def create_voice_session(
     direct_runtime = None
     if not cloud_required and not self_hosted_required:
         try:
-            direct_runtime = await resolve_direct_self_hosted_runtime(uid)
+            direct_runtime = await _resolve_direct_voice_runtime(uid)
         except ProvisioningError as exc:
             raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
     runtime_bound = (
@@ -1333,7 +1344,7 @@ async def create_voice_session(
     if (self_hosted_required or direct_runtime is not None) and runtime is not None:
         try:
             current_runtime = (
-                await resolve_direct_self_hosted_runtime(uid)
+                await _resolve_direct_voice_runtime(uid)
                 if direct_runtime is not None
                 else await resolve_isolated_runtime(uid, target_mode="hermes-voice")
             )
