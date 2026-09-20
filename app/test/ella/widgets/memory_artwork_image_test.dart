@@ -944,23 +944,25 @@ void main() {
     }, waitTimeout: Duration.zero);
 
     MemoryArtworkCache.revokeRuntimeTrust(preserveDisplayAliases: true);
-    var rememberCompleted = false;
-    final remember = MemoryArtworkCache.rememberDisplayCacheKey(
+    final timedOutRemember = await MemoryArtworkCache.rememberDisplayCacheKey(
       provisionalCacheKey: cacheKey,
       authoritativeCacheKey: cacheKey,
       isAuthorityCurrent: () => true,
-    ).then((value) {
-      events.add('key-published');
-      rememberCompleted = true;
-      return value;
-    });
-    await Future<void>.delayed(Duration.zero);
+      evictionWaitTimeout: Duration.zero,
+    );
 
-    expect(rememberCompleted, isFalse);
+    expect(timedOutRemember, isNull);
     expect(events, ['eviction-started']);
 
     release.complete();
-    expect(await remember, cacheKey);
+    await Future<void>.delayed(Duration.zero);
+    final recoveredCacheKey = await MemoryArtworkCache.rememberDisplayCacheKey(
+      provisionalCacheKey: cacheKey,
+      authoritativeCacheKey: cacheKey,
+      isAuthorityCurrent: () => true,
+    );
+    events.add('key-published');
+    expect(recoveredCacheKey, cacheKey);
     expect(events, ['eviction-started', 'eviction-finished', 'key-published']);
   });
 
