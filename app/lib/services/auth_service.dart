@@ -188,6 +188,17 @@ class AuthService {
 
   Future<void> signOut() => signOutWithQuiescedCleanup(() async {});
 
+  /// Ends an invalid Firebase session without treating it as a user-requested
+  /// privacy purge. Runtime cache trust is revoked immediately; a later login
+  /// may reuse the files only if it resolves to the same Firebase UID.
+  Future<void> signOutForReauthentication() async {
+    final previousUid = SharedPreferencesUtil().uid.trim();
+    await const EllaAccountIsolationService().stopForAccountTransition(
+      preserveOwnerScopedArtworkCache: previousUid.isNotEmpty,
+    );
+    await FirebaseAuth.instance.signOut();
+  }
+
   Future<String?> getIdToken() async {
     try {
       IdTokenResult? newToken = await FirebaseAuth.instance.currentUser?.getIdTokenResult(true);

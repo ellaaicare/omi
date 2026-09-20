@@ -873,7 +873,7 @@ void main() {
     ]);
   });
 
-  test('same-account reauthentication revokes artwork trust without deleting owner-scoped files', () async {
+  test('automatic sign-out and same-account reauthentication retain owner-scoped artwork files', () async {
     final calls = <String>[];
     final service = EllaAccountIsolationService(
       stopNotificationAudio: () => calls.add('notification-audio'),
@@ -888,14 +888,17 @@ void main() {
       revokeArtworkCacheTrust: () => calls.add('artwork-trust'),
     );
 
+    // The first transition is the automatic sign-out after failed token
+    // refresh. The second is the eventual successful identity replacement.
+    await service.stopForAccountTransition(preserveOwnerScopedArtworkCache: true);
     await service.stopForAccountTransition(preserveOwnerScopedArtworkCache: true);
     await service.finishPreservedArtworkTransition(previousUid: 'uid-a', currentUid: 'uid-a');
 
-    expect(calls, contains('artwork-trust'));
+    expect(calls.where((call) => call == 'artwork-trust'), hasLength(2));
     expect(calls, isNot(contains('artwork-cache')));
   });
 
-  test('replacement account deletes files retained during identity verification', () async {
+  test('automatic sign-out followed by a replacement account deletes retained artwork files', () async {
     final calls = <String>[];
     final service = EllaAccountIsolationService(
       stopNotificationAudio: () {},
@@ -911,9 +914,10 @@ void main() {
     );
 
     await service.stopForAccountTransition(preserveOwnerScopedArtworkCache: true);
+    await service.stopForAccountTransition(preserveOwnerScopedArtworkCache: true);
     await service.finishPreservedArtworkTransition(previousUid: 'uid-a', currentUid: 'uid-b');
 
-    expect(calls, ['artwork-trust', 'artwork-cache']);
+    expect(calls, ['artwork-trust', 'artwork-trust', 'artwork-cache']);
   });
 
   test('identity transition waits for a capture producer that is mid-write', () async {

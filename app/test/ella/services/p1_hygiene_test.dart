@@ -223,7 +223,12 @@ void main() {
     expect(auth, contains('preserveOwnerScopedArtworkCache: true'));
     expect(auth, contains('Future<void> signOutWithQuiescedCleanup'));
     expect(auth, contains('Future<void> signOut() => signOutWithQuiescedCleanup(() async {})'));
+    expect(auth, contains('Future<void> signOutForReauthentication()'));
     expect(auth, contains('replaceIdentityWithCredential'));
+
+    final sharedHttp = File('${lib.path}/backend/http/shared.dart').readAsStringSync();
+    expect(sharedHttp, contains('AuthService.instance.signOutForReauthentication()'));
+    expect(sharedHttp, isNot(contains('AuthService.instance.signOut();')));
 
     final authUtils = File('${lib.path}/utils/auth_utils.dart').readAsStringSync();
     expect(authUtils, contains('signOutWithQuiescedCleanup(() async {'));
