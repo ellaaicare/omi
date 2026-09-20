@@ -147,6 +147,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   String? _authorityRetryBudgetMemoryId;
   bool _authorityRetryBudgetExhausted = false;
   int _transientRetries = 0;
+  int _visibleEnrichmentRetries = 0;
   int? _transientRetryBudgetEpoch;
   int? _transientRetryBudgetRefreshEpoch;
   String? _transientRetryBudgetMemoryId;
@@ -249,6 +250,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     _transientRetryBudgetRefreshEpoch = widget.refreshEpoch;
     _transientRetryBudgetMemoryId = memoryId;
     _transientRetries = 0;
+    _visibleEnrichmentRetries = 0;
   }
 
   void _resetImageRetryBudgetIfNeeded() {
@@ -450,6 +452,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     _retryTimer?.cancel();
     _retryTimer = null;
     _transientRetries = 0;
+    _visibleEnrichmentRetries = 0;
     _imageDownloadRetries = 0;
     final generation = ++_requestGeneration;
     final api = widget.api ?? MemoryArtworkApi();
@@ -554,14 +557,14 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         return;
       }
       _authorityUnavailableRetries++;
+    } else if (_isVisibleEnrichmentPending(result)) {
+      if (_visibleEnrichmentRetries >= widget.maxVisibleEnrichmentRetries) return;
+      _visibleEnrichmentRetries++;
     } else if (transientTransportFailure ||
         _isTransportUnavailable(result) ||
         result?.refreshPending == true ||
-        result?.status == MemoryArtworkResultStatus.generating ||
-        _isVisibleEnrichmentPending(result)) {
-      final retryLimit =
-          _isVisibleEnrichmentPending(result) ? widget.maxVisibleEnrichmentRetries : widget.maxTransientRetries;
-      if (_transientRetries >= retryLimit) return;
+        result?.status == MemoryArtworkResultStatus.generating) {
+      if (_transientRetries >= widget.maxTransientRetries) return;
       _transientRetries++;
     } else {
       return;

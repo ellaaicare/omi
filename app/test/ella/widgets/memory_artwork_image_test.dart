@@ -351,6 +351,44 @@ class _RecoveringEnrichmentArtworkApi extends MemoryArtworkApi {
   }
 }
 
+class _EnrichmentThenGeneratingArtworkApi extends MemoryArtworkApi {
+  _EnrichmentThenGeneratingArtworkApi() : super(authorityProvider: () => null);
+
+  int loadCalls = 0;
+
+  @override
+  String cacheKeyForDisplay({
+    required String memoryId,
+    required String styleVersion,
+    required String enrichmentRevision,
+  }) =>
+      '';
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    loadCalls += 1;
+    if (loadCalls <= 3) {
+      return const MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.unavailable,
+        failureCode: 'memory_artwork_enrichment_not_terminal',
+      );
+    }
+    if (loadCalls == 4) {
+      return const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating);
+    }
+    return MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.ready,
+      url: Uri.parse('https://private-storage.example/generated-after-enrichment.png'),
+      cacheKey: 'generated-after-enrichment-cache-key',
+    );
+  }
+}
+
 class _PublishedRefreshArtworkApi extends MemoryArtworkApi {
   _PublishedRefreshArtworkApi() : super(authorityProvider: () => null);
 
@@ -2538,6 +2576,39 @@ void main() {
     expect(api.loadCalls, 3);
     expect(api.enqueueRequests, everyElement(isFalse));
     expect(find.text('Illustration unavailable'), findsOneWidget);
+  });
+
+  testWidgets('enrichment polling does not consume the later generating retry budget', (tester) async {
+    final api = _EnrichmentThenGeneratingArtworkApi();
+    final conversation = ServerConversation(
+      id: 'memory-enrichment-then-generating',
+      createdAt: DateTime(2026, 8, 26),
+      structured: Structured('[Ella] A new memory', '[Ella] A useful generic summary.'),
+      enrichmentState: const {'status': 'processing', 'canonical_status': 'pending', 'pending': true},
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => null,
+          retryDelay: const Duration(milliseconds: 10),
+          enqueueIfMissing: true,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    for (var attempt = 0; attempt < 4; attempt++) {
+      await tester.pump(const Duration(milliseconds: 10));
+      await tester.pump();
+    }
+
+    expect(api.loadCalls, 5);
+    expect(find.byKey(const Key('memory-generated-artwork-memory-enrichment-then-generating')), findsOneWidget);
   });
 
   testWidgets('compact preparing state fits at 200 percent text scale', (tester) async {
