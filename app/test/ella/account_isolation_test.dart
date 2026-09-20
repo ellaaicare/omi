@@ -915,6 +915,17 @@ void main() {
     expect(marker.resolve(clearedPreferenceUid), isEmpty);
   });
 
+  test('a stale UID preference cannot recreate retention after deliberate sign-out', () {
+    final marker = ReauthenticationOwnerMarker();
+
+    const stalePreferenceUid = 'uid-a';
+    const signedOutFirebaseUid = '';
+    marker.remember(signedOutFirebaseUid);
+
+    expect(stalePreferenceUid, isNotEmpty);
+    expect(marker.resolve(signedOutFirebaseUid), isEmpty);
+  });
+
   test('automatic sign-out followed by a replacement account deletes retained artwork files', () async {
     final calls = <String>[];
     final service = EllaAccountIsolationService(

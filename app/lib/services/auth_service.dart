@@ -221,9 +221,10 @@ class AuthService {
   /// may reuse the files only if it resolves to the same Firebase UID.
   Future<void> signOutForReauthentication() async {
     final authenticatedUid = FirebaseAuth.instance.currentUser?.uid.trim() ?? '';
-    final storedUid = SharedPreferencesUtil().uid.trim();
-    final knownUid = authenticatedUid.isNotEmpty ? authenticatedUid : storedUid;
-    _reauthenticationOwner.remember(knownUid);
+    // Only a live Firebase identity may start retention. The preferences UID
+    // can remain briefly stale after an intentional sign-out and must not
+    // recreate a preservation claim for a deliberately purged account.
+    _reauthenticationOwner.remember(authenticatedUid);
     final previousUid = _reauthenticationOwner.resolve('');
     await const EllaAccountIsolationService().stopForAccountTransition(
       preserveOwnerScopedArtworkCache: previousUid.isNotEmpty,
