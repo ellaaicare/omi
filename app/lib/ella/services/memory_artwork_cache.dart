@@ -225,7 +225,8 @@ class MemoryArtworkCache {
     _suppressedDisplayKeys.clear();
     _suppressionGenerations.clear();
     _completedEvictionGenerations.clear();
-    _pendingEvictions.clear();
+    // A detached terminal eviction can still delete its key after authority
+    // returns. Keep that future as a serialization fence until it completes.
     _diskReadsDisabled = false;
   }
 

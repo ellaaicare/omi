@@ -226,7 +226,12 @@ void main() {
     expect(auth, contains('Future<void> signOutForReauthentication()'));
     expect(auth, contains('final ReauthenticationOwnerMarker _reauthenticationOwner'));
     expect(auth, contains('_reauthenticationOwner.remember(authenticatedUid)'));
-    expect(auth, contains('_reauthenticationOwner.resolve(knownUid)'));
+    expect(auth, contains('_reauthenticationOwner.resolve(authenticatedUid)'));
+    final preservedTransition = auth.substring(
+      auth.indexOf('Future<T> runIdentityTransition<T>'),
+      auth.indexOf('Future<UserCredential> replaceIdentityWithCredential'),
+    );
+    expect(preservedTransition, isNot(contains('SharedPreferencesUtil().uid')));
     final automaticSignOut = auth.substring(
       auth.indexOf('Future<void> signOutForReauthentication()'),
       auth.indexOf('Future<String?> getIdToken()'),

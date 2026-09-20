@@ -931,6 +931,39 @@ void main() {
     expect(evictionCalls, 1);
   });
 
+  test('same-account reauthentication retains an in-flight terminal eviction fence', () async {
+    const cacheKey = 'reauth-pending-terminal-key';
+    final release = Completer<void>();
+    final events = <String>[];
+    MemoryArtworkCache.suppressDisplayCacheKeys({cacheKey});
+
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys({cacheKey}, (_) async {
+      events.add('eviction-started');
+      await release.future;
+      events.add('eviction-finished');
+    }, waitTimeout: Duration.zero);
+
+    MemoryArtworkCache.revokeRuntimeTrust(preserveDisplayAliases: true);
+    var rememberCompleted = false;
+    final remember = MemoryArtworkCache.rememberDisplayCacheKey(
+      provisionalCacheKey: cacheKey,
+      authoritativeCacheKey: cacheKey,
+      isAuthorityCurrent: () => true,
+    ).then((value) {
+      events.add('key-published');
+      rememberCompleted = true;
+      return value;
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(rememberCompleted, isFalse);
+    expect(events, ['eviction-started']);
+
+    release.complete();
+    expect(await remember, cacheKey);
+    expect(events, ['eviction-started', 'eviction-finished', 'key-published']);
+  });
+
   testWidgets('recycled cards use the authoritative disk key before a repeated metadata request completes', (
     tester,
   ) async {
