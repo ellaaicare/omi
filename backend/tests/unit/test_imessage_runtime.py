@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -16,6 +17,7 @@ from ella.services.imessage_runtime import (
     SelfHostedHermesCompletionClient,
 )
 from ella.services.runtime_errors import ProvisioningError
+from ella.services import runtime_resolver
 from ella.services.runtime_resolver import IsolatedRuntime, runtime_authority_identity
 
 NOW = datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
@@ -93,6 +95,9 @@ def _binding(runtime: IsolatedRuntime) -> dict:
 def _retained_runtime(*, uid: str = "owner-a") -> IsolatedRuntime:
     return _runtime(
         uid=uid,
+        profile_name="plato-eval",
+        agent_id="plato-eval",
+        workspace_root="/Users/ellaai/.hermes/profiles/plato-eval/workspace",
         runtime_target_id="",
         runtime_target_mode="",
         runtime_target_updated_at="",
@@ -112,11 +117,113 @@ def _retained_binding(runtime: IsolatedRuntime) -> dict:
 
 
 def test_authority_digest_preserves_user_contract_and_domains_imessage_role():
-    user_digest = runtime_authority_identity(_runtime()).digest
-    retained_digest = runtime_authority_identity(_retained_runtime()).digest
+    user_identity = runtime_authority_identity(_runtime())
+    retained_identity = runtime_authority_identity(_retained_runtime())
 
-    assert user_digest == "7ee26e926aadb7f8512c280648188c1342bd367deb46086d5d90078b7b698e97"
-    assert retained_digest != user_digest
+    assert user_identity.digest == "7ee26e926aadb7f8512c280648188c1342bd367deb46086d5d90078b7b698e97"
+    assert retained_identity.digest != user_identity.digest
+    assert user_identity.binding_role == "user"
+    assert retained_identity.binding_role == "imessage"
+
+
+def test_retained_owner_channel_runtime_is_exact_default_off_and_never_falls_back(monkeypatch):
+    runtime = _retained_runtime()
+    calls = {"retained": 0, "ordinary": 0}
+
+    async def retained(uid, repository=None):
+        calls["retained"] += 1
+        assert uid == "owner-a"
+        return runtime
+
+    async def ordinary(*_args, **_kwargs):
+        calls["ordinary"] += 1
+        raise AssertionError("ordinary runtime must not be selected")
+
+    monkeypatch.setattr(runtime_resolver, "resolve_imessage_retained_runtime", retained)
+    monkeypatch.setattr(runtime_resolver, "resolve_isolated_runtime", ordinary)
+    monkeypatch.setenv("ELLA_PLATO_UID", "owner-a")
+    monkeypatch.delenv("ELLA_RETAINED_OWNER_CHANNEL_RUNTIME_ENABLED", raising=False)
+
+    assert asyncio.run(runtime_resolver.resolve_retained_owner_channel_runtime("owner-a")) is None
+    assert calls == {"retained": 0, "ordinary": 0}
+
+    monkeypatch.setenv("ELLA_RETAINED_OWNER_CHANNEL_RUNTIME_ENABLED", "true")
+    assert asyncio.run(runtime_resolver.resolve_retained_owner_channel_runtime("owner-a")) is runtime
+    assert asyncio.run(runtime_resolver.resolve_retained_owner_channel_runtime("owner-b")) is None
+    assert calls == {"retained": 1, "ordinary": 0}
+
+
+def test_retained_owner_channel_runtime_missing_or_drifted_fails_closed(monkeypatch):
+    monkeypatch.setenv("ELLA_PLATO_UID", "owner-a")
+    monkeypatch.setenv("ELLA_RETAINED_OWNER_CHANNEL_RUNTIME_ENABLED", "true")
+
+    async def missing(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(runtime_resolver, "resolve_imessage_retained_runtime", missing)
+    with pytest.raises(ProvisioningError) as absent:
+        asyncio.run(runtime_resolver.resolve_retained_owner_channel_runtime("owner-a"))
+    assert absent.value.code == "retained_owner_channel_runtime_required"
+
+    async def drifted(*_args, **_kwargs):
+        return _runtime(
+            profile_name="plato-eval",
+            agent_id="plato-eval",
+            workspace_root="/Users/ellaai/.hermes/profiles/plato-eval/workspace",
+            runtime_target_id="",
+            runtime_target_mode="",
+            runtime_target_updated_at="",
+            target_entitlement_revision=0,
+            binding_role="user",
+        )
+
+    monkeypatch.setattr(runtime_resolver, "resolve_imessage_retained_runtime", drifted)
+    with pytest.raises(ProvisioningError) as invalid:
+        asyncio.run(runtime_resolver.resolve_retained_owner_channel_runtime("owner-a"))
+    assert invalid.value.code == "retained_owner_channel_runtime_invalid"
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    [
+        replace(_retained_runtime(), profile_name="other-profile"),
+        replace(_retained_runtime(), agent_id="other-agent"),
+    ],
+    ids=["profile-drift", "agent-drift"],
+)
+def test_retained_owner_channel_runtime_rejects_profile_or_agent_drift(monkeypatch, runtime):
+    monkeypatch.setenv("ELLA_PLATO_UID", "owner-a")
+    monkeypatch.setenv("ELLA_RETAINED_OWNER_CHANNEL_RUNTIME_ENABLED", "true")
+
+    async def drifted(*_args, **_kwargs):
+        return runtime
+
+    monkeypatch.setattr(runtime_resolver, "resolve_imessage_retained_runtime", drifted)
+
+    with pytest.raises(ProvisioningError) as invalid:
+        asyncio.run(runtime_resolver.resolve_retained_owner_channel_runtime("owner-a"))
+    assert invalid.value.code == "retained_owner_channel_runtime_invalid"
+
+
+def test_generic_runtime_revalidation_preserves_exact_imessage_role(monkeypatch):
+    runtime = _retained_runtime()
+    identity = runtime_authority_identity(runtime)
+    calls = {"retained": 0, "ordinary": 0}
+
+    async def retained(uid, repository=None):
+        calls["retained"] += 1
+        assert uid == "owner-a"
+        return runtime
+
+    async def ordinary(*_args, **_kwargs):
+        calls["ordinary"] += 1
+        raise AssertionError("generic role=user revalidation must not run")
+
+    monkeypatch.setattr(runtime_resolver, "resolve_retained_owner_channel_runtime", retained)
+    monkeypatch.setattr(runtime_resolver, "resolve_isolated_runtime", ordinary)
+
+    assert asyncio.run(runtime_resolver.revalidate_runtime_authority(identity)) is runtime
+    assert calls == {"retained": 1, "ordinary": 0}
 
 
 class FakeRepository:
@@ -369,6 +476,9 @@ def test_exact_configured_retained_owner_uses_targetless_binding_without_fallbac
     assert authorities[0].runtime_target_entitlement_revision == 0
     assert client.calls == 1
     assert calls == {"ordinary": 0, "retained": 2}
+    model_call = next(payload for name, payload in repository.events if name == "model")
+    assert model_call["session_key"] == "ella:omi:owner-a:canonical:channel:imessage"
+    assert model_call["memory_key"] == "ella:omi:owner-a:canonical"
 
 
 def test_targetless_non_owner_is_denied_before_heartbeat_or_model(monkeypatch):
@@ -428,10 +538,13 @@ def test_completion_transport_accepts_only_the_configured_targetless_owner(monke
             runtime=_retained_runtime(),
             user_text="content-free test",
             session_key="omi:owner-a",
+            memory_key="memory:owner-a",
         )
     )
     assert reply == "retained reply"
     assert len(calls) == 1
+    assert calls[0][2]["headers"]["X-Hermes-Session-Id"] == "omi:owner-a"
+    assert calls[0][2]["headers"]["X-Hermes-Session-Key"] == "memory:owner-a"
 
     with pytest.raises(ImessageRuntimeError, match="imessage_runtime_target_invalid"):
         asyncio.run(
@@ -439,6 +552,7 @@ def test_completion_transport_accepts_only_the_configured_targetless_owner(monke
                 runtime=_retained_runtime(uid="owner-b"),
                 user_text="content-free test",
                 session_key="omi:owner-b",
+                memory_key="memory:owner-b",
             )
         )
     assert len(calls) == 1
