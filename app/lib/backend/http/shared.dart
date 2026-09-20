@@ -188,7 +188,7 @@ Future<http.Response?> makeApiCall({
         );
         Logger.log('Token refreshed and request retried');
         if (response.statusCode == 401) {
-          await AuthService.instance.signOut();
+          await AuthService.instance.signOutForReauthentication();
           Logger.handle(
             Exception('Authentication failed. Please sign in again.'),
             StackTrace.current,
@@ -196,7 +196,7 @@ Future<http.Response?> makeApiCall({
           );
         }
       } else {
-        await AuthService.instance.signOut();
+        await AuthService.instance.signOutForReauthentication();
         Logger.handle(
           Exception('Authentication failed. Please sign in again.'),
           StackTrace.current,

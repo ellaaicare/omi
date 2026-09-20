@@ -21,6 +21,7 @@ class EllaAccountIsolationService {
     this.stopOnDeviceTts,
     this.clearGuardianNotifications,
     this.clearArtworkCache,
+    this.revokeArtworkCacheTrust,
   });
 
   final FutureOr<void> Function()? stopCapture;
@@ -32,6 +33,7 @@ class EllaAccountIsolationService {
   final FutureOr<void> Function()? stopOnDeviceTts;
   final FutureOr<void> Function()? clearGuardianNotifications;
   final FutureOr<void> Function()? clearArtworkCache;
+  final FutureOr<void> Function()? revokeArtworkCacheTrust;
 
   static final Map<Object, FutureOr<void> Function()> _captureProducers = {};
 
@@ -52,7 +54,7 @@ class EllaAccountIsolationService {
     }
   }
 
-  Future<void> stopForAccountTransition() async {
+  Future<void> stopForAccountTransition({bool preserveOwnerScopedArtworkCache = false}) async {
     SharedPreferencesUtil().invalidateAccountAuthorityForTransition();
     EllaAccountCommitBarrier.quiesceForAccountTransition();
     if (stopGuardian != null) {
@@ -96,13 +98,33 @@ class EllaAccountIsolationService {
       await WalFileManager.quarantineUnownedFiles();
     }
     try {
-      if (clearArtworkCache != null) {
+      if (preserveOwnerScopedArtworkCache) {
+        if (revokeArtworkCacheTrust != null) {
+          await revokeArtworkCacheTrust!.call();
+        } else {
+          MemoryArtworkCache.revokeRuntimeTrust(preserveDisplayAliases: true);
+        }
+      } else if (clearArtworkCache != null) {
         await clearArtworkCache!.call();
       } else {
         await MemoryArtworkCache.clear();
       }
     } catch (_) {
       // Owner-scoped keys still prevent the next account from reading stale art.
+    }
+  }
+
+  Future<void> finishPreservedArtworkTransition({required String previousUid, required String currentUid}) async {
+    if (previousUid.isNotEmpty && previousUid == currentUid) return;
+    try {
+      if (clearArtworkCache != null) {
+        await clearArtworkCache!.call();
+      } else {
+        await MemoryArtworkCache.clear();
+      }
+    } catch (_) {
+      // Runtime trust was already revoked, so a failed cleanup remains
+      // inaccessible to the replacement account.
     }
   }
 

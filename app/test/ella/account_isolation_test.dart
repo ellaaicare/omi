@@ -33,6 +33,7 @@ import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart'
 import 'package:omi/providers/memories_provider.dart';
 import 'package:omi/providers/message_provider.dart';
 import 'package:omi/providers/people_provider.dart';
+import 'package:omi/services/auth_service.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/devices/device_connection.dart';
 import 'package:omi/services/devices/discovery/device_discoverer.dart';
@@ -656,10 +657,7 @@ void main() {
       '$secondTurn:user',
       '$secondTurn:assistant',
     ]);
-    expect(
-      prefs.cachedMessages.map((message) => message.canonicalTurnOrdinal),
-      [0, 0, 1, 1],
-    );
+    expect(prefs.cachedMessages.map((message) => message.canonicalTurnOrdinal), [0, 0, 1, 1]);
   });
 
   test('V2V authority loss after backend response has zero local side effects', () async {
@@ -874,6 +872,80 @@ void main() {
       'quarantine',
       'artwork-cache',
     ]);
+  });
+
+  test('automatic sign-out and same-account reauthentication retain owner-scoped artwork files', () async {
+    final calls = <String>[];
+    final service = EllaAccountIsolationService(
+      stopNotificationAudio: () => calls.add('notification-audio'),
+      stopOnDeviceTts: () => calls.add('on-device-tts'),
+      clearGuardianNotifications: () => calls.add('notification-residue'),
+      stopCapture: () => calls.add('capture'),
+      stopV2v: () => calls.add('v2v'),
+      stopGuardian: () => calls.add('guardian'),
+      stopServices: () => calls.add('wal-services'),
+      quarantineLegacy: () => calls.add('quarantine'),
+      clearArtworkCache: () => calls.add('artwork-cache'),
+      revokeArtworkCacheTrust: () => calls.add('artwork-trust'),
+    );
+
+    // The first transition is the automatic sign-out after failed token
+    // refresh. The second is the eventual successful identity replacement.
+    await service.stopForAccountTransition(preserveOwnerScopedArtworkCache: true);
+    await service.stopForAccountTransition(preserveOwnerScopedArtworkCache: true);
+    await service.finishPreservedArtworkTransition(previousUid: 'uid-a', currentUid: 'uid-a');
+
+    expect(calls.where((call) => call == 'artwork-trust'), hasLength(2));
+    expect(calls, isNot(contains('artwork-cache')));
+  });
+
+  test('automatic sign-out owner survives the auth listener clearing its normal UID preference', () {
+    final marker = ReauthenticationOwnerMarker();
+    marker.remember('uid-a');
+
+    // Firebase authStateChanges clears SharedPreferencesUtil.uid after the
+    // forced sign-out, before the replacement sign-in begins.
+    const clearedPreferenceUid = '';
+    expect(marker.resolve(clearedPreferenceUid), 'uid-a');
+
+    marker.remember('');
+    expect(marker.resolve(clearedPreferenceUid), 'uid-a');
+
+    marker.clear();
+    expect(marker.resolve(clearedPreferenceUid), isEmpty);
+  });
+
+  test('a stale UID preference cannot recreate retention after deliberate sign-out', () {
+    final marker = ReauthenticationOwnerMarker();
+
+    const stalePreferenceUid = 'uid-a';
+    const signedOutFirebaseUid = '';
+    marker.remember(signedOutFirebaseUid);
+
+    expect(stalePreferenceUid, isNotEmpty);
+    expect(marker.resolve(signedOutFirebaseUid), isEmpty);
+  });
+
+  test('automatic sign-out followed by a replacement account deletes retained artwork files', () async {
+    final calls = <String>[];
+    final service = EllaAccountIsolationService(
+      stopNotificationAudio: () {},
+      stopOnDeviceTts: () {},
+      clearGuardianNotifications: () {},
+      stopCapture: () {},
+      stopV2v: () {},
+      stopGuardian: () {},
+      stopServices: () {},
+      quarantineLegacy: () {},
+      clearArtworkCache: () => calls.add('artwork-cache'),
+      revokeArtworkCacheTrust: () => calls.add('artwork-trust'),
+    );
+
+    await service.stopForAccountTransition(preserveOwnerScopedArtworkCache: true);
+    await service.stopForAccountTransition(preserveOwnerScopedArtworkCache: true);
+    await service.finishPreservedArtworkTransition(previousUid: 'uid-a', currentUid: 'uid-b');
+
+    expect(calls, ['artwork-trust', 'artwork-trust', 'artwork-cache']);
   });
 
   test('identity transition waits for a capture producer that is mid-write', () async {
@@ -1108,10 +1180,7 @@ void main() {
     final first = _LateDisconnectConnection(necklace, _LateDisconnectTransport(necklace.id));
     final second = _LateDisconnectConnection(necklace, _LateDisconnectTransport(necklace.id));
     final pendingConnections = <DeviceConnection>[first, second];
-    final service = DeviceService(
-      discoverers: [],
-      connectionCreator: (_) => pendingConnections.removeAt(0),
-    );
+    final service = DeviceService(discoverers: [], connectionCreator: (_) => pendingConnections.removeAt(0));
     final deviceProviderSubscriber = _RecordingDeviceSubscription();
     final onboardingSubscriber = _RecordingDeviceSubscription();
     final speechProfileSubscriber = _RecordingDeviceSubscription();
@@ -2249,11 +2318,7 @@ class _RecordingDeviceSubscription implements IDeviceServiceSubsciption {
   final List<DeviceConnectionState> connectionStates = [];
 
   @override
-  void onDeviceConnectionStateChanged(
-    String deviceId,
-    DeviceConnectionState state, {
-    int? connectionGeneration,
-  }) {
+  void onDeviceConnectionStateChanged(String deviceId, DeviceConnectionState state, {int? connectionGeneration}) {
     connectionStates.add(state);
   }
 

@@ -39,11 +39,12 @@ class MemoryArtworkCache {
   /// already-downloaded image wait for that endpoint again.
   static String resolveDisplayCacheKey(String provisionalCacheKey) {
     if (provisionalCacheKey.isEmpty || _diskReadsDisabled) return '';
-    final authoritativeCacheKey = _displayAliases.remove(provisionalCacheKey);
+    final authoritativeCacheKey = _displayAliases[provisionalCacheKey];
     if (authoritativeCacheKey != null) {
       if (_suppressedDisplayKeys.contains(authoritativeCacheKey) || !_trustDisplayKey(authoritativeCacheKey)) {
         return '';
       }
+      _displayAliases.remove(provisionalCacheKey);
       _displayAliases[provisionalCacheKey] = authoritativeCacheKey;
       return authoritativeCacheKey;
     }
@@ -66,9 +67,7 @@ class MemoryArtworkCache {
       return isAuthorityCurrent() ? networkOnlyCacheKey : null;
     }
     final cacheKeys = {authoritativeCacheKey, if (provisionalCacheKey.isNotEmpty) provisionalCacheKey};
-    final suppressionSnapshot = {
-      for (final cacheKey in cacheKeys) cacheKey: _suppressionGenerations[cacheKey] ?? 0,
-    };
+    final suppressionSnapshot = {for (final cacheKey in cacheKeys) cacheKey: _suppressionGenerations[cacheKey] ?? 0};
     final evictions = cacheKeys.map((cacheKey) => _pendingEvictions[cacheKey]).whereType<Future<bool>>().toList();
     if (evictions.isNotEmpty) {
       await Future.wait(evictions.map((eviction) => _waitForEviction(eviction, _evictionTimeout)));
@@ -85,7 +84,7 @@ class MemoryArtworkCache {
     String? existingRecoveryCacheKey;
     for (final cacheKey in cacheKeys) {
       final candidate = _displayAliases[cacheKey];
-      if (candidate != null && !_suppressedDisplayKeys.contains(candidate) && _trustedDisplayKeys.contains(candidate)) {
+      if (candidate != null && !_suppressedDisplayKeys.contains(candidate)) {
         existingRecoveryCacheKey = candidate;
         break;
       }
@@ -121,8 +120,9 @@ class MemoryArtworkCache {
   static void suppressDisplayCacheKeys(Iterable<String> cacheKeys) {
     final keys = cacheKeys.where((cacheKey) => cacheKey.isNotEmpty).toSet();
     if (keys.isEmpty) return;
-    _displayAliases
-        .removeWhere((provisional, authoritative) => keys.contains(provisional) || keys.contains(authoritative));
+    _displayAliases.removeWhere(
+      (provisional, authoritative) => keys.contains(provisional) || keys.contains(authoritative),
+    );
     for (final cacheKey in keys) {
       _trustedDisplayKeys.remove(cacheKey);
       _suppressedDisplayKeys.remove(cacheKey);
@@ -205,10 +205,7 @@ class MemoryArtworkCache {
 
   static String _createNetworkOnlyCacheNamespace() {
     final random = Random.secure();
-    return List.generate(
-      8,
-      (_) => random.nextInt(1 << 16).toRadixString(16).padLeft(4, '0'),
-    ).join();
+    return List.generate(8, (_) => random.nextInt(1 << 16).toRadixString(16).padLeft(4, '0')).join();
   }
 
   /// Simulates a process restart without deleting persistent cache files.
@@ -216,7 +213,14 @@ class MemoryArtworkCache {
   /// the exact account/profile key in the new process.
   @visibleForTesting
   static void resetRuntimeTrustForTesting() {
-    _displayAliases.clear();
+    revokeRuntimeTrust();
+  }
+
+  /// Revokes every in-memory artwork capability without deleting owner-scoped
+  /// files. A freshly authenticated authority must validate each key before a
+  /// persistent file can be read again.
+  static void revokeRuntimeTrust({bool preserveDisplayAliases = false}) {
+    if (!preserveDisplayAliases) _displayAliases.clear();
     _trustedDisplayKeys.clear();
     _suppressedDisplayKeys.clear();
     _suppressionGenerations.clear();

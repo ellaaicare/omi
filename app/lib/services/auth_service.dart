@@ -31,21 +31,64 @@ bool isSimulator() {
       Platform.environment['SIMULATOR_MODEL_IDENTIFIER'] != null;
 }
 
+@visibleForTesting
+class ReauthenticationOwnerMarker {
+  String _uid = '';
+
+  void remember(String uid) {
+    final normalizedUid = uid.trim();
+    if (normalizedUid.isNotEmpty) {
+      _uid = normalizedUid;
+    }
+  }
+
+  String resolve(String currentUid) {
+    final normalizedUid = currentUid.trim();
+    return normalizedUid.isNotEmpty ? normalizedUid : _uid;
+  }
+
+  void clear() => _uid = '';
+}
+
 class AuthService {
   static final AuthService _instance = AuthService._internal();
   static AuthService get instance => _instance;
 
   AuthService._internal();
 
-  Future<T> runIdentityTransition<T>(Future<T> Function() mutation) async {
-    await const EllaAccountIsolationService().stopForAccountTransition();
-    return mutation();
+  final ReauthenticationOwnerMarker _reauthenticationOwner = ReauthenticationOwnerMarker();
+
+  Future<T> runIdentityTransition<T>(
+    Future<T> Function() mutation, {
+    bool preserveOwnerScopedArtworkCache = false,
+  }) async {
+    final authenticatedUid = FirebaseAuth.instance.currentUser?.uid.trim() ?? '';
+    final storedUid = SharedPreferencesUtil().uid.trim();
+    final knownUid = authenticatedUid.isNotEmpty ? authenticatedUid : storedUid;
+    final previousUid = preserveOwnerScopedArtworkCache ? _reauthenticationOwner.resolve(knownUid) : knownUid;
+    final preserveArtwork = preserveOwnerScopedArtworkCache && previousUid.isNotEmpty;
+    if (!preserveOwnerScopedArtworkCache) {
+      _reauthenticationOwner.clear();
+    }
+    const isolation = EllaAccountIsolationService();
+    await isolation.stopForAccountTransition(preserveOwnerScopedArtworkCache: preserveArtwork);
+    try {
+      return await mutation();
+    } finally {
+      if (preserveArtwork) {
+        await isolation.finishPreservedArtworkTransition(
+          previousUid: previousUid,
+          currentUid: FirebaseAuth.instance.currentUser?.uid.trim() ?? '',
+        );
+      }
+      _reauthenticationOwner.clear();
+    }
   }
 
   Future<UserCredential> replaceIdentityWithCredential(AuthCredential credential) => runIdentityTransition(() async {
         await FirebaseAuth.instance.signOut();
         return FirebaseAuth.instance.signInWithCredential(credential);
-      });
+      }, preserveOwnerScopedArtworkCache: true);
 
   bool isSignedIn() => FirebaseAuth.instance.currentUser != null && !FirebaseAuth.instance.currentUser!.isAnonymous;
 
@@ -73,7 +116,10 @@ class AuthService {
 
     // Once signed in, return the UserCredential
     try {
-      var result = await runIdentityTransition(() => FirebaseAuth.instance.signInWithCredential(credential));
+      var result = await runIdentityTransition(
+        () => FirebaseAuth.instance.signInWithCredential(credential),
+        preserveOwnerScopedArtworkCache: true,
+      );
       await _updateUserPreferences(result, 'google');
       return result;
     } catch (_) {
@@ -161,14 +207,30 @@ class AuthService {
 
   /// Quiesce account-scoped producers once, run the caller's local cleanup,
   /// then mutate Firebase identity. Cleanup remains inside the transition so
-  /// caches cannot survive into the next account, while callers that already
-  /// need cleanup do not invoke the full shutdown sequence a second time.
+  /// owner-scoped caches cannot become readable by the next account, while
+  /// callers that already need cleanup do not invoke the shutdown twice.
   Future<void> signOutWithQuiescedCleanup(Future<void> Function() cleanup) => runIdentityTransition(() async {
-    await cleanup();
-    await FirebaseAuth.instance.signOut();
-  });
+        await cleanup();
+        await FirebaseAuth.instance.signOut();
+      });
 
   Future<void> signOut() => signOutWithQuiescedCleanup(() async {});
+
+  /// Ends an invalid Firebase session without treating it as a user-requested
+  /// privacy purge. Runtime cache trust is revoked immediately; a later login
+  /// may reuse the files only if it resolves to the same Firebase UID.
+  Future<void> signOutForReauthentication() async {
+    final authenticatedUid = FirebaseAuth.instance.currentUser?.uid.trim() ?? '';
+    // Only a live Firebase identity may start retention. The preferences UID
+    // can remain briefly stale after an intentional sign-out and must not
+    // recreate a preservation claim for a deliberately purged account.
+    _reauthenticationOwner.remember(authenticatedUid);
+    final previousUid = _reauthenticationOwner.resolve('');
+    await const EllaAccountIsolationService().stopForAccountTransition(
+      preserveOwnerScopedArtworkCache: previousUid.isNotEmpty,
+    );
+    await FirebaseAuth.instance.signOut();
+  }
 
   Future<String?> getIdToken() async {
     try {
@@ -330,7 +392,10 @@ class AuthService {
 
     // Use custom token if enabled and available
     if (useCustomToken && customToken != null) {
-      return runIdentityTransition(() => FirebaseAuth.instance.signInWithCustomToken(customToken));
+      return runIdentityTransition(
+        () => FirebaseAuth.instance.signInWithCustomToken(customToken),
+        preserveOwnerScopedArtworkCache: true,
+      );
     }
 
     // Fallback to OAuth credentials
@@ -339,10 +404,16 @@ class AuthService {
 
     if (provider == 'google') {
       final credential = GoogleAuthProvider.credential(idToken: idToken, accessToken: accessToken);
-      return runIdentityTransition(() => FirebaseAuth.instance.signInWithCredential(credential));
+      return runIdentityTransition(
+        () => FirebaseAuth.instance.signInWithCredential(credential),
+        preserveOwnerScopedArtworkCache: true,
+      );
     } else if (provider == 'apple') {
       final credential = OAuthProvider('apple.com').credential(idToken: idToken, accessToken: accessToken);
-      return runIdentityTransition(() => FirebaseAuth.instance.signInWithCredential(credential));
+      return runIdentityTransition(
+        () => FirebaseAuth.instance.signInWithCredential(credential),
+        preserveOwnerScopedArtworkCache: true,
+      );
     } else {
       throw Exception('Unsupported provider: $provider');
     }

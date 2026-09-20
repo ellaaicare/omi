@@ -216,10 +216,27 @@ void main() {
 
     final auth = File('${lib.path}/services/auth_service.dart').readAsStringSync();
     expect(auth, contains('Future<T> runIdentityTransition<T>'));
-    expect(auth.indexOf('stopForAccountTransition()'), lessThan(auth.indexOf('return mutation();')));
+    expect(
+      auth.indexOf('stopForAccountTransition(preserveOwnerScopedArtworkCache: preserveArtwork)'),
+      lessThan(auth.indexOf('return await mutation();')),
+    );
+    expect(auth, contains('preserveOwnerScopedArtworkCache: true'));
     expect(auth, contains('Future<void> signOutWithQuiescedCleanup'));
     expect(auth, contains('Future<void> signOut() => signOutWithQuiescedCleanup(() async {})'));
+    expect(auth, contains('Future<void> signOutForReauthentication()'));
+    expect(auth, contains('final ReauthenticationOwnerMarker _reauthenticationOwner'));
+    expect(auth, contains('_reauthenticationOwner.remember(authenticatedUid)'));
+    expect(auth, contains('_reauthenticationOwner.resolve(knownUid)'));
+    final automaticSignOut = auth.substring(
+      auth.indexOf('Future<void> signOutForReauthentication()'),
+      auth.indexOf('Future<String?> getIdToken()'),
+    );
+    expect(automaticSignOut, isNot(contains('SharedPreferencesUtil().uid')));
     expect(auth, contains('replaceIdentityWithCredential'));
+
+    final sharedHttp = File('${lib.path}/backend/http/shared.dart').readAsStringSync();
+    expect(sharedHttp, contains('AuthService.instance.signOutForReauthentication()'));
+    expect(sharedHttp, isNot(contains('AuthService.instance.signOut();')));
 
     final authUtils = File('${lib.path}/utils/auth_utils.dart').readAsStringSync();
     expect(authUtils, contains('signOutWithQuiescedCleanup(() async {'));
