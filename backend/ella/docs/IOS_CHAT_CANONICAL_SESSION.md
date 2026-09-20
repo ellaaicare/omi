@@ -43,6 +43,23 @@ ELLA_CHAT_HERMES_SESSION_EPOCH=<explicit epoch>
 The production default should remain `canonical` to avoid split-brain behavior
 between iOS Chat and iMessage.
 
+The one retained-owner exception is controlled by
+`ELLA_RETAINED_OWNER_CHANNEL_RUNTIME_ENABLED`. When that default-off gate is
+enabled for the exact configured owner, app chat and retained iMessage use the
+same physical runtime and canonical memory key but separate mutable Hermes
+session IDs:
+
+```text
+ella:omi:{uid}:canonical:channel:ios-chat
+ella:omi:{uid}:canonical:channel:imessage
+```
+
+Hermes does not serialize concurrent requests carrying the same session ID;
+using one mutable session across channels would be last-writer-wins. The
+canonical event ledger remains the cross-channel history source, while
+`ella:omi:{uid}:canonical` remains the shared Honcho memory key. This exception
+does not merge profiles or rewrite an ordinary runtime binding.
+
 ## Stable Event IDs
 
 iOS passes `client_message_id` and `client_sent_at`. Backend creates stable ids:
