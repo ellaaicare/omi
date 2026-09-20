@@ -875,6 +875,33 @@ void main() {
     expect(MemoryArtworkCache.resolveDisplayCacheKey(recoveredCacheKey!), isEmpty);
   });
 
+  test('same-account reauthentication revalidates an existing recovery alias without losing its file key', () async {
+    const provisionalKey = 'reauth-provisional-key';
+    const authoritativeKey = 'reauth-authoritative-key';
+    MemoryArtworkCache.suppressDisplayCacheKeys({provisionalKey, authoritativeKey});
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys({provisionalKey, authoritativeKey}, (_) async {});
+
+    final recoveredCacheKey = await MemoryArtworkCache.rememberDisplayCacheKey(
+      provisionalCacheKey: provisionalKey,
+      authoritativeCacheKey: authoritativeKey,
+      isAuthorityCurrent: () => true,
+    );
+    expect(recoveredCacheKey, isNotNull);
+
+    MemoryArtworkCache.revokeRuntimeTrust(preserveDisplayAliases: true);
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(provisionalKey), isEmpty);
+
+    expect(
+      await MemoryArtworkCache.rememberDisplayCacheKey(
+        provisionalCacheKey: provisionalKey,
+        authoritativeCacheKey: authoritativeKey,
+        isAuthorityCurrent: () => true,
+      ),
+      recoveredCacheKey,
+    );
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(provisionalKey), recoveredCacheKey);
+  });
+
   test('a timed-out eviction stays serialized until the underlying deletion finishes', () async {
     const cacheKey = 'hung-terminal-key';
     final release = Completer<void>();

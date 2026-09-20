@@ -39,11 +39,12 @@ class MemoryArtworkCache {
   /// already-downloaded image wait for that endpoint again.
   static String resolveDisplayCacheKey(String provisionalCacheKey) {
     if (provisionalCacheKey.isEmpty || _diskReadsDisabled) return '';
-    final authoritativeCacheKey = _displayAliases.remove(provisionalCacheKey);
+    final authoritativeCacheKey = _displayAliases[provisionalCacheKey];
     if (authoritativeCacheKey != null) {
       if (_suppressedDisplayKeys.contains(authoritativeCacheKey) || !_trustDisplayKey(authoritativeCacheKey)) {
         return '';
       }
+      _displayAliases.remove(provisionalCacheKey);
       _displayAliases[provisionalCacheKey] = authoritativeCacheKey;
       return authoritativeCacheKey;
     }
@@ -83,7 +84,7 @@ class MemoryArtworkCache {
     String? existingRecoveryCacheKey;
     for (final cacheKey in cacheKeys) {
       final candidate = _displayAliases[cacheKey];
-      if (candidate != null && !_suppressedDisplayKeys.contains(candidate) && _trustedDisplayKeys.contains(candidate)) {
+      if (candidate != null && !_suppressedDisplayKeys.contains(candidate)) {
         existingRecoveryCacheKey = candidate;
         break;
       }
@@ -218,8 +219,8 @@ class MemoryArtworkCache {
   /// Revokes every in-memory artwork capability without deleting owner-scoped
   /// files. A freshly authenticated authority must validate each key before a
   /// persistent file can be read again.
-  static void revokeRuntimeTrust() {
-    _displayAliases.clear();
+  static void revokeRuntimeTrust({bool preserveDisplayAliases = false}) {
+    if (!preserveDisplayAliases) _displayAliases.clear();
     _trustedDisplayKeys.clear();
     _suppressedDisplayKeys.clear();
     _suppressionGenerations.clear();

@@ -102,7 +102,7 @@ class EllaAccountIsolationService {
         if (revokeArtworkCacheTrust != null) {
           await revokeArtworkCacheTrust!.call();
         } else {
-          MemoryArtworkCache.revokeRuntimeTrust();
+          MemoryArtworkCache.revokeRuntimeTrust(preserveDisplayAliases: true);
         }
       } else if (clearArtworkCache != null) {
         await clearArtworkCache!.call();
