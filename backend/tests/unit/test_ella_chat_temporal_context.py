@@ -123,18 +123,13 @@ def test_hermes_session_defaults_to_canonical(monkeypatch):
     assert chat._hermes_chat_session_key("User/123") == "ella:omi:user-123:canonical"
     assert chat._hermes_chat_memory_key("User/123") == "ella:omi:user-123:canonical"
 
-
-def test_retained_owner_chat_separates_mutable_session_from_canonical_memory(monkeypatch):
     monkeypatch.setenv("ELLA_PLATO_UID", "owner-a")
     monkeypatch.setenv("ELLA_RETAINED_OWNER_CHANNEL_RUNTIME_ENABLED", "true")
-    monkeypatch.setattr(chat, "HERMES_CHAT_SESSION_SCOPE", "canonical")
 
     assert chat._hermes_chat_session_key("owner-a") == "ella:omi:owner-a:canonical:channel:ios-chat"
     assert chat._hermes_chat_memory_key("owner-a") == "ella:omi:owner-a:canonical"
     assert chat._hermes_chat_session_key("owner-b") == "ella:omi:owner-b:canonical"
 
-
-def test_chat_stream_selects_exact_retained_owner_runtime_before_ordinary_authority(monkeypatch):
     runtime = SimpleNamespace(provider="hermes")
     captured = {"retained": 0, "ordinary": 0, "stream_runtime": None}
 
