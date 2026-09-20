@@ -641,8 +641,6 @@ def test_self_hosted_voice_proxy_re_resolves_exact_voice_target(monkeypatch):
     assert len(posts) == 1
     assert posts[0][3]["session_id"] == "session-uid-a"
 
-
-def test_voice_proxy_prefers_exact_retained_owner_channel_runtime_without_ordinary_fallback(monkeypatch):
     retained_runtime = SimpleNamespace(
         agent_id="retained-owner-agent",
         revision=9,
