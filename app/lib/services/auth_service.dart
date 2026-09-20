@@ -31,18 +31,45 @@ bool isSimulator() {
       Platform.environment['SIMULATOR_MODEL_IDENTIFIER'] != null;
 }
 
+@visibleForTesting
+class ReauthenticationOwnerMarker {
+  String _uid = '';
+
+  void remember(String uid) {
+    final normalizedUid = uid.trim();
+    if (normalizedUid.isNotEmpty) {
+      _uid = normalizedUid;
+    }
+  }
+
+  String resolve(String currentUid) {
+    final normalizedUid = currentUid.trim();
+    return normalizedUid.isNotEmpty ? normalizedUid : _uid;
+  }
+
+  void clear() => _uid = '';
+}
+
 class AuthService {
   static final AuthService _instance = AuthService._internal();
   static AuthService get instance => _instance;
 
   AuthService._internal();
 
+  final ReauthenticationOwnerMarker _reauthenticationOwner = ReauthenticationOwnerMarker();
+
   Future<T> runIdentityTransition<T>(
     Future<T> Function() mutation, {
     bool preserveOwnerScopedArtworkCache = false,
   }) async {
-    final previousUid = SharedPreferencesUtil().uid.trim();
+    final authenticatedUid = FirebaseAuth.instance.currentUser?.uid.trim() ?? '';
+    final storedUid = SharedPreferencesUtil().uid.trim();
+    final knownUid = authenticatedUid.isNotEmpty ? authenticatedUid : storedUid;
+    final previousUid = preserveOwnerScopedArtworkCache ? _reauthenticationOwner.resolve(knownUid) : knownUid;
     final preserveArtwork = preserveOwnerScopedArtworkCache && previousUid.isNotEmpty;
+    if (!preserveOwnerScopedArtworkCache) {
+      _reauthenticationOwner.clear();
+    }
     const isolation = EllaAccountIsolationService();
     await isolation.stopForAccountTransition(preserveOwnerScopedArtworkCache: preserveArtwork);
     try {
@@ -54,6 +81,7 @@ class AuthService {
           currentUid: FirebaseAuth.instance.currentUser?.uid.trim() ?? '',
         );
       }
+      _reauthenticationOwner.clear();
     }
   }
 
@@ -192,7 +220,11 @@ class AuthService {
   /// privacy purge. Runtime cache trust is revoked immediately; a later login
   /// may reuse the files only if it resolves to the same Firebase UID.
   Future<void> signOutForReauthentication() async {
-    final previousUid = SharedPreferencesUtil().uid.trim();
+    final authenticatedUid = FirebaseAuth.instance.currentUser?.uid.trim() ?? '';
+    final storedUid = SharedPreferencesUtil().uid.trim();
+    final knownUid = authenticatedUid.isNotEmpty ? authenticatedUid : storedUid;
+    _reauthenticationOwner.remember(knownUid);
+    final previousUid = _reauthenticationOwner.resolve('');
     await const EllaAccountIsolationService().stopForAccountTransition(
       preserveOwnerScopedArtworkCache: previousUid.isNotEmpty,
     );

@@ -224,6 +224,9 @@ void main() {
     expect(auth, contains('Future<void> signOutWithQuiescedCleanup'));
     expect(auth, contains('Future<void> signOut() => signOutWithQuiescedCleanup(() async {})'));
     expect(auth, contains('Future<void> signOutForReauthentication()'));
+    expect(auth, contains('final ReauthenticationOwnerMarker _reauthenticationOwner'));
+    expect(auth, contains('_reauthenticationOwner.remember(knownUid)'));
+    expect(auth, contains('_reauthenticationOwner.resolve(knownUid)'));
     expect(auth, contains('replaceIdentityWithCredential'));
 
     final sharedHttp = File('${lib.path}/backend/http/shared.dart').readAsStringSync();

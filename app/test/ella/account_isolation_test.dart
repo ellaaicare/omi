@@ -33,6 +33,7 @@ import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart'
 import 'package:omi/providers/memories_provider.dart';
 import 'package:omi/providers/message_provider.dart';
 import 'package:omi/providers/people_provider.dart';
+import 'package:omi/services/auth_service.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/devices/device_connection.dart';
 import 'package:omi/services/devices/discovery/device_discoverer.dart';
@@ -896,6 +897,22 @@ void main() {
 
     expect(calls.where((call) => call == 'artwork-trust'), hasLength(2));
     expect(calls, isNot(contains('artwork-cache')));
+  });
+
+  test('automatic sign-out owner survives the auth listener clearing its normal UID preference', () {
+    final marker = ReauthenticationOwnerMarker();
+    marker.remember('uid-a');
+
+    // Firebase authStateChanges clears SharedPreferencesUtil.uid after the
+    // forced sign-out, before the replacement sign-in begins.
+    const clearedPreferenceUid = '';
+    expect(marker.resolve(clearedPreferenceUid), 'uid-a');
+
+    marker.remember('');
+    expect(marker.resolve(clearedPreferenceUid), 'uid-a');
+
+    marker.clear();
+    expect(marker.resolve(clearedPreferenceUid), isEmpty);
   });
 
   test('automatic sign-out followed by a replacement account deletes retained artwork files', () async {
