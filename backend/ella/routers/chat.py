@@ -39,7 +39,7 @@ from database.honcho_attestation import authority_credential
 from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
 from ella.routers.resolve import resolve_user_routing
 from ella.routers.trace import RouteTrace, record_trace
-from ella.services.hermes_session import canonical_omi_session_key, safe_session_component
+from ella.services.hermes_session import canonical_omi_session_key, channel_omi_session_id, safe_session_component
 from ella.services.hermes_cloud_runtime import (
     HermesCloudRuntimeService,
     HermesCloudTurnRequest,
@@ -49,7 +49,9 @@ from ella.services.provisioning import ProvisioningError
 from ella.services.runtime_resolver import (
     IsolatedRuntime,
     revalidate_runtime_authority,
+    resolve_retained_owner_channel_runtime,
     resolve_isolated_runtime,
+    retained_owner_channel_runtime_enabled,
     retained_owner_uid_configured,
     runtime_authority_identity,
     runtime_authority_enabled,
@@ -116,6 +118,8 @@ def _hermes_chat_memory_key(uid: str) -> str:
 
 
 def _hermes_chat_session_key(uid: str) -> str:
+    if retained_owner_channel_runtime_enabled(uid):
+        return channel_omi_session_id(uid, "ios-chat")
     safe_uid = safe_session_component(uid.lower())
     if HERMES_CHAT_SESSION_SCOPE in {"canonical", "shared", "cross_channel", "cross-channel"}:
         return _hermes_chat_memory_key(uid)
@@ -1054,7 +1058,9 @@ async def ella_chat_stream(
 
     runtime = None
     try:
-        runtime = await resolve_isolated_runtime(uid, target_mode="hermes-cloud-chat")
+        runtime = await resolve_retained_owner_channel_runtime(uid)
+        if runtime is None:
+            runtime = await resolve_isolated_runtime(uid, target_mode="hermes-cloud-chat")
     except ProvisioningError as exc:
         raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
 
@@ -1185,10 +1191,14 @@ async def ella_chat_history(
     _start = _time.time()
 
     uid = require_matching_firebase_uid(authenticated_uid, uid, feature="Chat history")
-    runtime_bound = await runtime_authority_enabled(authenticated_uid)
+    retained_owner_runtime = retained_owner_channel_runtime_enabled(authenticated_uid)
+    runtime_bound = retained_owner_runtime or await runtime_authority_enabled(authenticated_uid)
     if runtime_bound:
         try:
-            await resolve_isolated_runtime(authenticated_uid, target_mode="hermes-cloud-chat")
+            if retained_owner_runtime:
+                await resolve_retained_owner_channel_runtime(authenticated_uid)
+            else:
+                await resolve_isolated_runtime(authenticated_uid, target_mode="hermes-cloud-chat")
         except ProvisioningError as exc:
             raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
 
