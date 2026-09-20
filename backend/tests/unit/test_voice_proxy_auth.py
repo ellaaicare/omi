@@ -642,6 +642,44 @@ def test_self_hosted_voice_proxy_re_resolves_exact_voice_target(monkeypatch):
     assert posts[0][3]["session_id"] == "session-uid-a"
 
 
+def test_voice_proxy_prefers_exact_retained_owner_channel_runtime_without_ordinary_fallback(monkeypatch):
+    retained_runtime = SimpleNamespace(
+        agent_id="retained-owner-agent",
+        revision=9,
+        runtime_target_mode="",
+        binding_role="imessage",
+    )
+    calls = {"retained": 0, "ordinary": 0}
+
+    async def retained(uid):
+        calls["retained"] += 1
+        assert uid == "owner-a"
+        return retained_runtime
+
+    async def ordinary(_uid):
+        calls["ordinary"] += 1
+        raise AssertionError("ordinary role=user runtime must not be selected")
+
+    monkeypatch.setattr(voice, "resolve_retained_owner_channel_runtime", retained)
+    monkeypatch.setattr(voice, "resolve_direct_self_hosted_runtime", ordinary)
+    monkeypatch.setattr(voice, "_self_hosted_voice_required", lambda _uid: asyncio.sleep(0, result=False))
+    monkeypatch.setattr(voice, "cloud_provisioning_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
+
+    principal = voice.VoiceProxyPrincipal(
+        uid="owner-a",
+        session_id="session-owner-a",
+        provider="grok-voice",
+        voice_mode="v4",
+        isolated_runtime=True,
+        runtime_authority_digest=RUNTIME_AUTHORITY_DIGEST,
+    )
+
+    assert asyncio.run(voice._resolve_voice_runtime(principal)) is retained_runtime
+    assert calls == {"retained": 1, "ordinary": 0}
+
+
 @pytest.mark.parametrize(
     ("drift", "expected_code"),
     [
