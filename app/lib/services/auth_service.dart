@@ -63,9 +63,8 @@ class AuthService {
     bool preserveOwnerScopedArtworkCache = false,
   }) async {
     final authenticatedUid = FirebaseAuth.instance.currentUser?.uid.trim() ?? '';
-    final storedUid = SharedPreferencesUtil().uid.trim();
-    final knownUid = authenticatedUid.isNotEmpty ? authenticatedUid : storedUid;
-    final previousUid = preserveOwnerScopedArtworkCache ? _reauthenticationOwner.resolve(knownUid) : knownUid;
+    final previousUid =
+        preserveOwnerScopedArtworkCache ? _reauthenticationOwner.resolve(authenticatedUid) : authenticatedUid;
     final preserveArtwork = preserveOwnerScopedArtworkCache && previousUid.isNotEmpty;
     if (!preserveOwnerScopedArtworkCache) {
       _reauthenticationOwner.clear();

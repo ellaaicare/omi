@@ -56,6 +56,7 @@ class MemoryArtworkCache {
     required String provisionalCacheKey,
     required String authoritativeCacheKey,
     required bool Function() isAuthorityCurrent,
+    Duration evictionWaitTimeout = _evictionTimeout,
   }) async {
     if (authoritativeCacheKey.isEmpty || !isAuthorityCurrent()) return null;
     if (_diskReadsDisabled) {
@@ -70,7 +71,10 @@ class MemoryArtworkCache {
     final suppressionSnapshot = {for (final cacheKey in cacheKeys) cacheKey: _suppressionGenerations[cacheKey] ?? 0};
     final evictions = cacheKeys.map((cacheKey) => _pendingEvictions[cacheKey]).whereType<Future<bool>>().toList();
     if (evictions.isNotEmpty) {
-      await Future.wait(evictions.map((eviction) => _waitForEviction(eviction, _evictionTimeout)));
+      final evictionResults = await Future.wait(
+        evictions.map((eviction) => _waitForEviction(eviction, evictionWaitTimeout)),
+      );
+      if (evictionResults.any((completed) => !completed)) return null;
     }
     if (_diskReadsDisabled || !isAuthorityCurrent()) return null;
     if (cacheKeys.any((cacheKey) => (_suppressionGenerations[cacheKey] ?? 0) != suppressionSnapshot[cacheKey])) {
@@ -220,13 +224,16 @@ class MemoryArtworkCache {
   /// files. A freshly authenticated authority must validate each key before a
   /// persistent file can be read again.
   static void revokeRuntimeTrust({bool preserveDisplayAliases = false}) {
-    if (!preserveDisplayAliases) _displayAliases.clear();
+    if (!preserveDisplayAliases) {
+      _displayAliases.clear();
+      _suppressedDisplayKeys.clear();
+      _suppressionGenerations.clear();
+      _completedEvictionGenerations.clear();
+      _diskReadsDisabled = false;
+    }
     _trustedDisplayKeys.clear();
-    _suppressedDisplayKeys.clear();
-    _suppressionGenerations.clear();
-    _completedEvictionGenerations.clear();
-    _pendingEvictions.clear();
-    _diskReadsDisabled = false;
+    // A detached terminal eviction can still delete its key after authority
+    // returns. Keep that future as a serialization fence until it completes.
   }
 
   static void _enterFailClosedDiskMode() {
