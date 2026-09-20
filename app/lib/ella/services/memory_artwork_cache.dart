@@ -224,14 +224,16 @@ class MemoryArtworkCache {
   /// files. A freshly authenticated authority must validate each key before a
   /// persistent file can be read again.
   static void revokeRuntimeTrust({bool preserveDisplayAliases = false}) {
-    if (!preserveDisplayAliases) _displayAliases.clear();
+    if (!preserveDisplayAliases) {
+      _displayAliases.clear();
+      _suppressedDisplayKeys.clear();
+      _suppressionGenerations.clear();
+      _completedEvictionGenerations.clear();
+      _diskReadsDisabled = false;
+    }
     _trustedDisplayKeys.clear();
-    _suppressedDisplayKeys.clear();
-    _suppressionGenerations.clear();
-    _completedEvictionGenerations.clear();
     // A detached terminal eviction can still delete its key after authority
     // returns. Keep that future as a serialization fence until it completes.
-    _diskReadsDisabled = false;
   }
 
   static void _enterFailClosedDiskMode() {

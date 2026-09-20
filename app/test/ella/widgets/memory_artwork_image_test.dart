@@ -962,8 +962,47 @@ void main() {
       isAuthorityCurrent: () => true,
     );
     events.add('key-published');
-    expect(recoveredCacheKey, cacheKey);
+    expect(recoveredCacheKey, isNotNull);
+    expect(recoveredCacheKey, isNot(cacheKey));
     expect(events, ['eviction-started', 'eviction-finished', 'key-published']);
+  });
+
+  test('failed terminal eviction stays suppressed through same-account reauthentication', () async {
+    const cacheKey = 'reauth-failed-terminal-key';
+    final release = Completer<void>();
+    MemoryArtworkCache.suppressDisplayCacheKeys({cacheKey});
+
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys({cacheKey}, (_) async {
+      await release.future;
+      throw Exception('disk busy');
+    }, waitTimeout: Duration.zero);
+
+    MemoryArtworkCache.revokeRuntimeTrust(preserveDisplayAliases: true);
+    final waitingRemember = MemoryArtworkCache.rememberDisplayCacheKey(
+      provisionalCacheKey: cacheKey,
+      authoritativeCacheKey: cacheKey,
+      isAuthorityCurrent: () => true,
+    );
+    release.complete();
+
+    expect(await waitingRemember, isNull);
+    expect(
+      await MemoryArtworkCache.rememberDisplayCacheKey(
+        provisionalCacheKey: cacheKey,
+        authoritativeCacheKey: cacheKey,
+        isAuthorityCurrent: () => true,
+      ),
+      isNull,
+    );
+
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys({cacheKey}, (_) async {});
+    final recoveredCacheKey = await MemoryArtworkCache.rememberDisplayCacheKey(
+      provisionalCacheKey: cacheKey,
+      authoritativeCacheKey: cacheKey,
+      isAuthorityCurrent: () => true,
+    );
+    expect(recoveredCacheKey, isNotNull);
+    expect(recoveredCacheKey, isNot(cacheKey));
   });
 
   testWidgets('recycled cards use the authoritative disk key before a repeated metadata request completes', (
