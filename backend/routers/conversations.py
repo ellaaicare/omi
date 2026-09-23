@@ -131,11 +131,11 @@ def process_in_progress_conversation(
 
     processing_fence_token = f'conversation-processing:{uuid.uuid4()}'
     if is_capture_v2 and request and request.transport_lost:
-        processing_fence_acquired = redis_db.acquire_lost_transport_processing_fence(
+        processing_fence_acquired = redis_db.acquire_in_progress_processing_fence(
             uid,
             conversation_id,
-            request.owner_token or '',
             processing_fence_token,
+            expected_owner_id=request.owner_token or '',
         )
     else:
         processing_fence_acquired = redis_db.acquire_in_progress_processing_fence(

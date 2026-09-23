@@ -1333,16 +1333,11 @@ def test_capture_transport_lost_route_resumes_missing_effect_after_lost_ack(monk
     monkeypatch.setattr(conversations_router, "renew_capture_finalization", lambda *_args: True)
     monkeypatch.setattr(
         conversations_router.redis_db,
-        "acquire_lost_transport_processing_fence",
-        lambda uid, conversation_id, owner_token, processing_token: lost_transport_handoffs.append(
-            (uid, conversation_id, owner_token, processing_token)
+        "acquire_in_progress_processing_fence",
+        lambda uid, conversation_id, processing_token, *, expected_owner_id=None: lost_transport_handoffs.append(
+            (uid, conversation_id, expected_owner_id, processing_token)
         )
         or True,
-    )
-    monkeypatch.setattr(
-        conversations_router.redis_db,
-        "acquire_in_progress_processing_fence",
-        lambda *_args: pytest.fail("transport_lost must use the exact-owner Redis handoff"),
     )
     monkeypatch.setattr(conversations_router.redis_db, "release_capture_commit_lease", lambda *_args: True)
     monkeypatch.setattr(conversations_router.redis_db, "get_cached_user_geolocation", lambda _uid: None)
