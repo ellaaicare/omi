@@ -396,8 +396,8 @@ Future<CreateConversationResponse?> _processInProgressConversation({
   required String expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier exactAuthority,
 }) {
-  final captureAuthority =
-      exactAuthority is CaptureFinalizationOperation ? exactAuthority.captureProtocolAuthority : null;
+  final captureOperation = exactAuthority is CaptureFinalizationOperation ? exactAuthority : null;
+  final captureAuthority = captureOperation?.captureProtocolAuthority;
   if (captureAuthority == null || captureAuthority.conversationId != conversationId) {
     return Future<CreateConversationResponse?>.value();
   }
@@ -406,6 +406,7 @@ Future<CreateConversationResponse?> _processInProgressConversation({
     protocolVersion: captureAuthority.protocolVersion,
     generation: captureAuthority.generation,
     ownerToken: captureAuthority.ownerToken,
+    transportLost: captureOperation!.allowLostTransportRecovery,
     expectedAuthenticatedUid: expectedAuthenticatedUid,
     exactAuthority: exactAuthority,
   );
@@ -417,6 +418,7 @@ class CaptureFinalizationOperation implements ExactAccountAuthorityVerifier {
     required EllaAccountCommitLease accountLease,
     required this.captureGeneration,
     required this.captureProtocolAuthority,
+    this.allowLostTransportRecovery = false,
     required int Function() currentCaptureGeneration,
   })  : _accountLease = accountLease,
         _currentCaptureGeneration = currentCaptureGeneration;
@@ -424,6 +426,7 @@ class CaptureFinalizationOperation implements ExactAccountAuthorityVerifier {
   final EllaAccountCommitLease _accountLease;
   final int captureGeneration;
   final CaptureProtocolAuthority? captureProtocolAuthority;
+  final bool allowLostTransportRecovery;
   final int Function() _currentCaptureGeneration;
 
   bool get isCurrent => _accountLease.isExactCurrent() && captureGeneration == _currentCaptureGeneration();
@@ -1582,7 +1585,11 @@ class CaptureProvider extends ChangeNotifier
     notifyListeners();
     final hasServerMoment = _captureDiagnostics.hasTranscriptionDelivery || hasCapturableContent;
     final recovery = hasServerMoment
-        ? _serializeDeviceConversationBoundary(reason: reason, initialFrame: frame)
+        ? _serializeDeviceConversationBoundary(
+            reason: reason,
+            initialFrame: frame,
+            allowLostTransportRecovery: true,
+          )
         : _replaceDeviceCaptureSocket(session, reason: reason, initialFrame: frame);
     unawaited(
       recovery.then((recovered) async {
@@ -2812,6 +2819,7 @@ class CaptureProvider extends ChangeNotifier
   Future<bool> _serializeDeviceConversationBoundary({
     required String reason,
     _BufferedDeviceCaptureFrame? initialFrame,
+    bool allowLostTransportRecovery = false,
   }) {
     final activeBoundary = _deviceCaptureBoundaryFuture;
     if (activeBoundary != null) return activeBoundary;
@@ -2820,6 +2828,7 @@ class CaptureProvider extends ChangeNotifier
     trackedBoundary = _finalizeCurrentDeviceConversationAndContinue(
       reason: reason,
       initialFrame: initialFrame,
+      allowLostTransportRecovery: allowLostTransportRecovery,
     ).whenComplete(() {
       if (identical(_deviceCaptureBoundaryFuture, trackedBoundary)) {
         _deviceCaptureBoundaryFuture = null;
@@ -2832,6 +2841,7 @@ class CaptureProvider extends ChangeNotifier
   Future<bool> _finalizeCurrentDeviceConversationAndContinue({
     required String reason,
     _BufferedDeviceCaptureFrame? initialFrame,
+    required bool allowLostTransportRecovery,
   }) async {
     final activeFinalization = _deviceCaptureFinalizationFuture;
     if (activeFinalization != null) await activeFinalization;
@@ -2840,7 +2850,10 @@ class CaptureProvider extends ChangeNotifier
     if (session == null || !_isDeviceCaptureCurrent(session) || recordingState != RecordingState.deviceRecord) {
       return false;
     }
-    final operation = _beginFinalizationOperation(owningDeviceSocket: session.socket);
+    final operation = _beginFinalizationOperation(
+      owningDeviceSocket: session.socket,
+      allowLostTransportRecovery: allowLostTransportRecovery,
+    );
     if (operation == null) return false;
     try {
       final hasBoundaryEvidence = hasCapturableContent || hasActiveDeviceCaptureBoundaryEvidence;
@@ -3270,6 +3283,11 @@ class CaptureProvider extends ChangeNotifier
 
     if (closeCode == 4002) {
       usageProvider?.markAsOutOfCreditsAndRefresh();
+      if (_failActiveMobileCaptureAfterSocketLoss('transcription socket closed because credits are unavailable')) {
+        return;
+      }
+      notifyListeners();
+      return;
     }
 
     if (_replacingTranscriptionSocket) {
@@ -3457,6 +3475,7 @@ class CaptureProvider extends ChangeNotifier
 
   CaptureFinalizationOperation? _beginFinalizationOperation({
     TranscriptSegmentSocketService? owningDeviceSocket,
+    bool allowLostTransportRecovery = false,
   }) {
     final accountLease = EllaAccountCommitBarrier.begin(
       authorityProvider: _activeAccountAuthority,
@@ -3467,6 +3486,7 @@ class CaptureProvider extends ChangeNotifier
       accountLease: accountLease,
       captureGeneration: _captureGeneration,
       captureProtocolAuthority: (owningDeviceSocket ?? _socket)?.captureAuthority,
+      allowLostTransportRecovery: allowLostTransportRecovery,
       currentCaptureGeneration: () => _captureGeneration,
     );
   }

@@ -177,6 +177,7 @@ Future<CreateConversationResponse?> processInProgressConversation({
   int protocolVersion = 2,
   String generation = 'test-generation',
   String ownerToken = 'test-owner-token',
+  bool transportLost = false,
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
   int maxStatusPollAttempts = 60,
@@ -229,6 +230,7 @@ Future<CreateConversationResponse?> processInProgressConversation({
     'protocol_version': protocolVersion,
     'generation': generation,
     'owner_token': ownerToken,
+    if (transportLost) 'transport_lost': true,
   });
   final response = await sendBounded(
     url: '${Env.apiBaseUrl}v1/conversations',

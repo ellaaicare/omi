@@ -299,9 +299,10 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
     final consentLease = _aiConsentLease;
     _aiConsentLease = null;
     consentLease?.stop();
-    _listeners.forEach((k, v) {
-      v.onClosed(closeCode);
-    });
+    final listeners = _listeners.values.toList(growable: false);
+    for (final listener in listeners) {
+      listener.onClosed(closeCode);
+    }
     DebugLogManager.logEvent('transcription_socket_closed', {
       'close_code': closeCode ?? -1,
     });
@@ -315,9 +316,10 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
     final consentLease = _aiConsentLease;
     _aiConsentLease = null;
     consentLease?.stop();
-    _listeners.forEach((k, v) {
-      v.onError(err);
-    });
+    final listeners = _listeners.values.toList(growable: false);
+    for (final listener in listeners) {
+      listener.onError(err);
+    }
     DebugLogManager.logError(err, trace, 'transcription_socket_error');
   }
 
