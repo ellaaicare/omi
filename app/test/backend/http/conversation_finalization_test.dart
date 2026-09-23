@@ -153,6 +153,46 @@ void main() {
     expect(elapsed, greaterThan(const Duration(seconds: 10)));
   });
 
+  test('lost transport recovery marks every exact-tuple finalization request', () async {
+    final authority = _CaptureGenerationAuthority('uid-a');
+    var postCalls = 0;
+
+    final result = await processInProgressConversation(
+      conversationId: conversationId,
+      transportLost: true,
+      expectedAuthenticatedUid: authority.uid,
+      exactAuthority: authority,
+      maxStatusPollAttempts: 1,
+      statusPollInterval: Duration.zero,
+      transport: ({
+        required url,
+        required method,
+        required body,
+        required timeout,
+        required retries,
+        required retryOnUnauthorized,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+      }) async {
+        if (method == 'GET') {
+          return http.Response(jsonEncode(_conversationJson(conversationId, 'processing')), 200);
+        }
+        postCalls++;
+        expect(jsonDecode(body), {
+          'conversation_id': conversationId,
+          'protocol_version': 2,
+          'generation': 'test-generation',
+          'owner_token': 'test-owner-token',
+          'transport_lost': true,
+        });
+        return http.Response('capture owner active', 409);
+      },
+    );
+
+    expect(result, isNull);
+    expect(postCalls, 2);
+  });
+
   for (final directStatus in ['processing', 'merging']) {
     test('direct 200 $directStatus polls the exact capture before success', () async {
       var postCalls = 0;

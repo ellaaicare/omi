@@ -396,8 +396,8 @@ Future<CreateConversationResponse?> _processInProgressConversation({
   required String expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier exactAuthority,
 }) {
-  final captureAuthority =
-      exactAuthority is CaptureFinalizationOperation ? exactAuthority.captureProtocolAuthority : null;
+  final captureOperation = exactAuthority is CaptureFinalizationOperation ? exactAuthority : null;
+  final captureAuthority = captureOperation?.captureProtocolAuthority;
   if (captureAuthority == null || captureAuthority.conversationId != conversationId) {
     return Future<CreateConversationResponse?>.value();
   }
@@ -406,6 +406,7 @@ Future<CreateConversationResponse?> _processInProgressConversation({
     protocolVersion: captureAuthority.protocolVersion,
     generation: captureAuthority.generation,
     ownerToken: captureAuthority.ownerToken,
+    transportLost: captureOperation!.allowLostTransportRecovery,
     expectedAuthenticatedUid: expectedAuthenticatedUid,
     exactAuthority: exactAuthority,
   );
@@ -417,6 +418,7 @@ class CaptureFinalizationOperation implements ExactAccountAuthorityVerifier {
     required EllaAccountCommitLease accountLease,
     required this.captureGeneration,
     required this.captureProtocolAuthority,
+    this.allowLostTransportRecovery = false,
     required int Function() currentCaptureGeneration,
   })  : _accountLease = accountLease,
         _currentCaptureGeneration = currentCaptureGeneration;
@@ -424,6 +426,7 @@ class CaptureFinalizationOperation implements ExactAccountAuthorityVerifier {
   final EllaAccountCommitLease _accountLease;
   final int captureGeneration;
   final CaptureProtocolAuthority? captureProtocolAuthority;
+  final bool allowLostTransportRecovery;
   final int Function() _currentCaptureGeneration;
 
   bool get isCurrent => _accountLease.isExactCurrent() && captureGeneration == _currentCaptureGeneration();
@@ -1525,14 +1528,24 @@ class CaptureProvider extends ChangeNotifier
 
     if (!SharedPreferencesUtil().aiConsentAccepted) return;
     if (session.socket.state != SocketServiceState.connected) {
-      _recoverDeviceCaptureSocket(session, frame, reason: 'necklace audio reached a disconnected transcription socket');
+      _recoverDeviceCaptureSocket(
+        session,
+        frame,
+        reason: 'necklace audio reached a disconnected transcription socket',
+        failure: CaptureDiagnosticFailure.socketClosed,
+      );
       return;
     }
 
     unawaited(
       _sendDeviceFrame(session.socket, frame, startProof: startProof).then((sent) {
         if (!sent && SharedPreferencesUtil().aiConsentAccepted) {
-          _recoverDeviceCaptureSocket(session, frame, reason: 'necklace audio could not reach transcription');
+          _recoverDeviceCaptureSocket(
+            session,
+            frame,
+            reason: 'necklace audio could not reach transcription',
+            failure: CaptureDiagnosticFailure.socketError,
+          );
         }
       }),
     );
@@ -1553,27 +1566,41 @@ class CaptureProvider extends ChangeNotifier
     return accepted;
   }
 
-  void _recoverDeviceCaptureSocket(
+  bool _recoverDeviceCaptureSocket(
     _DeviceCaptureSession session,
-    _BufferedDeviceCaptureFrame frame, {
+    _BufferedDeviceCaptureFrame? frame, {
     required String reason,
+    required CaptureDiagnosticFailure failure,
   }) {
-    if (!_isDeviceCaptureCurrent(session) || recordingState != RecordingState.deviceRecord) return;
+    if (!_isDeviceCaptureCurrent(session) || recordingState != RecordingState.deviceRecord) return false;
+    if (!SharedPreferencesUtil().aiConsentAccepted) return false;
     final activeBuffer = session.socketReplacementBuffer;
     if (activeBuffer != null) {
-      _bufferDeviceFrameDuringSocketReplacement(session, activeBuffer, frame);
-      return;
+      if (frame != null) _bufferDeviceFrameDuringSocketReplacement(session, activeBuffer, frame);
+      return true;
     }
 
     _transcriptServiceReady = false;
     _replacingTranscriptionSocket = true;
     notifyListeners();
+    final hasServerMoment = _captureDiagnostics.hasTranscriptionDelivery || hasCapturableContent;
+    final recovery = hasServerMoment
+        ? _serializeDeviceConversationBoundary(
+            reason: reason,
+            initialFrame: frame,
+            allowLostTransportRecovery: true,
+          )
+        : _replaceDeviceCaptureSocket(session, reason: reason, initialFrame: frame);
     unawaited(
-      _replaceDeviceCaptureSocket(session, reason: reason, initialFrame: frame).whenComplete(() {
+      recovery.then((recovered) async {
+        if (recovered || !_isDeviceCaptureCurrent(session) || recordingState != RecordingState.deviceRecord) return;
+        await _failDeviceCaptureSession(session, 'Necklace transcription recovery failed', failure: failure);
+      }).whenComplete(() {
         _replacingTranscriptionSocket = false;
         if (_isDeviceCaptureCurrent(session)) notifyListeners();
       }),
     );
+    return true;
   }
 
   Future<bool> _sendDeviceFrame(
@@ -2786,11 +2813,23 @@ class CaptureProvider extends ChangeNotifier
   /// Finalizes the exact conversation owned by the current necklace socket,
   /// then binds the still-running BLE stream to a replacement socket.
   Future<bool> finalizeCurrentDeviceConversationAndContinue() {
+    return _serializeDeviceConversationBoundary(reason: 'continuous necklace moment boundary');
+  }
+
+  Future<bool> _serializeDeviceConversationBoundary({
+    required String reason,
+    _BufferedDeviceCaptureFrame? initialFrame,
+    bool allowLostTransportRecovery = false,
+  }) {
     final activeBoundary = _deviceCaptureBoundaryFuture;
     if (activeBoundary != null) return activeBoundary;
 
     late final Future<bool> trackedBoundary;
-    trackedBoundary = _finalizeCurrentDeviceConversationAndContinue().whenComplete(() {
+    trackedBoundary = _finalizeCurrentDeviceConversationAndContinue(
+      reason: reason,
+      initialFrame: initialFrame,
+      allowLostTransportRecovery: allowLostTransportRecovery,
+    ).whenComplete(() {
       if (identical(_deviceCaptureBoundaryFuture, trackedBoundary)) {
         _deviceCaptureBoundaryFuture = null;
       }
@@ -2799,7 +2838,11 @@ class CaptureProvider extends ChangeNotifier
     return trackedBoundary;
   }
 
-  Future<bool> _finalizeCurrentDeviceConversationAndContinue() async {
+  Future<bool> _finalizeCurrentDeviceConversationAndContinue({
+    required String reason,
+    _BufferedDeviceCaptureFrame? initialFrame,
+    required bool allowLostTransportRecovery,
+  }) async {
     final activeFinalization = _deviceCaptureFinalizationFuture;
     if (activeFinalization != null) await activeFinalization;
 
@@ -2807,7 +2850,10 @@ class CaptureProvider extends ChangeNotifier
     if (session == null || !_isDeviceCaptureCurrent(session) || recordingState != RecordingState.deviceRecord) {
       return false;
     }
-    final operation = _beginFinalizationOperation(owningDeviceSocket: session.socket);
+    final operation = _beginFinalizationOperation(
+      owningDeviceSocket: session.socket,
+      allowLostTransportRecovery: allowLostTransportRecovery,
+    );
     if (operation == null) return false;
     try {
       final hasBoundaryEvidence = hasCapturableContent || hasActiveDeviceCaptureBoundaryEvidence;
@@ -2828,7 +2874,8 @@ class CaptureProvider extends ChangeNotifier
       try {
         final replaced = await _replaceDeviceCaptureSocket(
           session,
-          reason: 'continuous necklace moment boundary',
+          reason: reason,
+          initialFrame: initialFrame,
           afterOldSocketStopped: () async {
             final conversationId = await _awaitInProgressConversationId(
               operation,
@@ -3236,10 +3283,25 @@ class CaptureProvider extends ChangeNotifier
 
     if (closeCode == 4002) {
       usageProvider?.markAsOutOfCreditsAndRefresh();
+      if (_failActiveMobileCaptureAfterSocketLoss('transcription socket closed because credits are unavailable')) {
+        return;
+      }
+      notifyListeners();
+      return;
     }
 
     if (_replacingTranscriptionSocket) {
       notifyListeners();
+      return;
+    }
+    final deviceSession = _deviceCaptureSession;
+    if (deviceSession != null &&
+        _recoverDeviceCaptureSocket(
+          deviceSession,
+          null,
+          reason: 'transcription socket closed during necklace capture',
+          failure: CaptureDiagnosticFailure.socketClosed,
+        )) {
       return;
     }
     if (_failActiveMobileCaptureAfterSocketLoss('transcription socket closed')) {
@@ -3321,6 +3383,16 @@ class CaptureProvider extends ChangeNotifier
       return;
     }
 
+    final deviceSession = _deviceCaptureSession;
+    if (deviceSession != null &&
+        _recoverDeviceCaptureSocket(
+          deviceSession,
+          null,
+          reason: 'transcription socket error during necklace capture: $err',
+          failure: CaptureDiagnosticFailure.socketError,
+        )) {
+      return;
+    }
     if (_failActiveMobileCaptureAfterSocketLoss('transcription socket error: $err')) {
       return;
     }
@@ -3403,6 +3475,7 @@ class CaptureProvider extends ChangeNotifier
 
   CaptureFinalizationOperation? _beginFinalizationOperation({
     TranscriptSegmentSocketService? owningDeviceSocket,
+    bool allowLostTransportRecovery = false,
   }) {
     final accountLease = EllaAccountCommitBarrier.begin(
       authorityProvider: _activeAccountAuthority,
@@ -3413,6 +3486,7 @@ class CaptureProvider extends ChangeNotifier
       accountLease: accountLease,
       captureGeneration: _captureGeneration,
       captureProtocolAuthority: (owningDeviceSocket ?? _socket)?.captureAuthority,
+      allowLostTransportRecovery: allowLostTransportRecovery,
       currentCaptureGeneration: () => _captureGeneration,
     );
   }
