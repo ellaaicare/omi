@@ -930,7 +930,14 @@ class CaptureProvider extends ChangeNotifier
 
   bool _transcriptServiceReady = false;
 
-  bool get transcriptServiceReady => _transcriptServiceReady && _isConnected;
+  bool get transcriptServiceReady {
+    final deviceSession = _deviceCaptureSession;
+    final activeSocketReady = deviceSession == null ||
+        (_isDeviceCaptureCurrent(deviceSession) &&
+            deviceSession.socket.state == SocketServiceState.connected &&
+            deviceSession.socketReplacementBuffer == null);
+    return _transcriptServiceReady && _isConnected && activeSocketReady;
+  }
 
   // having a connected device or using the phone's mic for recording
   bool get recordingDeviceServiceReady =>
@@ -1505,37 +1512,68 @@ class CaptureProvider extends ChangeNotifier
     }
 
     if (physicalPayload.isEmpty) return;
+    final frame = _BufferedDeviceCaptureFrame(
+      socketPayload: physicalPayload,
+      walFrame: snapshot,
+      persistedToWal: walSupported,
+    );
     final replacementBuffer = session.socketReplacementBuffer;
     if (replacementBuffer != null) {
-      final accepted = replacementBuffer.add(
-        _BufferedDeviceCaptureFrame(
-          socketPayload: physicalPayload,
-          walFrame: snapshot,
-          persistedToWal: walSupported,
-        ),
-      );
-      if (!accepted && !replacementBuffer.failureSignalled) {
-        replacementBuffer.failureSignalled = true;
-        unawaited(
-          _failDeviceCaptureSession(session, 'Necklace transcription replacement buffer exceeded its safe bound'),
-        );
-      }
+      _bufferDeviceFrameDuringSocketReplacement(session, replacementBuffer, frame);
       return;
     }
 
-    if (session.socket.state == SocketServiceState.connected && SharedPreferencesUtil().aiConsentAccepted) {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return;
+    if (session.socket.state != SocketServiceState.connected) {
+      _recoverDeviceCaptureSocket(session, frame, reason: 'necklace audio reached a disconnected transcription socket');
+      return;
+    }
+
+    unawaited(
+      _sendDeviceFrame(session.socket, frame, startProof: startProof).then((sent) {
+        if (!sent && SharedPreferencesUtil().aiConsentAccepted) {
+          _recoverDeviceCaptureSocket(session, frame, reason: 'necklace audio could not reach transcription');
+        }
+      }),
+    );
+  }
+
+  bool _bufferDeviceFrameDuringSocketReplacement(
+    _DeviceCaptureSession session,
+    _DeviceSocketReplacementBuffer buffer,
+    _BufferedDeviceCaptureFrame frame,
+  ) {
+    final accepted = buffer.add(frame);
+    if (!accepted && !buffer.failureSignalled) {
+      buffer.failureSignalled = true;
       unawaited(
-        _sendDeviceFrame(
-          session.socket,
-          _BufferedDeviceCaptureFrame(
-            socketPayload: physicalPayload,
-            walFrame: snapshot,
-            persistedToWal: walSupported,
-          ),
-          startProof: startProof,
-        ),
+        _failDeviceCaptureSession(session, 'Necklace transcription replacement buffer exceeded its safe bound'),
       );
     }
+    return accepted;
+  }
+
+  void _recoverDeviceCaptureSocket(
+    _DeviceCaptureSession session,
+    _BufferedDeviceCaptureFrame frame, {
+    required String reason,
+  }) {
+    if (!_isDeviceCaptureCurrent(session) || recordingState != RecordingState.deviceRecord) return;
+    final activeBuffer = session.socketReplacementBuffer;
+    if (activeBuffer != null) {
+      _bufferDeviceFrameDuringSocketReplacement(session, activeBuffer, frame);
+      return;
+    }
+
+    _transcriptServiceReady = false;
+    _replacingTranscriptionSocket = true;
+    notifyListeners();
+    unawaited(
+      _replaceDeviceCaptureSocket(session, reason: reason, initialFrame: frame).whenComplete(() {
+        _replacingTranscriptionSocket = false;
+        if (_isDeviceCaptureCurrent(session)) notifyListeners();
+      }),
+    );
   }
 
   Future<bool> _sendDeviceFrame(
@@ -1679,6 +1717,7 @@ class CaptureProvider extends ChangeNotifier
   Future<bool> _replaceDeviceCaptureSocket(
     _DeviceCaptureSession session, {
     required String reason,
+    _BufferedDeviceCaptureFrame? initialFrame,
     Future<bool> Function()? afterOldSocketStopped,
     CaptureDiagnosticFailure deniedReplacementFailure = CaptureDiagnosticFailure.necklaceConnectionUnavailable,
   }) async {
@@ -1697,6 +1736,10 @@ class CaptureProvider extends ChangeNotifier
     );
     session.socketReplacementBuffer = replacementBuffer;
     try {
+      if (initialFrame != null &&
+          !_bufferDeviceFrameDuringSocketReplacement(session, replacementBuffer, initialFrame)) {
+        return false;
+      }
       oldSocket.unsubscribe(this);
       await oldSocket.stop(reason: reason);
       final mayConnectReplacement = await afterOldSocketStopped?.call() ?? true;

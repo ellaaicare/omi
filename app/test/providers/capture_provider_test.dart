@@ -142,6 +142,8 @@ class _FakePureSocket implements IPureSocket {
   final List<dynamic> sent = [];
   int stops = 0;
 
+  void setStatus(PureSocketStatus status) => _status = status;
+
   @override
   PureSocketStatus get status => _status;
 
@@ -3055,6 +3057,83 @@ void main() {
     expect(provider.recordingState, RecordingState.error);
     expect(provider.deviceCaptureSocketForTesting, isNull);
     expect(provider.hasActiveKeepAliveTimerForTesting, isFalse);
+  });
+
+  test('physical necklace audio replaces a silently disconnected transcription socket', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final first = _FakeTranscriptSocket();
+    final replacement = _FakeTranscriptSocket();
+    var prepares = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async =>
+          prepares++ == 0 ? first.service : replacement.service,
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+    );
+    provider.onConnectionStateChanged(true);
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    first.pure.setStatus(PureSocketStatus.disconnected);
+
+    expect(provider.transcriptServiceReady, isFalse);
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 7, 8], codec: BleAudioCodec.pcm8);
+    await pumpEventQueue();
+
+    expect(prepares, 2);
+    expect(provider.recordingState, RecordingState.deviceRecord);
+    expect(provider.deviceCaptureSocketForTesting, same(replacement.service));
+    expect(replacement.pure.sent, contains(equals([7, 8])));
+    expect(provider.captureDiagnostics.physicalFrames, 1);
+    expect(provider.captureDiagnostics.transmittedFrames, 1);
+    expect(provider.transcriptServiceReady, isTrue);
+  });
+
+  test('failed necklace frame send is replayed through one replacement socket', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final first = _FakeTranscriptSocket(sendError: StateError('transport rejected frame'));
+    final replacement = _FakeTranscriptSocket();
+    var prepares = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async =>
+          prepares++ == 0 ? first.service : replacement.service,
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+    );
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 9, 10], codec: BleAudioCodec.pcm8);
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 11, 12], codec: BleAudioCodec.pcm8);
+    await pumpEventQueue();
+
+    expect(prepares, 2);
+    expect(first.pure.stops, 1);
+    expect(provider.recordingState, RecordingState.deviceRecord);
+    expect(provider.deviceCaptureSocketForTesting, same(replacement.service));
+    expect(replacement.pure.sent.whereType<List<int>>(), [
+      [9, 10],
+      [11, 12],
+    ]);
+    expect(provider.captureDiagnostics.physicalFrames, 2);
+    expect(provider.captureDiagnostics.transmittedFrames, 2);
+    expect(provider.deviceCaptureFailureTransitionsForTesting, 0);
   });
 
   test('failed necklace socket replacement becomes a durable capture error', () async {
