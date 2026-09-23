@@ -1144,7 +1144,7 @@ def test_capture_usage_receipt_and_increment_commit_atomically_once():
     assert duplicate.sets == []
 
 
-def test_capture_completed_summary_resumes_missing_effect_after_lost_ack(monkeypatch):
+def test_capture_transport_lost_route_resumes_missing_effect_after_lost_ack(monkeypatch):
     conversation = _long_conversation()
     conversation.id = "capture-a"
     durable = {
@@ -1205,8 +1205,10 @@ def test_capture_completed_summary_resumes_missing_effect_after_lost_ack(monkeyp
         }
         return {**result, "conversation": durable_snapshot()}
 
-    def claim_finalization(_uid, _conversation_id, generation, owner_token):
+    def claim_finalization(_uid, _conversation_id, generation, owner_token, *, transport_lost=False):
+        assert (_uid, _conversation_id) == ("uid-1", "capture-a")
         assert (generation, owner_token) == ("generation-a", "owner-a")
+        assert transport_lost is True
         capture_state = state["durable"]["capture_state"]
         if capture_state == "terminal":
             return "terminal", None
@@ -1357,6 +1359,7 @@ def test_capture_completed_summary_resumes_missing_effect_after_lost_ack(monkeyp
         "protocol_version": 2,
         "generation": "generation-a",
         "owner_token": "owner-a",
+        "transport_lost": True,
     }
     with TestClient(app, raise_server_exceptions=False) as client:
         failed = client.post("/v1/conversations", json=request_body)

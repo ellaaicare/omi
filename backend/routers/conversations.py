@@ -78,6 +78,7 @@ class ProcessConversationRequest(BaseModel):
     protocol_version: Optional[int] = None
     generation: Optional[str] = None
     owner_token: Optional[str] = None
+    transport_lost: bool = False
 
 
 @router.post(
@@ -114,6 +115,7 @@ def process_in_progress_conversation(
             conversation_id,
             request.generation or '',
             request.owner_token or '',
+            transport_lost=request.transport_lost,
         )
         if capture_outcome == 'terminal':
             return CreateConversationResponse(conversation=Conversation(**initial_conversation), messages=[])
