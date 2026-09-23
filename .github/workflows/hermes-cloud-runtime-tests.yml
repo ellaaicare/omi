@@ -666,6 +666,7 @@ jobs:
             "tests/unit/test_capture_buffer_retention.py::test_capture_commit_lease_blocks_ownership_transfer_until_release"
             "tests/unit/test_capture_buffer_retention.py::test_manual_processing_cannot_release_active_or_committing_capture"
             "tests/unit/test_capture_buffer_retention.py::test_manual_processing_fence_blocks_exact_reconnect_until_processing_claim"
+            "tests/unit/test_capture_buffer_retention.py::test_lost_transport_processing_fence_requires_exact_idle_owner_and_is_atomic"
             "tests/unit/test_capture_buffer_retention.py::test_stale_active_conversation_id_can_only_be_replaced_by_exact_cas"
             "tests/unit/test_capture_incident_1210_regressions.py::test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing"
             "tests/unit/test_capture_incident_1210_regressions.py::test_pusher_processing_request_waits_for_terminal_response"
@@ -698,6 +699,7 @@ jobs:
             "tests/unit/test_capture_protocol_v2_live.py::test_live_predecessor_rejects_new_generation_reconnect"
             "tests/unit/test_capture_protocol_v2_live.py::test_missing_or_malformed_lease_rejects_new_generation_reconnect"
             "tests/unit/test_capture_protocol_v2_live.py::test_drain_and_finalization_require_exact_tuple_and_reach_terminal"
+            "tests/unit/test_capture_protocol_v2_live.py::test_transport_lost_finalization_requires_exact_expired_authority"
             "tests/unit/test_capture_protocol_v2_live.py::test_expired_authority_allows_legacy_predecessor_rotation"
             "tests/unit/test_capture_protocol_v2_live.py::test_live_authority_rejects_legacy_predecessor_rotation_without_writes"
             "tests/unit/test_capture_protocol_v2_live.py::test_live_authority_blocks_overlapping_reconnect_before_owner_rebind"
@@ -737,7 +739,7 @@ jobs:
             "tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[todoist]"
             "tests/unit/test_capture_webhook_delivery.py::test_capture_developer_webhook_failure_is_not_acknowledged"
           )
-          test "$(grep -c '::' <<<"$capture_ids")" -eq 103
+          test "$(grep -c '::' <<<"$capture_ids")" -eq 105
           for required_id in "${required_capture_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$capture_ids"
           done
@@ -1076,7 +1078,7 @@ jobs:
             "tests/unit/test_conversation_processing_failures.py::test_capture_internal_sink_reclaim_is_idempotent[usage]"
             "tests/unit/test_conversation_processing_failures.py::test_capture_internal_sink_reclaim_is_idempotent[audio]"
             "tests/unit/test_conversation_processing_failures.py::test_capture_usage_receipt_and_increment_commit_atomically_once"
-            "tests/unit/test_conversation_processing_failures.py::test_capture_completed_summary_resumes_missing_effect_after_lost_ack"
+            "tests/unit/test_conversation_processing_failures.py::test_capture_transport_lost_route_resumes_missing_effect_after_lost_ack"
             "tests/unit/test_conversation_processing_failures.py::test_capture_ready_http_failure_retries_same_effect_without_duplicate_summary"
             "tests/unit/test_conversation_processing_failures.py::test_capture_task_sync_transient_failure_keeps_outer_effect_reclaimable"
             "tests/unit/test_conversation_processing_callers.py::test_pusher_does_not_dispatch_external_integrations_for_non_dispatch_outcomes[already_completed]"

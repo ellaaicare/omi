@@ -1376,6 +1376,105 @@ def test_drain_and_finalization_require_exact_tuple_and_reach_terminal(capture_p
     assert _updated(conversation_ref.data, complete_transaction, conversation_ref)['capture_state'] == 'terminal'
 
 
+def test_transport_lost_finalization_requires_exact_expired_authority(capture_protocol):
+    now = datetime.now(timezone.utc)
+    expired = now - timedelta(seconds=1)
+    live = now + timedelta(seconds=30)
+
+    def attempt(authority, conversation, *, generation='generation-a', owner='owner-a', transport_lost=True):
+        authority_ref = _Document(authority)
+        conversation_ref = _Document(conversation)
+        transaction = _Transaction()
+        outcome = capture_protocol._claim_finalization_transaction.to_wrap(
+            transaction,
+            authority_ref,
+            conversation_ref,
+            'capture-a',
+            generation,
+            owner,
+            'claim-a',
+            now,
+            transport_lost,
+        )
+        return outcome, transaction, authority_ref, conversation_ref
+
+    expired_authority = {**_authority(), 'lease_expires_at': expired}
+    expired_conversation = {**_conversation(), 'capture_lease_expires_at': expired}
+
+    outcome, transaction, _, _ = attempt(expired_authority, expired_conversation, transport_lost=False)
+    assert outcome == 'not_drained'
+    assert transaction.updates == []
+
+    outcome, transaction, authority_ref, conversation_ref = attempt(expired_authority, expired_conversation)
+    assert outcome == 'claimed'
+    finalized_authority = _updated(authority_ref.data, transaction, authority_ref)
+    finalized_conversation = _updated(conversation_ref.data, transaction, conversation_ref)
+    assert finalized_authority['state'] == 'finalizing'
+    assert finalized_authority['drained_at'] == now
+    assert finalized_conversation['capture_state'] == 'finalizing'
+    assert finalized_conversation['capture_owner_id'] is None
+    assert finalized_conversation['capture_drained_at'] == now
+
+    denied_cases = (
+        (
+            {**expired_authority, 'lease_expires_at': live},
+            expired_conversation,
+            'generation-a',
+            'owner-a',
+            'not_drained',
+        ),
+        (
+            expired_authority,
+            {**expired_conversation, 'capture_lease_expires_at': live},
+            'generation-a',
+            'owner-a',
+            'not_drained',
+        ),
+        (expired_authority, expired_conversation, 'generation-b', 'owner-a', 'mismatch'),
+        (expired_authority, expired_conversation, 'generation-a', 'owner-b', 'mismatch'),
+        (
+            {
+                **expired_authority,
+                'finalization_claim_token': 'active-finalizer',
+                'finalization_lease_expires_at': live,
+            },
+            expired_conversation,
+            'generation-a',
+            'owner-a',
+            'not_drained',
+        ),
+        (
+            {
+                **_authority(state='finalizing'),
+                'finalization_claim_token': 'active-finalizer',
+                'finalization_lease_expires_at': live,
+            },
+            {
+                **_conversation(state='finalizing'),
+                'capture_finalization_claim_token': 'active-finalizer',
+                'capture_finalization_lease_expires_at': live,
+            },
+            'generation-a',
+            'owner-a',
+            'busy',
+        ),
+    )
+    for authority, conversation, generation, owner, expected in denied_cases:
+        outcome, transaction, _, _ = attempt(authority, conversation, generation=generation, owner=owner)
+        assert outcome == expected
+        assert transaction.updates == []
+
+    outcome, transaction, _, _ = attempt(None, expired_conversation)
+    assert outcome == 'not_found'
+    assert transaction.updates == []
+
+    drained_authority = _authority(state='drained')
+    drained_conversation = _conversation(state='drained')
+    outcome, transaction, _, _ = attempt(drained_authority, drained_conversation, transport_lost=False)
+    assert outcome == 'claimed'
+    assert len(transaction.updates) == 2
+
+
 def test_expired_finalization_lease_is_reclaimable_and_stale_claim_cannot_commit(capture_protocol):
     now = datetime.now(timezone.utc)
     expired_at = now - timedelta(seconds=1)

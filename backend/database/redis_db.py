@@ -495,6 +495,19 @@ if redis.call('EXISTS', KEYS[3]) == 1 then
     return 0
 end
 local active_id = redis.call('GET', KEYS[1])
+local expected_owner_id = ARGV[4]
+if expected_owner_id ~= '' then
+    local owner_id = redis.call('GET', KEYS[2])
+    if active_id or owner_id then
+        if active_id ~= ARGV[1] or owner_id ~= expected_owner_id then
+            return 0
+        end
+    end
+    redis.call('SET', KEYS[3], ARGV[2], 'EX', ARGV[3])
+    redis.call('DEL', KEYS[1])
+    redis.call('DEL', KEYS[2])
+    return 1
+end
 if active_id == ARGV[1] then
     if redis.call('EXISTS', KEYS[2]) == 1 then
         return 0
@@ -717,6 +730,8 @@ def acquire_in_progress_processing_fence(
     conversation_id: str,
     processing_token: str,
     ttl: int = 120,
+    *,
+    expected_owner_id: Optional[str] = None,
 ) -> bool:
     """Fence reconnect publication while an exact conversation processing claim is acquired."""
     active_key, owner_key = _in_progress_conversation_keys(uid)
@@ -730,6 +745,7 @@ def acquire_in_progress_processing_fence(
             conversation_id,
             processing_token,
             ttl,
+            expected_owner_id or '',
         )
     )
 

@@ -78,6 +78,7 @@ class ProcessConversationRequest(BaseModel):
     protocol_version: Optional[int] = None
     generation: Optional[str] = None
     owner_token: Optional[str] = None
+    transport_lost: bool = False
 
 
 @router.post(
@@ -114,6 +115,7 @@ def process_in_progress_conversation(
             conversation_id,
             request.generation or '',
             request.owner_token or '',
+            transport_lost=request.transport_lost,
         )
         if capture_outcome == 'terminal':
             return CreateConversationResponse(conversation=Conversation(**initial_conversation), messages=[])
@@ -128,7 +130,20 @@ def process_in_progress_conversation(
         capture_finalization_claimed = True
 
     processing_fence_token = f'conversation-processing:{uuid.uuid4()}'
-    if not redis_db.acquire_in_progress_processing_fence(uid, conversation_id, processing_fence_token):
+    if is_capture_v2 and request and request.transport_lost:
+        processing_fence_acquired = redis_db.acquire_in_progress_processing_fence(
+            uid,
+            conversation_id,
+            processing_fence_token,
+            expected_owner_id=request.owner_token or '',
+        )
+    else:
+        processing_fence_acquired = redis_db.acquire_in_progress_processing_fence(
+            uid,
+            conversation_id,
+            processing_fence_token,
+        )
+    if not processing_fence_acquired:
         if capture_finalization_claimed:
             release_capture_finalization(
                 uid,

@@ -1144,7 +1144,7 @@ def test_capture_usage_receipt_and_increment_commit_atomically_once():
     assert duplicate.sets == []
 
 
-def test_capture_completed_summary_resumes_missing_effect_after_lost_ack(monkeypatch):
+def test_capture_transport_lost_route_resumes_missing_effect_after_lost_ack(monkeypatch):
     conversation = _long_conversation()
     conversation.id = "capture-a"
     durable = {
@@ -1166,6 +1166,7 @@ def test_capture_completed_summary_resumes_missing_effect_after_lost_ack(monkeyp
     postprocess_attempts = []
     postprocess_writes = set()
     integration_writes = set()
+    lost_transport_handoffs = []
 
     def durable_snapshot():
         return {
@@ -1205,8 +1206,10 @@ def test_capture_completed_summary_resumes_missing_effect_after_lost_ack(monkeyp
         }
         return {**result, "conversation": durable_snapshot()}
 
-    def claim_finalization(_uid, _conversation_id, generation, owner_token):
+    def claim_finalization(_uid, _conversation_id, generation, owner_token, *, transport_lost=False):
+        assert (_uid, _conversation_id) == ("uid-1", "capture-a")
         assert (generation, owner_token) == ("generation-a", "owner-a")
+        assert transport_lost is True
         capture_state = state["durable"]["capture_state"]
         if capture_state == "terminal":
             return "terminal", None
@@ -1331,10 +1334,14 @@ def test_capture_completed_summary_resumes_missing_effect_after_lost_ack(monkeyp
     monkeypatch.setattr(
         conversations_router.redis_db,
         "acquire_in_progress_processing_fence",
-        lambda *_args: True,
+        lambda uid, conversation_id, processing_token, *, expected_owner_id=None: lost_transport_handoffs.append(
+            (uid, conversation_id, expected_owner_id, processing_token)
+        )
+        or True,
     )
     monkeypatch.setattr(conversations_router.redis_db, "release_capture_commit_lease", lambda *_args: True)
     monkeypatch.setattr(conversations_router.redis_db, "get_cached_user_geolocation", lambda _uid: None)
+    monkeypatch.setattr(conversation_processor.redis_db, "get_conversation_meeting_id", lambda _conversation_id: None)
     monkeypatch.setattr(
         conversation_processor,
         "conversation_created_webhook",
@@ -1357,6 +1364,7 @@ def test_capture_completed_summary_resumes_missing_effect_after_lost_ack(monkeyp
         "protocol_version": 2,
         "generation": "generation-a",
         "owner_token": "owner-a",
+        "transport_lost": True,
     }
     with TestClient(app, raise_server_exceptions=False) as client:
         failed = client.post("/v1/conversations", json=request_body)
@@ -1380,6 +1388,8 @@ def test_capture_completed_summary_resumes_missing_effect_after_lost_ack(monkeyp
     assert postprocess_attempts == [postprocess_attempts[0], postprocess_attempts[0]]
     assert len(postprocess_writes) == 1
     assert len(integration_writes) == 1
+    assert len(lost_transport_handoffs) == 2
+    assert all(handoff[:3] == ("uid-1", "capture-a", "owner-a") for handoff in lost_transport_handoffs)
     assert state["durable"]["capture_state"] == "terminal"
     assert len(state["terminal_attempts"]) == 1
     terminal_completed, terminal_receipts = state["terminal_attempts"][0]

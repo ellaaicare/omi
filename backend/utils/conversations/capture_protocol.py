@@ -736,6 +736,7 @@ def _claim_finalization_transaction(
     owner_token: str,
     claim_token: str,
     now: datetime,
+    transport_lost: bool = False,
 ) -> str:
     authority_snapshot = authority_ref.get(transaction=transaction)
     conversation_snapshot = conversation_ref.get(transaction=transaction)
@@ -752,32 +753,53 @@ def _claim_finalization_transaction(
     if state == 'terminal' and str(conversation.get('capture_state') or '') == 'terminal':
         return 'terminal'
     if state == 'finalizing':
-        expires_at = authority.get('finalization_lease_expires_at')
-        if isinstance(expires_at, datetime) and _aware(expires_at) > now:
+        if (
+            str(conversation.get('capture_state') or '') != 'finalizing'
+            or not _strict_lease_expired(authority, now, 'finalization_lease_expires_at')
+            or not _strict_lease_expired(conversation, now, 'capture_finalization_lease_expires_at')
+        ):
             return 'busy'
-    elif state != 'drained':
+    elif state == 'active' and transport_lost:
+        # The client marker is only a hint; both durable leases must independently prove quiescence.
+        if (
+            str(conversation.get('capture_state') or '') != 'active'
+            or str(conversation.get('capture_owner_id') or '') != owner_token
+            or not _strict_lease_expired(authority, now, 'lease_expires_at')
+            or not _strict_lease_expired(conversation, now, 'capture_lease_expires_at')
+            or authority.get('finalization_claim_token')
+            or conversation.get('capture_finalization_claim_token')
+            or not _optional_lease_absent_or_expired(authority, now, 'finalization_lease_expires_at')
+            or not _optional_lease_absent_or_expired(conversation, now, 'capture_finalization_lease_expires_at')
+        ):
+            return 'not_drained'
+    elif state != 'drained' or str(conversation.get('capture_state') or '') != 'drained':
         return 'not_drained'
 
     lease_expires_at = now + timedelta(seconds=CAPTURE_FINALIZATION_LEASE_SECONDS)
-    transaction.update(
-        authority_ref,
-        {
-            'state': 'finalizing',
-            'finalization_claim_token': claim_token,
-            'finalization_lease_expires_at': lease_expires_at,
-            'updated_at': now,
-        },
-    )
-    transaction.update(
-        conversation_ref,
-        {
-            'capture_state': 'finalizing',
-            'capture_finalization_claim_token': claim_token,
-            'capture_finalization_lease_expires_at': lease_expires_at,
-            'capture_finalization_attempt_count': int(conversation.get('capture_finalization_attempt_count') or 0) + 1,
-            'capture_finalization_started_at': conversation.get('capture_finalization_started_at') or now,
-        },
-    )
+    authority_update = {
+        'state': 'finalizing',
+        'finalization_claim_token': claim_token,
+        'finalization_lease_expires_at': lease_expires_at,
+        'updated_at': now,
+    }
+    conversation_update = {
+        'capture_state': 'finalizing',
+        'capture_finalization_claim_token': claim_token,
+        'capture_finalization_lease_expires_at': lease_expires_at,
+        'capture_finalization_attempt_count': int(conversation.get('capture_finalization_attempt_count') or 0) + 1,
+        'capture_finalization_started_at': conversation.get('capture_finalization_started_at') or now,
+    }
+    if state == 'active':
+        authority_update.update({'lease_expires_at': now, 'drained_at': now})
+        conversation_update.update(
+            {
+                'capture_owner_id': None,
+                'capture_lease_expires_at': now,
+                'capture_drained_at': now,
+            }
+        )
+    transaction.update(authority_ref, authority_update)
+    transaction.update(conversation_ref, conversation_update)
     return 'claimed'
 
 
@@ -787,6 +809,8 @@ def claim_capture_finalization(
     generation: str,
     owner_token: str,
     claim_token: Optional[str] = None,
+    *,
+    transport_lost: bool = False,
 ) -> tuple[str, str]:
     exact_claim_token = claim_token or str(uuid.uuid4())
     outcome = _claim_finalization_transaction(
@@ -798,6 +822,7 @@ def claim_capture_finalization(
         owner_token,
         exact_claim_token,
         datetime.now(timezone.utc),
+        transport_lost,
     )
     return outcome, exact_claim_token
 
