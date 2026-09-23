@@ -1525,14 +1525,24 @@ class CaptureProvider extends ChangeNotifier
 
     if (!SharedPreferencesUtil().aiConsentAccepted) return;
     if (session.socket.state != SocketServiceState.connected) {
-      _recoverDeviceCaptureSocket(session, frame, reason: 'necklace audio reached a disconnected transcription socket');
+      _recoverDeviceCaptureSocket(
+        session,
+        frame,
+        reason: 'necklace audio reached a disconnected transcription socket',
+        failure: CaptureDiagnosticFailure.socketClosed,
+      );
       return;
     }
 
     unawaited(
       _sendDeviceFrame(session.socket, frame, startProof: startProof).then((sent) {
         if (!sent && SharedPreferencesUtil().aiConsentAccepted) {
-          _recoverDeviceCaptureSocket(session, frame, reason: 'necklace audio could not reach transcription');
+          _recoverDeviceCaptureSocket(
+            session,
+            frame,
+            reason: 'necklace audio could not reach transcription',
+            failure: CaptureDiagnosticFailure.socketError,
+          );
         }
       }),
     );
@@ -1553,27 +1563,37 @@ class CaptureProvider extends ChangeNotifier
     return accepted;
   }
 
-  void _recoverDeviceCaptureSocket(
+  bool _recoverDeviceCaptureSocket(
     _DeviceCaptureSession session,
-    _BufferedDeviceCaptureFrame frame, {
+    _BufferedDeviceCaptureFrame? frame, {
     required String reason,
+    required CaptureDiagnosticFailure failure,
   }) {
-    if (!_isDeviceCaptureCurrent(session) || recordingState != RecordingState.deviceRecord) return;
+    if (!_isDeviceCaptureCurrent(session) || recordingState != RecordingState.deviceRecord) return false;
+    if (!SharedPreferencesUtil().aiConsentAccepted) return false;
     final activeBuffer = session.socketReplacementBuffer;
     if (activeBuffer != null) {
-      _bufferDeviceFrameDuringSocketReplacement(session, activeBuffer, frame);
-      return;
+      if (frame != null) _bufferDeviceFrameDuringSocketReplacement(session, activeBuffer, frame);
+      return true;
     }
 
     _transcriptServiceReady = false;
     _replacingTranscriptionSocket = true;
     notifyListeners();
+    final hasServerMoment = _captureDiagnostics.hasTranscriptionDelivery || hasCapturableContent;
+    final recovery = hasServerMoment
+        ? _serializeDeviceConversationBoundary(reason: reason, initialFrame: frame)
+        : _replaceDeviceCaptureSocket(session, reason: reason, initialFrame: frame);
     unawaited(
-      _replaceDeviceCaptureSocket(session, reason: reason, initialFrame: frame).whenComplete(() {
+      recovery.then((recovered) async {
+        if (recovered || !_isDeviceCaptureCurrent(session) || recordingState != RecordingState.deviceRecord) return;
+        await _failDeviceCaptureSession(session, 'Necklace transcription recovery failed', failure: failure);
+      }).whenComplete(() {
         _replacingTranscriptionSocket = false;
         if (_isDeviceCaptureCurrent(session)) notifyListeners();
       }),
     );
+    return true;
   }
 
   Future<bool> _sendDeviceFrame(
@@ -2786,11 +2806,21 @@ class CaptureProvider extends ChangeNotifier
   /// Finalizes the exact conversation owned by the current necklace socket,
   /// then binds the still-running BLE stream to a replacement socket.
   Future<bool> finalizeCurrentDeviceConversationAndContinue() {
+    return _serializeDeviceConversationBoundary(reason: 'continuous necklace moment boundary');
+  }
+
+  Future<bool> _serializeDeviceConversationBoundary({
+    required String reason,
+    _BufferedDeviceCaptureFrame? initialFrame,
+  }) {
     final activeBoundary = _deviceCaptureBoundaryFuture;
     if (activeBoundary != null) return activeBoundary;
 
     late final Future<bool> trackedBoundary;
-    trackedBoundary = _finalizeCurrentDeviceConversationAndContinue().whenComplete(() {
+    trackedBoundary = _finalizeCurrentDeviceConversationAndContinue(
+      reason: reason,
+      initialFrame: initialFrame,
+    ).whenComplete(() {
       if (identical(_deviceCaptureBoundaryFuture, trackedBoundary)) {
         _deviceCaptureBoundaryFuture = null;
       }
@@ -2799,7 +2829,10 @@ class CaptureProvider extends ChangeNotifier
     return trackedBoundary;
   }
 
-  Future<bool> _finalizeCurrentDeviceConversationAndContinue() async {
+  Future<bool> _finalizeCurrentDeviceConversationAndContinue({
+    required String reason,
+    _BufferedDeviceCaptureFrame? initialFrame,
+  }) async {
     final activeFinalization = _deviceCaptureFinalizationFuture;
     if (activeFinalization != null) await activeFinalization;
 
@@ -2828,7 +2861,8 @@ class CaptureProvider extends ChangeNotifier
       try {
         final replaced = await _replaceDeviceCaptureSocket(
           session,
-          reason: 'continuous necklace moment boundary',
+          reason: reason,
+          initialFrame: initialFrame,
           afterOldSocketStopped: () async {
             final conversationId = await _awaitInProgressConversationId(
               operation,
@@ -3242,6 +3276,16 @@ class CaptureProvider extends ChangeNotifier
       notifyListeners();
       return;
     }
+    final deviceSession = _deviceCaptureSession;
+    if (deviceSession != null &&
+        _recoverDeviceCaptureSocket(
+          deviceSession,
+          null,
+          reason: 'transcription socket closed during necklace capture',
+          failure: CaptureDiagnosticFailure.socketClosed,
+        )) {
+      return;
+    }
     if (_failActiveMobileCaptureAfterSocketLoss('transcription socket closed')) {
       return;
     }
@@ -3321,6 +3365,16 @@ class CaptureProvider extends ChangeNotifier
       return;
     }
 
+    final deviceSession = _deviceCaptureSession;
+    if (deviceSession != null &&
+        _recoverDeviceCaptureSocket(
+          deviceSession,
+          null,
+          reason: 'transcription socket error during necklace capture: $err',
+          failure: CaptureDiagnosticFailure.socketError,
+        )) {
+      return;
+    }
     if (_failActiveMobileCaptureAfterSocketLoss('transcription socket error: $err')) {
       return;
     }

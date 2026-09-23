@@ -1875,7 +1875,7 @@ void main() {
     final provider = CaptureProvider()..updateRecordingState(RecordingState.deviceRecord);
     addTearDown(provider.dispose);
 
-    provider.onError(StateError('socket unavailable'));
+    provider.onClosed();
 
     expect(provider.recordingState, RecordingState.error);
     provider.onClosed();
@@ -1945,7 +1945,8 @@ void main() {
     expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.completed);
   });
 
-  test('unexpected necklace socket loss serializes finalization and restart', () async {
+  test('unexpected necklace socket loss finalizes its moment and continues the BLE capture', () async {
+    await _grantCaptureEgressAuthority('uid-a');
     final authority = _CaptureAuthority('uid-a');
     final transcriptSocket = _FakeTranscriptSocket();
     final replacementSocket = _FakeTranscriptSocket();
@@ -1953,6 +1954,7 @@ void main() {
     addTearDown(conversations.dispose);
     final processEntered = Completer<void>();
     final processGate = Completer<void>();
+    final replacementEntered = Completer<void>();
     var processCalls = 0;
     var transportStarts = 0;
     var socketPreparations = 0;
@@ -1964,6 +1966,7 @@ void main() {
       captureConsentAuthorityEnsurer: () async => true,
       deviceTranscriptionSocketPreparer: (_, {required force}) async {
         socketPreparations++;
+        if (socketPreparations == 2 && !replacementEntered.isCompleted) replacementEntered.complete();
         return socketPreparations == 1 ? transcriptSocket.service : replacementSocket.service;
       },
       deviceCaptureStarter: () async {
@@ -1994,28 +1997,32 @@ void main() {
     addTearDown(provider.dispose);
 
     await provider.streamDeviceRecording(device: necklace);
+    _bindCaptureAuthority(transcriptSocket, 'socket-loss-necklace');
     provider.segments = [_segment('segment-socket-loss-necklace', 'Necklace words before socket loss')];
     expect(transportStarts, 1);
 
     provider.onError(StateError('socket unavailable'));
     await processEntered.future;
-    var homeCompleted = false;
-    var restartCompleted = false;
-    final homeStop = provider.stopStreamDeviceRecordingAndFinalize().whenComplete(() => homeCompleted = true);
-    final restart = provider.streamDeviceRecording(device: necklace).whenComplete(() => restartCompleted = true);
+    provider.ingestDeviceAudioFrameForTesting([0, 0, 0, 13, 14], codec: BleAudioCodec.pcm8);
     await pumpEventQueue();
 
-    expect(homeCompleted, isFalse);
-    expect(restartCompleted, isFalse);
     expect(processCalls, 1);
     expect(transportStarts, 1);
+    expect(provider.recordingState, RecordingState.deviceRecord);
+    expect(provider.transcriptServiceReady, isFalse);
 
     processGate.complete();
-    expect(await homeStop, isTrue);
-    await restart;
+    await replacementEntered.future;
+    await pumpEventQueue();
+
     expect(processCalls, 1);
-    expect(transportStarts, 2);
+    expect(transportStarts, 1);
     expect(provider.recordingState, RecordingState.deviceRecord);
+    expect(provider.deviceCaptureSocketForTesting, same(replacementSocket.service));
+    expect(replacementSocket.pure.sent, contains(equals([13, 14])));
+    expect(provider.captureDiagnostics.phase, CaptureDiagnosticPhase.streaming);
+    expect(provider.captureDiagnostics.failure, CaptureDiagnosticFailure.none);
+    expect(provider.deviceCaptureFailureTransitionsForTesting, 0);
   });
 
   test('continuous necklace boundary finalizes before replacement connect or buffered replay', () async {
@@ -3033,31 +3040,44 @@ void main() {
     expect(provider.recordingState, RecordingState.deviceRecord);
   });
 
-  test('active necklace socket closure fails capture durably', () async {
-    final authority = _CaptureAuthority('uid-a');
-    final socket = _FakeTranscriptSocket();
-    late CaptureProvider provider;
-    provider = CaptureProvider(
-      activeWalAuthority: () => _activeCaptureAuthority(authority),
-      captureConsentAuthorityEnsurer: () async => true,
-      deviceTranscriptionSocketPreparer: (_, {required force}) async => socket.service,
-      deviceCaptureStarter: () async {
-        provider.updateRecordingState(RecordingState.deviceRecord);
-        return true;
-      },
-    );
-    addTearDown(provider.dispose);
+  for (final socketLoss in <String, void Function(CaptureProvider)>{
+    'closure': (provider) => provider.onClosed(),
+    'error': (provider) => provider.onError(StateError('socket unavailable')),
+  }.entries) {
+    test('active necklace socket ${socketLoss.key} before delivered audio reconnects the current capture', () async {
+      await _grantCaptureEgressAuthority('uid-a');
+      final authority = _CaptureAuthority('uid-a');
+      final socket = _FakeTranscriptSocket();
+      final replacement = _FakeTranscriptSocket();
+      var preparations = 0;
+      late CaptureProvider provider;
+      provider = CaptureProvider(
+        activeWalAuthority: () => _activeCaptureAuthority(authority),
+        captureConsentAuthorityEnsurer: () async => true,
+        deviceTranscriptionSocketPreparer: (_, {required force}) async =>
+            preparations++ == 0 ? socket.service : replacement.service,
+        deviceCaptureStarter: () async {
+          provider.updateRecordingState(RecordingState.deviceRecord);
+          return true;
+        },
+      );
+      provider.onConnectionStateChanged(true);
+      addTearDown(provider.dispose);
 
-    await provider.streamDeviceRecording(
-      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
-    );
-    provider.onClosed();
-    await pumpEventQueue();
+      await provider.streamDeviceRecording(
+        device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+      );
+      socketLoss.value(provider);
+      await pumpEventQueue();
 
-    expect(provider.recordingState, RecordingState.error);
-    expect(provider.deviceCaptureSocketForTesting, isNull);
-    expect(provider.hasActiveKeepAliveTimerForTesting, isFalse);
-  });
+      expect(preparations, 2);
+      expect(provider.recordingState, RecordingState.deviceRecord);
+      expect(provider.deviceCaptureSocketForTesting, same(replacement.service));
+      expect(provider.transcriptServiceReady, isTrue);
+      expect(provider.deviceCaptureFailureTransitionsForTesting, 0);
+      expect(provider.hasActiveKeepAliveTimerForTesting, isFalse);
+    });
+  }
 
   test('physical necklace audio replaces a silently disconnected transcription socket', () async {
     await _grantCaptureEgressAuthority('uid-a');
