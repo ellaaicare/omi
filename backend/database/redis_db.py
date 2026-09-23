@@ -505,6 +505,23 @@ redis.call('SET', KEYS[3], ARGV[2], 'EX', ARGV[3])
 return 1
 """
 
+_ACQUIRE_LOST_TRANSPORT_PROCESSING_FENCE_SCRIPT = """
+if redis.call('EXISTS', KEYS[3]) == 1 then
+    return 0
+end
+local active_id = redis.call('GET', KEYS[1])
+local owner_id = redis.call('GET', KEYS[2])
+if active_id or owner_id then
+    if active_id ~= ARGV[1] or owner_id ~= ARGV[2] then
+        return 0
+    end
+end
+redis.call('SET', KEYS[3], ARGV[3], 'EX', ARGV[4])
+redis.call('DEL', KEYS[1])
+redis.call('DEL', KEYS[2])
+return 1
+"""
+
 
 def _in_progress_conversation_keys(uid: str) -> tuple[str, str]:
     return (
@@ -728,6 +745,30 @@ def acquire_in_progress_processing_fence(
             owner_key,
             _capture_commit_lease_key(uid),
             conversation_id,
+            processing_token,
+            ttl,
+        )
+    )
+
+
+def acquire_lost_transport_processing_fence(
+    uid: str,
+    conversation_id: str,
+    owner_id: str,
+    processing_token: str,
+    ttl: int = 120,
+) -> bool:
+    """Fence processing while clearing an exact stale owner or confirming it is already absent."""
+    active_key, owner_key = _in_progress_conversation_keys(uid)
+    return bool(
+        r.eval(
+            _ACQUIRE_LOST_TRANSPORT_PROCESSING_FENCE_SCRIPT,
+            3,
+            active_key,
+            owner_key,
+            _capture_commit_lease_key(uid),
+            conversation_id,
+            owner_id,
             processing_token,
             ttl,
         )

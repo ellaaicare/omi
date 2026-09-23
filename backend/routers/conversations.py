@@ -130,7 +130,20 @@ def process_in_progress_conversation(
         capture_finalization_claimed = True
 
     processing_fence_token = f'conversation-processing:{uuid.uuid4()}'
-    if not redis_db.acquire_in_progress_processing_fence(uid, conversation_id, processing_fence_token):
+    if is_capture_v2 and request and request.transport_lost:
+        processing_fence_acquired = redis_db.acquire_lost_transport_processing_fence(
+            uid,
+            conversation_id,
+            request.owner_token or '',
+            processing_fence_token,
+        )
+    else:
+        processing_fence_acquired = redis_db.acquire_in_progress_processing_fence(
+            uid,
+            conversation_id,
+            processing_fence_token,
+        )
+    if not processing_fence_acquired:
         if capture_finalization_claimed:
             release_capture_finalization(
                 uid,

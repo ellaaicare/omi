@@ -38,6 +38,23 @@ class InMemoryOwnershipRedis:
         self.ttls = {}
 
     def eval(self, script, key_count, *args):
+        if "if active_id or owner_id then" in script:
+            assert key_count == 3
+            active_key, owner_key, lease_key = args[:key_count]
+            conversation_id, owner_id, processing_token, ttl = args[key_count:]
+            if lease_key in self.values:
+                return 0
+            active_id = self.values.get(active_key)
+            current_owner_id = self.values.get(owner_key)
+            if (active_id is not None or current_owner_id is not None) and (
+                active_id != conversation_id or current_owner_id != owner_id
+            ):
+                return 0
+            self._set(lease_key, processing_token, ttl)
+            self.delete(active_key)
+            self.delete(owner_key)
+            return 1
+
         if "if active_id == ARGV[1] then" in script:
             assert key_count == 3
             active_key, owner_key, lease_key = args[:key_count]
@@ -789,6 +806,57 @@ def test_manual_processing_fence_blocks_exact_reconnect_until_processing_claim()
         "replacement",
         "conversation-closed",
         "socket-reconnect",
+    )
+
+
+def test_lost_transport_processing_fence_requires_exact_idle_owner_and_is_atomic():
+    redis_db = load_ownership_redis_db()
+    redis_db.set_in_progress_conversation_id("uid-a", "conversation-a", owner_id="socket-a")
+
+    assert not redis_db.acquire_lost_transport_processing_fence(
+        "uid-a",
+        "conversation-a",
+        "socket-other",
+        "processing-wrong-owner",
+    )
+    assert not redis_db.acquire_lost_transport_processing_fence(
+        "uid-a",
+        "conversation-other",
+        "socket-a",
+        "processing-wrong-conversation",
+    )
+    assert redis_db.get_in_progress_conversation_id("uid-a") == "conversation-a"
+    assert redis_db.get_in_progress_conversation_owner("uid-a") == "socket-a"
+
+    assert redis_db.acquire_capture_commit_lease("uid-a", "conversation-a", "socket-a")
+    assert not redis_db.acquire_lost_transport_processing_fence(
+        "uid-a",
+        "conversation-a",
+        "socket-a",
+        "processing-during-commit",
+    )
+    assert redis_db.release_capture_commit_lease("uid-a", "socket-a")
+
+    assert redis_db.acquire_lost_transport_processing_fence(
+        "uid-a",
+        "conversation-a",
+        "socket-a",
+        "processing-exact",
+    )
+    assert redis_db.get_in_progress_conversation_id("uid-a") == ""
+    assert redis_db.get_in_progress_conversation_owner("uid-a") == ""
+    assert not redis_db.claim_in_progress_conversation_id(
+        "uid-a",
+        "conversation-a",
+        "socket-reconnect",
+    )
+
+    assert redis_db.release_capture_commit_lease("uid-a", "processing-exact")
+    assert redis_db.acquire_lost_transport_processing_fence(
+        "uid-a",
+        "conversation-a",
+        "socket-a",
+        "processing-no-owner",
     )
 
 

@@ -1166,6 +1166,7 @@ def test_capture_transport_lost_route_resumes_missing_effect_after_lost_ack(monk
     postprocess_attempts = []
     postprocess_writes = set()
     integration_writes = set()
+    lost_transport_handoffs = []
 
     def durable_snapshot():
         return {
@@ -1332,11 +1333,20 @@ def test_capture_transport_lost_route_resumes_missing_effect_after_lost_ack(monk
     monkeypatch.setattr(conversations_router, "renew_capture_finalization", lambda *_args: True)
     monkeypatch.setattr(
         conversations_router.redis_db,
+        "acquire_lost_transport_processing_fence",
+        lambda uid, conversation_id, owner_token, processing_token: lost_transport_handoffs.append(
+            (uid, conversation_id, owner_token, processing_token)
+        )
+        or True,
+    )
+    monkeypatch.setattr(
+        conversations_router.redis_db,
         "acquire_in_progress_processing_fence",
-        lambda *_args: True,
+        lambda *_args: pytest.fail("transport_lost must use the exact-owner Redis handoff"),
     )
     monkeypatch.setattr(conversations_router.redis_db, "release_capture_commit_lease", lambda *_args: True)
     monkeypatch.setattr(conversations_router.redis_db, "get_cached_user_geolocation", lambda _uid: None)
+    monkeypatch.setattr(conversation_processor.redis_db, "get_conversation_meeting_id", lambda _conversation_id: None)
     monkeypatch.setattr(
         conversation_processor,
         "conversation_created_webhook",
@@ -1383,6 +1393,8 @@ def test_capture_transport_lost_route_resumes_missing_effect_after_lost_ack(monk
     assert postprocess_attempts == [postprocess_attempts[0], postprocess_attempts[0]]
     assert len(postprocess_writes) == 1
     assert len(integration_writes) == 1
+    assert len(lost_transport_handoffs) == 2
+    assert all(handoff[:3] == ("uid-1", "capture-a", "owner-a") for handoff in lost_transport_handoffs)
     assert state["durable"]["capture_state"] == "terminal"
     assert len(state["terminal_attempts"]) == 1
     terminal_completed, terminal_receipts = state["terminal_attempts"][0]
