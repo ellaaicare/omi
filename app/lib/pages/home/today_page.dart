@@ -2048,7 +2048,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
             padding: const EdgeInsets.fromLTRB(EllaSizes.screenPadding, 18, EllaSizes.screenPadding, 0),
             sliver: SliverToBoxAdapter(
               child: MemoryDayGalleryCard(
-                key: Key('home-memory-day-${entries[index].value.first.id}'),
+                key: Key('home-memory-day-${entries[index].key}'),
                 dayLabel: entries[index].key,
                 memories: entries[index].value,
                 artworkApi: _memoryArtworkApi,

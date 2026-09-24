@@ -664,12 +664,15 @@ void main() {
     await tester.tap(find.text('Days'));
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('memory-day-evening')), findsOneWidget);
+    final memoryDayCard = find.byWidgetPredicate(
+      (widget) => widget is MemoryDayGalleryCard && widget.memories.any((item) => item.id == 'evening'),
+    );
+    expect(memoryDayCard, findsOneWidget);
     expect(find.text('2 memories'), findsOneWidget);
     expect(find.textContaining('Morning walk'), findsOneWidget);
     expect(find.byKey(const Key('memory-card-morning')), findsNothing);
 
-    await tester.tap(find.byKey(const Key('memory-day-evening')));
+    await tester.tap(memoryDayCard);
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('memory-day-list')), findsOneWidget);
     expect(find.byKey(const Key('memory-card-morning')), findsOneWidget);

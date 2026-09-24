@@ -99,6 +99,71 @@ void main() {
     await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/ella_home_memory_mosaic.png'));
   });
 
+  testWidgets('day collage retains existing artwork state when a new memory starts generating', (tester) async {
+    final artwork = _FakeMemoryArtworkApi(
+      displayResult: const MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.unavailable,
+        failureCode: 'memory_artwork_unavailable',
+      ),
+    );
+    final earlier = ServerConversation(
+      id: 'earlier-memory',
+      createdAt: DateTime(2026, 9, 23, 9),
+      structured: Structured('Earlier memory', 'An earlier memory with artwork already on screen.'),
+    );
+    final newer = ServerConversation(
+      id: 'newer-memory',
+      createdAt: DateTime(2026, 9, 23, 12),
+      structured: Structured('Newer memory', 'A newer memory whose illustration is still generating.'),
+    );
+    final newest = ServerConversation(
+      id: 'newest-memory',
+      createdAt: DateTime(2026, 9, 23, 15),
+      structured: Structured('Newest memory', 'Another memory entering the same day.'),
+    );
+    var memories = [earlier];
+    late StateSetter updateMemories;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: StatefulBuilder(
+            builder: (context, setState) {
+              updateMemories = setState;
+              return SizedBox(
+                width: 360,
+                height: 420,
+                child: MemoryDayGalleryCard(dayLabel: 'TODAY', memories: memories, artworkApi: artwork, onOpen: () {}),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    Finder artworkFor(String memoryId) =>
+        find.byWidgetPredicate((widget) => widget is MemoryArtworkImage && widget.conversation.id == memoryId);
+
+    final earlierState = tester.state(artworkFor(earlier.id));
+    expect(artwork.displayRequests.where((request) => request.memoryId == earlier.id), hasLength(1));
+
+    updateMemories(() => memories = [newer, earlier]);
+    await tester.pump();
+    expect(identical(tester.state(artworkFor(earlier.id)), earlierState), isTrue);
+    expect(artwork.displayRequests.where((request) => request.memoryId == earlier.id), hasLength(1));
+
+    final newerState = tester.state(artworkFor(newer.id));
+    updateMemories(() => memories = [newest, newer, earlier]);
+    await tester.pump();
+    expect(identical(tester.state(artworkFor(earlier.id)), earlierState), isTrue);
+    expect(identical(tester.state(artworkFor(newer.id)), newerState), isTrue);
+    expect(artwork.displayRequests.where((request) => request.memoryId == earlier.id), hasLength(1));
+    expect(artwork.displayRequests.where((request) => request.memoryId == newer.id), hasLength(1));
+  });
+
   testWidgets('Daily Note preview opens the full note and hands off to scoped talk', (tester) async {
     const fullBody =
         'A longer Daily Note keeps its complete grounded text available here while Home remains a compact overview.';
@@ -1013,7 +1078,12 @@ void main() {
     await tester.tap(find.text('Days'));
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('memory-day-memory-1')), findsOneWidget);
+    expect(
+      find.byWidgetPredicate(
+        (widget) => widget is MemoryDayGalleryCard && widget.memories.first.id == 'memory-1',
+      ),
+      findsOneWidget,
+    );
     expect(find.byKey(const Key('memory-layout-journal-memory-1')), findsNothing);
 
     await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
@@ -1098,20 +1168,20 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
+    final newestDayCard = find.byWidgetPredicate(
+      (widget) => widget is MemoryDayGalleryCard && widget.memories.any((memory) => memory.id == 'newest-0'),
+    );
     await tester.scrollUntilVisible(
-      find.byKey(const Key('home-memory-day-newest-0')),
+      newestDayCard,
       500,
-      scrollable: find.descendant(
-        of: find.byKey(const Key('today-scroll')),
-        matching: find.byType(Scrollable),
-      ),
+      scrollable: find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
     );
     await tester.pump(const Duration(milliseconds: 100));
 
     final newestArtworkWidgets = tester
         .widgetList<MemoryArtworkImage>(
           find.descendant(
-            of: find.byKey(const Key('home-memory-day-newest-0')),
+            of: newestDayCard,
             matching: find.byType(MemoryArtworkImage),
           ),
         )
@@ -1148,16 +1218,16 @@ void main() {
     expect(artwork.displayRequests.length, requestsBeforeRetry + 1);
     expect(artwork.displayRequests.last, (memoryId: 'newest-0', enqueueIfMissing: true));
 
+    final olderDayCard = find.byWidgetPredicate(
+      (widget) => widget is MemoryDayGalleryCard && widget.memories.any((memory) => memory.id == 'older-0'),
+    );
     await tester.scrollUntilVisible(
-      find.byKey(const Key('home-memory-day-older-0')),
+      olderDayCard,
       500,
-      scrollable: find.descendant(
-        of: find.byKey(const Key('today-scroll')),
-        matching: find.byType(Scrollable),
-      ),
+      scrollable: find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
     );
     await tester.pump(const Duration(milliseconds: 100));
-    expect(find.byKey(const Key('home-memory-day-older-0')), findsOneWidget);
+    expect(olderDayCard, findsOneWidget);
     expect(
       artwork.displayRequests.where((request) => request.enqueueIfMissing && request.memoryId.startsWith('older-')),
       isEmpty,
@@ -1264,7 +1334,13 @@ void main() {
     final authority = await _installArtworkAuthority();
     final artwork = _FakeMemoryArtworkApi(
       backfillPages: const [
-        MemoryArtworkBackfillPage(queued: 10, existing: 0, skipped: 0, hasMore: true, nextCursor: 'older-artwork-page'),
+        MemoryArtworkBackfillPage(
+          queued: 10,
+          existing: 0,
+          skipped: 0,
+          hasMore: true,
+          nextCursor: 'older-artwork-page',
+        ),
         MemoryArtworkBackfillPage(queued: 8, existing: 2, skipped: 0, hasMore: false),
       ],
     );
@@ -1777,13 +1853,7 @@ void main() {
     final authority = await _installArtworkAuthority();
     final artwork = _FakeMemoryArtworkApi(
       backfillPages: const [
-        MemoryArtworkBackfillPage(
-          queued: 10,
-          existing: 0,
-          skipped: 0,
-          hasMore: true,
-          nextCursor: 'older-artwork-page',
-        ),
+        MemoryArtworkBackfillPage(queued: 10, existing: 0, skipped: 0, hasMore: true, nextCursor: 'older-artwork-page'),
         MemoryArtworkBackfillPage(
           queued: 10,
           existing: 0,
@@ -2183,9 +2253,12 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Days'));
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.byKey(const Key('memory-day-memory-1')));
+    final memoryDayCard = find.byWidgetPredicate(
+      (widget) => widget is MemoryDayGalleryCard && widget.memories.first.id == 'memory-1',
+    );
+    await tester.ensureVisible(memoryDayCard);
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('memory-day-memory-1')));
+    await tester.tap(memoryDayCard);
     await tester.pumpAndSettle();
 
     expect(find.byKey(const Key('memory-day-list')), findsOneWidget);

@@ -623,7 +623,7 @@ class MemoryDayGalleryCard extends StatelessWidget {
       button: true,
       label: context.l10n.memoryDayOpen(dayLabel, memories.length),
       child: Material(
-        key: Key('memory-day-${memories.first.id}'),
+        key: Key('memory-day-$dayLabel'),
         color: EllaColors.card,
         borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
         clipBehavior: Clip.antiAlias,
@@ -700,40 +700,46 @@ class _MemoryDayArtworkCollage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final panels = memories.take(4).toList(growable: false);
-    if (panels.length == 1) return _art(panels.first);
-    if (panels.length == 2) {
-      return Row(
-        children: [
-          Expanded(child: _art(panels[0])),
-          const SizedBox(width: 2),
-          Expanded(child: _art(panels[1])),
-        ],
-      );
-    }
-    return Row(
-      children: [
-        Expanded(child: _art(panels[0])),
-        const SizedBox(width: 2),
-        Expanded(
-          child: Column(
-            children: [
-              Expanded(child: _art(panels[1])),
-              const SizedBox(height: 2),
-              Expanded(
-                child: panels.length == 3
-                    ? _art(panels[2])
-                    : Row(
-                        children: [
-                          Expanded(child: _art(panels[2])),
-                          const SizedBox(width: 2),
-                          Expanded(child: _art(panels[3])),
-                        ],
-                      ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        const gap = 2.0;
+        final width = constraints.maxWidth;
+        final height = constraints.maxHeight;
+        final halfWidth = (width - gap) / 2;
+        final halfHeight = (height - gap) / 2;
+        final quarterWidth = (halfWidth - gap) / 2;
+
+        Rect panelRect(int index) {
+          if (panels.length == 1) return Rect.fromLTWH(0, 0, width, height);
+          if (panels.length == 2) {
+            return Rect.fromLTWH(index == 0 ? 0 : halfWidth + gap, 0, halfWidth, height);
+          }
+          if (index == 0) return Rect.fromLTWH(0, 0, halfWidth, height);
+          if (index == 1) return Rect.fromLTWH(halfWidth + gap, 0, halfWidth, halfHeight);
+          if (panels.length == 3) {
+            return Rect.fromLTWH(halfWidth + gap, halfHeight + gap, halfWidth, halfHeight);
+          }
+          return Rect.fromLTWH(
+            halfWidth + gap + (index == 3 ? quarterWidth + gap : 0),
+            halfHeight + gap,
+            quarterWidth,
+            halfHeight,
+          );
+        }
+
+        // Keep every memory under one stable parent. Changing the panel count
+        // must move an existing image, not recreate it and lose its cache state.
+        return Stack(
+          children: [
+            for (var index = 0; index < panels.length; index++)
+              Positioned.fromRect(
+                key: ValueKey('memory-day-artwork-${panels[index].id}'),
+                rect: panelRect(index),
+                child: _art(panels[index]),
               ),
-            ],
-          ),
-        ),
-      ],
+          ],
+        );
+      },
     );
   }
 }
