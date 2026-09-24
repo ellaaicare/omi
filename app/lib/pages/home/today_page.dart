@@ -712,16 +712,16 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       _homeArtworkBackfillState = _queueUiState(updated!);
     });
     _publishHomeArtworkStudioState();
+    if (action == MemoryArtworkQueueAction.resume) {
+      unawaited(
+        _advanceHomeArtworkBackfill(
+          restart: restartPreview || autoContinue,
+          mode: autoContinue || !restartPreview ? MemoryArtworkBackfillMode.all : MemoryArtworkBackfillMode.preview,
+          waitForActive: !restartPreview && !autoContinue,
+        ),
+      );
+    }
     if (_shouldPollHomeArtworkQueue(updated)) {
-      if (action == MemoryArtworkQueueAction.resume) {
-        unawaited(
-          _advanceHomeArtworkBackfill(
-            restart: restartPreview || autoContinue,
-            mode: autoContinue || !restartPreview ? MemoryArtworkBackfillMode.all : MemoryArtworkBackfillMode.preview,
-            waitForActive: !restartPreview && !autoContinue,
-          ),
-        );
-      }
       _scheduleHomeArtworkQueuePoll();
     } else {
       _homeArtworkBackfillPollTimer?.cancel();
@@ -1001,6 +1001,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
             onRetryStatus: () => unawaited(_refreshHomeArtworkQueueStatus()),
             onPause: () => unawaited(_controlHomeArtworkQueue(MemoryArtworkQueueAction.pause)),
             onResume: () => unawaited(_controlHomeArtworkQueue(MemoryArtworkQueueAction.resume)),
+            onGenerateAll: () =>
+                unawaited(_controlHomeArtworkQueue(MemoryArtworkQueueAction.resume, autoContinue: true)),
             onStop: () => unawaited(_confirmStopHomeArtworkQueue()),
           );
         },
@@ -2527,6 +2529,7 @@ class _ArtworkStudioSheet extends StatelessWidget {
     required this.onRetryStatus,
     required this.onPause,
     required this.onResume,
+    required this.onGenerateAll,
     required this.onStop,
   });
 
@@ -2542,6 +2545,7 @@ class _ArtworkStudioSheet extends StatelessWidget {
   final VoidCallback onRetryStatus;
   final VoidCallback onPause;
   final VoidCallback onResume;
+  final VoidCallback onGenerateAll;
   final VoidCallback onStop;
 
   @override
@@ -2705,15 +2709,30 @@ class _ArtworkStudioSheet extends StatelessWidget {
                                   label: Text(context.l10n.memoryArtworkQueuePause),
                                 ),
                               if (queue.canResume)
-                                FilledButton.icon(
+                                OutlinedButton.icon(
                                   key: const Key('home-artwork-resume'),
                                   onPressed: queueControlBusy ? null : onResume,
+                                  style: OutlinedButton.styleFrom(
+                                    foregroundColor: EllaColors.tealDeep,
+                                    side: const BorderSide(color: EllaColors.tealDeep),
+                                  ),
+                                  icon: const Icon(Icons.play_arrow_rounded),
+                                  label: Text(
+                                    queue.pauseReason == 'batch_complete'
+                                        ? context.l10n.memoryArtworkQueueNextBatch(queue.batchSize)
+                                        : context.l10n.memoryArtworkQueueResume,
+                                  ),
+                                ),
+                              if (queue.canResume && queue.pauseReason == 'batch_complete')
+                                FilledButton.icon(
+                                  key: const Key('home-artwork-generate-all'),
+                                  onPressed: queueControlBusy ? null : onGenerateAll,
                                   style: FilledButton.styleFrom(
                                     foregroundColor: EllaColors.paper,
                                     backgroundColor: EllaColors.tealDeep,
                                   ),
-                                  icon: const Icon(Icons.play_arrow_rounded),
-                                  label: Text(context.l10n.memoryArtworkQueueNextBatch(queue.batchSize)),
+                                  icon: const Icon(Icons.auto_awesome_rounded),
+                                  label: Text(context.l10n.memoryArtworkQueueGenerateAll),
                                 ),
                               if (queue.canCancel)
                                 TextButton.icon(

@@ -1893,7 +1893,7 @@ void main() {
     expect(find.byKey(const Key('home-artwork-pause')), findsOneWidget);
   });
 
-  testWidgets('Artwork Studio advances older history only in a manual bounded batch', (tester) async {
+  testWidgets('Artwork Studio keeps a bounded batch available beside automatic history', (tester) async {
     final authority = await _installArtworkAuthority();
     final artwork = _FakeMemoryArtworkApi(
       backfillPages: const [
@@ -1929,7 +1929,7 @@ void main() {
 
     expect(find.byKey(const Key('home-artwork-queue-progress-label')), findsOneWidget);
     expect(find.text('Prepare up to 10 older memories'), findsOneWidget);
-    expect(find.text('Generate all automatically'), findsNothing);
+    expect(find.text('Generate all automatically'), findsOneWidget);
     expect(find.byKey(const Key('home-artwork-continue')), findsNothing);
 
     await tester.tap(find.byKey(const Key('home-artwork-resume')));
@@ -1940,6 +1940,58 @@ void main() {
     expect(artwork.queueAutoContinue, [false]);
     expect(artwork.backfillModes.where((mode) => mode == MemoryArtworkBackfillMode.all), hasLength(1));
     expect(find.textContaining('Automatic generation is on.'), findsNothing);
+  });
+
+  testWidgets('Artwork Studio starts a recent-first automatic run after the prior batch drains', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(
+      backfillPages: const [
+        MemoryArtworkBackfillPage(
+          queued: 10,
+          existing: 0,
+          skipped: 0,
+          hasMore: true,
+          nextCursor: 'older-artwork-page',
+        ),
+        MemoryArtworkBackfillPage(
+          queued: 18,
+          existing: 12,
+          skipped: 0,
+          hasMore: true,
+          nextCursor: 'reconciliation-job',
+          mode: MemoryArtworkBackfillMode.all,
+        ),
+      ],
+      queue: _artworkQueueStatus(
+        ready: 30,
+        controlState: MemoryArtworkQueueState.paused,
+        scanStatus: 'completed',
+        batchRemaining: 0,
+        pauseReason: 'batch_complete',
+      ),
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    await tester.tap(find.byKey(const Key('home-artwork-generate-all')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(artwork.queueActions, [MemoryArtworkQueueAction.resume]);
+    expect(artwork.queueAutoContinue, [true]);
+    expect(artwork.queue?.autoContinue, isTrue);
+    expect(artwork.backfillModes.where((mode) => mode == MemoryArtworkBackfillMode.all), hasLength(1));
+    expect(artwork.backfillCursors.last, isNull, reason: 'automatic reconciliation restarts at newest history');
   });
 
   testWidgets('a transient queue status failure keeps polling the last known running queue', (tester) async {
