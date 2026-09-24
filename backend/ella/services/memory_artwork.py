@@ -262,6 +262,8 @@ class MemoryArtworkRepository(Protocol):
 
     def set_backfill_control(self, uid: str, **kwargs) -> dict[str, Any]: ...
 
+    def pause_observed_legacy_auto_continue_control(self, uid: str, **kwargs) -> dict[str, Any]: ...
+
     def list_jobs_for_uid(self, uid: str, *, migrate_legacy_jobs: bool = True) -> list[dict[str, Any]]: ...
 
     def get_conversation(self, uid: str, memory_id: str) -> Optional[dict[str, Any]]: ...
@@ -318,6 +320,7 @@ class FirestoreMemoryArtworkRepository:
     set_preferences = staticmethod(artwork_db.set_preferences)
     get_backfill_control = staticmethod(artwork_db.get_backfill_control)
     set_backfill_control = staticmethod(artwork_db.set_backfill_control)
+    pause_observed_legacy_auto_continue_control = staticmethod(artwork_db.pause_observed_legacy_auto_continue_control)
     list_jobs_for_uid = staticmethod(artwork_db.list_jobs_for_uid)
     get_conversation = staticmethod(artwork_db.get_conversation)
     list_conversations_page = staticmethod(artwork_db.list_conversations_page)
@@ -1060,14 +1063,21 @@ class MemoryArtworkService:
             and bool(control.get("auto_continue"))
             and not artwork_db._auto_continue_receipt_is_current(control)
         ):
-            update = self.repository.set_backfill_control(
+            update = self.repository.pause_observed_legacy_auto_continue_control(
                 uid,
+                observed_control=control,
                 expected_generation_id=generation_id,
-                state="paused",
-                auto_continue=False,
+                authority_digest=authority.authority_digest,
+                style_version=style_version,
             )
-            if update.get("outcome") == "updated":
+            if update.get("outcome") in {"updated", "stale"}:
                 control = update.get("control") or {}
+                control_is_current = bool(
+                    control.get("generation_id") == generation_id
+                    and control.get("authority_digest") == authority.authority_digest
+                    and control.get("style_version") == style_version
+                    and control.get("state") in {"running", "paused", "cancelled"}
+                )
         state = str(control.get("state")) if control_is_current else "running"
         auto_continue = (
             bool(control.get("auto_continue")) and artwork_db._auto_continue_receipt_is_current(control)
