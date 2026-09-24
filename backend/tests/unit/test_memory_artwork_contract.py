@@ -78,6 +78,13 @@ def _load_service_module():
     database_stub.reconciliation_job_id = lambda uid, authority_digest, style_version: hashlib.sha256(
         f"{uid}\0{authority_digest}\0{style_version}".encode("utf-8")
     ).hexdigest()
+    database_stub._auto_continue_receipt_is_current = lambda control: bool(
+        isinstance(control.get("auto_continue_receipt"), dict)
+        and control["auto_continue_receipt"].get("schema_version") == "ella.memory_artwork.auto_continue.v1"
+        and control["auto_continue_receipt"].get("generation_id") == control.get("generation_id")
+        and control["auto_continue_receipt"].get("authority_digest") == control.get("authority_digest")
+        and control["auto_continue_receipt"].get("style_version") == control.get("style_version")
+    )
     ella_stub = types.ModuleType("ella")
     ella_stub.__path__ = []
     ella_services_stub = types.ModuleType("ella.services")
@@ -249,6 +256,14 @@ class FakeRepository:
             "pause_reason": "user_paused" if state == "paused" else "user_cancelled" if state == "cancelled" else "",
             "updated_at": datetime.now(timezone.utc),
         }
+        if state == "running" and auto_continue:
+            control["auto_continue_receipt"] = {
+                "schema_version": "ella.memory_artwork.auto_continue.v1",
+                "generation_id": generation_id,
+                "authority_digest": preferences["authority_digest"],
+                "style_version": preferences["style_version"],
+                "granted_at": control["updated_at"],
+            }
         self.backfill_controls[uid] = control
         return {"outcome": "updated", "control": copy.deepcopy(control)}
 
@@ -563,6 +578,16 @@ class FakeRepository:
                 }
                 self.backfill_controls[uid] = control
             if control.get("generation_id") != expected_generation_id or control.get("state") != "running":
+                return None
+            if control.get("auto_continue") and not artwork.artwork_db._auto_continue_receipt_is_current(control):
+                control.update(
+                    {
+                        "state": "paused",
+                        "auto_continue": False,
+                        "batch_remaining": 0,
+                        "pause_reason": "manual_batches_required",
+                    }
+                )
                 return None
         if job.get("status") == "processing":
             lease_expires_at = job.get("lease_expires_at")
@@ -1096,7 +1121,7 @@ def test_preview_promotes_recent_existing_historical_work_without_a_duplicate_ge
     assert repository.reserve_writes == 1
 
 
-def test_every_resume_restores_only_one_manual_batch_even_for_legacy_automatic_clients():
+def test_fresh_owner_auto_continue_resume_persists_receipt_through_status_and_claims():
     repository = FakeRepository()
     repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
     service = artwork.MemoryArtworkService(
@@ -1128,9 +1153,39 @@ def test_every_resume_restores_only_one_manual_batch_even_for_legacy_automatic_c
         service.set_queue_control("owner-a", action="resume", generation_id=generation_id, auto_continue=True)
     )
     assert automatic["control_state"] == "running"
-    assert automatic["auto_continue"] is False
-    assert automatic["batch_remaining"] == 10
+    assert automatic["auto_continue"] is True
+    assert automatic["batch_remaining"] == 0
+    assert repository.backfill_controls["owner-a"]["auto_continue_receipt"] == {
+        "schema_version": "ella.memory_artwork.auto_continue.v1",
+        "generation_id": generation_id,
+        "authority_digest": "digest-a",
+        "style_version": artwork.DEFAULT_STYLE_VERSION,
+        "granted_at": repository.backfill_controls["owner-a"]["updated_at"],
+    }
+    status = asyncio.run(service.queue_status("owner-a"))
+    assert status["control_state"] == "running"
+    assert status["auto_continue"] is True
+    assert status["batch_remaining"] == 0
     assert repository.reconciliation_jobs == {}
+
+    for index in range(2):
+        memory_id = f"auto-history-{index}"
+        repository.conversations[("owner-a", memory_id)] = _terminal_memory(memory_id)
+        asyncio.run(service.enqueue("owner-a", memory_id, origin=artwork.HISTORICAL_BACKFILL_ORIGIN))
+        job = next(job for (owner, item, _), job in repository.jobs.items() if owner == "owner-a" and item == memory_id)
+        assert repository.claim_job(
+            "owner-a",
+            memory_id,
+            job["generation_key"],
+            lease_token=f"auto-lease-{index}",
+            now=datetime.now(timezone.utc),
+            lease_seconds=120,
+        )
+        assert repository.complete_job("owner-a", memory_id, job["generation_key"], lease_token=f"auto-lease-{index}")
+
+    assert repository.backfill_controls["owner-a"]["state"] == "running"
+    assert repository.backfill_controls["owner-a"]["auto_continue"] is True
+    assert repository.backfill_controls["owner-a"]["batch_remaining"] == 0
 
 
 def test_queue_status_pauses_a_persisted_legacy_automatic_run():
@@ -1241,6 +1296,93 @@ def test_database_claim_pauses_legacy_automatic_run_before_provider_work():
     assert control["auto_continue"] is False
     assert control["batch_remaining"] == 0
     assert control["pause_reason"] == "manual_batches_required"
+
+
+def test_database_claim_honors_fresh_auto_continue_receipt():
+    class Snapshot:
+        def __init__(self, payload):
+            self.exists = True
+            self._payload = payload
+
+        def to_dict(self):
+            return copy.deepcopy(self._payload)
+
+    class Reference:
+        def __init__(self, identifier, payload):
+            self.id = identifier
+            self._snapshot = Snapshot(payload)
+
+        def get(self, transaction=None):
+            return self._snapshot
+
+    class Transaction:
+        def __init__(self):
+            self.sets = []
+            self.updates = []
+
+        def set(self, reference, payload, merge=False):
+            self.sets.append((reference, copy.deepcopy(payload), merge))
+
+        def update(self, reference, payload):
+            self.updates.append((reference, copy.deepcopy(payload)))
+
+    preferences = _accepted_preferences(_authority())
+    generation_id = artwork_database.reconciliation_job_id(
+        "owner-a",
+        preferences["authority_digest"],
+        preferences["style_version"],
+    )
+    granted_at = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    user_ref = Reference(
+        "owner-a",
+        {
+            artwork_database.PREFERENCES_FIELD: preferences,
+            artwork_database.BACKFILL_CONTROL_FIELD: {
+                "schema_version": artwork_database.QUEUE_CONTROL_SCHEMA_VERSION,
+                "generation_id": generation_id,
+                "authority_digest": preferences["authority_digest"],
+                "style_version": preferences["style_version"],
+                "state": "running",
+                "auto_continue": True,
+                "batch_size": 10,
+                "batch_remaining": 0,
+                "auto_continue_receipt": {
+                    "schema_version": artwork_database.AUTO_CONTINUE_RECEIPT_VERSION,
+                    "generation_id": generation_id,
+                    "authority_digest": preferences["authority_digest"],
+                    "style_version": preferences["style_version"],
+                    "granted_at": granted_at,
+                },
+            },
+        },
+    )
+    job_ref = Reference(
+        "job-a",
+        {
+            "uid": "owner-a",
+            "status": "pending",
+            "available_at": datetime(2026, 8, 30, tzinfo=timezone.utc),
+            "authority_digest": preferences["authority_digest"],
+            "style_version": preferences["style_version"],
+            "origin": artwork_database.HISTORICAL_BACKFILL_ORIGIN,
+        },
+    )
+    transaction = Transaction()
+
+    claimed = artwork_database._claim_job_transaction(
+        transaction,
+        user_ref,
+        job_ref,
+        lease_token="lease-a",
+        now=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        lease_seconds=600,
+    )
+
+    assert claimed is not None
+    assert claimed["lease_token"] == "lease-a"
+    assert transaction.sets == []
+    assert len(transaction.updates) == 1
+    assert transaction.updates[0][1]["status"] == "processing"
 
 
 def test_manual_resume_restarts_only_a_failed_reconciliation_job():

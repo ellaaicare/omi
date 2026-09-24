@@ -1055,7 +1055,11 @@ class MemoryArtworkService:
             and control.get("style_version") == style_version
             and control.get("state") in {"running", "paused", "cancelled"}
         )
-        if control_is_current and bool(control.get("auto_continue")):
+        if (
+            control_is_current
+            and bool(control.get("auto_continue"))
+            and not artwork_db._auto_continue_receipt_is_current(control)
+        ):
             update = self.repository.set_backfill_control(
                 uid,
                 expected_generation_id=generation_id,
@@ -1065,7 +1069,11 @@ class MemoryArtworkService:
             if update.get("outcome") == "updated":
                 control = update.get("control") or {}
         state = str(control.get("state")) if control_is_current else "running"
-        auto_continue = bool(control.get("auto_continue")) if control_is_current else False
+        auto_continue = (
+            bool(control.get("auto_continue")) and artwork_db._auto_continue_receipt_is_current(control)
+            if control_is_current
+            else False
+        )
         batch_size = int(control.get("batch_size") or DEFAULT_HISTORICAL_BACKFILL_BATCH_SIZE)
         batch_remaining = int(control.get("batch_remaining", batch_size) or 0) if control_is_current else batch_size
         pause_reason = str(control.get("pause_reason") or "") if control_is_current else ""
@@ -1211,7 +1219,7 @@ class MemoryArtworkService:
             uid,
             expected_generation_id=generation_id,
             state=state,
-            auto_continue=False,
+            auto_continue=auto_continue if action == "resume" else False,
         )
         outcome = str(update.get("outcome") or "")
         if outcome == "deletion_pending":
