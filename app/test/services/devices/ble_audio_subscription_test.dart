@@ -230,6 +230,51 @@ void main() {
     ]);
   });
 
+  test('Omi production entrypoint recovers when audio notifications stall after valid frames', () async {
+    final initialEndpoint = _FakeBleNotificationEndpoint();
+    final recoveredEndpoint = _FakeBleNotificationEndpoint();
+    BleNotificationEndpoint activeEndpoint = initialEndpoint;
+    var serviceRefreshes = 0;
+    final transport = _testBleTransport(
+      initialEndpoint,
+      recovery: BleAudioLivenessRecovery(window: const Duration(milliseconds: 1)),
+      endpointResolver: (_, __) async => activeEndpoint,
+      serviceRefresher: () async {
+        serviceRefreshes++;
+        activeEndpoint = recoveredEndpoint;
+      },
+    );
+    final connection = OmiDeviceConnection(necklace(), transport);
+    addTearDown(initialEndpoint.dispose);
+    addTearDown(recoveredEndpoint.dispose);
+    addTearDown(transport.dispose);
+
+    final received = <List<int>>[];
+    final subscription = await connection.performGetBleAudioBytesListener(onAudioBytesReceived: received.add);
+    addTearDown(() => subscription?.cancel());
+    initialEndpoint.fresh.add([1, 2, 3]);
+    await pumpEventQueue();
+
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    while (recoveredEndpoint.notifyCalls.isEmpty) {
+      await pumpEventQueue();
+    }
+    recoveredEndpoint.fresh.add([4, 5, 6]);
+    await pumpEventQueue();
+
+    expect(subscription, isNotNull);
+    expect(serviceRefreshes, 1);
+    expect(initialEndpoint.notifyCalls, [
+      (true, bleNotificationEnableTimeoutSeconds),
+      (false, bleNotificationResetTimeoutSeconds),
+    ]);
+    expect(recoveredEndpoint.notifyCalls, [(true, bleNotificationEnableTimeoutSeconds)]);
+    expect(received, [
+      [1, 2, 3],
+      [4, 5, 6],
+    ]);
+  });
+
   test('production BLE setup fails closed when the account/device connection generation drifts', () async {
     final endpoint = _FakeBleNotificationEndpoint();
     final connectionStates = StreamController<BluetoothConnectionState>.broadcast();
@@ -662,7 +707,7 @@ void main() {
     expect(recoveries, 1, reason: 'a silent link must not enter a CCCD retry loop');
   });
 
-  testWidgets('the first physical audio frame cancels notification recovery', (tester) async {
+  testWidgets('physical audio postpones recovery while a later mid-stream stall triggers it once', (tester) async {
     var recoveries = 0;
     final recovery = BleAudioLivenessRecovery(window: const Duration(seconds: 2));
     addTearDown(recovery.dispose);
@@ -672,8 +717,17 @@ void main() {
     });
     await tester.pump(const Duration(seconds: 1));
     recovery.observedAudio();
+    await tester.pump(const Duration(seconds: 1));
+    expect(recoveries, 0);
+
+    recovery.observedAudio();
+    await tester.pump(const Duration(seconds: 1));
+    expect(recoveries, 0);
+
+    await tester.pump(const Duration(seconds: 1));
+    expect(recoveries, 1);
     await tester.pump(const Duration(seconds: 10));
 
-    expect(recoveries, 0);
+    expect(recoveries, 1, reason: 'one mid-stream stall must not enter a CCCD retry loop');
   });
 }

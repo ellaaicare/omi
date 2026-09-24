@@ -72,28 +72,47 @@ class BleAudioLivenessRecovery {
 
   final Duration window;
   Timer? _timer;
+  Future<void> Function()? _recover;
   bool _recoveryUsed = false;
+  bool _recovering = false;
+  int _generation = 0;
 
   void arm(Future<void> Function() recover) {
-    if (_timer != null || _recoveryUsed) return;
+    _recover = recover;
+    _armWindow();
+  }
+
+  void _armWindow() {
+    final recover = _recover;
+    if (recover == null || _timer != null || _recoveryUsed || _recovering) return;
+    final generation = _generation;
     _timer = Timer(window, () {
       _timer = null;
-      if (_recoveryUsed) return;
+      if (generation != _generation || _recoveryUsed || _recovering) return;
       _recoveryUsed = true;
-      unawaited(recover());
+      _recovering = true;
+      unawaited(Future<void>.sync(recover).whenComplete(() {
+        if (generation != _generation) return;
+        _recovering = false;
+        _armWindow();
+      }));
     });
   }
 
   void observedAudio() {
     _timer?.cancel();
     _timer = null;
-    _recoveryUsed = true;
+    _recoveryUsed = false;
+    _armWindow();
   }
 
   void reset() {
+    _generation++;
     _timer?.cancel();
     _timer = null;
+    _recover = null;
     _recoveryUsed = false;
+    _recovering = false;
   }
 
   void dispose() => reset();
