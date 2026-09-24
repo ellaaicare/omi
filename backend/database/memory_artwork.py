@@ -19,6 +19,8 @@ STORAGE_CLEANUP_REQUIRED_FIELD = "memory_artwork_storage_cleanup_required"
 DELETION_PENDING_FIELD = "memory_artwork_deletion_pending"
 JOB_COLLECTION = "ella_memory_artwork_jobs"
 RECONCILIATION_COLLECTION = "ella_memory_artwork_reconciliation_jobs"
+QUEUE_CONTROL_SCHEMA_VERSION = "ella.memory_artwork.queue_control.v1"
+AUTO_CONTINUE_RECEIPT_VERSION = "ella.memory_artwork.auto_continue.v1"
 DEFAULT_BACKFILL_BATCH_SIZE = 10
 FIRESTORE_MIGRATION_BATCH_SIZE = 400
 WORKER_SCAN_PAGE_MULTIPLIER = 4
@@ -70,8 +72,8 @@ def _backfill_control_state(
     authority_digest = str(preferences.get("authority_digest") or "")
     style_version = str(preferences.get("style_version") or "")
     now = datetime.now(timezone.utc)
-    return {
-        "schema_version": "ella.memory_artwork.queue_control.v1",
+    control = {
+        "schema_version": QUEUE_CONTROL_SCHEMA_VERSION,
         "generation_id": reconciliation_job_id(uid, authority_digest, style_version),
         "authority_digest": authority_digest,
         "style_version": style_version,
@@ -80,6 +82,43 @@ def _backfill_control_state(
         "batch_size": batch_size,
         "batch_remaining": 0 if state != "running" or auto_continue else batch_size,
         "pause_reason": pause_reason,
+        "updated_at": now,
+    }
+    if state == "running" and auto_continue:
+        control["auto_continue_receipt"] = {
+            "schema_version": AUTO_CONTINUE_RECEIPT_VERSION,
+            "generation_id": control["generation_id"],
+            "authority_digest": authority_digest,
+            "style_version": style_version,
+            "granted_at": now,
+        }
+    return control
+
+
+def _auto_continue_receipt_is_current(control: dict[str, Any]) -> bool:
+    receipt = control.get("auto_continue_receipt")
+    if not isinstance(receipt, dict):
+        return False
+    return bool(
+        receipt.get("schema_version") == AUTO_CONTINUE_RECEIPT_VERSION
+        and receipt.get("generation_id") == control.get("generation_id")
+        and receipt.get("authority_digest") == control.get("authority_digest")
+        and receipt.get("style_version") == control.get("style_version")
+    )
+
+
+def _has_unreceipted_auto_continue(control: dict[str, Any]) -> bool:
+    return bool(control.get("auto_continue")) and not _auto_continue_receipt_is_current(control)
+
+
+def _paused_legacy_auto_continue_control(control: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+    return {
+        **control,
+        "state": "paused",
+        "auto_continue": False,
+        "batch_size": int(control.get("batch_size") or DEFAULT_BACKFILL_BATCH_SIZE),
+        "batch_remaining": 0,
+        "pause_reason": "manual_batches_required",
         "updated_at": now,
     }
 
@@ -249,6 +288,20 @@ def _claim_reconciliation_job_transaction(
         transaction.delete(job_ref)
         return None
     job = snapshot.to_dict() or {}
+    control = user.get(BACKFILL_CONTROL_FIELD)
+    if (
+        isinstance(control, dict)
+        and _has_unreceipted_auto_continue(control)
+        and control.get("generation_id") == snapshot.id
+        and control.get("authority_digest") == job.get("authority_digest")
+        and control.get("style_version") == job.get("style_version")
+    ):
+        transaction.set(
+            user_ref,
+            {BACKFILL_CONTROL_FIELD: _paused_legacy_auto_continue_control(control, now=now)},
+            merge=True,
+        )
+        return None
     if not _backfill_control_allows_job(user, job):
         return None
     status = job.get("status")
@@ -758,7 +811,7 @@ def _backfill_control_allows_job(user: dict[str, Any], job: dict[str, Any]) -> b
         style_version,
     )
     return bool(
-        control.get("schema_version") == "ella.memory_artwork.queue_control.v1"
+        control.get("schema_version") == QUEUE_CONTROL_SCHEMA_VERSION
         and control.get("generation_id") == expected_generation_id
         and control.get("authority_digest") == authority_digest
         and control.get("style_version") == style_version
@@ -815,37 +868,29 @@ def _claim_job_transaction(
         auto_continue = bool(control.get("auto_continue"))
         batch_size = int(control.get("batch_size") or DEFAULT_BACKFILL_BATCH_SIZE)
         batch_remaining = int(control.get("batch_remaining", batch_size) or 0)
-        if auto_continue:
-            # Automatic full-history runs are retired. Stop a legacy run at
-            # the claim boundary before another provider request can begin.
+        if auto_continue and not _auto_continue_receipt_is_current(control):
+            # Legacy automatic rows predate a fresh owner-authenticated
+            # receipt. Stop them at the claim boundary before another provider
+            # request can begin.
             transaction.set(
                 user_ref,
-                {
-                    BACKFILL_CONTROL_FIELD: {
-                        **control,
-                        "state": "paused",
-                        "auto_continue": False,
-                        "batch_size": batch_size,
-                        "batch_remaining": 0,
-                        "pause_reason": "manual_batches_required",
-                        "updated_at": now,
-                    }
-                },
+                {BACKFILL_CONTROL_FIELD: _paused_legacy_auto_continue_control(control, now=now)},
                 merge=True,
             )
             return None
-        if batch_size < 1 or (batch_remaining < 1 and not auto_continue):
-            return None
-        batch_remaining -= 1
-        control = {
-            **control,
-            "batch_size": batch_size,
-            "batch_remaining": batch_remaining,
-            "state": "paused" if batch_remaining == 0 else "running",
-            "pause_reason": "batch_complete" if batch_remaining == 0 else "",
-            "updated_at": now,
-        }
-        transaction.set(user_ref, {BACKFILL_CONTROL_FIELD: control}, merge=True)
+        if not auto_continue:
+            if batch_size < 1 or batch_remaining < 1:
+                return None
+            batch_remaining -= 1
+            control = {
+                **control,
+                "batch_size": batch_size,
+                "batch_remaining": batch_remaining,
+                "state": "paused" if batch_remaining == 0 else "running",
+                "pause_reason": "batch_complete" if batch_remaining == 0 else "",
+                "updated_at": now,
+            }
+            transaction.set(user_ref, {BACKFILL_CONTROL_FIELD: control}, merge=True)
     claimed = {
         **job,
         "status": "processing",
