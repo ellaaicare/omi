@@ -1270,6 +1270,46 @@ void main() {
     expect(provider.segments.single.text, '\u4eca\u5929\u6211\u4eec\u53bb\u516c\u56ed\u7136\u540e\u5403\u996d');
   });
 
+  test('a drained same-id same-end transcript accepts a longer unspaced-script canonical revision', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    var processCalls = 0;
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        return [
+          _conversationWithEvidence(
+            'authoritative',
+            [_segment('stable-segment', '\u4eca\u5929\u6211\u4eec\u53bb\u516c\u56ed', end: 2.0)],
+            captureState: 'drained',
+          ),
+        ];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        processCalls++;
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation(
+            'authoritative',
+            '\u4eca\u5929\u6211\u4eec\u53bb\u516c\u56ed',
+            status: ConversationStatus.completed,
+          ),
+        );
+      },
+    )
+      ..updateProviderInstances(conversations, null, null, null)
+      ..segments = [_segment('stable-segment', '\u4eca\u5929\u53bb\u516c\u56ed', end: 2.0)];
+    addTearDown(provider.dispose);
+
+    expect(
+      await provider.finalizeCurrentConversation(maxTranscriptAttempts: 1, transcriptRetryDelay: Duration.zero),
+      isTrue,
+    );
+    expect(processCalls, 1);
+  });
+
   test('a same-id correction arriving during the final read remains visible and blocks stale processing', () async {
     final authority = _CaptureAuthority('uid-a');
     final refresh = Completer<List<ServerConversation>>();
