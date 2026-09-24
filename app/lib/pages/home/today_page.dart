@@ -712,16 +712,16 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       _homeArtworkBackfillState = _queueUiState(updated!);
     });
     _publishHomeArtworkStudioState();
+    if (action == MemoryArtworkQueueAction.resume) {
+      unawaited(
+        _advanceHomeArtworkBackfill(
+          restart: restartPreview || autoContinue,
+          mode: autoContinue || !restartPreview ? MemoryArtworkBackfillMode.all : MemoryArtworkBackfillMode.preview,
+          waitForActive: !restartPreview && !autoContinue,
+        ),
+      );
+    }
     if (_shouldPollHomeArtworkQueue(updated)) {
-      if (action == MemoryArtworkQueueAction.resume) {
-        unawaited(
-          _advanceHomeArtworkBackfill(
-            restart: restartPreview || autoContinue,
-            mode: autoContinue || !restartPreview ? MemoryArtworkBackfillMode.all : MemoryArtworkBackfillMode.preview,
-            waitForActive: !restartPreview && !autoContinue,
-          ),
-        );
-      }
       _scheduleHomeArtworkQueuePoll();
     } else {
       _homeArtworkBackfillPollTimer?.cancel();

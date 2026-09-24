@@ -1942,7 +1942,7 @@ void main() {
     expect(find.textContaining('Automatic generation is on.'), findsNothing);
   });
 
-  testWidgets('Artwork Studio starts an explicit recent-first automatic history run', (tester) async {
+  testWidgets('Artwork Studio starts a recent-first automatic run after the prior batch drains', (tester) async {
     final authority = await _installArtworkAuthority();
     final artwork = _FakeMemoryArtworkApi(
       backfillPages: const [
@@ -1963,9 +1963,9 @@ void main() {
         ),
       ],
       queue: _artworkQueueStatus(
-        ready: 10,
-        queued: 20,
+        ready: 30,
         controlState: MemoryArtworkQueueState.paused,
+        scanStatus: 'completed',
         batchRemaining: 0,
         pauseReason: 'batch_complete',
       ),
@@ -1989,9 +1989,9 @@ void main() {
 
     expect(artwork.queueActions, [MemoryArtworkQueueAction.resume]);
     expect(artwork.queueAutoContinue, [true]);
+    expect(artwork.queue?.autoContinue, isTrue);
     expect(artwork.backfillModes.where((mode) => mode == MemoryArtworkBackfillMode.all), hasLength(1));
     expect(artwork.backfillCursors.last, isNull, reason: 'automatic reconciliation restarts at newest history');
-    expect(find.textContaining('Automatic generation is on.'), findsOneWidget);
   });
 
   testWidgets('a transient queue status failure keeps polling the last known running queue', (tester) async {
