@@ -123,6 +123,38 @@ def _paused_legacy_auto_continue_control(control: dict[str, Any], *, now: dateti
     }
 
 
+def _legacy_auto_continue_pause_matches(
+    control: dict[str, Any],
+    observed_control: dict[str, Any],
+    *,
+    expected_generation_id: str,
+    authority_digest: str,
+    style_version: str,
+) -> bool:
+    if not isinstance(control, dict) or not isinstance(observed_control, dict):
+        return False
+    if not _has_unreceipted_auto_continue(control) or not _has_unreceipted_auto_continue(observed_control):
+        return False
+    if (
+        observed_control.get("generation_id") != expected_generation_id
+        or observed_control.get("authority_digest") != authority_digest
+        or observed_control.get("style_version") != style_version
+    ):
+        return False
+    for key in (
+        "schema_version",
+        "generation_id",
+        "authority_digest",
+        "style_version",
+        "state",
+        "auto_continue",
+        "auto_continue_receipt",
+    ):
+        if control.get(key) != observed_control.get(key):
+            return False
+    return True
+
+
 def _reconciliation_ref(job_id: str):
     return db.collection(RECONCILIATION_COLLECTION).document(job_id)
 
@@ -471,6 +503,60 @@ def set_backfill_control(
         expected_generation_id=expected_generation_id,
         state=state,
         auto_continue=auto_continue,
+    )
+
+
+def _pause_observed_legacy_auto_continue_control_transaction(
+    transaction,
+    user_ref,
+    *,
+    observed_control: dict[str, Any],
+    expected_generation_id: str,
+    authority_digest: str,
+    style_version: str,
+    now: datetime,
+) -> dict[str, Any]:
+    snapshot = user_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return {"outcome": "not_found"}
+    user = snapshot.to_dict() or {}
+    if bool(user.get(DELETION_PENDING_FIELD)):
+        return {"outcome": "deletion_pending"}
+    control = user.get(BACKFILL_CONTROL_FIELD)
+    if not _legacy_auto_continue_pause_matches(
+        control,
+        observed_control,
+        expected_generation_id=expected_generation_id,
+        authority_digest=authority_digest,
+        style_version=style_version,
+    ):
+        return {"outcome": "stale", "control": dict(control) if isinstance(control, dict) else {}}
+    paused = _paused_legacy_auto_continue_control(control, now=now)
+    transaction.set(user_ref, {BACKFILL_CONTROL_FIELD: paused}, merge=True)
+    return {"outcome": "updated", "control": paused}
+
+
+@transactional
+def _pause_observed_legacy_auto_continue_control(transaction, user_ref, **kwargs):
+    return _pause_observed_legacy_auto_continue_control_transaction(transaction, user_ref, **kwargs)
+
+
+def pause_observed_legacy_auto_continue_control(
+    uid: str,
+    *,
+    observed_control: dict[str, Any],
+    expected_generation_id: str,
+    authority_digest: str,
+    style_version: str,
+) -> dict[str, Any]:
+    return _pause_observed_legacy_auto_continue_control(
+        db.transaction(),
+        _user_ref(uid),
+        observed_control=observed_control,
+        expected_generation_id=expected_generation_id,
+        authority_digest=authority_digest,
+        style_version=style_version,
+        now=datetime.now(timezone.utc),
     )
 
 

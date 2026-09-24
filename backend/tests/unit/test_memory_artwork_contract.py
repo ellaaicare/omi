@@ -40,6 +40,7 @@ def _load_service_module():
         "set_preferences",
         "get_backfill_control",
         "set_backfill_control",
+        "pause_observed_legacy_auto_continue_control",
         "list_jobs_for_uid",
         "get_conversation",
         "list_conversations_page",
@@ -266,6 +267,54 @@ class FakeRepository:
             }
         self.backfill_controls[uid] = control
         return {"outcome": "updated", "control": copy.deepcopy(control)}
+
+    def pause_observed_legacy_auto_continue_control(
+        self,
+        uid,
+        *,
+        observed_control,
+        expected_generation_id,
+        authority_digest,
+        style_version,
+    ):
+        current = self.backfill_controls.get(uid)
+        if uid in self.deletion_pending:
+            return {"outcome": "deletion_pending"}
+        if not isinstance(current, dict):
+            return {"outcome": "stale", "control": {}}
+        if not (
+            bool(current.get("auto_continue"))
+            and not artwork.artwork_db._auto_continue_receipt_is_current(current)
+            and bool(observed_control.get("auto_continue"))
+            and not artwork.artwork_db._auto_continue_receipt_is_current(observed_control)
+            and observed_control.get("generation_id") == expected_generation_id
+            and observed_control.get("authority_digest") == authority_digest
+            and observed_control.get("style_version") == style_version
+            and all(
+                current.get(key) == observed_control.get(key)
+                for key in (
+                    "schema_version",
+                    "generation_id",
+                    "authority_digest",
+                    "style_version",
+                    "state",
+                    "auto_continue",
+                    "auto_continue_receipt",
+                )
+            )
+        ):
+            return {"outcome": "stale", "control": copy.deepcopy(current)}
+        paused = {
+            **current,
+            "state": "paused",
+            "auto_continue": False,
+            "batch_size": int(current.get("batch_size") or artwork.DEFAULT_HISTORICAL_BACKFILL_BATCH_SIZE),
+            "batch_remaining": 0,
+            "pause_reason": "manual_batches_required",
+            "updated_at": datetime.now(timezone.utc),
+        }
+        self.backfill_controls[uid] = paused
+        return {"outcome": "updated", "control": copy.deepcopy(paused)}
 
     def list_jobs_for_uid(self, uid, *, migrate_legacy_jobs=True):
         self.job_list_migration_requests.append(migrate_legacy_jobs)
@@ -1214,6 +1263,147 @@ def test_queue_status_pauses_a_persisted_legacy_automatic_run():
     assert status["control_state"] == "paused"
     assert status["auto_continue"] is False
     assert status["batch_remaining"] == 0
+
+
+def test_concurrent_owner_auto_continue_resume_wins_over_stale_queue_status_pause():
+    class InterleavingRepository(FakeRepository):
+        def __init__(self):
+            super().__init__()
+            self.resume_committed_before_stale_pause = False
+
+        def pause_observed_legacy_auto_continue_control(
+            self,
+            uid,
+            *,
+            observed_control,
+            expected_generation_id,
+            authority_digest,
+            style_version,
+        ):
+            if not self.resume_committed_before_stale_pause:
+                self.resume_committed_before_stale_pause = True
+                resume = self.set_backfill_control(
+                    uid,
+                    expected_generation_id=expected_generation_id,
+                    state="running",
+                    auto_continue=True,
+                )
+                assert resume["outcome"] == "updated"
+                assert artwork.artwork_db._auto_continue_receipt_is_current(resume["control"])
+            return super().pause_observed_legacy_auto_continue_control(
+                uid,
+                observed_control=observed_control,
+                expected_generation_id=expected_generation_id,
+                authority_digest=authority_digest,
+                style_version=style_version,
+            )
+
+    repository = InterleavingRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+    generation_id = artwork.artwork_db.reconciliation_job_id("owner-a", "digest-a", artwork.DEFAULT_STYLE_VERSION)
+    repository.backfill_controls["owner-a"] = {
+        "schema_version": "ella.memory_artwork.queue_control.v1",
+        "generation_id": generation_id,
+        "authority_digest": "digest-a",
+        "style_version": artwork.DEFAULT_STYLE_VERSION,
+        "state": "running",
+        "auto_continue": True,
+        "batch_size": 10,
+        "batch_remaining": 0,
+        "pause_reason": "",
+    }
+
+    status = asyncio.run(service.queue_status("owner-a"))
+
+    control = repository.backfill_controls["owner-a"]
+    assert repository.resume_committed_before_stale_pause is True
+    assert status["control_state"] == "running"
+    assert status["auto_continue"] is True
+    assert status["batch_remaining"] == 0
+    assert control["state"] == "running"
+    assert control["auto_continue"] is True
+    assert artwork.artwork_db._auto_continue_receipt_is_current(control)
+
+
+def test_database_legacy_auto_continue_pause_cas_preserves_concurrent_receipt():
+    class Snapshot:
+        def __init__(self, payload):
+            self.exists = True
+            self._payload = payload
+
+        def to_dict(self):
+            return copy.deepcopy(self._payload)
+
+    class Reference:
+        def __init__(self, identifier, payload):
+            self.id = identifier
+            self._snapshot = Snapshot(payload)
+
+        def get(self, transaction=None):
+            return self._snapshot
+
+    class Transaction:
+        def __init__(self):
+            self.sets = []
+
+        def set(self, reference, payload, merge=False):
+            self.sets.append((reference, copy.deepcopy(payload), merge))
+
+    preferences = _accepted_preferences(_authority())
+    generation_id = artwork_database.reconciliation_job_id(
+        "owner-a",
+        preferences["authority_digest"],
+        preferences["style_version"],
+    )
+    observed_stale_control = {
+        "schema_version": artwork_database.QUEUE_CONTROL_SCHEMA_VERSION,
+        "generation_id": generation_id,
+        "authority_digest": preferences["authority_digest"],
+        "style_version": preferences["style_version"],
+        "state": "running",
+        "auto_continue": True,
+        "batch_size": 10,
+        "batch_remaining": 0,
+    }
+    current_receipted_control = {
+        **observed_stale_control,
+        "auto_continue_receipt": {
+            "schema_version": artwork_database.AUTO_CONTINUE_RECEIPT_VERSION,
+            "generation_id": generation_id,
+            "authority_digest": preferences["authority_digest"],
+            "style_version": preferences["style_version"],
+            "granted_at": datetime(2026, 9, 24, tzinfo=timezone.utc),
+        },
+    }
+    user_ref = Reference(
+        "owner-a",
+        {
+            artwork_database.PREFERENCES_FIELD: preferences,
+            artwork_database.BACKFILL_CONTROL_FIELD: current_receipted_control,
+        },
+    )
+    transaction = Transaction()
+
+    result = artwork_database._pause_observed_legacy_auto_continue_control_transaction(
+        transaction,
+        user_ref,
+        observed_control=observed_stale_control,
+        expected_generation_id=generation_id,
+        authority_digest=preferences["authority_digest"],
+        style_version=preferences["style_version"],
+        now=datetime(2026, 9, 24, tzinfo=timezone.utc),
+    )
+
+    assert result["outcome"] == "stale"
+    assert transaction.sets == []
+    assert result["control"]["state"] == "running"
+    assert result["control"]["auto_continue"] is True
+    assert artwork_database._auto_continue_receipt_is_current(result["control"])
 
 
 def test_database_claim_pauses_legacy_automatic_run_before_provider_work():
