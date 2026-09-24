@@ -100,6 +100,51 @@ class _FakeBleNotificationEndpoint implements BleNotificationEndpoint {
   }
 }
 
+class _ManualTimer implements Timer {
+  _ManualTimer(this.duration, this._callback);
+
+  final Duration duration;
+  final void Function() _callback;
+  bool _active = true;
+  int _tick = 0;
+
+  @override
+  bool get isActive => _active;
+
+  @override
+  int get tick => _tick;
+
+  @override
+  void cancel() => _active = false;
+
+  void fire() {
+    if (!_active) return;
+    _active = false;
+    _tick++;
+    _callback();
+  }
+}
+
+class _ManualLivenessClock {
+  final List<_ManualTimer> _timers = [];
+
+  Timer createTimer(Duration duration, void Function() callback) {
+    final timer = _ManualTimer(duration, callback);
+    _timers.add(timer);
+    return timer;
+  }
+
+  int get activeCount => _timers.where((timer) => timer.isActive).length;
+
+  void elapseNextWindow() {
+    final active = _timers.where((timer) => timer.isActive).toList();
+    if (active.length != 1) {
+      throw StateError('Expected exactly one active liveness timer, found ${active.length}');
+    }
+    active.single.fire();
+  }
+}
+
 BleTransport _testBleTransport(
   _FakeBleNotificationEndpoint endpoint, {
   BleAudioLivenessRecovery? recovery,
@@ -156,7 +201,8 @@ void main() {
 
   test('production BLE transport resets one silent CCCD inside the physical-audio deadline', () async {
     final endpoint = _FakeBleNotificationEndpoint();
-    final recovery = BleAudioLivenessRecovery(window: const Duration(milliseconds: 1));
+    final clock = _ManualLivenessClock();
+    final recovery = BleAudioLivenessRecovery(timerFactory: clock.createTimer);
     final transport = _testBleTransport(endpoint, recovery: recovery);
     addTearDown(endpoint.dispose);
     addTearDown(transport.dispose);
@@ -165,7 +211,8 @@ void main() {
     final received = <List<int>>[];
     final subscription = stream?.listen(received.add);
     addTearDown(() => subscription?.cancel());
-    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(clock.activeCount, 1);
+    clock.elapseNextWindow();
     await pumpEventQueue(times: 20);
     endpoint.fresh.add([4, 5, 6]);
     await pumpEventQueue();
@@ -178,6 +225,7 @@ void main() {
     expect(received, [
       [4, 5, 6],
     ]);
+    expect(clock.activeCount, 1, reason: 'recovered physical audio must arm the next interval');
     final worstCaseRecovery = bleAudioLivenessWindow +
         const Duration(
           seconds: bleNotificationResetTimeoutSeconds +
@@ -192,9 +240,10 @@ void main() {
     final freshEndpoint = _FakeBleNotificationEndpoint();
     BleNotificationEndpoint activeEndpoint = staleEndpoint;
     var serviceRefreshes = 0;
+    final clock = _ManualLivenessClock();
     final transport = _testBleTransport(
       staleEndpoint,
-      recovery: BleAudioLivenessRecovery(window: const Duration(milliseconds: 1)),
+      recovery: BleAudioLivenessRecovery(timerFactory: clock.createTimer),
       endpointResolver: (_, __) async => activeEndpoint,
       serviceRefresher: () async {
         serviceRefreshes++;
@@ -209,7 +258,8 @@ void main() {
     final received = <List<int>>[];
     final subscription = await connection.performGetBleAudioBytesListener(onAudioBytesReceived: received.add);
     addTearDown(() => subscription?.cancel());
-    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(clock.activeCount, 1);
+    clock.elapseNextWindow();
     while (freshEndpoint.notifyCalls.isEmpty) {
       await pumpEventQueue();
     }
@@ -228,6 +278,7 @@ void main() {
     expect(received, [
       [4, 5, 6],
     ]);
+    expect(clock.activeCount, 1, reason: 'forwarded physical audio must arm the next interval');
   });
 
   test('Omi production entrypoint recovers when audio notifications stall after valid frames', () async {
@@ -235,9 +286,10 @@ void main() {
     final recoveredEndpoint = _FakeBleNotificationEndpoint();
     BleNotificationEndpoint activeEndpoint = initialEndpoint;
     var serviceRefreshes = 0;
+    final clock = _ManualLivenessClock();
     final transport = _testBleTransport(
       initialEndpoint,
-      recovery: BleAudioLivenessRecovery(window: const Duration(milliseconds: 1)),
+      recovery: BleAudioLivenessRecovery(timerFactory: clock.createTimer),
       endpointResolver: (_, __) async => activeEndpoint,
       serviceRefresher: () async {
         serviceRefreshes++;
@@ -255,7 +307,8 @@ void main() {
     initialEndpoint.fresh.add([1, 2, 3]);
     await pumpEventQueue();
 
-    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(clock.activeCount, 1);
+    clock.elapseNextWindow();
     while (recoveredEndpoint.notifyCalls.isEmpty) {
       await pumpEventQueue();
     }
@@ -273,6 +326,9 @@ void main() {
       [1, 2, 3],
       [4, 5, 6],
     ]);
+    expect(clock.activeCount, 1, reason: 'recovered physical audio must arm the next interval');
+    await pumpEventQueue(times: 20);
+    expect(serviceRefreshes, 1, reason: 'the next interval must not fire until explicitly elapsed');
   });
 
   test('production BLE setup fails closed when the account/device connection generation drifts', () async {
@@ -346,9 +402,10 @@ void main() {
     final resetBarrier = Completer<void>();
     endpoint.notifyCallBarriers[2] = resetBarrier;
     var connected = true;
+    final clock = _ManualLivenessClock();
     final transport = _testBleTransport(
       endpoint,
-      recovery: BleAudioLivenessRecovery(window: const Duration(milliseconds: 1)),
+      recovery: BleAudioLivenessRecovery(timerFactory: clock.createTimer),
       connectionProbe: () => connected,
       connectionStates: connectionStates.stream,
     );
@@ -359,7 +416,8 @@ void main() {
     final stream = await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
     final subscription = stream?.listen((_) {});
     addTearDown(() => subscription?.cancel());
-    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(clock.activeCount, 1);
+    clock.elapseNextWindow();
     while (endpoint.notifyCalls.length < 2) {
       await pumpEventQueue();
     }
@@ -451,9 +509,10 @@ void main() {
     final endpoint = _FakeBleNotificationEndpoint();
     final resetBarrier = Completer<void>();
     endpoint.notifyCallBarriers[2] = resetBarrier;
+    final clock = _ManualLivenessClock();
     final transport = _testBleTransport(
       endpoint,
-      recovery: BleAudioLivenessRecovery(window: const Duration(milliseconds: 1)),
+      recovery: BleAudioLivenessRecovery(timerFactory: clock.createTimer),
     );
     addTearDown(endpoint.dispose);
     addTearDown(transport.dispose);
@@ -463,7 +522,8 @@ void main() {
     expect(initialStream, isNotNull);
     final initialSubscription = initialStream?.listen((_) {});
     addTearDown(() => initialSubscription?.cancel());
-    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(clock.activeCount, 1);
+    clock.elapseNextWindow();
     while (endpoint.notifyCalls.length < 2) {
       await pumpEventQueue();
     }
@@ -473,7 +533,6 @@ void main() {
     resetBarrier.complete();
 
     expect(await overlappingReady, isNotNull);
-    await Future<void>.delayed(const Duration(milliseconds: 10));
     await pumpEventQueue(times: 20);
     expect(endpoint.notifyCalls, [
       (true, bleNotificationEnableTimeoutSeconds),
@@ -590,17 +649,19 @@ void main() {
 
   test('cancelled silent capture cannot consume the next capture recovery budget', () async {
     final endpoint = _FakeBleNotificationEndpoint();
+    final clock = _ManualLivenessClock();
     final transport = _testBleTransport(
       endpoint,
-      recovery: BleAudioLivenessRecovery(window: const Duration(milliseconds: 1)),
+      recovery: BleAudioLivenessRecovery(timerFactory: clock.createTimer),
     );
     addTearDown(endpoint.dispose);
     addTearDown(transport.dispose);
 
     final firstStream = await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
     final firstSubscription = firstStream?.listen((_) {});
+    expect(clock.activeCount, 1);
     await firstSubscription?.cancel();
-    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(clock.activeCount, 0);
     await pumpEventQueue(times: 20);
 
     expect(endpoint.notifyCalls, [(true, bleNotificationEnableTimeoutSeconds)]);
@@ -609,7 +670,8 @@ void main() {
         await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
     final secondSubscription = secondStream?.listen((_) {});
     addTearDown(() => secondSubscription?.cancel());
-    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(clock.activeCount, 1);
+    clock.elapseNextWindow();
     await pumpEventQueue(times: 20);
 
     expect(endpoint.notifyCalls, [
@@ -623,16 +685,18 @@ void main() {
     final endpoint = _FakeBleNotificationEndpoint();
     final resetBarrier = Completer<void>();
     endpoint.notifyCallBarriers[2] = resetBarrier;
+    final clock = _ManualLivenessClock();
     final transport = _testBleTransport(
       endpoint,
-      recovery: BleAudioLivenessRecovery(window: const Duration(milliseconds: 1)),
+      recovery: BleAudioLivenessRecovery(timerFactory: clock.createTimer),
     );
     addTearDown(endpoint.dispose);
     addTearDown(transport.dispose);
 
     final firstStream = await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
     final firstSubscription = firstStream?.listen((_) {});
-    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(clock.activeCount, 1);
+    clock.elapseNextWindow();
     while (endpoint.notifyCalls.length < 2) {
       await pumpEventQueue();
     }
@@ -650,7 +714,8 @@ void main() {
         await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
     final secondSubscription = secondStream?.listen((_) {});
     addTearDown(() => secondSubscription?.cancel());
-    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(clock.activeCount, 1);
+    clock.elapseNextWindow();
     await pumpEventQueue(times: 20);
 
     expect(endpoint.notifyCalls, [
@@ -692,42 +757,53 @@ void main() {
     expect(transport.legacyStreamRequests, 0);
   });
 
-  testWidgets('silent connected audio triggers one bounded notification recovery', (tester) async {
+  test('silent connected audio triggers one bounded notification recovery', () async {
     var recoveries = 0;
-    final recovery = BleAudioLivenessRecovery(window: const Duration(seconds: 2));
+    final clock = _ManualLivenessClock();
+    final recovery = BleAudioLivenessRecovery(timerFactory: clock.createTimer);
     addTearDown(recovery.dispose);
 
     recovery.arm(() async {
       recoveries++;
     });
-    await tester.pump(const Duration(seconds: 2));
+    expect(clock.activeCount, 1);
+    clock.elapseNextWindow();
+    await pumpEventQueue();
     expect(recoveries, 1);
 
-    await tester.pump(const Duration(seconds: 10));
+    await pumpEventQueue(times: 20);
     expect(recoveries, 1, reason: 'a silent link must not enter a CCCD retry loop');
+    expect(clock.activeCount, 0);
   });
 
-  testWidgets('physical audio postpones recovery while a later mid-stream stall triggers it once', (tester) async {
+  test('physical audio re-arms exactly one later silent recovery interval', () async {
     var recoveries = 0;
-    final recovery = BleAudioLivenessRecovery(window: const Duration(seconds: 2));
+    final clock = _ManualLivenessClock();
+    final recovery = BleAudioLivenessRecovery(timerFactory: clock.createTimer);
     addTearDown(recovery.dispose);
 
     recovery.arm(() async {
       recoveries++;
     });
-    await tester.pump(const Duration(seconds: 1));
+    expect(clock.activeCount, 1);
     recovery.observedAudio();
-    await tester.pump(const Duration(seconds: 1));
+    expect(clock.activeCount, 1);
+    await pumpEventQueue(times: 20);
     expect(recoveries, 0);
 
-    recovery.observedAudio();
-    await tester.pump(const Duration(seconds: 1));
-    expect(recoveries, 0);
-
-    await tester.pump(const Duration(seconds: 1));
+    clock.elapseNextWindow();
+    await pumpEventQueue();
     expect(recoveries, 1);
-    await tester.pump(const Duration(seconds: 10));
+    expect(clock.activeCount, 0);
 
-    expect(recoveries, 1, reason: 'one mid-stream stall must not enter a CCCD retry loop');
+    recovery.observedAudio();
+    expect(clock.activeCount, 1, reason: 'recovered audio must create a fresh interval');
+    await pumpEventQueue(times: 20);
+    expect(recoveries, 1, reason: 'the next interval must not run until deliberately elapsed');
+
+    clock.elapseNextWindow();
+    await pumpEventQueue();
+    expect(recoveries, 2);
+    expect(clock.activeCount, 0);
   });
 }

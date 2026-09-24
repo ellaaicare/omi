@@ -63,14 +63,21 @@ typedef BleNotificationEndpointResolver = Future<BleNotificationEndpoint?> Funct
 typedef BleServiceRefresher = Future<void> Function();
 
 @visibleForTesting
+typedef BleLivenessTimerFactory = Timer Function(Duration duration, void Function() callback);
+
+@visibleForTesting
 bool bleCharacteristicUsesFreshNotifications(String characteristicUuid) =>
     characteristicUuid.toLowerCase() == audioDataStreamCharacteristicUuid.toLowerCase();
 
 @visibleForTesting
 class BleAudioLivenessRecovery {
-  BleAudioLivenessRecovery({this.window = bleAudioLivenessWindow});
+  BleAudioLivenessRecovery({
+    this.window = bleAudioLivenessWindow,
+    BleLivenessTimerFactory? timerFactory,
+  }) : _timerFactory = timerFactory ?? ((duration, callback) => Timer(duration, callback));
 
   final Duration window;
+  final BleLivenessTimerFactory _timerFactory;
   Timer? _timer;
   Future<void> Function()? _recover;
   bool _recoveryUsed = false;
@@ -86,7 +93,7 @@ class BleAudioLivenessRecovery {
     final recover = _recover;
     if (recover == null || _timer != null || _recoveryUsed || _recovering) return;
     final generation = _generation;
-    _timer = Timer(window, () {
+    _timer = _timerFactory(window, () {
       _timer = null;
       if (generation != _generation || _recoveryUsed || _recovering) return;
       _recoveryUsed = true;
