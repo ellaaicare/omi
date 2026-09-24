@@ -293,6 +293,7 @@ ServerConversation _conversationWithEvidence(
   List<TranscriptSegment> transcriptSegments, {
   List<ConversationPhoto> photos = const [],
   ConversationStatus status = ConversationStatus.in_progress,
+  String? captureState,
 }) {
   final startedAt = DateTime.parse('2026-08-10T20:00:00Z');
   return ServerConversation(
@@ -302,6 +303,7 @@ ServerConversation _conversationWithEvidence(
     finishedAt: startedAt.add(const Duration(minutes: 1)),
     structured: Structured('Memory $id', 'Overview'),
     status: status,
+    captureState: captureState,
     transcriptSegments: transcriptSegments,
     photos: photos,
   );
@@ -1178,7 +1180,11 @@ void main() {
   test('a shorter authoritative segment cannot authorize a longer visible transcript tail', () async {
     final authority = _CaptureAuthority('uid-a');
     var processCalls = 0;
-    final authoritative = _conversation('authoritative', 'Durable partial words');
+    final authoritative = _conversationWithEvidence(
+      'authoritative',
+      [_segment('segment-authoritative', 'Durable partial words')],
+      captureState: 'drained',
+    );
     final provider = CaptureProvider(
       activeAccountAuthority: () => authority,
       inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
@@ -1223,12 +1229,81 @@ void main() {
     await pumpEventQueue();
     provider.onSegmentReceived([_segment('stable-segment', 'Corrected final words')]);
     refresh.complete([
-      _conversationWithEvidence('authoritative', [_segment('stable-segment', 'Draft words')]),
+      _conversationWithEvidence(
+        'authoritative',
+        [_segment('stable-segment', 'Draft words')],
+        captureState: 'drained',
+      ),
     ]);
 
     expect(await finalization, isFalse);
     expect(processCalls, 0);
     expect(provider.segments.single.text, 'Corrected final words');
+  });
+
+  test('a drained same-id final wording revision authorizes processing when visible evidence stayed stable', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    var processCalls = 0;
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        return [
+          _conversationWithEvidence(
+            'authoritative',
+            [_segment('stable-segment', 'Canonical final wording')],
+            captureState: 'drained',
+          ),
+        ];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        processCalls++;
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation('authoritative', 'Canonical final wording', status: ConversationStatus.completed),
+        );
+      },
+    )
+      ..updateProviderInstances(conversations, null, null, null)
+      ..segments = [_segment('stable-segment', 'Visible interim wording')];
+    addTearDown(provider.dispose);
+
+    expect(
+      await provider.finalizeCurrentConversation(maxTranscriptAttempts: 1, transcriptRetryDelay: Duration.zero),
+      isTrue,
+    );
+    expect(processCalls, 1);
+  });
+
+  test('an active same-id wording mismatch cannot authorize processing', () async {
+    final authority = _CaptureAuthority('uid-a');
+    var processCalls = 0;
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        return [
+          _conversationWithEvidence(
+            'authoritative',
+            [_segment('stable-segment', 'Server draft wording')],
+            captureState: 'active',
+          ),
+        ];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        processCalls++;
+        return null;
+      },
+    )..segments = [_segment('stable-segment', 'Visible interim wording')];
+    addTearDown(provider.dispose);
+
+    expect(
+      await provider.finalizeCurrentConversation(maxTranscriptAttempts: 1, transcriptRetryDelay: Duration.zero),
+      isFalse,
+    );
+    expect(processCalls, 0);
   });
 
   test('failed processing preserves visible transcript and photos for a retry', () async {
@@ -2306,6 +2381,68 @@ void main() {
     expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isTrue);
     expect(fetchCalls, 2);
     expect(processCalls, 1);
+  });
+
+  test('continuous necklace boundary accepts a stable drained canonical wording revision', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final authority = _CaptureAuthority('uid-a');
+    final initialSocket = _FakeTranscriptSocket();
+    final replacementSocket = _FakeTranscriptSocket();
+    final conversations = ConversationProvider();
+    addTearDown(conversations.dispose);
+    var socketPreparations = 0;
+    var fetchCalls = 0;
+    var processCalls = 0;
+    late CaptureProvider provider;
+    provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) async {
+        socketPreparations++;
+        return socketPreparations == 1 ? initialSocket.service : replacementSocket.service;
+      },
+      deviceCaptureStarter: () async {
+        provider.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        fetchCalls++;
+        return [
+          _conversationWithEvidence(
+            'drained-capture',
+            [_segment('stable-segment', 'Canonical final necklace wording')],
+            captureState: 'drained',
+          ),
+        ];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        expect(conversationId, 'drained-capture');
+        processCalls++;
+        return CreateConversationResponse(
+          messages: const [],
+          conversation: _conversation(
+            'drained-capture',
+            'Canonical final necklace wording',
+            status: ConversationStatus.completed,
+          ),
+        );
+      },
+      geolocationSender: ({required expectedAuthenticatedUid, required exactAuthority}) async => true,
+    )..updateProviderInstances(conversations, null, null, null);
+    addTearDown(provider.dispose);
+
+    await provider.streamDeviceRecording(
+      device: BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30),
+    );
+    _bindCaptureAuthority(initialSocket, 'drained-capture');
+    provider.segments = [_segment('stable-segment', 'Visible interim necklace wording')];
+
+    expect(await provider.finalizeCurrentDeviceConversationAndContinue(), isTrue);
+    expect(fetchCalls, 1);
+    expect(processCalls, 1);
+    expect(socketPreparations, 2);
   });
 
   test('continuous necklace boundary retains a pending photo until the durable snapshot covers it', () async {

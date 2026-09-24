@@ -3547,8 +3547,17 @@ class CaptureProvider extends ChangeNotifier
         );
       }
       var loadResult = _InProgressConversationLoadResult.rejected;
+      List<TranscriptSegment>? visibleAtCommit;
+      List<ConversationPhoto>? visiblePhotosAtCommit;
       try {
-        loadResult = await _loadInProgressConversation(operation, preserveVisibleContentOnEmpty: true);
+        loadResult = await _loadInProgressConversation(
+          operation,
+          preserveVisibleContentOnEmpty: true,
+          onBeforeCommit: (transcript, photos) {
+            visibleAtCommit = transcript;
+            visiblePhotosAtCommit = photos;
+          },
+        );
         if (loadResult == _InProgressConversationLoadResult.rejected) {
           return FinalCapturableContentResult.failed;
         }
@@ -3567,21 +3576,30 @@ class CaptureProvider extends ChangeNotifier
         final authoritativeHasContent = authoritativeConversation != null &&
             (authoritativeHasTranscript ||
                 authoritativePhotos.any((photo) => !photo.discarded && photo.base64.trim().isNotEmpty));
-        final visibleAfterRefresh = segments.where((segment) => segment.text.trim().isNotEmpty).toList();
-        final visiblePhotosAfterRefresh = _capturablePhotos(photos);
+        final liveTranscriptAtCommit =
+            (visibleAtCommit ?? visibleBeforeRefresh).where((segment) => segment.text.trim().isNotEmpty).toList();
+        final livePhotosAtCommit = _capturablePhotos(visiblePhotosAtCommit ?? visiblePhotosBeforeRefresh);
         final expectedVisibleTranscript = _mergeVisibleTranscriptEvidence(
           visibleBeforeRefresh,
-          visibleAfterRefresh,
+          liveTranscriptAtCommit,
         );
         final expectedVisiblePhotos = _mergeVisiblePhotoEvidence(
           visiblePhotosBeforeRefresh,
-          visiblePhotosAfterRefresh,
+          livePhotosAtCommit,
         );
         final expectsAuthoritativeTranscript =
             expectedVisibleTranscript.isNotEmpty || _captureDiagnostics.hasTranscript;
         final expectsAuthoritativePhotos = expectedVisiblePhotos.isNotEmpty;
-        final authoritativeCoversVisible =
-            _authoritativeTranscriptCovers(authoritativeSegments, expectedVisibleTranscript);
+        final transcriptChangedDuringRead = !_sameTranscriptEvidence(visibleBeforeRefresh, liveTranscriptAtCommit);
+        // A drained exact capture makes the server wording canonical, but only
+        // when no newer local evidence arrived and the durable tail is complete.
+        final authoritativeCoversVisible = _authoritativeTranscriptCovers(
+              authoritativeSegments,
+              expectedVisibleTranscript,
+            ) ||
+            (authoritativeConversation?.captureState == 'drained' &&
+                !transcriptChangedDuringRead &&
+                _authoritativeTranscriptIdentityCovers(authoritativeSegments, expectedVisibleTranscript));
         final authoritativeCoversVisiblePhotos = _authoritativePhotosCover(authoritativePhotos, expectedVisiblePhotos);
         if (authoritativeHasContent &&
             (!expectsAuthoritativeTranscript || (authoritativeHasTranscript && authoritativeCoversVisible)) &&
@@ -3670,6 +3688,31 @@ class CaptureProvider extends ChangeNotifier
               authoritativeSegment.end + 0.001 >= visibleSegment.end,
         ),
       );
+
+  bool _authoritativeTranscriptIdentityCovers(
+    List<TranscriptSegment> authoritative,
+    List<TranscriptSegment> visible,
+  ) =>
+      visible.every(
+        (visibleSegment) => authoritative.any(
+          (authoritativeSegment) =>
+              _sameTranscriptSegment(authoritativeSegment, visibleSegment) &&
+              authoritativeSegment.text.trim().isNotEmpty &&
+              authoritativeSegment.end + 0.001 >= visibleSegment.end,
+        ),
+      );
+
+  bool _sameTranscriptEvidence(List<TranscriptSegment> left, List<TranscriptSegment> right) {
+    if (left.length != right.length) return false;
+    return left.every(
+      (leftSegment) => right.any(
+        (rightSegment) =>
+            _sameTranscriptSegment(leftSegment, rightSegment) &&
+            _normalizedTranscriptText(leftSegment.text) == _normalizedTranscriptText(rightSegment.text) &&
+            leftSegment.end == rightSegment.end,
+      ),
+    );
+  }
 
   String _normalizedTranscriptText(String text) => text.trim().replaceAll(RegExp(r'\s+'), ' ');
 
@@ -3795,6 +3838,7 @@ class CaptureProvider extends ChangeNotifier
     CaptureFinalizationOperation operation, {
     bool preserveVisibleContentOnEmpty = false,
     bool Function()? commitGuard,
+    void Function(List<TranscriptSegment> transcript, List<ConversationPhoto> photos)? onBeforeCommit,
   }) async {
     if (!operation.isCurrent || commitGuard?.call() == false) {
       return _InProgressConversationLoadResult.rejected;
@@ -3806,6 +3850,7 @@ class CaptureProvider extends ChangeNotifier
     if (!operation.isCurrent || commitGuard?.call() == false) {
       return _InProgressConversationLoadResult.rejected;
     }
+    onBeforeCommit?.call(List<TranscriptSegment>.from(segments), List<ConversationPhoto>.from(photos));
     final expectedConversationId = operation.captureProtocolAuthority?.conversationId.trim() ?? '';
     final fetchedConversation = expectedConversationId.isEmpty
         ? convos.firstOrNull
