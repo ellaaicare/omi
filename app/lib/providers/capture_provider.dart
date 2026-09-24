@@ -3698,6 +3698,7 @@ class CaptureProvider extends ChangeNotifier
           (authoritativeSegment) =>
               _sameTranscriptSegment(authoritativeSegment, visibleSegment) &&
               authoritativeSegment.text.trim().isNotEmpty &&
+              _transcriptExtentCovers(authoritativeSegment.text, visibleSegment.text) &&
               authoritativeSegment.end + 0.001 >= visibleSegment.end,
         ),
       );
@@ -3715,6 +3716,23 @@ class CaptureProvider extends ChangeNotifier
   }
 
   String _normalizedTranscriptText(String text) => text.trim().replaceAll(RegExp(r'\s+'), ' ');
+
+  bool _transcriptExtentCovers(String authoritative, String visible) {
+    final normalizedAuthoritative = _normalizedTranscriptText(authoritative);
+    final normalizedVisible = _normalizedTranscriptText(visible);
+    if (normalizedVisible.isEmpty) return true;
+
+    return _transcriptWordCount(normalizedAuthoritative) >= _transcriptWordCount(normalizedVisible) &&
+        _nonWhitespaceRuneCount(normalizedAuthoritative) >= _nonWhitespaceRuneCount(normalizedVisible);
+  }
+
+  int _transcriptWordCount(String normalizedText) {
+    return normalizedText.isEmpty ? 0 : normalizedText.split(' ').length;
+  }
+
+  int _nonWhitespaceRuneCount(String normalizedText) {
+    return normalizedText.replaceAll(' ', '').runes.length;
+  }
 
   bool _transcriptTextCovers(String authoritative, String visible) {
     final normalizedAuthoritative = _normalizedTranscriptText(authoritative);
