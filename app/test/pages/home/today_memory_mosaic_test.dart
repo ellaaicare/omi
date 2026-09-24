@@ -164,6 +164,50 @@ void main() {
     expect(artwork.displayRequests.where((request) => request.memoryId == newer.id), hasLength(1));
   });
 
+  testWidgets('Home retains day artwork state when midnight relabels the calendar date', (tester) async {
+    final authority = await _installArtworkAuthority();
+    await SharedPreferencesUtil().saveMemoryGalleryLayout(MemoryGalleryLayout.days.name);
+    final artwork = _FakeMemoryArtworkApi(
+      displayResult: const MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.unavailable,
+        failureCode: 'memory_artwork_unavailable',
+      ),
+    );
+    final memory = ServerConversation(
+      id: 'midnight-memory',
+      createdAt: DateTime(2026, 8, 9, 12),
+      structured: Structured('Stable through midnight', 'Artwork stays mounted when Today becomes Yesterday.'),
+    );
+    var now = DateTime(2026, 8, 9, 23, 59);
+    final harness = await _pumpHome(
+      tester,
+      conversations: [memory],
+      nowProvider: () => now,
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+
+    final artworkFinder = find.byWidgetPredicate(
+      (widget) => widget is MemoryArtworkImage && widget.conversation.id == memory.id,
+    );
+    final artworkState = tester.state(artworkFinder);
+    expect(tester.widget<MemoryDayGalleryCard>(find.byType(MemoryDayGalleryCard)).dayLabel, 'TODAY');
+    final requestsBeforeMidnight = artwork.displayRequests.where((request) => request.memoryId == memory.id).length;
+    expect(requestsBeforeMidnight, greaterThan(0));
+
+    now = DateTime(2026, 8, 10, 0, 1);
+    harness.conversations.rebuild();
+    await tester.pump();
+
+    expect(tester.widget<MemoryDayGalleryCard>(find.byType(MemoryDayGalleryCard)).dayLabel, 'YESTERDAY');
+    expect(identical(tester.state(artworkFinder), artworkState), isTrue);
+    expect(
+      artwork.displayRequests.where((request) => request.memoryId == memory.id),
+      hasLength(requestsBeforeMidnight),
+    );
+  });
+
   testWidgets('Daily Note preview opens the full note and hands off to scoped talk', (tester) async {
     const fullBody =
         'A longer Daily Note keeps its complete grounded text available here while Home remains a compact overview.';
@@ -2786,6 +2830,7 @@ Future<_HomeHarness> _pumpHome(
   MemoryArtworkApi? memoryArtworkApi,
   MemoryArtworkAuthorityProvider? memoryArtworkAuthorityProvider,
   MemoryPresentationAuthorityProvider? memoryPresentationAuthorityProvider,
+  TodayNowProvider? nowProvider,
 }) async {
   tester.view.physicalSize = viewport;
   tester.view.devicePixelRatio = 1;
@@ -2854,7 +2899,7 @@ Future<_HomeHarness> _pumpHome(
             body: Stack(
               children: [
                 TodayPage(
-                  nowProvider: () => DateTime(2026, 8, 9, 9, 12),
+                  nowProvider: nowProvider ?? () => DateTime(2026, 8, 9, 9, 12),
                   todayCardRepository: _FixedTodayCardRepository(response),
                   todayCardCache: _MemoryTodayCardCache(),
                   todayCardAuthoritySnapshotProvider: () =>
@@ -2919,6 +2964,8 @@ class _FixtureConversationProvider extends ConversationProvider {
   final List<List<ServerConversation>> _olderConversationPages;
   final Completer<void>? initialLoadGate;
   int pageRequests = 0;
+
+  void rebuild() => notifyListeners();
 
   void restoreIncompletePage(List<ServerConversation> values) {
     conversations = List<ServerConversation>.of(values);

@@ -623,7 +623,7 @@ class MemoryDayGalleryCard extends StatelessWidget {
       button: true,
       label: context.l10n.memoryDayOpen(dayLabel, memories.length),
       child: Material(
-        key: Key('memory-day-$dayLabel'),
+        key: Key('memory-day-${memoryConversationCalendarDayKey(memories.first)}'),
         color: EllaColors.card,
         borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
         clipBehavior: Clip.antiAlias,
@@ -1100,4 +1100,12 @@ Map<String, List<ServerConversation>> groupMemoryConversationsByDay(
     result.putIfAbsent(label, () => []).add(conversation);
   }
   return result;
+}
+
+String memoryConversationCalendarDayKey(ServerConversation conversation) {
+  final value = (conversation.startedAt ?? conversation.createdAt).toLocal();
+  final year = value.year.toString().padLeft(4, '0');
+  final month = value.month.toString().padLeft(2, '0');
+  final day = value.day.toString().padLeft(2, '0');
+  return '$year-$month-$day';
 }
