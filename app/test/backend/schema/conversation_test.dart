@@ -77,6 +77,29 @@ void main() {
     expect(conversation.toJson()['processing_error_at'], '2026-07-20T08:05:00.000Z');
   });
 
+  test('preserves capture finalization state for authoritative transcript reads', () {
+    final conversation = ServerConversation.fromJson({
+      'id': 'drained-capture',
+      'created_at': '2026-09-24T20:00:00Z',
+      'structured': {
+        'title': '',
+        'overview': '',
+        'emoji': '',
+        'category': 'other',
+        'action_items': [],
+        'events': [],
+      },
+      'transcript_segments': [],
+      'apps_results': [],
+      'audio_files': [],
+      'status': 'in_progress',
+      'capture_state': 'drained',
+    });
+
+    expect(conversation.captureState, 'drained');
+    expect(conversation.toJson()['capture_state'], 'drained');
+  });
+
   test('preserves the active summary version used by memory-scoped voice', () {
     final conversation = ServerConversation.fromJson({
       'id': 'memory-voice-conversation',

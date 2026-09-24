@@ -257,6 +257,7 @@ class ServerConversation {
   final String? processingRetryEnrichmentVectorStatus;
   final String? processingError;
   final DateTime? processingErrorAt;
+  final String? captureState;
   final MemoryArtworkState? artwork;
 
   ConversationStatus status;
@@ -305,6 +306,7 @@ class ServerConversation {
     this.processingRetryEnrichmentVectorStatus,
     this.processingError,
     this.processingErrorAt,
+    this.captureState,
     this.artwork,
     this.status = ConversationStatus.completed,
     this.isLocked = false,
@@ -346,6 +348,7 @@ class ServerConversation {
       processingError: json['processing_error'],
       processingErrorAt:
           json['processing_error_at'] != null ? DateTime.parse(json['processing_error_at']).toLocal() : null,
+      captureState: json['capture_state']?.toString(),
       artwork: json['artwork'] is Map
           ? MemoryArtworkState.fromJson(Map<String, dynamic>.from(json['artwork'] as Map))
           : null,
@@ -383,6 +386,7 @@ class ServerConversation {
       'processing_retry_enrichment_vector_status': processingRetryEnrichmentVectorStatus,
       'processing_error': processingError,
       'processing_error_at': processingErrorAt?.toUtc().toIso8601String(),
+      if (captureState != null) 'capture_state': captureState,
       'artwork': artwork?.toJson(),
       'status': status.toString().split('.').last,
       'is_locked': isLocked,
