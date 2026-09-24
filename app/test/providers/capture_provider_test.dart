@@ -1207,6 +1207,37 @@ void main() {
     expect(provider.segments.single.text, 'Visible words with a later tail');
   });
 
+  test('a drained same-id same-end transcript cannot authorize a truncated visible tail', () async {
+    final authority = _CaptureAuthority('uid-a');
+    var processCalls = 0;
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      inProgressConversationFetch: ({required expectedAuthenticatedUid, required exactAuthority}) async {
+        return [
+          _conversationWithEvidence(
+            'authoritative',
+            [_segment('stable-segment', 'Durable partial words', end: 2.0)],
+            captureState: 'drained',
+          ),
+        ];
+      },
+      inProgressConversationProcess: (
+          {required conversationId, required expectedAuthenticatedUid, required exactAuthority}) async {
+        processCalls++;
+        return null;
+      },
+    )..segments = [_segment('stable-segment', 'Visible words with a later transcript tail', end: 2.0)];
+    addTearDown(provider.dispose);
+
+    expect(
+      await provider.finalizeCurrentConversation(maxTranscriptAttempts: 1, transcriptRetryDelay: Duration.zero),
+      isFalse,
+    );
+    expect(processCalls, 0);
+    expect(provider.segments.single.end, 2.0);
+    expect(provider.segments.single.text, 'Visible words with a later transcript tail');
+  });
+
   test('a same-id correction arriving during the final read remains visible and blocks stale processing', () async {
     final authority = _CaptureAuthority('uid-a');
     final refresh = Completer<List<ServerConversation>>();
