@@ -1202,6 +1202,22 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     _connectedCaptureRecoveryAuthorityGeneration = null;
   }
 
+  void _continueOwnerBoundReconnectAfterSilentCaptureReset(BtDevice device, int recoveryGeneration) {
+    if (!_isDeviceOperationCurrent(recoveryGeneration) ||
+        isConnected ||
+        !_isCurrentOwnerBoundDevice(device.id) ||
+        _hasPendingFreshBleSessionRequirement()) {
+      return;
+    }
+    unawaited(
+      periodicConnect(
+        'automatic silent-necklace recovery follow-up',
+        boundDeviceOnly: true,
+        operationGeneration: recoveryGeneration,
+      ),
+    );
+  }
+
   void _scheduleConnectedCaptureRecovery(BtDevice device, int failedOperationGeneration) {
     final capture = captureProvider;
     final failure = capture?.captureDiagnostics.failure;
@@ -1254,17 +1270,13 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         await _resetConnectedDeviceForCaptureRetry(device, recoveryGeneration);
         if (!_isDeviceOperationCurrent(recoveryGeneration)) return;
         await scanAndConnectToDevice(operationGeneration: recoveryGeneration, startCaptureWhenConnected: true);
-        if (_isDeviceOperationCurrent(recoveryGeneration) && !isConnected && _isCurrentOwnerBoundDevice(device.id)) {
-          unawaited(
-            periodicConnect(
-              'automatic silent-necklace recovery follow-up',
-              boundDeviceOnly: true,
-              operationGeneration: recoveryGeneration,
-            ),
-          );
-        }
+        _continueOwnerBoundReconnectAfterSilentCaptureReset(device, recoveryGeneration);
       } catch (error) {
         Logger.debug('Automatic silent-necklace recovery failed: $error');
+        // A successful native reset is safe to retry after a transient scan or
+        // teardown error. A failed native disconnect retains the fresh-session
+        // fence and remains explicit-retry-only.
+        _continueOwnerBoundReconnectAfterSilentCaptureReset(device, recoveryGeneration);
       } finally {
         if (_isDeviceOperationCurrent(recoveryGeneration)) updateConnectingStatus(false);
       }
