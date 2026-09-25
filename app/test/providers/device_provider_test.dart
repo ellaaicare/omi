@@ -1506,6 +1506,99 @@ void main() {
     expect(provider.connectionAttemptFailed, isFalse);
   });
 
+  test('failed explicit replacement restores the remembered necklace', () async {
+    final necklaceA = BtDevice(name: 'Ella A', id: 'necklace-a', type: DeviceType.omi, rssi: -30);
+    final necklaceB = BtDevice(name: 'Ella B', id: 'necklace-b', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklaceA);
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      scanConnector: () async => null,
+      automaticallyReconnectOnReady: false,
+    );
+    addTearDown(provider.dispose);
+
+    expect(await provider.connectDeviceForCurrentUser(necklaceB), isFalse);
+
+    expect(provider.presentationConnectedDevice, isNull);
+    expect(provider.presentationPairedDevice?.id, necklaceA.id);
+    expect(provider.connectionAttemptFailed, isTrue);
+  });
+
+  test('failed first explicit connection leaves no false paired necklace', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-b', type: DeviceType.omi, rssi: -30);
+    final preferences = SharedPreferencesUtil()..uid = 'test-user';
+    await preferences.btDeviceSet(BtDevice.empty());
+    await preferences.btDeviceOwnerBindingSet('');
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      scanConnector: () async => null,
+      automaticallyReconnectOnReady: false,
+    );
+    addTearDown(provider.dispose);
+
+    expect(await provider.connectDeviceForCurrentUser(necklace), isFalse);
+
+    expect(provider.presentationConnectedDevice, isNull);
+    expect(provider.presentationPairedDevice, isNull);
+    expect(provider.connectionAttemptFailed, isTrue);
+  });
+
+  test('ambient resume rejects connected A while replacement B is pending', () async {
+    final necklaceA = BtDevice(name: 'Ella A', id: 'necklace-a', type: DeviceType.omi, rssi: -30);
+    final necklaceB = BtDevice(name: 'Ella B', id: 'necklace-b', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklaceA);
+    final connectionGate = Completer<DeviceConnection?>();
+    final service = _FakeDeviceService(DeviceServiceStatus.ready)..ensureConnectionGate = connectionGate;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async => null,
+      automaticallyReconnectOnReady: false,
+    )
+      ..connectedDevice = necklaceA
+      ..pairedDevice = necklaceA
+      ..isConnected = true;
+    addTearDown(provider.dispose);
+
+    final replacement = provider.connectDeviceForCurrentUser(necklaceB);
+    for (var attempt = 0; attempt < 20 && service.ensureConnectionCalls == 0; attempt++) {
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    expect(provider.presentationConnectedDevice?.id, necklaceA.id);
+    expect(provider.presentationPairedDevice?.id, necklaceB.id);
+    expect(provider.canResumeAmbientCaptureFor(necklaceA), isFalse);
+
+    connectionGate.complete(null);
+    expect(await replacement, isFalse);
+  });
+
+  test('ambient resume rejects a device after durable unpair starts', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-a', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      automaticallyReconnectOnReady: false,
+    )
+      ..connectedDevice = necklace
+      ..pairedDevice = necklace
+      ..isConnected = true;
+    addTearDown(provider.dispose);
+
+    expect(provider.canResumeAmbientCaptureFor(necklace), isTrue);
+
+    provider.updateConnectingStatus(true);
+    expect(
+      provider.canResumeAmbientCaptureFor(necklace),
+      isTrue,
+      reason: 'a stale presentation flag without a live attempt cannot strand ambient capture',
+    );
+
+    await SharedPreferencesUtil().btDeviceSet(BtDevice.empty());
+
+    expect(provider.presentationConnectedDevice?.id, necklace.id, reason: 'native unpair may still be in flight');
+    expect(provider.canResumeAmbientCaptureFor(necklace), isFalse);
+  });
+
   test('a newer explicit connect owns presentation when an older attempt completes late', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await bindRememberedDeviceForCurrentTestAuthority(necklace);

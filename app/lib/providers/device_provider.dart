@@ -397,7 +397,25 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       return;
     }
     connectedDevice = null;
+    pairedDevice = _rememberedDeviceForCurrentAuthority();
     isDeviceStorageSupport = false;
+  }
+
+  /// Ambient capture may resume only for the current UID-bound pairing.
+  /// This rejects a stale connected device while replacement or unpair work
+  /// has changed the selected/durable authority.
+  bool canResumeAmbientCaptureFor(BtDevice device) {
+    if (device.id.isEmpty ||
+        _authorityReconciliationPending ||
+        _requiresExplicitDeviceSelectionAfterAuthorityChange ||
+        _hasLiveConnectionAttempt ||
+        _hasPendingFreshBleSessionRequirement()) {
+      return false;
+    }
+    final remembered = _rememberedDeviceForCurrentAuthority();
+    if (remembered?.id != device.id || presentationPairedDevice?.id != device.id) return false;
+    final connected = presentationConnectedDevice;
+    return connected == null || connected.id == device.id;
   }
 
   Future<bool> _runConnectionAttempt(

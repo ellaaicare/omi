@@ -1559,13 +1559,13 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (device == null || !mounted) return;
     final deviceProvider = context.read<DeviceProvider>();
     final capture = context.read<CaptureProvider>();
-    final currentDevice = deviceProvider.presentationConnectedDevice ?? deviceProvider.presentationPairedDevice;
-    if (currentDevice?.id != device.id) return;
+    if (!deviceProvider.canResumeAmbientCaptureFor(device)) return;
     try {
       final connected = await deviceProvider.connectDeviceForCurrentUser(device);
       final resumedDevice = deviceProvider.presentationConnectedDevice;
       if (connected &&
           resumedDevice?.id == device.id &&
+          deviceProvider.canResumeAmbientCaptureFor(device) &&
           !capture.phoneCaptureOwnsMobileAudio &&
           capture.recordingState != RecordingState.deviceRecord) {
         await capture.streamDeviceRecording(device: resumedDevice);

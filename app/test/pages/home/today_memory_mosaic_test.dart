@@ -664,6 +664,7 @@ void main() {
   ) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await _bindHomeNecklace(necklace);
     final device = _ReconnectTrackingDeviceProvider()
       ..pairedDevice = necklace
       ..connectedDevice = necklace
@@ -701,6 +702,7 @@ void main() {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
     final necklaceA = BtDevice(name: 'Ella A', id: 'necklace-a', type: DeviceType.omi, rssi: -30);
     final necklaceB = BtDevice(name: 'Ella B', id: 'necklace-b', type: DeviceType.omi, rssi: -30);
+    await _bindHomeNecklace(necklaceA);
     final device = _ReconnectTrackingDeviceProvider()
       ..pairedDevice = necklaceA
       ..connectedDevice = necklaceA
@@ -734,11 +736,76 @@ void main() {
     expect(harness.capture.recordingState, RecordingState.stop);
   });
 
+  testWidgets('phone finalization does not reconnect A while replacement B is pending', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final necklaceA = BtDevice(name: 'Ella A', id: 'necklace-a', type: DeviceType.omi, rssi: -30);
+    final necklaceB = BtDevice(name: 'Ella B', id: 'necklace-b', type: DeviceType.omi, rssi: -30);
+    await _bindHomeNecklace(necklaceA);
+    final device = _ReconnectTrackingDeviceProvider()
+      ..pairedDevice = necklaceA
+      ..connectedDevice = necklaceA
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      initialRecordingState: RecordingState.deviceRecord,
+    );
+    addTearDown(harness.dispose);
+    device.capture = harness.capture;
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    expect(harness.capture.recordingState, RecordingState.record);
+
+    device
+      ..pairedDevice = necklaceB
+      ..isConnecting = true
+      ..notifyListeners();
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(device.reconnects, 0);
+    expect(harness.capture.deviceStarts, 0);
+    expect(device.presentationConnectedDevice?.id, necklaceA.id);
+  });
+
+  testWidgets('phone finalization does not resurrect a necklace while unpair is in flight', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-a', type: DeviceType.omi, rssi: -30);
+    await _bindHomeNecklace(necklace);
+    final device = _ReconnectTrackingDeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      initialRecordingState: RecordingState.deviceRecord,
+    );
+    addTearDown(harness.dispose);
+    device.capture = harness.capture;
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    expect(harness.capture.recordingState, RecordingState.record);
+
+    await SharedPreferencesUtil().btDeviceSet(BtDevice.empty());
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(device.reconnects, 0);
+    expect(harness.capture.deviceStarts, 0);
+    expect(device.presentationConnectedDevice?.id, necklace.id, reason: 'native unpair may still be in flight');
+  });
+
   testWidgets('failed phone finalization keeps ambient necklace stopped until the same moment succeeds', (
     tester,
   ) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await _bindHomeNecklace(necklace);
     final device = _ReconnectTrackingDeviceProvider()
       ..pairedDevice = necklace
       ..connectedDevice = necklace
@@ -1027,6 +1094,7 @@ void main() {
 
   testWidgets('necklace transport error is cleaned before an iPhone retry', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await _bindHomeNecklace(necklace);
     final device = _ReconnectTrackingDeviceProvider()
       ..pairedDevice = necklace
       ..connectedDevice = necklace
@@ -1204,6 +1272,7 @@ void main() {
 
   testWidgets('failed phone start restores the ambient necklace stream', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await _bindHomeNecklace(necklace);
     final device = _ReconnectTrackingDeviceProvider()
       ..pairedDevice = necklace
       ..connectedDevice = necklace
@@ -2883,6 +2952,12 @@ TranscriptSegment _liveTranscriptSegment(String id) => TranscriptSegment(
       end: 1,
       translations: const [],
     );
+
+Future<void> _bindHomeNecklace(BtDevice device) async {
+  final preferences = SharedPreferencesUtil()..uid = 'test-user';
+  await preferences.btDeviceSet(device);
+  await preferences.btDeviceOwnerBindingSet('test-user');
+}
 
 class _HomeHarness {
   const _HomeHarness({
