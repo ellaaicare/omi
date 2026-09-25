@@ -109,6 +109,12 @@ void main() {
   });
 
   test('recent Home artwork recovery computes yesterday as a local calendar date', () {
+    expect(
+      homeCalendarDayKey(2026, 3, 9, dayOffset: -1),
+      DateTime.utc(2026, 3, 8),
+      reason: 'civil date arithmetic is isolated from local elapsed-time and DST offsets',
+    );
+
     final selected = homeRecentArtworkRepairMemoryIds([
       ServerConversation(
         id: 'dst-yesterday',

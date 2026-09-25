@@ -141,6 +141,9 @@ List<ServerConversation> homeMemoryCanvasSelection(List<ServerConversation> conv
   return sorted.take(limit).toList(growable: false);
 }
 
+DateTime homeCalendarDayKey(int year, int month, int day, {int dayOffset = 0}) =>
+    DateTime.utc(year, month, day + dayOffset);
+
 Set<String> homeRecentArtworkRepairMemoryIds(
   List<ServerConversation> newestFirstMemories, {
   required DateTime now,
@@ -149,13 +152,13 @@ Set<String> homeRecentArtworkRepairMemoryIds(
 }) {
   if (limit <= 0) return <String>{};
   final localNow = now.toLocal();
-  final today = DateTime(localNow.year, localNow.month, localNow.day);
-  final yesterday = DateTime(localNow.year, localNow.month, localNow.day - 1);
+  final today = homeCalendarDayKey(localNow.year, localNow.month, localNow.day);
+  final yesterday = homeCalendarDayKey(localNow.year, localNow.month, localNow.day, dayOffset: -1);
   final selectedPerDay = <DateTime, int>{};
   return newestFirstMemories
       .where((memory) {
         final value = (memory.startedAt ?? memory.createdAt).toLocal();
-        final day = DateTime(value.year, value.month, value.day);
+        final day = homeCalendarDayKey(value.year, value.month, value.day);
         if (!DateUtils.isSameDay(day, today) && !DateUtils.isSameDay(day, yesterday)) return false;
         if (visiblePerDayLimit == null) return true;
         final selected = selectedPerDay[day] ?? 0;
