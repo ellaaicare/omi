@@ -144,16 +144,23 @@ Set<String> homeRecentArtworkRepairMemoryIds(
   List<ServerConversation> newestFirstMemories, {
   required DateTime now,
   int limit = homeRecentArtworkRepairLimit,
+  int? visiblePerDayLimit,
 }) {
   if (limit <= 0) return <String>{};
   final localNow = now.toLocal();
   final today = DateTime(localNow.year, localNow.month, localNow.day);
-  final yesterday = today.subtract(const Duration(days: 1));
+  final yesterday = DateTime(localNow.year, localNow.month, localNow.day - 1);
+  final selectedPerDay = <DateTime, int>{};
   return newestFirstMemories
       .where((memory) {
         final value = (memory.startedAt ?? memory.createdAt).toLocal();
         final day = DateTime(value.year, value.month, value.day);
-        return DateUtils.isSameDay(day, today) || DateUtils.isSameDay(day, yesterday);
+        if (!DateUtils.isSameDay(day, today) && !DateUtils.isSameDay(day, yesterday)) return false;
+        if (visiblePerDayLimit == null) return true;
+        final selected = selectedPerDay[day] ?? 0;
+        if (selected >= visiblePerDayLimit) return false;
+        selectedPerDay[day] = selected + 1;
+        return true;
       })
       .take(limit)
       .map((memory) => memory.id)
@@ -1856,9 +1863,12 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final remainingMemories = showDayGallery ? orderedMemories : orderedMemories.skip(1).toList(growable: false);
     final artworkReleaseEnabled = _homeArtworkPreferences?.releaseEnabled == true;
     final automaticArtworkRepairMemoryIds = _homeMemorySort == MemoryGallerySort.recent && artworkReleaseEnabled
-        ? homeRecentArtworkRepairMemoryIds(orderedMemories, now: now)
+        ? homeRecentArtworkRepairMemoryIds(
+            orderedMemories,
+            now: now,
+            visiblePerDayLimit: showDayGallery ? 4 : null,
+          )
         : <String>{};
-    if (heroMemory != null && artworkReleaseEnabled) automaticArtworkRepairMemoryIds.add(heroMemory.id);
     final showDailyNote = shouldShowDailyNote(_todayCardController.state);
     final showGuardianSurfaces = _guardianAvailable;
     final homeCaptureOwned =
@@ -1942,7 +1952,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                               artworkRefreshEpoch: _homeArtworkDisplayEpoch,
                               artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
                               enqueueArtworkIfMissing: automaticArtworkRepairMemoryIds.contains(heroMemory.id),
-                              artworkFallbackAsset: memoryArtworkWatercolorFallbackAsset,
+                              artworkFallbackAsset: automaticArtworkRepairMemoryIds.contains(heroMemory.id)
+                                  ? memoryArtworkWatercolorFallbackAsset
+                                  : null,
                               onOpen: () => _openMemoryDetail(heroMemory),
                               onDelete: () => _deleteMemory(heroMemory),
                             ),

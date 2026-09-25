@@ -108,6 +108,55 @@ void main() {
     expect(selected, isNot(contains('same-date-prior-year')));
   });
 
+  test('recent Home artwork recovery computes yesterday as a local calendar date', () {
+    final selected = homeRecentArtworkRepairMemoryIds(
+      [
+        ServerConversation(
+          id: 'dst-yesterday',
+          createdAt: DateTime(2026, 3, 8, 12),
+          structured: Structured('DST yesterday', 'A memory from the prior calendar day.'),
+        ),
+        ServerConversation(
+          id: 'dst-two-days-ago',
+          createdAt: DateTime(2026, 3, 7, 23),
+          structured: Structured('DST older', 'A memory from two calendar days ago.'),
+        ),
+      ],
+      now: DateTime(2026, 3, 9, 12),
+    );
+
+    expect(selected, contains('dst-yesterday'));
+    expect(selected, isNot(contains('dst-two-days-ago')));
+  });
+
+  test('recent Home artwork recovery spends Days slots only on rendered collage entries', () {
+    final memories = [
+      for (var index = 0; index < 5; index++)
+        ServerConversation(
+          id: 'today-$index',
+          createdAt: DateTime(2026, 9, 24, 12 - index),
+          structured: Structured('Today $index', 'Today memory $index.'),
+        ),
+      for (var index = 0; index < 4; index++)
+        ServerConversation(
+          id: 'yesterday-$index',
+          createdAt: DateTime(2026, 9, 23, 12 - index),
+          structured: Structured('Yesterday $index', 'Yesterday memory $index.'),
+        ),
+    ];
+
+    final selected = homeRecentArtworkRepairMemoryIds(
+      memories,
+      now: DateTime(2026, 9, 24, 20),
+      visiblePerDayLimit: 4,
+    );
+
+    expect(selected, hasLength(homeRecentArtworkRepairLimit));
+    expect(selected, containsAll(<String>['today-0', 'today-1', 'today-2', 'today-3']));
+    expect(selected, isNot(contains('today-4')));
+    expect(selected, containsAll(<String>['yesterday-0', 'yesterday-1', 'yesterday-2', 'yesterday-3']));
+  });
+
   testWidgets('ready Home matches the reviewed Memory Canvas hierarchy', (tester) async {
     final photoData = await rootBundle.load('assets/images/onboarding-bg-1.webp');
     final conversations = _ConversationFixtures.withMemories(photoBase64: base64Encode(photoData.buffer.asUint8List()));
@@ -2471,6 +2520,55 @@ void main() {
     expect(
       tester.widget<PopupMenuButton<MemoryGallerySort>>(find.byKey(const Key('home-memory-sort-menu'))).initialValue,
       MemoryGallerySort.recent,
+    );
+  });
+
+  testWidgets('Oldest-first keeps an older terminal hero read-only without a fallback', (tester) async {
+    MemoryArtworkImage.resetAutomaticGenerationBudgetForTesting();
+    addTearDown(MemoryArtworkImage.resetAutomaticGenerationBudgetForTesting);
+    final authority = await _installArtworkAuthority();
+    final artwork = _FakeMemoryArtworkApi(
+      displayResult: const MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.unavailable,
+        failureCode: 'memory_artwork_object_missing',
+      ),
+    );
+    final memories = [
+      for (var index = 0; index < 3; index++)
+        ServerConversation(
+          id: 'oldest-read-only-$index',
+          createdAt: DateTime(2026, 8, 1 + index, 12),
+          startedAt: DateTime(2026, 8, 1 + index, 12),
+          structured: Structured('Older memory $index', 'A complete older memory $index.'),
+        ),
+    ];
+    final harness = await _pumpHome(
+      tester,
+      conversations: memories,
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.byKey(const Key('home-memory-sort-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Oldest first'));
+    await tester.pumpAndSettle();
+
+    final hero = tester.widget<MemoryGalleryCard>(
+      find.byWidgetPredicate(
+        (widget) => widget is MemoryGalleryCard && widget.conversation.id == 'oldest-read-only-0',
+      ),
+    );
+    expect(hero.enqueueArtworkIfMissing, isFalse);
+    expect(hero.artworkFallbackAsset, isNull);
+    expect(
+      artwork.displayRequests.where(
+        (request) => request.memoryId == 'oldest-read-only-0' && request.enqueueIfMissing,
+      ),
+      isEmpty,
     );
   });
 
