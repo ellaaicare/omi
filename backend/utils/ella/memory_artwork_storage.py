@@ -31,8 +31,13 @@ ARTWORK_OBJECT_RE = re.compile(
     r"^users/(?P<owner>[0-9a-f]{64})/profiles/(?P<profile>[0-9a-f]{64})/memories/"
     r"(?P<memory>[A-Za-z0-9_.:-]{1,256})/(?P<generation>[0-9a-f]{64})\.(?P<extension>png|webp|jpg)$"
 )
+CONTENT_ADDRESSED_ARTWORK_OBJECT_RE = re.compile(
+    r"^users/(?P<owner>[0-9a-f]{64})/profiles/(?P<profile>[0-9a-f]{64})/memories/"
+    r"(?P<memory>[A-Za-z0-9_.:-]{1,256})/(?P<generation>[0-9a-f]{64})/"
+    r"(?P<content>[0-9a-f]{64})-(?P<rendition>master|w384|w768|w1536)\.(?P<extension>webp|jpg)$"
+)
 MAX_ARTWORK_BYTES = 12 * 1024 * 1024
-SIGNED_URL_TTL_SECONDS = 300
+SIGNED_URL_TTL_SECONDS = 3600
 _PUBLICATION_LOCK_NAMESPACE = "ella-memory-artwork-publication-v1"
 _PUBLICATION_LOCK_ISSUER = object()
 _ACTIVE_PUBLICATION_LOCKS: dict[object, str] = {}
@@ -59,6 +64,7 @@ class StoredArtwork:
     object_generation: str
     content_type: str
     byte_size: int
+    cache_key: str = ""
 
 
 def _sha256(value: str) -> str:
@@ -137,8 +143,36 @@ def object_key_for(
     )
 
 
+def content_addressed_object_key_for(
+    *,
+    uid: str,
+    profile_binding_id: str,
+    memory_id: str,
+    generation_key: str,
+    content_type: str,
+    image_bytes: bytes,
+    rendition: str,
+) -> str:
+    extension = _extension(content_type)
+    if extension not in {"jpg", "webp"}:
+        raise MemoryArtworkStorageError("memory_artwork_content_type_invalid")
+    if rendition not in {"master", "w384", "w768", "w1536"}:
+        raise MemoryArtworkStorageError("memory_artwork_rendition_invalid")
+    if not memory_id or len(memory_id) > 256 or re.fullmatch(r"[A-Za-z0-9_.:-]+", memory_id) is None:
+        raise MemoryArtworkStorageError("memory_artwork_id_invalid")
+    if re.fullmatch(r"[0-9a-f]{64}", generation_key) is None:
+        raise MemoryArtworkStorageError("memory_artwork_generation_key_invalid")
+    content_digest = hashlib.sha256(image_bytes).hexdigest()
+    return (
+        f"users/{_sha256(uid)}/profiles/{_sha256(profile_binding_id)}/memories/"
+        f"{memory_id}/{generation_key}/{content_digest}-{rendition}.{extension}"
+    )
+
+
 def _validated_owner_key(uid: str, memory_id: str, object_key: str) -> re.Match[str]:
-    match = ARTWORK_OBJECT_RE.fullmatch(str(object_key or ""))
+    match = ARTWORK_OBJECT_RE.fullmatch(str(object_key or "")) or CONTENT_ADDRESSED_ARTWORK_OBJECT_RE.fullmatch(
+        str(object_key or "")
+    )
     if match is None:
         raise MemoryArtworkStorageError("memory_artwork_object_key_invalid")
     if match.group("owner") != _sha256(uid) or match.group("memory") != memory_id:
@@ -181,18 +215,21 @@ class GCSMemoryArtworkStore:
         generation_key: str,
         content_type: str,
         image_bytes: bytes,
+        rendition: str = "master",
     ) -> StoredArtwork:
         if not image_bytes or len(image_bytes) > MAX_ARTWORK_BYTES:
             raise MemoryArtworkStorageError("memory_artwork_payload_size_invalid")
-        object_key = object_key_for(
+        object_key = content_addressed_object_key_for(
             uid=uid,
             profile_binding_id=profile_binding_id,
             memory_id=memory_id,
             generation_key=generation_key,
             content_type=content_type,
+            image_bytes=image_bytes,
+            rendition=rendition,
         )
         blob = self.client.bucket(self.bucket_name).blob(object_key)
-        blob.cache_control = "private, max-age=300"
+        blob.cache_control = f"private, max-age={SIGNED_URL_TTL_SECONDS}, immutable"
         try:
             blob.upload_from_string(image_bytes, content_type=content_type, if_generation_match=0)
         except PreconditionFailed:
@@ -207,7 +244,33 @@ class GCSMemoryArtworkStore:
             object_generation=str(blob.generation or ""),
             content_type=content_type,
             byte_size=len(image_bytes),
+            cache_key=hashlib.sha256(image_bytes).hexdigest(),
         )
+
+    def get_bytes(
+        self,
+        *,
+        uid: str,
+        profile_binding_id: str,
+        memory_id: str,
+        generation_key: str,
+        object_key: str,
+        object_generation: str = "",
+    ) -> bytes:
+        _validated_artwork_key(uid, profile_binding_id, memory_id, generation_key, object_key)
+        blob = self.client.bucket(self.bucket_name).blob(object_key)
+        try:
+            download_options = {}
+            if str(object_generation).isdigit():
+                download_options["if_generation_match"] = int(object_generation)
+            payload = blob.download_as_bytes(**download_options)
+        except NotFound as exc:
+            raise MemoryArtworkStorageError("memory_artwork_object_missing") from exc
+        except Exception as exc:
+            raise MemoryArtworkStorageError("memory_artwork_storage_unavailable") from exc
+        if not payload or len(payload) > MAX_ARTWORK_BYTES:
+            raise MemoryArtworkStorageError("memory_artwork_payload_size_invalid")
+        return payload
 
     def signed_get_url(
         self,
@@ -256,10 +319,31 @@ class GCSMemoryArtworkStore:
         prefix = f"{owner_prefix}profiles/{_sha256(profile_binding_id)}/memories/" f"{memory_id}/"
         deleted = 0
         for blob in self.client.bucket(self.bucket_name).list_blobs(prefix=prefix):
-            match = ARTWORK_OBJECT_RE.fullmatch(str(blob.name or ""))
+            match = ARTWORK_OBJECT_RE.fullmatch(str(blob.name or "")) or CONTENT_ADDRESSED_ARTWORK_OBJECT_RE.fullmatch(
+                str(blob.name or "")
+            )
             if match is None or match.group("owner") != _sha256(uid) or match.group("memory") != memory_id:
                 continue
             blob.delete()
+            deleted += 1
+        return deleted
+
+    def delete_memory_all_bindings(self, *, uid: str, memory_id: str) -> int:
+        if not memory_id or len(memory_id) > 256 or re.fullmatch(r"[A-Za-z0-9_.:-]+", memory_id) is None:
+            raise MemoryArtworkStorageError("memory_artwork_id_invalid")
+        owner_digest = _sha256(uid)
+        prefix = f"users/{owner_digest}/profiles/"
+        deleted = 0
+        for blob in self.client.bucket(self.bucket_name).list_blobs(prefix=prefix):
+            match = ARTWORK_OBJECT_RE.fullmatch(str(blob.name or "")) or CONTENT_ADDRESSED_ARTWORK_OBJECT_RE.fullmatch(
+                str(blob.name or "")
+            )
+            if match is None or match.group("owner") != owner_digest or match.group("memory") != memory_id:
+                continue
+            try:
+                blob.delete()
+            except NotFound:
+                continue
             deleted += 1
         return deleted
 
@@ -282,17 +366,25 @@ def delete_conversation_artwork_if_present(uid: str, memory_id: str, conversatio
     ]
     if not artwork_states:
         return
-    store = GCSMemoryArtworkStore()
-    object_keys = {str(state.get("object_key") or "") for state in artwork_states}
-    for object_key in sorted(object_keys - {""}):
-        store.delete(uid=uid, memory_id=memory_id, object_key=object_key)
-    binding_ids = {str(state.get("binding_id") or "") for state in artwork_states}
-    for binding_id in sorted(binding_ids - {""}):
-        store.delete_memory_prefix(
-            uid=uid,
-            memory_id=memory_id,
-            profile_binding_id=binding_id,
-        )
+    GCSMemoryArtworkStore().delete_memory_all_bindings(uid=uid, memory_id=memory_id)
+
+
+def delete_memory_artwork_for_exclusion(
+    uid: str,
+    memory_id: str,
+    conversation: dict,
+    *,
+    lock_proof: MemoryArtworkPublicationLockProof,
+    store=None,
+) -> None:
+    require_memory_artwork_publication_lock(uid, lock_proof)
+    artwork_states = [
+        state
+        for state in (conversation.get("artwork"), conversation.get("published_artwork"))
+        if isinstance(state, dict) and state
+    ]
+    if artwork_states:
+        (store or GCSMemoryArtworkStore()).delete_memory_all_bindings(uid=uid, memory_id=memory_id)
 
 
 def delete_all_user_artwork(uid: str, *, cleanup_required: bool = False) -> int:
@@ -301,6 +393,21 @@ def delete_all_user_artwork(uid: str, *, cleanup_required: bool = False) -> int:
             raise MemoryArtworkStorageError("memory_artwork_storage_cleanup_unavailable")
         return 0
     return GCSMemoryArtworkStore().delete_user_prefix(uid=uid)
+
+
+def delete_user_artwork_for_consent(
+    uid: str,
+    *,
+    lock_proof: MemoryArtworkPublicationLockProof,
+    repository=None,
+) -> int:
+    if repository is None:
+        repository = default_memory_artwork_repository
+    require_memory_artwork_publication_lock(uid, lock_proof)
+    return delete_all_user_artwork(
+        uid,
+        cleanup_required=repository.storage_cleanup_required(uid),
+    )
 
 
 def prepare_account_artwork_deletion(uid: str, *, repository=None, lock_proof=None) -> int:

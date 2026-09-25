@@ -33,13 +33,15 @@ except ModuleNotFoundError:
 
 import database.memory_artwork as artwork_db
 from ella.services.ai_consent import CURRENT_POLICY_VERSION, get_ai_consent_service
-from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_authority_identity
+from ella.services.runtime_resolver import resolve_isolated_runtime
 from utils.ella.memory_artwork_storage import (
     MAX_ARTWORK_BYTES,
     GCSMemoryArtworkStore,
     MemoryArtworkStorageError,
     StoredArtwork,
     acquire_memory_artwork_publication_lock,
+    delete_memory_artwork_for_exclusion,
+    delete_user_artwork_for_consent,
 )
 
 ARTWORK_SCHEMA_VERSION = "ella.memory_artwork.v1"
@@ -163,6 +165,8 @@ XAI_IMAGE_ENDPOINT = "https://api.x.ai/v1/images/generations"
 DEFAULT_XAI_IMAGE_MODEL = "grok-imagine-image-2.0"
 MAX_PROVIDER_RESPONSE_BYTES = 20 * 1024 * 1024
 MAX_BASE64_ARTWORK_CHARS = ((MAX_ARTWORK_BYTES + 2) // 3) * 4
+RESPONSIVE_VARIANT_WIDTHS = (384, 768, 1536)
+SIGNED_ARTWORK_URL_TTL_SECONDS = 3600
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +222,15 @@ class GeneratedArtwork:
 
 
 @dataclass(frozen=True)
+class ArtworkRendition:
+    name: str
+    image_bytes: bytes
+    content_type: str
+    pixel_width: int
+    pixel_height: int
+
+
+@dataclass(frozen=True)
 class ArtworkProviderContext:
     owner_uid: str
     profile_binding: str
@@ -259,6 +272,8 @@ class MemoryArtworkConfig:
 class MemoryArtworkRepository(Protocol):
     def get_preferences(self, uid: str) -> dict[str, Any]: ...
 
+    def stabilize_preferences_authority(self, uid: str, **kwargs) -> dict[str, Any]: ...
+
     def set_preferences(self, uid: str, preferences: dict[str, Any], **kwargs) -> None: ...
 
     def get_backfill_control(self, uid: str) -> dict[str, Any]: ...
@@ -291,6 +306,10 @@ class MemoryArtworkRepository(Protocol):
 
     def clear_published_artwork(self, uid: str, memory_id: str, **kwargs) -> bool: ...
 
+    def restore_permanent_artwork(self, uid: str, memory_id: str, **kwargs) -> dict[str, Any]: ...
+
+    def attach_artwork_renditions(self, uid: str, memory_id: str, **kwargs) -> bool: ...
+
     def mark_generation_unavailable(self, uid: str, memory_id: str, **kwargs) -> bool: ...
 
     def list_pending_jobs(self, **kwargs) -> list[dict[str, Any]]: ...
@@ -319,9 +338,12 @@ class MemoryArtworkRepository(Protocol):
 
     def finish_reconciliation_job(self, job_id: str, **kwargs) -> bool: ...
 
+    def storage_cleanup_required(self, uid: str) -> bool: ...
+
 
 class FirestoreMemoryArtworkRepository:
     get_preferences = staticmethod(artwork_db.get_preferences)
+    stabilize_preferences_authority = staticmethod(artwork_db.stabilize_preferences_authority)
     set_preferences = staticmethod(artwork_db.set_preferences)
     get_backfill_control = staticmethod(artwork_db.get_backfill_control)
     set_backfill_control = staticmethod(artwork_db.set_backfill_control)
@@ -335,6 +357,8 @@ class FirestoreMemoryArtworkRepository:
     claim_generation = staticmethod(artwork_db.claim_generation)
     finalize_generation = staticmethod(artwork_db.finalize_generation)
     clear_published_artwork = staticmethod(artwork_db.clear_published_artwork)
+    restore_permanent_artwork = staticmethod(artwork_db.restore_permanent_artwork)
+    attach_artwork_renditions = staticmethod(artwork_db.attach_artwork_renditions)
     mark_generation_unavailable = staticmethod(artwork_db.mark_generation_unavailable)
     list_pending_jobs = staticmethod(artwork_db.list_pending_jobs)
     claim_job = staticmethod(artwork_db.claim_job)
@@ -349,6 +373,7 @@ class FirestoreMemoryArtworkRepository:
     list_pending_reconciliation_jobs = staticmethod(artwork_db.list_pending_reconciliation_jobs)
     claim_reconciliation_job = staticmethod(artwork_db.claim_reconciliation_job)
     finish_reconciliation_job = staticmethod(artwork_db.finish_reconciliation_job)
+    storage_cleanup_required = staticmethod(artwork_db.storage_cleanup_required)
 
 
 class MemoryArtworkProvider(Protocol):
@@ -367,9 +392,15 @@ class MemoryArtworkStore(Protocol):
 
     def signed_get_url(self, **kwargs) -> str: ...
 
+    def get_bytes(self, **kwargs) -> bytes: ...
+
     def delete(self, **kwargs) -> None: ...
 
     def delete_memory_prefix(self, **kwargs) -> int: ...
+
+    def delete_memory_all_bindings(self, **kwargs) -> int: ...
+
+    def delete_user_prefix(self, **kwargs) -> int: ...
 
 
 async def _bounded_provider_post(
@@ -615,7 +646,6 @@ async def resolve_memory_artwork_authority(uid: str) -> ArtworkRuntimeAuthority:
         raise MemoryArtworkError("memory_artwork_runtime_authority_unavailable", retryable=True) from exc
     if runtime is None:
         raise MemoryArtworkError("memory_artwork_runtime_not_ready", retryable=True)
-    identity = runtime_authority_identity(runtime)
     profile_id = str(runtime.profile_user_id or runtime.account_user_id or "").strip()
     if not runtime.binding_id or not profile_id:
         raise MemoryArtworkError("memory_artwork_owner_scope_missing", retryable=False)
@@ -624,8 +654,69 @@ async def resolve_memory_artwork_authority(uid: str) -> ArtworkRuntimeAuthority:
         binding_id=runtime.binding_id,
         profile_id=profile_id,
         revision=runtime.revision,
-        authority_digest=identity.digest,
+        authority_digest=_stable_artwork_authority_digest(uid, runtime.binding_id, profile_id),
     )
+
+
+def _stable_artwork_authority_digest(uid: str, binding_id: str, profile_id: str) -> str:
+    material = {"uid": uid, "binding_id": binding_id, "profile_id": profile_id}
+    return hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _same_artwork_authority(left: ArtworkRuntimeAuthority, right: ArtworkRuntimeAuthority) -> bool:
+    return bool(left.uid == right.uid and left.binding_id == right.binding_id and left.profile_id == right.profile_id)
+
+
+def _responsive_renditions(image_bytes: bytes) -> list[ArtworkRendition]:
+    if not _PIL_AVAILABLE:
+        raise MemoryArtworkError("memory_artwork_image_codec_unavailable", retryable=False)
+    if not image_bytes or len(image_bytes) > MAX_ARTWORK_BYTES:
+        raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False)
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            width, height = source.size
+            if width <= 0 or height <= 0 or width * height > 24_000_000:
+                raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False)
+            rgb = source.convert("RGB")
+            master_image = ImageOps.fit(
+                rgb,
+                (TARGET_WIDTH, TARGET_HEIGHT),
+                method=Image.Resampling.LANCZOS,
+            )
+            master_output = io.BytesIO()
+            master_image.save(master_output, format="JPEG", quality=88, optimize=True)
+            renditions = [
+                ArtworkRendition(
+                    name="master",
+                    image_bytes=master_output.getvalue(),
+                    content_type="image/jpeg",
+                    pixel_width=TARGET_WIDTH,
+                    pixel_height=TARGET_HEIGHT,
+                )
+            ]
+            for variant_width in RESPONSIVE_VARIANT_WIDTHS:
+                variant_height = variant_width * 2 // 3
+                variant = ImageOps.fit(
+                    master_image,
+                    (variant_width, variant_height),
+                    method=Image.Resampling.LANCZOS,
+                )
+                output = io.BytesIO()
+                variant.save(output, format="WEBP", quality=80, method=6)
+                renditions.append(
+                    ArtworkRendition(
+                        name=f"w{variant_width}",
+                        image_bytes=output.getvalue(),
+                        content_type="image/webp",
+                        pixel_width=variant_width,
+                        pixel_height=variant_height,
+                    )
+                )
+    except _IMAGE_DECODE_ERRORS as exc:
+        raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False) from exc
+    if any(not rendition.image_bytes or len(rendition.image_bytes) > MAX_ARTWORK_BYTES for rendition in renditions):
+        raise MemoryArtworkError("memory_artwork_provider_response_invalid", retryable=False)
+    return renditions
 
 
 def _terminal_enrichment(conversation: dict[str, Any]) -> Optional[str]:
@@ -645,12 +736,13 @@ def _terminal_enrichment(conversation: dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _conversation_day(conversation: dict[str, Any]) -> str:
+def _conversation_day(conversation: dict[str, Any], *, utc_offset_minutes: int = 0) -> str:
+    local_timezone = timezone(timedelta(minutes=utc_offset_minutes))
     for field in ("started_at", "created_at"):
         value = conversation.get(field)
         if isinstance(value, datetime):
             normalized = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-            return normalized.astimezone(timezone.utc).date().isoformat()
+            return normalized.astimezone(local_timezone).date().isoformat()
     return ""
 
 
@@ -740,7 +832,6 @@ def _generation_key(
         "uid": uid,
         "binding_id": authority.binding_id,
         "profile_id": authority.profile_id,
-        "authority_digest": authority.authority_digest,
         "memory_id": memory_id,
         "enrichment_revision": enrichment_revision,
         "style_version": style_version,
@@ -761,7 +852,6 @@ def _preferences_match_authority(
         and not preferences.get(artwork_db.DELETION_PENDING_FIELD)
         and preferences.get("binding_id") == authority.binding_id
         and preferences.get("profile_id") == authority.profile_id
-        and preferences.get("authority_digest") == authority.authority_digest
         and (style_version is None or preferences.get("style_version") == style_version)
     )
 
@@ -785,10 +875,11 @@ def _recovery_status(
     generation_key: str,
     authority_digest: str,
 ) -> Optional[str]:
-    artwork_is_current = (
-        artwork.get("generation_key") == generation_key and artwork.get("authority_digest") == authority_digest
-    )
-    job_is_current = bool(job and job.get("authority_digest") == authority_digest)
+    # Runtime credentials and model policy are deliberately absent from
+    # permanent artwork identity. Existing durable work remains current when
+    # only the legacy authority fingerprint changes.
+    artwork_is_current = artwork.get("generation_key") == generation_key
+    job_is_current = bool(job)
     job_status = str((job or {}).get("status") or "") if job_is_current else ""
     attempts = int((job or {}).get("attempt_count") or 0) if job_is_current else 0
     if job_status in {"pending", "processing"}:
@@ -804,40 +895,17 @@ def _inventory_release_artwork(
     conversation: dict[str, Any],
     *,
     preferences: dict[str, Any],
-    authority: ArtworkRuntimeAuthority,
 ) -> Optional[dict[str, Any]]:
     """Return the artwork the signed URL path can serve from this snapshot."""
 
     if conversation.get("deletion_pending") or conversation.get("discarded") or _source_is_sensitive(conversation):
         return None
-    artwork, refresh_pending, refresh_failure_code = _release_artwork(conversation)
+    artwork, _, _ = _release_artwork(conversation)
     if not isinstance(artwork, dict) or artwork.get("status") != "ready" or not artwork.get("object_key"):
         return None
-    if (
-        artwork.get("authority_digest") != authority.authority_digest
-        or artwork.get("binding_id") != authority.binding_id
-        or artwork.get("profile_id") != authority.profile_id
-        or not _preferences_match_authority(
-            preferences,
-            authority,
-            style_version=None if refresh_pending or refresh_failure_code else str(artwork.get("style_version") or ""),
-        )
+    if artwork.get("binding_id") != preferences.get("binding_id") or artwork.get("profile_id") != preferences.get(
+        "profile_id"
     ):
-        return None
-    if refresh_pending or refresh_failure_code:
-        generation_request = conversation.get("artwork") or {}
-        if (
-            not isinstance(generation_request, dict)
-            or generation_request.get("style_version") != preferences.get("style_version")
-            or generation_request.get("enrichment_revision") != artwork.get("enrichment_revision")
-        ):
-            return None
-    enrichment_revision = _terminal_enrichment(conversation)
-    try:
-        _, prompt_sha256 = _prompt_for(conversation, str(artwork.get("style_version") or ""))
-    except MemoryArtworkError:
-        return None
-    if enrichment_revision != artwork.get("enrichment_revision") or prompt_sha256 != artwork.get("prompt_sha256"):
         return None
     return artwork
 
@@ -889,37 +957,23 @@ class MemoryArtworkService:
         self.global_consent_checker = global_consent_checker or has_current_global_ai_consent
         self.config = config or MemoryArtworkConfig.from_env()
 
+    def _stabilize_preferences(
+        self,
+        uid: str,
+        authority: ArtworkRuntimeAuthority,
+    ) -> dict[str, Any]:
+        return self.repository.stabilize_preferences_authority(
+            uid,
+            binding_id=authority.binding_id,
+            profile_id=authority.profile_id,
+            authority_digest=authority.authority_digest,
+        )
+
     async def _cleanup_published_artwork(self, uid: str, memory_id: str, *, required: bool) -> bool:
-        try:
-            async with acquire_memory_artwork_publication_lock(uid):
-                conversation = self.repository.get_conversation(uid, memory_id) or {}
-                current = conversation.get(artwork_db.ARTWORK_FIELD) or {}
-                published = conversation.get(artwork_db.PUBLISHED_ARTWORK_FIELD) or {}
-                if not isinstance(published, dict) or not published:
-                    return True
-                if not isinstance(current, dict) or current.get("status") != "ready":
-                    return True
-                object_key = str(published.get("object_key") or "")
-                object_generation = str(published.get("object_generation") or "")
-                if not object_key:
-                    raise MemoryArtworkStorageError("memory_artwork_published_object_missing")
-                if object_key != str(current.get("object_key") or ""):
-                    self.store_factory().delete(uid=uid, memory_id=memory_id, object_key=object_key)
-                if not self.repository.clear_published_artwork(
-                    uid,
-                    memory_id,
-                    object_key=object_key,
-                    object_generation=object_generation,
-                ):
-                    raise MemoryArtworkStorageError("memory_artwork_published_cleanup_conflict")
-                return True
-        except Exception as exc:
-            if required:
-                if isinstance(exc, MemoryArtworkError):
-                    raise
-                raise MemoryArtworkError("memory_artwork_published_cleanup_failed", retryable=True) from exc
-            logger.warning("Memory artwork published-object cleanup remains pending: %s", type(exc).__name__)
-            return False
+        # Published objects are immutable user artifacts. Swapping the active
+        # pointer must never delete a prior illustration; explicit privacy
+        # erasure paths own all destructive storage work.
+        return True
 
     async def preferences(self, uid: str) -> dict[str, Any]:
         if not self.config.allows_uid(uid):
@@ -952,21 +1006,48 @@ class MemoryArtworkService:
             raise MemoryArtworkError("memory_artwork_consent_version_stale")
         if style_version not in SUPPORTED_STYLE_VERSIONS:
             raise MemoryArtworkError("memory_artwork_style_version_invalid")
-        authority = await self.authority_resolver(uid)
-        self.repository.set_preferences(
-            uid,
-            {
+        if consent == "declined":
+            current = self.repository.get_preferences(uid)
+            declined = {
+                **current,
                 "schema_version": ARTWORK_SCHEMA_VERSION,
-                "consent": consent,
+                "consent": "declined",
                 "consent_version": consent_version,
                 "style_version": style_version,
-                "binding_id": authority.binding_id,
-                "profile_id": authority.profile_id,
-                "authority_digest": authority.authority_digest,
                 "updated_at": datetime.now(timezone.utc),
-            },
-            backfill_control_state="running" if consent == "accepted" else "cancelled",
-        )
+            }
+            declined.pop(artwork_db.DELETION_PENDING_FIELD, None)
+            declined.pop(artwork_db.STORAGE_CLEANUP_REQUIRED_FIELD, None)
+            try:
+                async with acquire_memory_artwork_publication_lock(uid) as lock_proof:
+                    self.repository.set_preferences(
+                        uid,
+                        declined,
+                        backfill_control_state="cancelled",
+                    )
+                    delete_user_artwork_for_consent(
+                        uid,
+                        lock_proof=lock_proof,
+                        repository=self.repository,
+                    )
+            except Exception as exc:
+                raise MemoryArtworkError("memory_artwork_consent_erasure_failed", retryable=True) from exc
+        else:
+            authority = await self.authority_resolver(uid)
+            self.repository.set_preferences(
+                uid,
+                {
+                    "schema_version": ARTWORK_SCHEMA_VERSION,
+                    "consent": consent,
+                    "consent_version": consent_version,
+                    "style_version": style_version,
+                    "binding_id": authority.binding_id,
+                    "profile_id": authority.profile_id,
+                    "authority_digest": authority.authority_digest,
+                    "updated_at": datetime.now(timezone.utc),
+                },
+                backfill_control_state="running",
+            )
         return await self.preferences(uid)
 
     @staticmethod
@@ -1008,7 +1089,7 @@ class MemoryArtworkService:
         ):
             raise MemoryArtworkError("memory_artwork_backfill_disabled")
         authority = await self.authority_resolver(uid)
-        preferences = self.repository.get_preferences(uid)
+        preferences = self._stabilize_preferences(uid, authority)
         style_version = str(preferences.get("style_version") or "")
         if style_version not in SUPPORTED_STYLE_VERSIONS:
             raise MemoryArtworkError("memory_artwork_style_version_invalid")
@@ -1190,7 +1271,7 @@ class MemoryArtworkService:
         if not (self.config.enabled and self.config.release_enabled and self.config.provider_enabled):
             raise MemoryArtworkError("memory_artwork_generation_disabled")
         authority = await self.authority_resolver(uid)
-        preferences = self.repository.get_preferences(uid)
+        preferences = self._stabilize_preferences(uid, authority)
         style_version = str(preferences.get("style_version") or "")
         if not self.global_consent_checker(uid):
             raise MemoryArtworkError("memory_artwork_consent_required")
@@ -1222,7 +1303,6 @@ class MemoryArtworkService:
                 _inventory_release_artwork(
                     conversation,
                     preferences=preferences,
-                    authority=authority,
                 )
                 is not None
             ):
@@ -1324,18 +1404,187 @@ class MemoryArtworkService:
             "items": items,
         }
 
+    async def recover_permanent_artwork(
+        self,
+        uid: str,
+        *,
+        cursor_memory_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Restore runtime-stale records and derive renditions without provider egress."""
+
+        if not self.config.allows_uid(uid):
+            raise MemoryArtworkError("memory_artwork_internal_owner_required")
+        if not (self.config.enabled and self.config.release_enabled):
+            raise MemoryArtworkError("memory_artwork_release_disabled")
+        if limit < 1 or limit > 100:
+            raise MemoryArtworkError("memory_artwork_recovery_limit_invalid")
+        authority = await self.authority_resolver(uid)
+        preferences = self._stabilize_preferences(uid, authority)
+        if not self.global_consent_checker(uid) or not _preferences_match_authority(preferences, authority):
+            raise MemoryArtworkError("memory_artwork_preference_authority_stale")
+        conversations = self.repository.list_conversations_page(
+            uid,
+            limit=limit + 1,
+            cursor_memory_id=cursor_memory_id,
+        )
+        page = conversations[:limit]
+        has_more = len(conversations) > limit
+        restored = 0
+        variant_backfilled = 0
+        skipped = 0
+        failures = 0
+
+        async with acquire_memory_artwork_publication_lock(uid) as lock_proof:
+            store = self.store_factory()
+            for conversation in page:
+                memory_id = str(conversation.get("id") or "")
+                if not memory_id or conversation.get("discarded") or _source_is_sensitive(conversation):
+                    skipped += 1
+                    continue
+                result = self.repository.restore_permanent_artwork(
+                    uid,
+                    memory_id,
+                    binding_id=authority.binding_id,
+                    profile_id=authority.profile_id,
+                    authority_digest=authority.authority_digest,
+                    consent_version=ARTWORK_CONSENT_VERSION,
+                )
+                outcome = str(result.get("outcome") or "")
+                if outcome == "restored":
+                    restored += 1
+                if outcome not in {"ready", "restored"}:
+                    skipped += 1
+                    continue
+                artwork = result.get("artwork") or {}
+                if not isinstance(artwork, dict):
+                    skipped += 1
+                    continue
+                current_preferences = self.repository.get_preferences(uid)
+                current_conversation = self.repository.get_conversation(uid, memory_id) or {}
+                if (
+                    not self.global_consent_checker(uid)
+                    or not _preferences_match_authority(current_preferences, authority)
+                    or current_conversation.get("deletion_pending")
+                    or current_conversation.get("discarded")
+                    or _source_is_sensitive(current_conversation)
+                ):
+                    skipped += 1
+                    continue
+                existing_variants = artwork.get("variants") or []
+                if isinstance(existing_variants, list) and {
+                    int(item.get("w") or 0) for item in existing_variants if isinstance(item, dict)
+                } == set(RESPONSIVE_VARIANT_WIDTHS):
+                    continue
+                source_object_key = str(artwork.get("object_key") or "")
+                source_object_generation = str(artwork.get("object_generation") or "")
+                generation_key = str(artwork.get("generation_key") or "")
+                try:
+                    source_bytes = store.get_bytes(
+                        uid=uid,
+                        profile_binding_id=authority.binding_id,
+                        memory_id=memory_id,
+                        generation_key=generation_key,
+                        object_key=source_object_key,
+                        object_generation=source_object_generation,
+                    )
+                    rendered = _responsive_renditions(source_bytes)
+                    del source_bytes
+                    stored_renditions = [
+                        (
+                            rendition,
+                            store.put(
+                                uid=uid,
+                                profile_binding_id=authority.binding_id,
+                                memory_id=memory_id,
+                                generation_key=generation_key,
+                                content_type=rendition.content_type,
+                                image_bytes=rendition.image_bytes,
+                                rendition=rendition.name,
+                            ),
+                        )
+                        for rendition in rendered
+                    ]
+                    master_rendition, master = stored_renditions[0]
+                    rendition_update = {
+                        "object_key": master.object_key,
+                        "object_generation": master.object_generation,
+                        "content_type": master.content_type,
+                        "byte_size": master.byte_size,
+                        "pixel_width": master_rendition.pixel_width,
+                        "pixel_height": master_rendition.pixel_height,
+                        "cache_key": master.cache_key or hashlib.sha256(master.object_key.encode("utf-8")).hexdigest(),
+                        "variants": [
+                            {
+                                "w": rendition.pixel_width,
+                                "h": rendition.pixel_height,
+                                "object_key": stored.object_key,
+                                "object_generation": stored.object_generation,
+                                "content_type": stored.content_type,
+                                "byte_size": stored.byte_size,
+                                "cache_key": stored.cache_key
+                                or hashlib.sha256(stored.object_key.encode("utf-8")).hexdigest(),
+                            }
+                            for rendition, stored in stored_renditions[1:]
+                        ],
+                    }
+                    rendered.clear()
+                    stored_renditions.clear()
+                    if not self.repository.attach_artwork_renditions(
+                        uid,
+                        memory_id,
+                        source_object_key=source_object_key,
+                        source_object_generation=source_object_generation,
+                        rendition_update=rendition_update,
+                    ):
+                        latest_preferences = self.repository.get_preferences(uid)
+                        latest_conversation = self.repository.get_conversation(uid, memory_id) or {}
+                        if (
+                            not self.global_consent_checker(uid)
+                            or not _preferences_match_authority(latest_preferences, authority)
+                            or latest_conversation.get("deletion_pending")
+                            or latest_conversation.get("discarded")
+                            or _source_is_sensitive(latest_conversation)
+                        ):
+                            delete_memory_artwork_for_exclusion(
+                                uid,
+                                memory_id,
+                                {"artwork": rendition_update},
+                                lock_proof=lock_proof,
+                                store=store,
+                            )
+                        raise MemoryArtworkError("memory_artwork_variant_backfill_conflict", retryable=True)
+                    variant_backfilled += 1
+                except Exception:
+                    failures += 1
+
+        return {
+            "schema_version": ARTWORK_SCHEMA_VERSION,
+            "scanned": len(page),
+            "restored": restored,
+            "regenerations_avoided": restored,
+            "variant_backfilled": variant_backfilled,
+            "skipped": skipped,
+            "failures": failures,
+            "provider_calls": 0,
+            "next_cursor": str(page[-1].get("id") or "") if has_more and page else None,
+            "has_more": has_more,
+        }
+
     async def libraries(self, uid: str) -> dict[str, Any]:
         """Describe artwork objects that are actually available, not historical job totals."""
 
         if not self.config.allows_uid(uid):
             raise MemoryArtworkError("memory_artwork_internal_owner_required")
-        authority = await self.authority_resolver(uid)
         preferences = self.repository.get_preferences(uid)
         selected_style = str(preferences.get("style_version") or "")
-        if not self.global_consent_checker(uid) or not _preferences_match_authority(
-            preferences,
-            authority,
-            style_version=selected_style,
+        if (
+            not self.global_consent_checker(uid)
+            or preferences.get("consent") != "accepted"
+            or preferences.get("consent_version") != ARTWORK_CONSENT_VERSION
+            or preferences.get(artwork_db.DELETION_PENDING_FIELD)
+            or not preferences.get("binding_id")
+            or not preferences.get("profile_id")
         ):
             raise MemoryArtworkError("memory_artwork_preference_authority_stale")
 
@@ -1346,7 +1595,7 @@ class MemoryArtworkService:
             if not memory_id:
                 continue
             day = _conversation_day(conversation)
-            artwork = _inventory_release_artwork(conversation, preferences=preferences, authority=authority)
+            artwork = _inventory_release_artwork(conversation, preferences=preferences)
             style_version = str((artwork or {}).get("style_version") or "")
             if style_version not in SUPPORTED_STYLE_VERSIONS:
                 continue
@@ -1443,18 +1692,6 @@ class MemoryArtworkService:
         conversation = self.repository.get_conversation(uid, memory_id)
         if conversation is None:
             raise MemoryArtworkError("memory_artwork_memory_not_found")
-        current_artwork = conversation.get(artwork_db.ARTWORK_FIELD) or {}
-        published_artwork = conversation.get(artwork_db.PUBLISHED_ARTWORK_FIELD) or {}
-        if (
-            isinstance(current_artwork, dict)
-            and current_artwork.get("status") == "ready"
-            and isinstance(published_artwork, dict)
-            and published_artwork
-        ):
-            await self._cleanup_published_artwork(uid, memory_id, required=True)
-            conversation = self.repository.get_conversation(uid, memory_id)
-            if conversation is None:
-                raise MemoryArtworkError("memory_artwork_memory_not_found")
         enrichment_revision = _terminal_enrichment(conversation)
         if enrichment_revision is None:
             raise MemoryArtworkError("memory_artwork_enrichment_not_terminal", retryable=True)
@@ -1467,6 +1704,28 @@ class MemoryArtworkService:
             return {"outcome": "consent_required", "status": "unavailable"}
         if _source_is_sensitive(conversation):
             return {"outcome": "sensitive_source_excluded", "status": "unavailable"}
+        published_artwork, _, _ = _release_artwork(conversation)
+        if (
+            request_mode == "automatic"
+            and isinstance(published_artwork, dict)
+            and published_artwork.get("status") == "ready"
+            and str(published_artwork.get("object_key") or "").strip()
+            and published_artwork.get("binding_id") == preferences.get("binding_id")
+            and published_artwork.get("profile_id") == preferences.get("profile_id")
+        ):
+            # Source and style changes are advisory for permanent artwork. Do
+            # not turn terminal enrichment into an unbounded, high-priority
+            # provider queue. An authenticated manual request may still create
+            # a replacement, and the old object remains published until that
+            # replacement is durably ready.
+            return {
+                "outcome": "stale_retained",
+                "status": "ready",
+                "stale": bool(
+                    published_artwork.get("enrichment_revision") != enrichment_revision
+                    or published_artwork.get("style_version") != preferences.get("style_version")
+                ),
+            }
         authority = await self.authority_resolver(uid)
         if not preferences:
             self.repository.set_preferences(
@@ -1484,12 +1743,12 @@ class MemoryArtworkService:
                 backfill_control_state="running",
             )
             preferences = self.repository.get_preferences(uid)
+        preferences = self._stabilize_preferences(uid, authority)
         if preferences.get("consent") != "accepted" or preferences.get("consent_version") != ARTWORK_CONSENT_VERSION:
             return {"outcome": "consent_required", "status": "unavailable"}
         if (
             preferences.get("binding_id") != authority.binding_id
             or preferences.get("profile_id") != authority.profile_id
-            or preferences.get("authority_digest") != authority.authority_digest
         ):
             raise MemoryArtworkError("memory_artwork_preference_authority_stale")
         style_version = str(preferences.get("style_version") or "")
@@ -1668,7 +1927,7 @@ class MemoryArtworkService:
                 lease_token=lease_token,
             )
             raise MemoryArtworkError("memory_artwork_consent_required")
-        if authority.authority_digest != claimed.get("authority_digest"):
+        if authority.binding_id != claimed.get("binding_id") or authority.profile_id != claimed.get("profile_id"):
             self.repository.mark_generation_unavailable(
                 uid,
                 memory_id,
@@ -1738,7 +1997,7 @@ class MemoryArtworkService:
         reject_deletion_pending(egress_preferences)
         if (
             not self.global_consent_checker(uid)
-            or egress_authority != authority
+            or not _same_artwork_authority(egress_authority, authority)
             or not _preferences_match_authority(
                 egress_preferences,
                 egress_authority,
@@ -1842,7 +2101,7 @@ class MemoryArtworkService:
         reject_deletion_pending(latest_preferences)
         if (
             not self.global_consent_checker(uid)
-            or latest_authority != authority
+            or not _same_artwork_authority(latest_authority, authority)
             or not _preferences_match_authority(
                 latest_preferences,
                 latest_authority,
@@ -1870,6 +2129,19 @@ class MemoryArtworkService:
             )
             raise MemoryArtworkError("memory_artwork_source_changed")
         try:
+            renditions = _responsive_renditions(generated.image_bytes)
+        except MemoryArtworkError as exc:
+            del generated
+            self.repository.mark_generation_unavailable(
+                uid,
+                memory_id,
+                generation_key=generation_key,
+                failure_code=exc.code,
+                lease_token=lease_token,
+            )
+            raise
+        del generated
+        try:
             async with acquire_memory_artwork_publication_lock(uid):
                 # Renew both durable claims and persist cleanup intent while the
                 # crash-released distributed lock excludes destructive cleanup.
@@ -1895,14 +2167,21 @@ class MemoryArtworkService:
                 upload_conversation = self.repository.get_conversation(uid, memory_id) or {}
                 reject_claim_drift(upload_conversation)
                 store = self.store_factory()
-                stored = store.put(
-                    uid=uid,
-                    profile_binding_id=authority.binding_id,
-                    memory_id=memory_id,
-                    generation_key=generation_key,
-                    content_type=generated.content_type,
-                    image_bytes=generated.image_bytes,
-                )
+                stored_renditions = [
+                    (
+                        rendition,
+                        store.put(
+                            uid=uid,
+                            profile_binding_id=authority.binding_id,
+                            memory_id=memory_id,
+                            generation_key=generation_key,
+                            content_type=rendition.content_type,
+                            image_bytes=rendition.image_bytes,
+                            rendition=rendition.name,
+                        ),
+                    )
+                    for rendition in renditions
+                ]
         except MemoryArtworkStorageError as exc:
             self.repository.mark_generation_unavailable(
                 uid,
@@ -1927,9 +2206,25 @@ class MemoryArtworkService:
         # by an outcome-ambiguous retry. Workers therefore never delete it after
         # upload; the persisted cleanup marker delegates destructive cleanup to
         # the explicit memory/account deletion paths.
-        generated_width = generated.pixel_width
-        generated_height = generated.pixel_height
-        del generated
+        master_rendition, stored = stored_renditions[0]
+        master_width = master_rendition.pixel_width
+        master_height = master_rendition.pixel_height
+        variant_states = [
+            {
+                "w": rendition.pixel_width,
+                "h": rendition.pixel_height,
+                "object_key": stored_variant.object_key,
+                "object_generation": stored_variant.object_generation,
+                "content_type": stored_variant.content_type,
+                "byte_size": stored_variant.byte_size,
+                "cache_key": stored_variant.cache_key
+                or hashlib.sha256(stored_variant.object_key.encode("utf-8")).hexdigest(),
+            }
+            for rendition, stored_variant in stored_renditions[1:]
+        ]
+        del master_rendition
+        renditions.clear()
+        stored_renditions.clear()
         try:
             final_authority = await self.authority_resolver(uid)
             final_preferences = self.repository.get_preferences(uid)
@@ -1963,7 +2258,7 @@ class MemoryArtworkService:
         ) and not _source_is_sensitive(final_conversation)
         if (
             not self.global_consent_checker(uid)
-            or final_authority != authority
+            or not _same_artwork_authority(final_authority, authority)
             or not final_claim_is_current
             or not final_source_is_current
             or not _preferences_match_authority(
@@ -2003,12 +2298,17 @@ class MemoryArtworkService:
         ready_state = {
             **claimed,
             "status": "ready",
+            "authority_digest": authority.authority_digest,
+            "binding_id": authority.binding_id,
+            "profile_id": authority.profile_id,
             "object_key": stored.object_key,
             "object_generation": stored.object_generation,
             "content_type": stored.content_type,
             "byte_size": stored.byte_size,
-            "pixel_width": generated_width,
-            "pixel_height": generated_height,
+            "pixel_width": master_width,
+            "pixel_height": master_height,
+            "cache_key": stored.cache_key or hashlib.sha256(stored.object_key.encode("utf-8")).hexdigest(),
+            "variants": variant_states,
             "updated_at": datetime.now(timezone.utc),
         }
         ready_state.pop("lease_token", None)
@@ -2017,13 +2317,12 @@ class MemoryArtworkService:
             uid,
             memory_id,
             generation_key=generation_key,
-            authority_digest=authority.authority_digest,
+            authority_digest=str(claimed.get("authority_digest") or ""),
             lease_token=lease_token,
             ready_state=ready_state,
         )
         if not finalized:
             raise MemoryArtworkError("memory_artwork_finalize_conflict", retryable=True)
-        await self._cleanup_published_artwork(uid, memory_id, required=False)
         return {"outcome": "ready", "status": "ready"}
 
     async def signed_url(self, uid: str, memory_id: str) -> dict[str, Any]:
@@ -2039,38 +2338,18 @@ class MemoryArtworkService:
                 "status": "unavailable",
                 "failure_code": "memory_artwork_release_disabled",
             }
-        conversation = self.repository.get_conversation(uid, memory_id)
-        if conversation is None:
-            raise MemoryArtworkError("memory_artwork_memory_not_found")
-        if conversation.get("discarded"):
-            return {
-                "schema_version": ARTWORK_SCHEMA_VERSION,
-                "status": "unavailable",
-                "failure_code": "memory_artwork_discarded",
-            }
-        if _source_is_sensitive(conversation):
-            return {
-                "schema_version": ARTWORK_SCHEMA_VERSION,
-                "status": "unavailable",
-                "failure_code": "memory_artwork_sensitive_source_excluded",
-            }
-        authority = await self.authority_resolver(uid)
-        # Re-read policy and artwork after the awaited authority lookup. This
-        # applies to unavailable/generating states as well as ready artwork, so
-        # this GET is a side-effect-free generation preflight. There is no await
-        # between this snapshot and the return or synchronous signer call.
         preferences = self.repository.get_preferences(uid)
         conversation = self.repository.get_conversation(uid, memory_id)
         if conversation is None:
             raise MemoryArtworkError("memory_artwork_memory_not_found")
+        if conversation.get("deletion_pending"):
+            raise MemoryArtworkError("memory_artwork_deletion_pending")
         if conversation.get("discarded"):
             return {
                 "schema_version": ARTWORK_SCHEMA_VERSION,
                 "status": "unavailable",
                 "failure_code": "memory_artwork_discarded",
             }
-        current_artwork, current_refresh_pending, current_refresh_failure_code = _release_artwork(conversation)
-        generation_request = conversation.get("artwork") or {}
         if preferences.get(artwork_db.DELETION_PENDING_FIELD):
             raise MemoryArtworkError("memory_artwork_deletion_pending")
         if preferences.get("consent") == "declined":
@@ -2086,11 +2365,26 @@ class MemoryArtworkService:
                 "failure_code": "memory_artwork_consent_required",
             }
         if _source_is_sensitive(conversation):
+            try:
+                async with acquire_memory_artwork_publication_lock(uid) as lock_proof:
+                    latest_conversation = self.repository.get_conversation(uid, memory_id)
+                    if latest_conversation is not None and _source_is_sensitive(latest_conversation):
+                        delete_memory_artwork_for_exclusion(
+                            uid,
+                            memory_id,
+                            latest_conversation,
+                            lock_proof=lock_proof,
+                            store=self.store_factory(),
+                        )
+            except Exception as exc:
+                raise MemoryArtworkError("memory_artwork_sensitive_erasure_failed", retryable=True) from exc
             return {
                 "schema_version": ARTWORK_SCHEMA_VERSION,
                 "status": "unavailable",
                 "failure_code": "memory_artwork_sensitive_source_excluded",
             }
+        current_artwork, current_refresh_pending, current_refresh_failure_code = _release_artwork(conversation)
+        generation_request = conversation.get("artwork") or {}
         if not isinstance(current_artwork, dict):
             return {
                 "schema_version": ARTWORK_SCHEMA_VERSION,
@@ -2104,111 +2398,52 @@ class MemoryArtworkService:
                 "status": "unavailable",
                 "failure_code": "memory_artwork_state_invalid",
             }
-        stored_style_version = str(current_artwork.get("style_version") or "")
-        style_version = stored_style_version or str(preferences.get("style_version") or "")
-        if status == "ready" and not stored_style_version:
-            return {
-                "schema_version": ARTWORK_SCHEMA_VERSION,
-                "status": "unavailable",
-                "failure_code": "memory_artwork_preference_authority_stale",
-            }
-        if not _preferences_match_authority(
-            preferences,
-            authority,
-            style_version=None if current_refresh_pending or current_refresh_failure_code else style_version,
+        if (
+            not preferences.get("binding_id")
+            or not preferences.get("profile_id")
+            or current_artwork.get("binding_id") != preferences.get("binding_id")
+            or current_artwork.get("profile_id") != preferences.get("profile_id")
         ):
             return {
                 "schema_version": ARTWORK_SCHEMA_VERSION,
                 "status": "unavailable",
                 "failure_code": "memory_artwork_preference_authority_stale",
             }
-        if any(
-            (
-                current_artwork.get("authority_digest"),
-                current_artwork.get("binding_id"),
-                current_artwork.get("profile_id"),
-            )
-        ) and (
-            current_artwork.get("authority_digest") != authority.authority_digest
-            or current_artwork.get("binding_id") != authority.binding_id
-            or current_artwork.get("profile_id") != authority.profile_id
-        ):
-            return {
-                "schema_version": ARTWORK_SCHEMA_VERSION,
-                "status": "unavailable",
-                "failure_code": "memory_artwork_preference_authority_stale",
-            }
-        if current_refresh_pending or current_refresh_failure_code:
-            if (
-                not isinstance(generation_request, dict)
-                or generation_request.get("style_version") != preferences.get("style_version")
-                or generation_request.get("enrichment_revision") != current_artwork.get("enrichment_revision")
-            ):
-                return {
-                    "schema_version": ARTWORK_SCHEMA_VERSION,
-                    "status": "unavailable",
-                    "failure_code": "memory_artwork_preference_authority_stale",
-                }
-        current_enrichment_revision = _terminal_enrichment(conversation)
-        if current_enrichment_revision is None:
-            return {
-                "schema_version": ARTWORK_SCHEMA_VERSION,
-                "status": "unavailable",
-                "failure_code": "memory_artwork_enrichment_not_terminal",
-            }
-        stored_enrichment_revision = str(current_artwork.get("enrichment_revision") or "")
-        if status == "ready" and not stored_enrichment_revision:
-            return {
-                "schema_version": ARTWORK_SCHEMA_VERSION,
-                "status": "unavailable",
-                "failure_code": "memory_artwork_source_stale",
-            }
-        if stored_enrichment_revision and stored_enrichment_revision != current_enrichment_revision:
-            return {
-                "schema_version": ARTWORK_SCHEMA_VERSION,
-                "status": "unavailable",
-                "failure_code": "memory_artwork_source_stale",
-            }
-        stored_prompt_sha256 = str(current_artwork.get("prompt_sha256") or "")
-        if status == "ready" and not stored_prompt_sha256:
-            return {
-                "schema_version": ARTWORK_SCHEMA_VERSION,
-                "status": "unavailable",
-                "failure_code": "memory_artwork_source_stale",
-            }
-        if stored_prompt_sha256:
-            _, current_prompt_sha256 = _prompt_for(conversation, style_version)
-            if stored_prompt_sha256 != current_prompt_sha256:
-                return {
-                    "schema_version": ARTWORK_SCHEMA_VERSION,
-                    "status": "unavailable",
-                    "failure_code": "memory_artwork_source_stale",
-                }
         if status != "ready":
             return {
                 "schema_version": ARTWORK_SCHEMA_VERSION,
                 "status": status,
                 "failure_code": current_artwork.get("failure_code"),
             }
-        if (
-            current_artwork.get("authority_digest") != authority.authority_digest
-            or current_artwork.get("binding_id") != authority.binding_id
-            or current_artwork.get("profile_id") != authority.profile_id
-        ):
-            return {
-                "schema_version": ARTWORK_SCHEMA_VERSION,
-                "status": "unavailable",
-                "failure_code": "memory_artwork_preference_authority_stale",
-            }
+        style_version = str(current_artwork.get("style_version") or "")
+        current_enrichment_revision = _terminal_enrichment(conversation)
+        stored_enrichment_revision = str(current_artwork.get("enrichment_revision") or "")
+        stored_prompt_sha256 = str(current_artwork.get("prompt_sha256") or "")
+        current_prompt_sha256 = ""
+        try:
+            _, current_prompt_sha256 = _prompt_for(conversation, style_version)
+        except MemoryArtworkError:
+            pass
+        stale = bool(
+            current_refresh_pending
+            or current_refresh_failure_code
+            or not stored_enrichment_revision
+            or current_enrichment_revision != stored_enrichment_revision
+            or not stored_prompt_sha256
+            or current_prompt_sha256 != stored_prompt_sha256
+            or preferences.get("style_version") != style_version
+        )
         object_key = str(current_artwork.get("object_key") or "").strip()
         if not object_key:
             raise MemoryArtworkError("memory_artwork_object_missing", retryable=True)
         try:
-            url = self.store_factory().signed_get_url(
+            store = self.store_factory()
+            generation_key = str(current_artwork.get("generation_key") or "")
+            url = store.signed_get_url(
                 uid=uid,
-                profile_binding_id=authority.binding_id,
+                profile_binding_id=str(preferences.get("binding_id") or ""),
                 memory_id=memory_id,
-                generation_key=str(current_artwork.get("generation_key") or ""),
+                generation_key=generation_key,
                 object_key=object_key,
             )
         except MemoryArtworkStorageError as exc:
@@ -2228,14 +2463,34 @@ class MemoryArtworkService:
                     failure_code="memory_artwork_object_missing",
                     expected_artwork=current_artwork,
                 )
-            else:
-                self.repository.clear_published_artwork(
-                    uid,
-                    memory_id,
-                    object_key=object_key,
-                    object_generation=str(current_artwork.get("object_generation") or ""),
-                )
             raise MemoryArtworkError("memory_artwork_object_missing", retryable=True) from exc
+        variants = []
+        variants_incomplete = False
+        for variant in current_artwork.get("variants") or []:
+            if not isinstance(variant, dict):
+                variants_incomplete = True
+                continue
+            try:
+                width = int(variant.get("w") or 0)
+                variant_key = str(variant.get("object_key") or "")
+                if width not in RESPONSIVE_VARIANT_WIDTHS or not variant_key:
+                    raise ValueError("invalid variant")
+                variant_url = store.signed_get_url(
+                    uid=uid,
+                    profile_binding_id=str(preferences.get("binding_id") or ""),
+                    memory_id=memory_id,
+                    generation_key=generation_key,
+                    object_key=variant_key,
+                )
+                variants.append(
+                    {
+                        "w": width,
+                        "url": variant_url,
+                        "bytes": int(variant.get("byte_size") or 0),
+                    }
+                )
+            except (MemoryArtworkStorageError, TypeError, ValueError):
+                variants_incomplete = True
         return {
             "schema_version": ARTWORK_SCHEMA_VERSION,
             "status": "ready",
@@ -2245,7 +2500,12 @@ class MemoryArtworkService:
             "pixel_width": current_artwork.get("pixel_width"),
             "pixel_height": current_artwork.get("pixel_height"),
             "url": url,
-            "expires_in_seconds": 300,
+            "cache_key": str(current_artwork.get("cache_key") or "")
+            or hashlib.sha256(object_key.encode("utf-8")).hexdigest(),
+            "expires_in_seconds": SIGNED_ARTWORK_URL_TTL_SECONDS,
+            "variants": sorted(variants, key=lambda item: item["w"]),
+            "variants_incomplete": variants_incomplete or len(variants) != len(RESPONSIVE_VARIANT_WIDTHS),
+            "stale": stale,
             "refresh_pending": current_refresh_pending,
             "refresh_failure_code": current_refresh_failure_code,
             "requested_style_version": (
@@ -2253,6 +2513,51 @@ class MemoryArtworkService:
                 if current_refresh_pending or current_refresh_failure_code
                 else current_artwork.get("style_version")
             ),
+        }
+
+    async def day_artwork(self, uid: str, day: str, *, utc_offset_minutes: int) -> dict[str, Any]:
+        if utc_offset_minutes < -840 or utc_offset_minutes > 840:
+            raise MemoryArtworkError("memory_artwork_utc_offset_invalid")
+        try:
+            datetime.strptime(day, "%Y-%m-%d")
+        except ValueError as exc:
+            raise MemoryArtworkError("memory_artwork_day_invalid") from exc
+        items = []
+        cursor_memory_id: Optional[str] = None
+        seen_cursors: set[str] = set()
+        while True:
+            conversations = self.repository.list_conversations_page(
+                uid,
+                limit=200,
+                cursor_memory_id=cursor_memory_id,
+            )
+            if not conversations:
+                break
+            page_days: list[str] = []
+            for conversation in conversations:
+                conversation_day = _conversation_day(conversation, utc_offset_minutes=utc_offset_minutes)
+                if conversation_day:
+                    page_days.append(conversation_day)
+                if conversation_day != day:
+                    continue
+                memory_id = str(conversation.get("id") or "")
+                if not memory_id:
+                    continue
+                artwork = await self.signed_url(uid, memory_id)
+                if artwork.get("status") == "ready":
+                    items.append({"memory_id": memory_id, "artwork": artwork})
+            if len(conversations) < 200 or (page_days and min(page_days) < day):
+                break
+            next_cursor = str(conversations[-1].get("id") or "")
+            if not next_cursor or next_cursor in seen_cursors:
+                raise MemoryArtworkError("memory_artwork_day_cursor_invalid", retryable=True)
+            seen_cursors.add(next_cursor)
+            cursor_memory_id = next_cursor
+        return {
+            "schema_version": ARTWORK_SCHEMA_VERSION,
+            "day": day,
+            "utc_offset_minutes": utc_offset_minutes,
+            "items": items,
         }
 
     async def backfill(

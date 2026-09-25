@@ -14,6 +14,23 @@ from ella.services.ai_consent import (
 from ella.services.provisioning import self_hosted_fresh_uid_relax_enabled
 
 
+class ArtworkConsentErasureUnavailable(RuntimeError):
+    """Content-free denial when revoked artwork bytes cannot be proven absent."""
+
+
+async def _erase_artwork_for_denial(uid: str) -> None:
+    try:
+        from utils.ella.memory_artwork_storage import (
+            acquire_memory_artwork_publication_lock,
+            delete_user_artwork_for_consent,
+        )
+
+        async with acquire_memory_artwork_publication_lock(uid) as lock_proof:
+            delete_user_artwork_for_consent(uid, lock_proof=lock_proof)
+    except Exception as exc:
+        raise ArtworkConsentErasureUnavailable("artwork_consent_erasure_unavailable") from exc
+
+
 def _managed_authority_required(uid: str) -> bool:
     cloud_enabled = os.getenv(
         "ELLA_HERMES_CLOUD_PROVISIONING_ENABLED",
@@ -57,6 +74,8 @@ async def submit_with_managed_cloud_authority(
         )
 
     payload = service.submit(uid, submission)
+    if submission.decision in {"declined", "revoked"}:
+        await _erase_artwork_for_denial(uid)
     if managed and submission.decision == "granted":
         await managed_cloud_consent.synchronize_grant(
             grant=managed_cloud_consent.ManagedCloudGrant.from_mapping(

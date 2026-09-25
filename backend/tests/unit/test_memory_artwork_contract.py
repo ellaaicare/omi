@@ -1,12 +1,14 @@
 import asyncio
 import base64
 import copy
+import gc
 import hashlib
 import importlib.util
 import io
 import json
 import sys
 import types
+import weakref
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,6 +39,7 @@ def _load_service_module():
     database_stub = types.ModuleType("database.memory_artwork")
     for name in (
         "get_preferences",
+        "stabilize_preferences_authority",
         "set_preferences",
         "get_backfill_control",
         "set_backfill_control",
@@ -51,6 +54,8 @@ def _load_service_module():
         "claim_generation",
         "finalize_generation",
         "clear_published_artwork",
+        "restore_permanent_artwork",
+        "attach_artwork_renditions",
         "mark_generation_unavailable",
         "claim_deletion",
         "list_pending_jobs",
@@ -66,6 +71,7 @@ def _load_service_module():
         "list_pending_reconciliation_jobs",
         "claim_reconciliation_job",
         "finish_reconciliation_job",
+        "storage_cleanup_required",
     ):
         setattr(database_stub, name, lambda *args, **kwargs: None)
     database_stub.STORAGE_CLEANUP_REQUIRED_FIELD = "memory_artwork_storage_cleanup_required"
@@ -196,7 +202,7 @@ class FakeRepository:
         self.conversations = {}
         self.reserve_writes = 0
         self.jobs = {}
-        self.storage_cleanup_required = set()
+        self.storage_cleanup_required_uids = set()
         self.deletion_pending = set()
         self.reconciliation_jobs = {}
         self.backfill_controls = {}
@@ -229,6 +235,20 @@ class FakeRepository:
                 "pause_reason": "",
                 "updated_at": datetime.now(timezone.utc),
             }
+
+    def stabilize_preferences_authority(self, uid, *, binding_id, profile_id, authority_digest):
+        preferences = self.get_preferences(uid)
+        if (
+            not preferences.get(artwork.artwork_db.DELETION_PENDING_FIELD)
+            and preferences.get("binding_id") == binding_id
+            and preferences.get("profile_id") == profile_id
+            and preferences.get("authority_digest") != authority_digest
+        ):
+            preferences["authority_digest"] = authority_digest
+            preferences["updated_at"] = datetime.now(timezone.utc)
+            preferences.pop(artwork.artwork_db.DELETION_PENDING_FIELD, None)
+            self.preferences_by_uid[uid] = copy.deepcopy(preferences)
+        return preferences
 
     def get_backfill_control(self, uid):
         return copy.deepcopy(self.backfill_controls.get(uid, {}))
@@ -421,15 +441,8 @@ class FakeRepository:
             return {"outcome": "existing", "artwork": copy.deepcopy(current)}
         if not allow_retry and (current.get("generation_key") == generation_key or existing_job):
             return {"outcome": "automatic_attempt_already_used", "artwork": copy.deepcopy(current)}
-        published = conversation.get("published_artwork") or {}
-        if (
-            current.get("status") == "ready"
-            and str(current.get("object_key") or "").strip()
-            and current.get("enrichment_revision") == enrichment_revision
-        ):
+        if current.get("status") == "ready" and str(current.get("object_key") or "").strip():
             conversation["published_artwork"] = copy.deepcopy(current)
-        elif not (published.get("status") == "ready" and published.get("enrichment_revision") == enrichment_revision):
-            conversation.pop("published_artwork", None)
         conversation["artwork"] = copy.deepcopy(artwork_state)
         if not (preserve_job_attempts and existing_job.get("status") == "processing"):
             self.jobs[job_key] = effective_job
@@ -483,6 +496,75 @@ class FakeRepository:
             return False
         conversation.pop("published_artwork", None)
         return True
+
+    def restore_permanent_artwork(
+        self,
+        uid,
+        memory_id,
+        *,
+        binding_id,
+        profile_id,
+        authority_digest,
+        consent_version,
+    ):
+        conversation = self.conversations.get((uid, memory_id))
+        preferences = self.preferences_by_uid.get(uid) or {}
+        if conversation is None:
+            return {"outcome": "not_found"}
+        if (
+            preferences.get("consent") != "accepted"
+            or preferences.get("consent_version") != consent_version
+            or uid in self.deletion_pending
+            or conversation.get("deletion_pending")
+            or conversation.get("discarded")
+            or artwork._source_is_sensitive(conversation)
+        ):
+            return {"outcome": "blocked"}
+        if preferences.get("binding_id") != binding_id or preferences.get("profile_id") != profile_id:
+            return {"outcome": "authority_mismatch"}
+        for field in ("artwork", "published_artwork"):
+            state = conversation.get(field) or {}
+            if not state.get("object_key"):
+                continue
+            if state.get("status") == "unavailable" and state.get("failure_code") not in {
+                "authority_changed",
+                "authority_unavailable",
+                "memory_artwork_preference_authority_stale",
+                "preference_changed",
+            }:
+                continue
+            if state.get("status") not in {"ready", "unavailable"}:
+                continue
+            was_restored = state.get("status") != "ready" or state.get("authority_digest") != authority_digest
+            state.update({"status": "ready", "authority_digest": authority_digest})
+            state.pop("failure_code", None)
+            preferences["authority_digest"] = authority_digest
+            return {
+                "outcome": "restored" if was_restored else "ready",
+                "field": field,
+                "artwork": copy.deepcopy(state),
+            }
+        return {"outcome": "not_restorable"}
+
+    def attach_artwork_renditions(
+        self,
+        uid,
+        memory_id,
+        *,
+        source_object_key,
+        source_object_generation,
+        rendition_update,
+    ):
+        conversation = self.conversations.get((uid, memory_id))
+        updated = False
+        for field in ("artwork", "published_artwork"):
+            state = (conversation or {}).get(field) or {}
+            if state.get("object_key") == source_object_key and str(state.get("object_generation") or "") == str(
+                source_object_generation
+            ):
+                state.update(copy.deepcopy(rendition_update))
+                updated = True
+        return updated
 
     def mark_generation_unavailable(
         self,
@@ -742,7 +824,7 @@ class FakeRepository:
             return False
         if not self.job_claim_is_current(uid, memory_id, generation_key, lease_token=job_lease_token):
             return False
-        self.storage_cleanup_required.add(uid)
+        self.storage_cleanup_required_uids.add(uid)
         return True
 
     def renew_publication_claim(
@@ -770,6 +852,9 @@ class FakeRepository:
         self.jobs[(uid, memory_id, generation_key)]["lease_expires_at"] = publication_expiry
         return True
 
+    def storage_cleanup_required(self, uid):
+        return uid in self.storage_cleanup_required_uids
+
 
 def _run_claimed_process(service, repository, uid="owner-a", memory_id="memory-1"):
     conversation = repository.get_conversation(uid, memory_id) or {}
@@ -794,6 +879,12 @@ def _run_claimed_process(service, repository, uid="owner-a", memory_id="memory-1
     )
 
 
+def _valid_test_image_bytes():
+    output = io.BytesIO()
+    Image.new("RGB", (1536, 1024), color=(68, 107, 91)).save(output, format="JPEG", quality=90)
+    return output.getvalue()
+
+
 class FakeProvider:
     def __init__(self, *, failure=None, after_generate=None):
         self.failure = failure
@@ -807,8 +898,8 @@ class FakeProvider:
         if self.after_generate:
             self.after_generate()
         return artwork.GeneratedArtwork(
-            image_bytes=b"private-image",
-            content_type="image/png",
+            image_bytes=_valid_test_image_bytes(),
+            content_type="image/jpeg",
             pixel_width=1536,
             pixel_height=1024,
         )
@@ -823,20 +914,35 @@ class FakeStore:
 
     def put(self, **kwargs):
         self.puts.append(kwargs)
+        extension = "jpg" if kwargs["content_type"] == "image/jpeg" else "webp"
+        rendition = kwargs.get("rendition", "master")
         return artwork.StoredArtwork(
             object_key=(
                 f"users/owner/profiles/{kwargs['profile_binding_id']}/memories/"
-                f"{kwargs['memory_id']}/{kwargs['generation_key']}.png"
+                f"{kwargs['memory_id']}/{kwargs['generation_key']}/{hashlib.sha256(kwargs['image_bytes']).hexdigest()}-"
+                f"{rendition}.{extension}"
             ),
             object_generation="7",
             content_type=kwargs["content_type"],
             byte_size=len(kwargs["image_bytes"]),
+            cache_key=hashlib.sha256(kwargs["image_bytes"]).hexdigest(),
         )
+
+    def get_bytes(self, **kwargs):
+        return _valid_test_image_bytes()
 
     def delete(self, **kwargs):
         self.deletes.append(kwargs)
 
     def delete_memory_prefix(self, **kwargs):
+        self.prefix_deletes.append(kwargs)
+        return 0
+
+    def delete_memory_all_bindings(self, **kwargs):
+        self.prefix_deletes.append(kwargs)
+        return 0
+
+    def delete_user_prefix(self, **kwargs):
         self.prefix_deletes.append(kwargs)
         return 0
 
@@ -1004,30 +1110,29 @@ def test_recent_recovery_is_recent_first_idempotent_and_reports_durable_states()
         "schema_version": artwork.ARTWORK_RECENT_RECOVERY_SCHEMA_VERSION,
         "scanned": 5,
         "reservation_limit": artwork.RECENT_RECOVERY_RESERVATION_LIMIT,
-        "reserved": 2,
+        "reserved": 1,
         "deferred": 0,
-        "ready": 1,
-        "pending": 2,
+        "ready": 2,
+        "pending": 1,
         "retrying": 1,
         "exhausted": 1,
         "skipped": 0,
         "items": [
-            {"memory_id": "stale", "status": "pending"},
             {"memory_id": "missing", "status": "pending"},
             {"memory_id": "exhausted", "status": "exhausted"},
             {"memory_id": "retrying", "status": "retrying"},
         ],
     }
-    assert repository.reserve_writes == writes_before_recovery + 2
+    assert repository.reserve_writes == writes_before_recovery + 1
     assert repository.conversations[("owner-a", "ready")]["artwork"]["status"] == "ready"
 
     second = asyncio.run(service.recover_recent("owner-a"))
 
     assert second["reserved"] == 0
-    assert second["pending"] == 2
+    assert second["pending"] == 1
     assert second["retrying"] == 1
     assert second["exhausted"] == 1
-    assert repository.reserve_writes == writes_before_recovery + 2
+    assert repository.reserve_writes == writes_before_recovery + 1
 
 
 def test_recent_recovery_caps_new_reservations_without_starving_later_candidates():
@@ -1141,7 +1246,7 @@ def test_recent_recovery_reads_the_generation_reserved_after_source_drift():
     assert result["items"] == [{"memory_id": "drift", "status": "pending"}]
 
 
-def test_recent_recovery_replaces_a_stale_authority_job_once():
+def test_recent_recovery_preserves_generation_across_runtime_fingerprint_rotation():
     repository = FakeRepository()
     old_authority = _authority(digest="digest-old")
     repository.preferences_by_uid["owner-a"] = _accepted_preferences(old_authority)
@@ -1171,20 +1276,19 @@ def test_recent_recovery_replaces_a_stale_authority_job_once():
     current_generation_key = repository.conversations[("owner-a", "rotated")]["artwork"]["generation_key"]
     second = asyncio.run(current_service.recover_recent("owner-a"))
 
-    assert current_generation_key != old_generation_key
+    assert current_generation_key == old_generation_key
     assert repository.jobs[("owner-a", "rotated", old_generation_key)]["authority_digest"] == "digest-old"
-    assert repository.jobs[("owner-a", "rotated", current_generation_key)]["authority_digest"] == "digest-new"
     assert first["pending"] == 1
     assert first["retrying"] == 0
     assert first["exhausted"] == 0
-    assert first["reserved"] == 1
+    assert first["reserved"] == 0
     assert first["items"] == [{"memory_id": "rotated", "status": "pending"}]
     assert second["pending"] == 1
     assert second["reserved"] == 0
-    assert repository.reserve_writes == writes_before_rotation + 1
+    assert repository.reserve_writes == writes_before_rotation
 
 
-def test_recent_recovery_fails_before_inventory_without_current_consent_or_authority():
+def test_recent_recovery_fails_before_inventory_without_current_consent_or_binding():
     class NeverScanRepository(FakeRepository):
         def list_conversations_page(self, uid, *, limit, cursor_memory_id=None):
             raise AssertionError("recovery must fence authority before inventory")
@@ -1202,7 +1306,7 @@ def test_recent_recovery_fails_before_inventory_without_current_consent_or_autho
         asyncio.run(without_consent.recover_recent("owner-a"))
     assert denied.value.code == "memory_artwork_consent_required"
 
-    repository.preferences_by_uid["owner-a"]["authority_digest"] = "stale"
+    repository.preferences_by_uid["owner-a"]["binding_id"] = "stale-binding"
     with_stale_authority = artwork.MemoryArtworkService(
         repository=repository,
         authority_resolver=_resolver,
@@ -1218,6 +1322,232 @@ def test_recent_recovery_fails_before_inventory_without_current_consent_or_autho
     with pytest.raises(artwork.MemoryArtworkError) as deletion:
         asyncio.run(with_stale_authority.recover_recent("owner-a"))
     assert deletion.value.code == "memory_artwork_deletion_pending"
+
+
+def test_permanent_recovery_restores_runtime_stale_and_backfills_variants_without_provider_calls():
+    repository = FakeRepository()
+    old_authority = _authority(digest="legacy-runtime-fingerprint")
+    current_authority = artwork.ArtworkRuntimeAuthority(
+        uid="owner-a",
+        binding_id=old_authority.binding_id,
+        profile_id=old_authority.profile_id,
+        revision=99,
+        authority_digest="stable-owner-profile-digest",
+    )
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(old_authority)
+    restorable = _terminal_memory("restorable")
+    restorable["artwork"] = {
+        **_ready_artwork(restorable, authority=old_authority, style_version=artwork.DEFAULT_STYLE_VERSION),
+        "status": "unavailable",
+        "failure_code": "authority_changed",
+        "generation_key": "a" * 64,
+        "object_generation": "7",
+        "content_type": "image/png",
+    }
+    source_changed = _terminal_memory("source-changed")
+    source_changed["artwork"] = {
+        **_ready_artwork(source_changed, authority=old_authority, style_version=artwork.DEFAULT_STYLE_VERSION),
+        "status": "unavailable",
+        "failure_code": "source_changed",
+        "generation_key": "b" * 64,
+        "object_generation": "8",
+        "content_type": "image/png",
+    }
+    repository.conversations[("owner-a", "restorable")] = restorable
+    repository.conversations[("owner-a", "source-changed")] = source_changed
+    store = FakeStore()
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=lambda uid: asyncio.sleep(0, result=current_authority),
+        provider_factory=lambda: (_ for _ in ()).throw(AssertionError("recovery must not call a provider")),
+        store_factory=lambda: store,
+        config=_enabled_config(provider=False),
+    )
+
+    result = asyncio.run(service.recover_permanent_artwork("owner-a"))
+
+    assert result["restored"] == 1
+    assert result["regenerations_avoided"] == 1
+    assert result["variant_backfilled"] == 1
+    assert result["provider_calls"] == 0
+    assert {item["rendition"] for item in store.puts} == {"master", "w384", "w768", "w1536"}
+    recovered = repository.conversations[("owner-a", "restorable")]["artwork"]
+    assert recovered["status"] == "ready"
+    assert recovered["authority_digest"] == current_authority.authority_digest
+    assert [item["w"] for item in recovered["variants"]] == [384, 768, 1536]
+    assert repository.conversations[("owner-a", "source-changed")]["artwork"]["status"] == "unavailable"
+    assert store.deletes == []
+
+
+def test_permanent_recovery_erases_new_renditions_when_source_becomes_sensitive_before_attach(monkeypatch):
+    class SensitiveDuringAttachRepository(FakeRepository):
+        def attach_artwork_renditions(self, uid, memory_id, **kwargs):
+            self.conversations[(uid, memory_id)]["ella_tags"] = ["caregiver-private"]
+            return False
+
+    repository = SensitiveDuringAttachRepository()
+    authority = _authority(digest="stable-owner-profile-digest")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(authority)
+    memory = _terminal_memory("restorable")
+    memory["artwork"] = {
+        **_ready_artwork(memory, authority=authority, style_version=artwork.DEFAULT_STYLE_VERSION),
+        "generation_key": "a" * 64,
+        "object_generation": "7",
+        "content_type": "image/png",
+    }
+    repository.conversations[("owner-a", "restorable")] = memory
+    store = FakeStore()
+
+    def erase_sensitive(uid, memory_id, conversation, *, lock_proof, store):
+        store.delete_memory_all_bindings(uid=uid, memory_id=memory_id)
+
+    monkeypatch.setattr(artwork, "delete_memory_artwork_for_exclusion", erase_sensitive)
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=lambda uid: asyncio.sleep(0, result=authority),
+        provider_factory=lambda: (_ for _ in ()).throw(AssertionError("recovery must not call a provider")),
+        store_factory=lambda: store,
+        config=_enabled_config(provider=False),
+    )
+
+    result = asyncio.run(service.recover_permanent_artwork("owner-a"))
+
+    assert result["variant_backfilled"] == 0
+    assert result["failures"] == 1
+    assert result["provider_calls"] == 0
+    assert store.prefix_deletes == [{"uid": "owner-a", "memory_id": "restorable"}]
+
+
+def test_generation_identity_ignores_runtime_fingerprint_and_revision():
+    memory = _terminal_memory("memory-stable")
+    _, prompt_sha256 = artwork._prompt_for(memory, artwork.DEFAULT_STYLE_VERSION)
+    before = _authority(digest="runtime-token-a")
+    after = artwork.ArtworkRuntimeAuthority(
+        uid=before.uid,
+        binding_id=before.binding_id,
+        profile_id=before.profile_id,
+        revision=before.revision + 100,
+        authority_digest="runtime-token-b",
+    )
+
+    before_key = artwork._generation_key(
+        uid="owner-a",
+        authority=before,
+        memory_id="memory-stable",
+        enrichment_revision=memory["active_summary_version_id"],
+        style_version=artwork.DEFAULT_STYLE_VERSION,
+        prompt_sha256=prompt_sha256,
+    )
+    after_key = artwork._generation_key(
+        uid="owner-a",
+        authority=after,
+        memory_id="memory-stable",
+        enrichment_revision=memory["active_summary_version_id"],
+        style_version=artwork.DEFAULT_STYLE_VERSION,
+        prompt_sha256=prompt_sha256,
+    )
+
+    assert before_key == after_key
+
+
+def test_automatic_source_refresh_retains_ready_artwork_without_job_or_runtime_lookup():
+    repository = FakeRepository()
+    authority = _authority()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(authority)
+    memory = _terminal_memory("memory-1")
+    memory["artwork"] = _ready_artwork(
+        memory,
+        authority=authority,
+        style_version=artwork.DEFAULT_STYLE_VERSION,
+    )
+    published = copy.deepcopy(memory["artwork"])
+    memory["active_summary_version_id"] = "summary-edited"
+    memory["structured"]["title"] = "Edited title"
+    repository.conversations[("owner-a", "memory-1")] = memory
+
+    async def runtime_must_not_run(uid):
+        raise AssertionError("automatic stale retention must not resolve runtime authority")
+
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=runtime_must_not_run,
+        provider_factory=FakeProvider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+
+    result = asyncio.run(service.enqueue("owner-a", "memory-1", request_mode="automatic"))
+
+    assert result == {"outcome": "stale_retained", "status": "ready", "stale": True}
+    assert repository.conversations[("owner-a", "memory-1")]["artwork"] == published
+    assert repository.jobs == {}
+
+
+def test_responsive_renditions_are_three_by_two_and_strip_exif():
+    source = Image.new("RGB", (1800, 1200), color=(100, 80, 60))
+    exif = Image.Exif()
+    exif[0x010E] = "private description"
+    encoded = io.BytesIO()
+    source.save(encoded, format="JPEG", quality=90, exif=exif)
+
+    renditions = artwork._responsive_renditions(encoded.getvalue())
+
+    assert [(item.name, item.pixel_width, item.pixel_height) for item in renditions] == [
+        ("master", 1536, 1024),
+        ("w384", 384, 256),
+        ("w768", 768, 512),
+        ("w1536", 1536, 1024),
+    ]
+    for rendition in renditions:
+        with Image.open(io.BytesIO(rendition.image_bytes)) as decoded:
+            assert decoded.size == (rendition.pixel_width, rendition.pixel_height)
+            assert len(decoded.getexif()) == 0
+
+
+def test_generation_releases_rendition_objects_before_final_authority_await(monkeypatch):
+    repository = FakeRepository()
+    authority = _authority()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(authority)
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    rendition_refs = []
+    original_responsive_renditions = artwork._responsive_renditions
+
+    def tracked_renditions(image_bytes):
+        renditions = original_responsive_renditions(image_bytes)
+        rendition_refs.extend(weakref.ref(rendition) for rendition in renditions)
+        return renditions
+
+    class NonRetainingStore(FakeStore):
+        def put(self, **kwargs):
+            content_digest = hashlib.sha256(kwargs["image_bytes"]).hexdigest()
+            rendition = kwargs.get("rendition", "master")
+            return artwork.StoredArtwork(
+                object_key=f"private/{content_digest}-{rendition}",
+                object_generation="7",
+                content_type=kwargs["content_type"],
+                byte_size=len(kwargs["image_bytes"]),
+                cache_key=content_digest,
+            )
+
+    async def resolving_authority(uid):
+        if rendition_refs:
+            gc.collect()
+            assert all(reference() is None for reference in rendition_refs)
+        return authority
+
+    monkeypatch.setattr(artwork, "_responsive_renditions", tracked_renditions)
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=resolving_authority,
+        provider_factory=FakeProvider,
+        store_factory=NonRetainingStore,
+        config=_enabled_config(),
+    )
+
+    assert asyncio.run(service.enqueue("owner-a", "memory-1"))["outcome"] == "reserved"
+    assert _run_claimed_process(service, repository) == {"outcome": "ready", "status": "ready"}
+    assert rendition_refs
+    assert all(reference() is None for reference in rendition_refs)
 
 
 def test_legacy_job_metadata_is_recovered_only_from_its_exact_generation():
@@ -2019,6 +2349,39 @@ def test_disabled_and_declined_states_never_call_provider():
     assert provider.calls == 0
 
 
+def test_declining_artwork_consent_erases_user_prefix_without_runtime_resolution(monkeypatch):
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    erasures = []
+
+    def erase(uid, *, lock_proof, repository):
+        erasures.append(uid)
+        return 4
+
+    async def runtime_must_not_run(uid):
+        raise AssertionError("declining consent must not depend on runtime availability")
+
+    monkeypatch.setattr(artwork, "delete_user_artwork_for_consent", erase)
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=runtime_must_not_run,
+        config=_enabled_config(),
+    )
+
+    result = asyncio.run(
+        service.set_preferences(
+            "owner-a",
+            consent="declined",
+            consent_version=artwork.ARTWORK_CONSENT_VERSION,
+            style_version=artwork.DEFAULT_STYLE_VERSION,
+        )
+    )
+
+    assert result["consent"] == "declined"
+    assert repository.preferences_by_uid["owner-a"]["consent"] == "declined"
+    assert erasures == ["owner-a"]
+
+
 def test_environment_owner_gate_fails_closed_before_repository_or_provider(monkeypatch):
     monkeypatch.setenv("ELLA_MEMORY_ARTWORK_ENABLED", "true")
     monkeypatch.setenv("ELLA_MEMORY_ARTWORK_RELEASE_ENABLED", "true")
@@ -2181,13 +2544,14 @@ def test_idempotent_generation_and_owner_scoped_signed_url():
     assert signed["status"] == "ready"
     assert signed["url"].startswith("https://first-party.invalid/")
     assert provider.calls == 1
-    assert len(store.puts) == 1
-    assert repository.storage_cleanup_required == {"owner-a"}
+    assert len(store.puts) == 4
+    assert {entry["rendition"] for entry in store.puts} == {"master", "w384", "w768", "w1536"}
+    assert repository.storage_cleanup_required_uids == {"owner-a"}
 
     with pytest.raises(artwork.MemoryArtworkError) as missing:
         asyncio.run(service.signed_url("owner-b", "memory-1"))
     assert missing.value.code == "memory_artwork_memory_not_found"
-    assert len(store.signed) == 1
+    assert len(store.signed) == 4
 
 
 def test_style_refresh_keeps_previous_artwork_published_until_atomic_swap():
@@ -2226,17 +2590,11 @@ def test_style_refresh_keeps_previous_artwork_published_until_atomic_swap():
     assert after_swap["style_version"] == selected_style
     assert after_swap["requested_style_version"] == selected_style
     assert after_swap["refresh_pending"] is False
-    assert "published_artwork" not in repository.conversations[("owner-a", "memory-1")]
-    assert store.deletes == [
-        {
-            "uid": "owner-a",
-            "memory_id": "memory-1",
-            "object_key": first_ready["object_key"],
-        }
-    ]
+    assert repository.conversations[("owner-a", "memory-1")]["published_artwork"] == first_ready
+    assert store.deletes == []
 
 
-def test_repeated_binding_refreshes_delete_each_preserved_object_before_next_reservation():
+def test_repeated_binding_refreshes_never_delete_prior_artwork_versions():
     repository = FakeRepository()
     repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
     current_authority = [_authority()]
@@ -2287,11 +2645,12 @@ def test_repeated_binding_refreshes_delete_each_preserved_object_before_next_res
     asyncio.run(service.enqueue("owner-a", "memory-1"))
     assert _run_claimed_process(service, repository) == {"outcome": "ready", "status": "ready"}
 
-    assert [entry["object_key"] for entry in store.deletes] == [first_object_key, second_object_key]
-    assert "published_artwork" not in repository.conversations[("owner-a", "memory-1")]
+    assert first_object_key != second_object_key
+    assert store.deletes == []
+    assert repository.conversations[("owner-a", "memory-1")]["published_artwork"]["object_key"] == second_object_key
 
 
-def test_failed_preserved_object_cleanup_blocks_later_refresh_without_overwriting_metadata():
+def test_storage_delete_failure_cannot_block_a_later_refresh():
     class CleanupStore(FakeStore):
         def __init__(self):
             super().__init__()
@@ -2325,17 +2684,12 @@ def test_failed_preserved_object_cleanup_blocks_later_refresh_without_overwritin
     writes_before_retry = repository.reserve_writes
 
     repository.preferences_by_uid["owner-a"]["style_version"] = "ella.memory_artwork.style.cinematic-still.v1"
-    with pytest.raises(artwork.MemoryArtworkError) as failure:
-        asyncio.run(service.enqueue("owner-a", "memory-1"))
-    assert failure.value.code == "memory_artwork_published_cleanup_failed"
-    assert repository.reserve_writes == writes_before_retry
-    assert repository.conversations[("owner-a", "memory-1")]["published_artwork"] == preserved
-
-    store.fail_delete = False
     assert asyncio.run(service.enqueue("owner-a", "memory-1"))["outcome"] == "reserved"
+    assert repository.reserve_writes == writes_before_retry + 1
     replacement_published = repository.conversations[("owner-a", "memory-1")]["published_artwork"]
     assert replacement_published["object_key"] == current_object_key
     assert replacement_published["object_key"] != preserved["object_key"]
+    assert store.deletes == []
 
 
 def test_failed_style_refresh_retains_previous_ready_artwork():
@@ -3030,7 +3384,7 @@ def test_failed_storage_write_remains_covered_by_cleanup_marker():
         _run_claimed_process(service, repository)
 
     assert failure.value.code == "memory_artwork_storage_failed"
-    assert repository.storage_cleanup_required == {"owner-a"}
+    assert repository.storage_cleanup_required_uids == {"owner-a"}
 
 
 def test_cleanup_marker_failure_prevents_object_upload():
@@ -3110,7 +3464,15 @@ def test_authority_drift_after_provider_output_prevents_object_write():
     async def drifting_resolver(uid):
         nonlocal calls
         calls += 1
-        return _authority(uid, "digest-b" if calls >= 4 else "digest-a")
+        if calls < 4:
+            return _authority(uid, "digest-a")
+        return artwork.ArtworkRuntimeAuthority(
+            uid=uid,
+            binding_id="other-binding",
+            profile_id="other-profile",
+            revision=99,
+            authority_digest="digest-b",
+        )
 
     provider = FakeProvider()
     store = FakeStore()
@@ -3212,7 +3574,7 @@ def test_expired_claim_after_object_write_never_deletes_shared_idempotent_object
         _run_claimed_process(service, repository)
 
     assert failure.value.code == "memory_artwork_job_claim_invalid"
-    assert len(store.puts) == 1
+    assert len(store.puts) == 4
     assert store.deletes == []
 
 
@@ -3302,24 +3664,20 @@ def test_sensitive_classification_drift_at_egress_recheck_blocks_provider():
     [
         ({"consent": "not_set"}, "unavailable"),
         ({"consent_version": "stale"}, "unavailable"),
-        ({"style_version": "ella.memory_artwork.style.paper-collage.v1"}, "stale"),
-        ({"binding_id": "other-binding"}, "stale"),
-        ({"profile_id": "other-profile"}, "stale"),
-        ({"authority_digest": "other-digest"}, "stale"),
+        ({"style_version": "ella.memory_artwork.style.paper-collage.v1"}, "ready_stale"),
+        ({"binding_id": "other-binding"}, "authority_stale"),
+        ({"profile_id": "other-profile"}, "authority_stale"),
+        ({"authority_digest": "other-digest"}, "ready"),
     ],
 )
 def test_signed_url_requires_current_bound_consent(preference_change, expected):
     repository = FakeRepository()
     memory = _terminal_memory("memory-1")
-    memory["artwork"] = {
-        "status": "ready",
-        "style_version": artwork.DEFAULT_STYLE_VERSION,
-        "enrichment_revision": "summary-memory-1",
-        "authority_digest": "digest-a",
-        "binding_id": "binding-owner-a",
-        "profile_id": "profile-owner-a",
-        "object_key": "private/object/key",
-    }
+    memory["artwork"] = _ready_artwork(
+        memory,
+        authority=_authority(),
+        style_version=artwork.DEFAULT_STYLE_VERSION,
+    )
     repository.conversations[("owner-a", "memory-1")] = memory
     preferences = _accepted_preferences(_authority())
     preferences.update(preference_change)
@@ -3339,17 +3697,21 @@ def test_signed_url_requires_current_bound_consent(preference_change, expected):
             "status": "unavailable",
             "failure_code": "memory_artwork_consent_required",
         }
-    else:
+    elif expected == "authority_stale":
         result = asyncio.run(service.signed_url("owner-a", "memory-1"))
         assert result == {
             "schema_version": artwork.ARTWORK_SCHEMA_VERSION,
             "status": "unavailable",
             "failure_code": "memory_artwork_preference_authority_stale",
         }
-    assert store.signed == []
+    else:
+        result = asyncio.run(service.signed_url("owner-a", "memory-1"))
+        assert result["status"] == "ready"
+        assert result["stale"] is (expected == "ready_stale")
+    assert bool(store.signed) is expected.startswith("ready")
 
 
-def test_signed_url_rechecks_sensitive_source_before_release():
+def test_signed_url_rechecks_sensitive_source_before_release(monkeypatch):
     repository = FakeRepository()
     memory = _terminal_memory("memory-1")
     memory["ella_tags"] = ["caregiver-private"]
@@ -3372,6 +3734,10 @@ def test_signed_url_rechecks_sensitive_source_before_release():
         config=_enabled_config(),
     )
 
+    def erase_sensitive(uid, memory_id, conversation, *, lock_proof, store):
+        store.delete_memory_all_bindings(uid=uid, memory_id=memory_id)
+
+    monkeypatch.setattr(artwork, "delete_memory_artwork_for_exclusion", erase_sensitive)
     result = asyncio.run(service.signed_url("owner-a", "memory-1"))
 
     assert result == {
@@ -3380,6 +3746,7 @@ def test_signed_url_rechecks_sensitive_source_before_release():
         "failure_code": "memory_artwork_sensitive_source_excluded",
     }
     assert store.signed == []
+    assert store.prefix_deletes == [{"uid": "owner-a", "memory_id": "memory-1"}]
 
     for drift in ("enrichment_revision", "prompt", "discarded"):
         repository = FakeRepository()
@@ -3405,15 +3772,46 @@ def test_signed_url_rechecks_sensitive_source_before_release():
             conversation["discarded"] = True
 
         result = asyncio.run(service.signed_url("owner-a", "memory-1"))
-        assert result == {
-            "schema_version": artwork.ARTWORK_SCHEMA_VERSION,
-            "status": "unavailable",
-            "failure_code": "memory_artwork_discarded" if drift == "discarded" else "memory_artwork_source_stale",
-        }
-        assert store.signed == []
+        if drift == "discarded":
+            assert result == {
+                "schema_version": artwork.ARTWORK_SCHEMA_VERSION,
+                "status": "unavailable",
+                "failure_code": "memory_artwork_discarded",
+            }
+            assert store.signed == []
+        else:
+            assert result["status"] == "ready"
+            assert result["stale"] is True
+            assert store.signed
 
 
-def test_signed_url_rereads_consent_after_awaited_authority_resolution():
+def test_signed_url_rejects_conversation_deletion_before_signing():
+    repository = FakeRepository()
+    memory = _terminal_memory("memory-1")
+    memory["deletion_pending"] = True
+    memory["artwork"] = _ready_artwork(
+        memory,
+        authority=_authority(),
+        style_version=artwork.DEFAULT_STYLE_VERSION,
+    )
+    repository.conversations[("owner-a", "memory-1")] = memory
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    store = FakeStore()
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        store_factory=lambda: store,
+        config=_enabled_config(),
+    )
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        asyncio.run(service.signed_url("owner-a", "memory-1"))
+
+    assert failure.value.code == "memory_artwork_deletion_pending"
+    assert store.signed == []
+
+
+def test_signed_url_does_not_depend_on_runtime_resolution_and_honors_declined_consent():
     repository = FakeRepository()
     memory = _terminal_memory("memory-1")
     memory["artwork"] = {
@@ -3427,17 +3825,18 @@ def test_signed_url_rereads_consent_after_awaited_authority_resolution():
         "object_key": "private/object/key",
     }
     repository.conversations[("owner-a", "memory-1")] = memory
-    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    repository.preferences_by_uid["owner-a"] = {
+        **_accepted_preferences(_authority()),
+        "consent": "declined",
+    }
     store = FakeStore()
 
-    async def declining_resolver(uid):
-        await asyncio.sleep(0)
-        repository.preferences_by_uid[uid]["consent"] = "declined"
-        return _authority(uid)
+    async def never_resolve(uid):
+        raise AssertionError("permanent artwork reads must not depend on runtime health or credentials")
 
     service = artwork.MemoryArtworkService(
         repository=repository,
-        authority_resolver=declining_resolver,
+        authority_resolver=never_resolve,
         store_factory=lambda: store,
         config=_enabled_config(),
     )
@@ -3588,11 +3987,11 @@ def test_libraries_count_only_ready_owner_bound_objects_by_style_and_day():
     assert result["schema_version"] == artwork.ARTWORK_LIBRARIES_SCHEMA_VERSION
     assert result["default_preview_days"] == 3
     assert result["historical_batch_size"] == 10
-    assert by_style[anime]["ready_memories"] == 0
-    assert by_style[anime]["ready_days"] == 0
+    assert by_style[anime]["ready_memories"] == 3
+    assert by_style[anime]["ready_days"] == 2
     assert by_style[artwork.DEFAULT_STYLE_VERSION]["ready_memories"] == 1
     assert by_style[artwork.DEFAULT_STYLE_VERSION]["ready_days"] == 1
-    assert sum(library["ready_memories"] for library in result["libraries"]) == 1
+    assert sum(library["ready_memories"] for library in result["libraries"]) == 4
 
 
 def test_libraries_exclude_retained_ready_objects_that_signed_url_cannot_display():
@@ -3619,8 +4018,77 @@ def test_libraries_exclude_retained_ready_objects_that_signed_url_cannot_display
     result = asyncio.run(service.libraries("owner-a"))
     selected = next(library for library in result["libraries"] if library["selected"])
 
-    assert selected["ready_memories"] == 1
+    assert selected["ready_memories"] == 2
     assert selected["ready_days"] == 1
+
+
+def test_day_artwork_batches_only_the_requested_local_calendar_day():
+    repository = FakeRepository()
+    authority = _authority()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(authority)
+    early_utc = _terminal_memory("early", created_at=datetime(2026, 9, 25, 1, tzinfo=timezone.utc))
+    midday_utc = _terminal_memory("midday", created_at=datetime(2026, 9, 25, 12, tzinfo=timezone.utc))
+    for memory in (early_utc, midday_utc):
+        memory["artwork"] = {
+            **_ready_artwork(memory, authority=authority, style_version=artwork.DEFAULT_STYLE_VERSION),
+            "generation_key": hashlib.sha256(memory["id"].encode()).hexdigest(),
+        }
+        repository.conversations[("owner-a", memory["id"])] = memory
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=lambda uid: (_ for _ in ()).throw(AssertionError("read must not resolve runtime")),
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+
+    result = asyncio.run(service.day_artwork("owner-a", "2026-09-24", utc_offset_minutes=-420))
+
+    assert result["day"] == "2026-09-24"
+    assert result["utc_offset_minutes"] == -420
+    assert [item["memory_id"] for item in result["items"]] == ["early"]
+    assert result["items"][0]["artwork"]["status"] == "ready"
+
+
+def test_day_artwork_paginates_past_two_hundred_newer_memories():
+    class PagingRepository(FakeRepository):
+        def __init__(self):
+            super().__init__()
+            self.page_calls = 0
+
+        def list_conversations_page(self, uid, *, limit, cursor_memory_id=None):
+            self.page_calls += 1
+            return super().list_conversations_page(
+                uid,
+                limit=limit,
+                cursor_memory_id=cursor_memory_id,
+            )
+
+    repository = PagingRepository()
+    authority = _authority()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(authority)
+    target = _terminal_memory("target", created_at=datetime(2026, 1, 15, 12, tzinfo=timezone.utc))
+    target["artwork"] = {
+        **_ready_artwork(target, authority=authority, style_version=artwork.DEFAULT_STYLE_VERSION),
+        "generation_key": "a" * 64,
+    }
+    repository.conversations[("owner-a", "target")] = target
+    for index in range(201):
+        memory_id = f"newer-{index:03d}"
+        repository.conversations[("owner-a", memory_id)] = _terminal_memory(
+            memory_id,
+            created_at=datetime(2026, 2, 1, 12, tzinfo=timezone.utc) + timedelta(minutes=index),
+        )
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=lambda uid: (_ for _ in ()).throw(AssertionError("read must not resolve runtime")),
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+
+    result = asyncio.run(service.day_artwork("owner-a", "2026-01-15", utc_offset_minutes=0))
+
+    assert repository.page_calls == 2
+    assert [item["memory_id"] for item in result["items"]] == ["target"]
 
 
 def test_backfill_limits_enrichment_recovery_candidates_and_rejects_stale_cursor():
@@ -3870,8 +4338,8 @@ def test_account_deletion_marker_drains_claimed_worker_before_storage_write():
             entered.set()
             await release.wait()
             return artwork.GeneratedArtwork(
-                image_bytes=b"private-image",
-                content_type="image/png",
+                image_bytes=_valid_test_image_bytes(),
+                content_type="image/jpeg",
                 pixel_width=1536,
                 pixel_height=1024,
             )
@@ -3925,8 +4393,8 @@ def test_memory_deletion_marker_drains_claimed_worker_before_storage_write():
             entered.set()
             await release.wait()
             return artwork.GeneratedArtwork(
-                image_bytes=b"private-image",
-                content_type="image/png",
+                image_bytes=_valid_test_image_bytes(),
+                content_type="image/jpeg",
                 pixel_width=1536,
                 pixel_height=1024,
             )
@@ -4209,6 +4677,181 @@ def test_firestore_reservation_writes_generation_and_dispatch_in_one_transaction
     assert [operation[0] for operation in transaction.operations] == ["update", "set"]
     assert conversation_ref.state["artwork"] == artwork_state
     assert job_ref.state == job_state
+
+
+def test_firestore_permanent_restore_is_transactional_and_runtime_failure_only():
+    class Snapshot:
+        def __init__(self, state):
+            self.state = state
+            self.exists = bool(state)
+
+        def to_dict(self):
+            return copy.deepcopy(self.state)
+
+    class Reference:
+        def __init__(self, state):
+            self.state = state
+
+        def get(self, transaction=None):
+            return Snapshot(self.state)
+
+    class Transaction:
+        def __init__(self):
+            self.updates = 0
+
+        def update(self, reference, payload):
+            self.updates += 1
+            reference.state.update(copy.deepcopy(payload))
+
+        def set(self, reference, payload, merge=False):
+            self.updates += 1
+            if merge:
+                reference.state.update(copy.deepcopy(payload))
+            else:
+                reference.state = copy.deepcopy(payload)
+
+    preferences = {
+        "consent": "accepted",
+        "consent_version": artwork.ARTWORK_CONSENT_VERSION,
+        "binding_id": "binding-owner-a",
+        "profile_id": "profile-owner-a",
+        "authority_digest": "legacy-runtime-fingerprint",
+    }
+    user_ref = Reference({artwork_database.PREFERENCES_FIELD: preferences})
+    conversation_ref = Reference(
+        {
+            artwork_database.ARTWORK_FIELD: {
+                "status": "unavailable",
+                "failure_code": "authority_changed",
+                "binding_id": "binding-owner-a",
+                "profile_id": "profile-owner-a",
+                "authority_digest": "legacy-runtime-fingerprint",
+                "object_key": "private/object.jpg",
+                "object_generation": "7",
+            }
+        }
+    )
+    transaction = Transaction()
+
+    result = artwork_database._restore_permanent_artwork_transaction(
+        transaction,
+        user_ref,
+        conversation_ref,
+        binding_id="binding-owner-a",
+        profile_id="profile-owner-a",
+        authority_digest="stable-owner-profile-digest",
+        consent_version=artwork.ARTWORK_CONSENT_VERSION,
+    )
+
+    assert result["outcome"] == "restored"
+    assert conversation_ref.state[artwork_database.ARTWORK_FIELD]["status"] == "ready"
+    assert "failure_code" not in conversation_ref.state[artwork_database.ARTWORK_FIELD]
+    assert user_ref.state[artwork_database.PREFERENCES_FIELD]["authority_digest"] == ("stable-owner-profile-digest")
+    assert transaction.updates == 2
+
+    conversation_ref.state[artwork_database.ARTWORK_FIELD].update(
+        {"status": "unavailable", "failure_code": "source_changed"}
+    )
+    denied = artwork_database._restore_permanent_artwork_transaction(
+        Transaction(),
+        user_ref,
+        conversation_ref,
+        binding_id="binding-owner-a",
+        profile_id="profile-owner-a",
+        authority_digest="stable-owner-profile-digest",
+        consent_version=artwork.ARTWORK_CONSENT_VERSION,
+    )
+    assert denied["outcome"] == "not_restorable"
+
+    conversation_ref.state[artwork_database.ARTWORK_FIELD].update(
+        {"status": "unavailable", "failure_code": "authority_changed"}
+    )
+    user_ref.state[artwork_database.PREFERENCES_FIELD]["consent"] = "declined"
+    declined_transaction = Transaction()
+    declined = artwork_database._restore_permanent_artwork_transaction(
+        declined_transaction,
+        user_ref,
+        conversation_ref,
+        binding_id="binding-owner-a",
+        profile_id="profile-owner-a",
+        authority_digest="stable-owner-profile-digest",
+        consent_version=artwork.ARTWORK_CONSENT_VERSION,
+    )
+    assert declined["outcome"] == "blocked"
+    assert conversation_ref.state[artwork_database.ARTWORK_FIELD]["status"] == "unavailable"
+    assert declined_transaction.updates == 0
+
+    user_ref.state[artwork_database.PREFERENCES_FIELD]["consent"] = "accepted"
+    conversation_ref.state["deletion_pending"] = True
+    deleting_transaction = Transaction()
+    deleting = artwork_database._restore_permanent_artwork_transaction(
+        deleting_transaction,
+        user_ref,
+        conversation_ref,
+        binding_id="binding-owner-a",
+        profile_id="profile-owner-a",
+        authority_digest="stable-owner-profile-digest",
+        consent_version=artwork.ARTWORK_CONSENT_VERSION,
+    )
+    assert deleting["outcome"] == "blocked"
+    assert conversation_ref.state[artwork_database.ARTWORK_FIELD]["status"] == "unavailable"
+    assert deleting_transaction.updates == 0
+
+
+def test_firestore_authority_stabilization_preserves_latest_consent_and_style():
+    class Snapshot:
+        exists = True
+
+        def __init__(self, state):
+            self.state = state
+
+        def to_dict(self):
+            return copy.deepcopy(self.state)
+
+    class Reference:
+        def __init__(self, state):
+            self.state = state
+
+        def get(self, transaction=None):
+            return Snapshot(self.state)
+
+    class Transaction:
+        def __init__(self):
+            self.writes = 0
+
+        def set(self, reference, payload, merge=False):
+            self.writes += 1
+            assert merge is True
+            reference.state.update(copy.deepcopy(payload))
+
+    latest_preferences = {
+        "consent": "declined",
+        "consent_version": artwork.ARTWORK_CONSENT_VERSION,
+        "style_version": "ella.memory_artwork.style.paper-collage.v1",
+        "binding_id": "binding-owner-a",
+        "profile_id": "profile-owner-a",
+        "authority_digest": "legacy-runtime-digest",
+    }
+    user_ref = Reference({artwork_database.PREFERENCES_FIELD: latest_preferences})
+    transaction = Transaction()
+
+    result = artwork_database._stabilize_preferences_authority_transaction(
+        transaction,
+        user_ref,
+        binding_id="binding-owner-a",
+        profile_id="profile-owner-a",
+        authority_digest="stable-owner-profile-digest",
+        now=datetime(2026, 9, 25, tzinfo=timezone.utc),
+    )
+
+    assert result["consent"] == "declined"
+    assert result["style_version"] == "ella.memory_artwork.style.paper-collage.v1"
+    assert result["authority_digest"] == "stable-owner-profile-digest"
+    assert user_ref.state[artwork_database.PREFERENCES_FIELD]["consent"] == "declined"
+    assert user_ref.state[artwork_database.PREFERENCES_FIELD]["style_version"] == (
+        "ella.memory_artwork.style.paper-collage.v1"
+    )
+    assert transaction.writes == 1
 
 
 def test_firestore_terminal_reservation_promotes_existing_pending_historical_job():
@@ -5510,7 +6153,7 @@ def test_objectless_ready_artwork_is_atomically_rereserved_for_generation():
     assert repository.jobs[("owner-a", "memory-1", generation_key)]["status"] == "pending"
 
 
-def test_signed_url_releases_artwork_that_finishes_during_authority_resolution():
+def test_signed_url_returns_durable_generating_state_without_runtime_resolution():
     repository = FakeRepository()
     memory = _terminal_memory("memory-1")
     _, prompt_sha256 = artwork._prompt_for(memory, artwork.DEFAULT_STYLE_VERSION)
@@ -5528,38 +6171,20 @@ def test_signed_url_releases_artwork_that_finishes_during_authority_resolution()
     repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
     store = FakeStore()
 
-    async def completing_resolver(uid):
-        await asyncio.sleep(0)
-        repository.conversations[(uid, "memory-1")]["artwork"].update(
-            {
-                "status": "ready",
-                "object_key": "private/object/key",
-                "content_type": "image/webp",
-                "pixel_width": 1536,
-                "pixel_height": 1024,
-            }
-        )
-        return _authority(uid)
+    async def never_resolve(uid):
+        raise AssertionError("signed artwork reads must not resolve the runtime")
 
     service = artwork.MemoryArtworkService(
         repository=repository,
-        authority_resolver=completing_resolver,
+        authority_resolver=never_resolve,
         store_factory=lambda: store,
         config=_enabled_config(),
     )
 
     result = asyncio.run(service.signed_url("owner-a", "memory-1"))
 
-    assert result["status"] == "ready"
-    assert store.signed == [
-        {
-            "uid": "owner-a",
-            "profile_binding_id": "binding-owner-a",
-            "memory_id": "memory-1",
-            "generation_key": "a" * 64,
-            "object_key": "private/object/key",
-        }
-    ]
+    assert result["status"] == "generating"
+    assert store.signed == []
 
 
 def test_missing_ready_blob_is_demoted_and_can_be_rereserved():
@@ -5758,6 +6383,99 @@ def test_gcs_signed_url_rejects_missing_or_wrong_authority_before_signing():
     assert str(missing.value) == "memory_artwork_object_missing"
 
 
+def test_content_addressed_artwork_keys_are_stable_immutable_and_owner_scoped():
+    common = {
+        "uid": "owner-a",
+        "profile_binding_id": "binding-owner-a",
+        "memory_id": "memory-1",
+        "generation_key": "a" * 64,
+        "content_type": "image/webp",
+        "rendition": "w384",
+    }
+    first = memory_artwork_storage.content_addressed_object_key_for(
+        **common,
+        image_bytes=b"first immutable rendition",
+    )
+    repeated = memory_artwork_storage.content_addressed_object_key_for(
+        **common,
+        image_bytes=b"first immutable rendition",
+    )
+    changed = memory_artwork_storage.content_addressed_object_key_for(
+        **common,
+        image_bytes=b"different immutable rendition",
+    )
+
+    assert first == repeated
+    assert changed != first
+    assert "owner-a" not in first
+    assert memory_artwork_storage.CONTENT_ADDRESSED_ARTWORK_OBJECT_RE.fullmatch(first)
+    memory_artwork_storage._validated_artwork_key(
+        "owner-a",
+        "binding-owner-a",
+        "memory-1",
+        "a" * 64,
+        first,
+    )
+
+
+def test_memory_erasure_deletes_every_historical_binding_version():
+    class Blob:
+        def __init__(self, name):
+            self.name = name
+            self.deleted = False
+
+        def delete(self):
+            self.deleted = True
+
+    blobs = [
+        Blob(
+            memory_artwork_storage.object_key_for(
+                uid="owner-a",
+                profile_binding_id=f"binding-{index}",
+                memory_id="memory-1",
+                generation_key=f"{index + 1:064x}",
+                content_type="image/jpeg",
+            )
+        )
+        for index in range(3)
+    ]
+    other_memory = Blob(
+        memory_artwork_storage.object_key_for(
+            uid="owner-a",
+            profile_binding_id="binding-3",
+            memory_id="memory-2",
+            generation_key="4" * 64,
+            content_type="image/jpeg",
+        )
+    )
+    other_owner = Blob(
+        memory_artwork_storage.object_key_for(
+            uid="owner-b",
+            profile_binding_id="binding-4",
+            memory_id="memory-1",
+            generation_key="5" * 64,
+            content_type="image/jpeg",
+        )
+    )
+    blobs.extend((other_memory, other_owner))
+
+    class Bucket:
+        def list_blobs(self, *, prefix):
+            return [blob for blob in blobs if blob.name.startswith(prefix)]
+
+    class Client:
+        def bucket(self, bucket_name):
+            assert bucket_name == "private-artwork"
+            return Bucket()
+
+    store = memory_artwork_storage.GCSMemoryArtworkStore(bucket_name="private-artwork", client=Client())
+
+    assert store.delete_memory_all_bindings(uid="owner-a", memory_id="memory-1") == 3
+    assert all(blob.deleted for blob in blobs[:3])
+    assert other_memory.deleted is False
+    assert other_owner.deleted is False
+
+
 def test_gcs_signed_url_wraps_transient_existence_failure_without_signing():
     class UnavailableBlob:
         def exists(self):
@@ -5807,17 +6525,13 @@ def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
         memory_artwork_storage._validated_owner_key("owner-b", "memory-1", object_key)
     assert str(mismatch.value) == "memory_artwork_object_owner_mismatch"
 
-    deleted = []
-    prefix_deleted = []
+    all_binding_deletes = []
     real_store_class = memory_artwork_storage.GCSMemoryArtworkStore
 
     class RecordingStore:
-        def delete(self, **kwargs):
-            deleted.append(kwargs)
-
-        def delete_memory_prefix(self, **kwargs):
-            prefix_deleted.append(kwargs)
-            return 1
+        def delete_memory_all_bindings(self, **kwargs):
+            all_binding_deletes.append(kwargs)
+            return 3
 
     monkeypatch.setattr(memory_artwork_storage, "GCSMemoryArtworkStore", RecordingStore)
     memory_artwork_storage.delete_conversation_artwork_if_present(
@@ -5837,47 +6551,14 @@ def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
             },
         },
     )
-    assert deleted == [
-        {
-            "uid": "owner-a",
-            "memory_id": "memory-1",
-            "object_key": object_key,
-        },
-        {
-            "uid": "owner-a",
-            "memory_id": "memory-1",
-            "object_key": memory_artwork_storage.object_key_for(
-                uid="owner-a",
-                profile_binding_id="binding-owner-a-v0",
-                memory_id="memory-1",
-                generation_key="b" * 64,
-                content_type="image/png",
-            ),
-        },
-    ]
-    assert prefix_deleted == [
-        {
-            "uid": "owner-a",
-            "memory_id": "memory-1",
-            "profile_binding_id": "binding-owner-a",
-        },
-        {
-            "uid": "owner-a",
-            "memory_id": "memory-1",
-            "profile_binding_id": "binding-owner-a-v0",
-        },
-    ]
+    assert all_binding_deletes == [{"uid": "owner-a", "memory_id": "memory-1"}]
 
     memory_artwork_storage.delete_conversation_artwork_if_present(
         "owner-a",
         "memory-2",
         {"artwork": {"status": "generating", "binding_id": "binding-owner-a"}},
     )
-    assert prefix_deleted[-1] == {
-        "uid": "owner-a",
-        "memory_id": "memory-2",
-        "profile_binding_id": "binding-owner-a",
-    }
+    assert all_binding_deletes[-1] == {"uid": "owner-a", "memory_id": "memory-2"}
 
     real_store = object.__new__(real_store_class)
     with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as unbound:
@@ -6166,6 +6847,14 @@ def test_mounted_route_rejects_unauthenticated_request_before_service_work(monke
             self.calls += 1
             return {"status": "pending"}
 
+        async def recover_permanent_artwork(self, uid, **kwargs):
+            self.calls += 1
+            return {"status": "pending"}
+
+        async def day_artwork(self, uid, day, **kwargs):
+            self.calls += 1
+            return {"items": []}
+
     fake = NeverCalled()
     monkeypatch.setattr(router_module, "MemoryArtworkService", lambda: fake)
     app = FastAPI()
@@ -6174,9 +6863,47 @@ def test_mounted_route_rejects_unauthenticated_request_before_service_work(monke
 
     response = client.get("/v1/ella/memories/memory-1/artwork")
     recovery_response = client.post("/v1/ella/memory-artwork/recovery/recent")
+    permanent_response = client.post("/v1/ella/memory-artwork/recovery/permanent")
+    day_response = client.get("/v1/ella/memory-artwork/day/2026-09-25")
     assert response.status_code == 401
     assert recovery_response.status_code == 401
+    assert permanent_response.status_code == 401
+    assert day_response.status_code == 401
     assert fake.calls == 0
+
+
+def test_permanent_recovery_and_day_routes_bind_authenticated_owner(monkeypatch):
+    router_module = _load_memory_artwork_router_module("ella_memory_artwork_permanent_router_test_module")
+    calls = []
+
+    class Service:
+        async def recover_permanent_artwork(self, uid, *, cursor_memory_id=None, limit=50):
+            calls.append(("recover", uid, cursor_memory_id, limit))
+            return {"provider_calls": 0, "restored": 2, "variant_backfilled": 1}
+
+        async def day_artwork(self, uid, day, *, utc_offset_minutes):
+            calls.append(("day", uid, day, utc_offset_minutes))
+            return {"day": day, "items": []}
+
+    monkeypatch.setattr(router_module, "MemoryArtworkService", Service)
+    app = FastAPI()
+    app.include_router(router_module.router)
+    app.dependency_overrides[router_module.get_exact_firebase_uid] = lambda: "owner-a"
+    client = TestClient(app)
+
+    recovery = client.post(
+        "/v1/ella/memory-artwork/recovery/permanent",
+        json={"cursor": "memory-cursor", "limit": 25},
+    )
+    day = client.get("/v1/ella/memory-artwork/day/2026-09-25?utc_offset_minutes=-420")
+
+    assert recovery.status_code == 202
+    assert recovery.json()["provider_calls"] == 0
+    assert day.status_code == 200
+    assert calls == [
+        ("recover", "owner-a", "memory-cursor", 25),
+        ("day", "owner-a", "2026-09-25", -420),
+    ]
 
 
 def test_libraries_route_uses_authenticated_owner_and_actual_inventory_service(monkeypatch):
