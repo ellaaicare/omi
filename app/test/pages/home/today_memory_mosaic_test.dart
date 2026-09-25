@@ -183,6 +183,45 @@ void main() {
     await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/ella_home_memory_mosaic.png'));
   });
 
+  testWidgets('necklace dock routes connect through the provider and the open controls sheet stays live', (
+    tester,
+  ) async {
+    final necklace = BtDevice(name: 'Ella necklace', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = _LiveDockDeviceProvider(necklace);
+    final harness = await _pumpHome(tester, conversations: const [], device: device);
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-capture-source-necklace')));
+    await tester.pump();
+    expect(find.text('Necklace not connected'), findsOneWidget);
+    expect(find.text('Connect'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    expect(device.connects, 1);
+
+    device.showFailure();
+    await tester.pump();
+    expect(find.text("Can't find your necklace · Try again"), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-dock-status')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('today-reconnect-known-necklace')), findsOneWidget);
+
+    device.showConnecting();
+    await tester.pump();
+    final connectingButton = tester.widget<FilledButton>(find.byKey(const Key('today-reconnect-known-necklace')));
+    expect(connectingButton.onPressed, isNull);
+    expect(find.text('Necklace · Connecting…'), findsWidgets);
+
+    device.showConnected();
+    await tester.pump();
+    expect(find.byKey(const Key('today-reconnect-known-necklace')), findsNothing);
+    expect(find.text('Records with your necklace'), findsOneWidget);
+    expect(find.text('Necklace · Ready'), findsOneWidget);
+    expect(find.text('Record'), findsOneWidget);
+  });
+
   testWidgets('day collage retains existing artwork state when a new memory starts generating', (tester) async {
     final artwork = _FakeMemoryArtworkApi(
       displayResult: const MemoryArtworkResult(
@@ -652,7 +691,6 @@ void main() {
 
     expect(harness.capture.phoneStops, 1);
     expect(device.reconnects, 1);
-    expect(device.freshSessionRequests, [isFalse]);
     expect(harness.capture.deviceStarts, 1);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
@@ -704,7 +742,6 @@ void main() {
     expect(harness.capture.phoneStops, 1, reason: 'retry must not stop the phone transport twice');
     expect(harness.capture.finalizationCalls, 3);
     expect(device.reconnects, 1);
-    expect(device.freshSessionRequests, [isFalse]);
     expect(harness.capture.deviceStarts, 1, reason: 'ambient necklace resumes only after the phone moment succeeds');
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
@@ -987,7 +1024,6 @@ void main() {
 
     expect(harness.capture.phoneStops, 1);
     expect(device.reconnects, 1);
-    expect(device.freshSessionRequests, [isTrue]);
     expect(
       harness.capture.captureDiagnostics.source,
       CaptureDiagnosticSource.phone,
@@ -1119,7 +1155,6 @@ void main() {
     expect(harness.capture.deviceStops, 1);
     expect(harness.capture.phoneStarts, 1);
     expect(device.reconnects, 1);
-    expect(device.freshSessionRequests, [isFalse]);
     expect(harness.capture.deviceStarts, 1);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
     expect(find.text('Necklace is recording · iPhone selected'), findsOneWidget);
@@ -2812,14 +2847,49 @@ class _ReconnectTrackingDeviceProvider extends DeviceProvider {
   int reconnects = 0;
 
   @override
-  Future<bool> reconnectKnownDeviceForCapture({required String reason, bool forceFreshBleSession = false}) async {
+  Future<bool> connectDeviceForCurrentUser(BtDevice device) async {
     reconnects++;
-    freshSessionRequests.add(forceFreshBleSession);
     await capture?.streamDeviceRecording(device: presentationConnectedDevice);
     return true;
   }
+}
 
-  final List<bool> freshSessionRequests = [];
+class _LiveDockDeviceProvider extends DeviceProvider {
+  _LiveDockDeviceProvider(this.necklace) {
+    pairedDevice = necklace;
+  }
+
+  final BtDevice necklace;
+  int connects = 0;
+  bool _failed = false;
+
+  @override
+  bool get connectionAttemptFailed => _failed;
+
+  @override
+  Future<bool> connectDeviceForCurrentUser(BtDevice device) async {
+    connects++;
+    return false;
+  }
+
+  void showFailure() {
+    _failed = true;
+    isConnecting = false;
+    notifyListeners();
+  }
+
+  void showConnecting() {
+    _failed = false;
+    isConnecting = true;
+    notifyListeners();
+  }
+
+  void showConnected() {
+    _failed = false;
+    isConnecting = false;
+    connectedDevice = necklace;
+    setIsConnected(true);
+  }
 }
 
 class _MutableExactAuthority implements ExactAccountAuthorityVerifier {

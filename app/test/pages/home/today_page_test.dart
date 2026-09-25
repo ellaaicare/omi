@@ -82,8 +82,8 @@ void main() {
     final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
     expect(find.text(l10n.todayDockNecklaceNotConnected), findsOneWidget);
-    expect(find.byIcon(Icons.refresh_rounded), findsWidgets);
-    expect(find.text(l10n.todayDockReconnect), findsOneWidget);
+    expect(find.byIcon(Icons.bluetooth_searching_rounded), findsOneWidget);
+    expect(find.text(l10n.connect), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
@@ -157,7 +157,7 @@ void main() {
     expect(transcriptTaps, 1);
   });
 
-  testWidgets('interrupted necklace capture keeps source-specific retry and transcript actions', (tester) async {
+  testWidgets('interrupted connected necklace keeps source-specific record and transcript actions', (tester) async {
     var processTaps = 0;
     var transcriptTaps = 0;
     await _pumpRecordControl(
@@ -171,7 +171,7 @@ void main() {
     );
     var l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
-    expect(find.text(l10n.todayDockRetry), findsOneWidget);
+    expect(find.text(l10n.todayDockRecord), findsOneWidget);
     expect(find.text(l10n.todayDockTranscriptNecklace), findsOneWidget);
     expect(find.text(l10n.todayDockNecklaceNeedsAttention), findsOneWidget);
     expect(_recordActionSemantics(tester).properties.selected, isFalse);
@@ -191,7 +191,7 @@ void main() {
     );
     l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
-    expect(find.text(l10n.todayDockReconnect), findsOneWidget);
+    expect(find.text(l10n.connect), findsOneWidget);
     expect(find.text(l10n.todayDockNecklaceConnecting), findsOneWidget);
     expect(tester.widget<InkWell>(find.byKey(const Key('today-record-moment'))).onTap, isNull);
   });

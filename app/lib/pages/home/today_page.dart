@@ -294,7 +294,6 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   MemoryArtworkLibraries? _homeArtworkLibraries;
   MemoryArtworkQueueStatus? _homeArtworkQueueStatus;
   BtDevice? _resumeNecklaceAfterPhoneCapture;
-  bool _resumeNecklaceWithFreshSessionAfterPhoneCapture = false;
   EllaCaptureSource? _selectedCaptureSource;
 
   static const _artworkBackfillComplete = '__complete__';
@@ -408,7 +407,6 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _homeCaptureAuthorityGeneration++;
     final authorityGeneration = _homeCaptureAuthorityGeneration;
     _resumeNecklaceAfterPhoneCapture = null;
-    _resumeNecklaceWithFreshSessionAfterPhoneCapture = false;
     _externalCaptureFinalizationSource = null;
     _todayCardController.invalidateAuthority();
     _homeArtworkBackfillPollTimer?.cancel();
@@ -1549,18 +1547,15 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
 
   Future<void> _resumeAmbientNecklace() async {
     final device = _resumeNecklaceAfterPhoneCapture;
-    final forceFreshBleSession = _resumeNecklaceWithFreshSessionAfterPhoneCapture;
     _resumeNecklaceAfterPhoneCapture = null;
-    _resumeNecklaceWithFreshSessionAfterPhoneCapture = false;
     if (device == null || !mounted) return;
     final deviceProvider = context.read<DeviceProvider>();
-    final currentDevice = deviceProvider.presentationConnectedDevice;
-    if (currentDevice?.id != device.id) return;
+    final capture = context.read<CaptureProvider>();
     try {
-      await deviceProvider.reconnectKnownDeviceForCapture(
-        reason: 'resume after iPhone capture',
-        forceFreshBleSession: forceFreshBleSession,
-      );
+      final connected = await deviceProvider.connectDeviceForCurrentUser(device);
+      if (connected && !capture.phoneCaptureOwnsMobileAudio && capture.recordingState != RecordingState.deviceRecord) {
+        await capture.streamDeviceRecording(device: deviceProvider.presentationConnectedDevice ?? device);
+      }
     } catch (_) {
       // The phone-owned moment is already finalized. Necklace recovery remains
       // visible through device status and must not turn that successful action
@@ -1675,14 +1670,30 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     unawaited(SharedPreferencesUtil().saveEllaCaptureSource(source.name));
   }
 
-  Future<void> _reconnectNecklaceCapture(DeviceProvider device) async {
-    if (_homeCaptureStarting) return;
+  Future<bool> _connectNecklace(DeviceProvider device) async {
+    if (_homeCaptureStarting) return false;
     setState(() => _homeCaptureStarting = true);
     try {
-      final started = await device.reconnectKnownDeviceForCapture(reason: 'Home necklace capture');
-      if (!started && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
+      final target = device.presentationConnectedDevice ?? device.presentationPairedDevice;
+      return target != null && await device.connectDeviceForCurrentUser(target);
+    } catch (_) {
+      return false;
+    } finally {
+      if (mounted) setState(() => _homeCaptureStarting = false);
+    }
+  }
+
+  Future<void> _startNecklaceCapture(CaptureProvider capture, DeviceProvider device) async {
+    if (_homeCaptureStarting) return;
+    final target = device.presentationConnectedDevice;
+    if (target == null || !device.presentationIsConnected) return;
+    setState(() => _homeCaptureStarting = true);
+    try {
+      await capture.streamDeviceRecording(device: target);
+      if (!mounted || capture.recordingState == RecordingState.deviceRecord || capture.phoneCaptureOwnsMobileAudio) {
+        return;
       }
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
@@ -1744,7 +1755,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       await _confirmLegacyNecklace(device);
       return;
     }
-    await _reconnectNecklaceCapture(device);
+    if (!device.presentationIsConnected) {
+      await _connectNecklace(device);
+      return;
+    }
+    await _startNecklaceCapture(capture, device);
   }
 
   Future<void> _toggleHomeCapture({
@@ -1782,11 +1797,6 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       if (necklaceTransportOwned) {
         if (necklaceConnected && connectedDevice != null) {
           _resumeNecklaceAfterPhoneCapture = connectedDevice;
-          final failure = capture.captureDiagnostics.failure;
-          _resumeNecklaceWithFreshSessionAfterPhoneCapture =
-              failure == CaptureDiagnosticFailure.necklaceAudioSubscriptionUnavailable ||
-                  failure == CaptureDiagnosticFailure.physicalAudioUnavailable ||
-                  failure == CaptureDiagnosticFailure.necklaceConnectionUnavailable;
         }
         if (capture.recordingState == RecordingState.deviceRecord || capture.recordingState == RecordingState.pause) {
           final hadCapturableContent = capture.captureDiagnostics.hasPhysicalAudio || capture.hasCapturableContent;
@@ -1830,12 +1840,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }
 
   Future<void> _showHomeControls({
-    required bool hasNecklace,
-    required bool legacyNecklaceNeedsConfirmation,
-    required bool necklaceConnected,
-    required bool necklaceConnecting,
-    required int batteryLevel,
-    required DeviceType deviceType,
+    required EllaCaptureSource selectedCaptureSource,
     required bool showGuardianSurfaces,
     required VoidCallback onReconnectNecklace,
     required VoidCallback onConfirmLegacyNecklace,
@@ -1847,12 +1852,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       backgroundColor: EllaColors.bgPrimary,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
       builder: (sheetContext) => _HomeControlsSheet(
-        hasNecklace: hasNecklace,
-        legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
-        necklaceConnected: necklaceConnected,
-        necklaceConnecting: necklaceConnecting,
-        batteryLevel: batteryLevel,
-        deviceType: deviceType,
+        selectedCaptureSource: selectedCaptureSource,
         showWhispers: showGuardianSurfaces,
         whispersEnabled: _whispersOn,
         whispersVerified: _whispersVerified,
@@ -1918,10 +1918,6 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final deviceConnected = device.presentationIsConnected && connectedDevice != null;
     final hasNecklace = device.presentationPairedDevice != null;
     final legacyNecklaceNeedsConfirmation = device.legacyUntrustedDeviceCandidate != null;
-    final deviceType = device.presentationConnectedDevice?.type ??
-        device.presentationPairedDevice?.type ??
-        device.legacyUntrustedDeviceCandidate?.type ??
-        DeviceType.omi;
     final capture = context.watch<CaptureProvider>();
     final diagnosticCaptureSource = todayActiveCaptureSource(capture.recordingState, capture.captureDiagnostics);
     final activeCaptureSource = diagnosticCaptureSource ??
@@ -1964,14 +1960,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
 
     void openControls() => unawaited(
           _showHomeControls(
-            hasNecklace: hasNecklace,
-            legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
-            necklaceConnected: deviceConnected,
-            necklaceConnecting: device.isConnecting,
-            batteryLevel: device.presentationBatteryLevel,
-            deviceType: deviceType,
+            selectedCaptureSource: selectedCaptureSource,
             showGuardianSurfaces: showGuardianSurfaces,
-            onReconnectNecklace: () => unawaited(_reconnectNecklaceCapture(device)),
+            onReconnectNecklace: () => unawaited(_connectNecklace(device)),
             onConfirmLegacyNecklace: () => unawaited(_confirmLegacyNecklace(device)),
           ),
         );
@@ -2118,6 +2109,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
               necklaceConnected: deviceConnected,
               necklaceConnecting: device.isConnecting,
+              necklaceConnectionFailed: device.connectionAttemptFailed,
               recordingState: capture.recordingState,
               diagnostics: capture.captureDiagnostics,
               showWhispers: showGuardianSurfaces,
@@ -3030,6 +3022,7 @@ class TodayRecordMomentControl extends StatelessWidget {
     this.legacyNecklaceNeedsConfirmation = false,
     required this.necklaceConnected,
     required this.necklaceConnecting,
+    this.necklaceConnectionFailed = false,
     required this.recordingState,
     this.diagnostics = const CaptureDiagnostics(),
     this.showWhispers = false,
@@ -3051,6 +3044,7 @@ class TodayRecordMomentControl extends StatelessWidget {
   final bool legacyNecklaceNeedsConfirmation;
   final bool necklaceConnected;
   final bool necklaceConnecting;
+  final bool necklaceConnectionFailed;
   final RecordingState recordingState;
   final CaptureDiagnostics diagnostics;
   final bool showWhispers;
@@ -3083,7 +3077,18 @@ class TodayRecordMomentControl extends StatelessWidget {
       legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
       necklaceConnected: necklaceConnected,
       necklaceConnecting: necklaceConnecting,
+      necklaceConnectionFailed: necklaceConnectionFailed,
     );
+    final sourceIsNecklace = selectedSource == EllaCaptureSource.necklace;
+    final necklaceStateActive = sourceIsNecklace && (necklaceConnected || necklaceConnecting || necklaceRecording);
+    final dotActive = active || necklaceStateActive;
+    final dotColor = active
+        ? EllaColors.error
+        : necklaceConnecting
+            ? EllaColors.warning
+            : necklaceConnected && sourceIsNecklace
+                ? EllaColors.success
+                : EllaColors.inkSoft;
     return Material(
       key: const Key('today-capture-dock'),
       elevation: 12,
@@ -3132,44 +3137,50 @@ class TodayRecordMomentControl extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 4),
-              InkWell(
-                key: const Key('today-dock-status'),
-                onTap: onOpenControls,
-                borderRadius: BorderRadius.circular(16),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(minHeight: EllaSizes.minTouchTarget),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    child: Row(
-                      children: [
-                        EllaBreathingDot(
-                          active: active,
-                          live: active && diagnostics.hasPhysicalAudio,
-                          activeColor: active ? EllaColors.error : EllaColors.teal,
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Semantics(
-                            liveRegion: true,
-                            child: Text(
-                              presentation.status,
-                              key: const Key('today-record-source'),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: EllaTextStyles.caption.copyWith(
-                                color: EllaColors.inkSoft,
-                                fontWeight: FontWeight.w700,
+              Semantics(
+                button: true,
+                label: presentation.status,
+                excludeSemantics: true,
+                child: InkWell(
+                  key: const Key('today-dock-status'),
+                  onTap: onOpenControls,
+                  borderRadius: BorderRadius.circular(16),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(minHeight: EllaSizes.minTouchTarget),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      child: Row(
+                        children: [
+                          EllaBreathingDot(
+                            active: dotActive,
+                            live: active || necklaceConnecting,
+                            activeColor: dotColor,
+                            inactiveColor: dotColor,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Semantics(
+                              liveRegion: true,
+                              child: Text(
+                                presentation.status,
+                                key: const Key('today-record-source'),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: EllaTextStyles.caption.copyWith(
+                                  color: EllaColors.inkSoft,
+                                  fontWeight: FontWeight.w700,
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                        if (selectedSource == EllaCaptureSource.necklace && !necklaceConnected)
-                          Icon(
-                            legacyNecklaceNeedsConfirmation ? Icons.link_rounded : Icons.refresh_rounded,
-                            color: EllaColors.tealDeep,
-                            semanticLabel: '',
-                          ),
-                      ],
+                          if (selectedSource == EllaCaptureSource.necklace && !necklaceConnected)
+                            Icon(
+                              legacyNecklaceNeedsConfirmation ? Icons.link_rounded : Icons.refresh_rounded,
+                              color: EllaColors.tealDeep,
+                              semanticLabel: '',
+                            ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -3230,6 +3241,7 @@ class TodayRecordMomentControl extends StatelessWidget {
     required bool legacyNecklaceNeedsConfirmation,
     required bool necklaceConnected,
     required bool necklaceConnecting,
+    required bool necklaceConnectionFailed,
   }) {
     final sourceIsNecklace = selectedSource == EllaCaptureSource.necklace;
     final switchingAwayFromStartup =
@@ -3258,7 +3270,9 @@ class TodayRecordMomentControl extends StatelessWidget {
                                 : legacyNecklaceNeedsConfirmation
                                     ? context.l10n.todayLegacyNecklaceDockStatus
                                     : !necklaceConnected
-                                        ? context.l10n.todayDockNecklaceNotConnected
+                                        ? necklaceConnectionFailed
+                                            ? context.l10n.todayDockNecklaceConnectionFailed
+                                            : context.l10n.todayDockNecklaceNotConnected
                                         : context.l10n.todayDockNecklaceReady
                         : recordingState == RecordingState.error
                             ? context.l10n.todayDockPhoneNeedsAttention
@@ -3300,17 +3314,12 @@ class TodayRecordMomentControl extends StatelessWidget {
       );
     }
     if (sourceIsNecklace) {
-      final needsReconnect = legacyNecklaceNeedsConfirmation || (hasNecklace && !necklaceConnected);
+      final needsConnect = legacyNecklaceNeedsConfirmation || !necklaceConnected;
       return TodayCaptureDockPresentation(
-        mode: recordingState == RecordingState.error ? TodayCaptureDockMode.unavailable : TodayCaptureDockMode.ready,
+        mode: TodayCaptureDockMode.ready,
         status: status,
-        primaryLabel: recordingState == RecordingState.error
-            ? context.l10n.todayDockRetry
-            : needsReconnect
-                ? context.l10n.todayDockReconnect
-                : context.l10n.todayDockStartNecklace,
-        primaryIcon:
-            needsReconnect || recordingState == RecordingState.error ? Icons.refresh_rounded : Icons.mic_none_rounded,
+        primaryLabel: needsConnect ? context.l10n.connect : context.l10n.todayDockRecord,
+        primaryIcon: needsConnect ? Icons.bluetooth_searching_rounded : Icons.mic_none_rounded,
         primaryEnabled: !necklaceConnecting && (necklaceConnected || hasNecklace || legacyNecklaceNeedsConfirmation),
       );
     }
@@ -3509,12 +3518,7 @@ class _TodayDockActionState extends State<_TodayDockAction> with SingleTickerPro
 
 class _HomeControlsSheet extends StatelessWidget {
   const _HomeControlsSheet({
-    required this.hasNecklace,
-    required this.legacyNecklaceNeedsConfirmation,
-    required this.necklaceConnected,
-    required this.necklaceConnecting,
-    required this.batteryLevel,
-    required this.deviceType,
+    required this.selectedCaptureSource,
     required this.showWhispers,
     required this.whispersEnabled,
     required this.whispersVerified,
@@ -3526,12 +3530,7 @@ class _HomeControlsSheet extends StatelessWidget {
     required this.onConfirmLegacyNecklace,
   });
 
-  final bool hasNecklace;
-  final bool legacyNecklaceNeedsConfirmation;
-  final bool necklaceConnected;
-  final bool necklaceConnecting;
-  final int batteryLevel;
-  final DeviceType deviceType;
+  final EllaCaptureSource selectedCaptureSource;
   final bool showWhispers;
   final bool whispersEnabled;
   final bool whispersVerified;
@@ -3542,167 +3541,181 @@ class _HomeControlsSheet extends StatelessWidget {
   final VoidCallback onReconnectNecklace;
   final VoidCallback onConfirmLegacyNecklace;
 
-  String _recordingSource(BuildContext context) {
-    return context.l10n.todayRecordOnPhone;
+  EllaCaptureSource _recordingSource(CaptureProvider capture, DeviceProvider device) {
+    return todayActiveCaptureSource(capture.recordingState, capture.captureDiagnostics) ??
+        (capture.phoneCaptureOwnsMobileAudio
+            ? EllaCaptureSource.phone
+            : capture.havingRecordingDevice && device.presentationIsConnected
+                ? EllaCaptureSource.necklace
+                : selectedCaptureSource);
   }
 
   @override
   Widget build(BuildContext context) {
-    final necklaceGlyph = EllaHardwareArtwork.glyphForDeviceType(deviceType);
-    return Padding(
-      padding: EdgeInsets.fromLTRB(
-        EllaSizes.screenPadding,
-        16,
-        EllaSizes.screenPadding,
-        24 + MediaQuery.paddingOf(context).bottom,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Center(
-            child: Container(
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(color: EllaColors.cardDeep, borderRadius: BorderRadius.circular(2)),
-            ),
+    return Consumer2<DeviceProvider, CaptureProvider>(
+      builder: (context, device, capture, child) {
+        final necklaceConnected = device.presentationIsConnected && device.presentationConnectedDevice != null;
+        final hasNecklace = device.presentationPairedDevice != null;
+        final legacyNecklaceNeedsConfirmation = device.legacyUntrustedDeviceCandidate != null;
+        final necklaceConnecting = device.isConnecting;
+        final deviceType = device.presentationConnectedDevice?.type ??
+            device.presentationPairedDevice?.type ??
+            device.legacyUntrustedDeviceCandidate?.type ??
+            DeviceType.omi;
+        final recordingSource = _recordingSource(capture, device);
+        final necklaceGlyph = EllaHardwareArtwork.glyphForDeviceType(deviceType);
+        return Padding(
+          padding: EdgeInsets.fromLTRB(
+            EllaSizes.screenPadding,
+            16,
+            EllaSizes.screenPadding,
+            24 + MediaQuery.paddingOf(context).bottom,
           ),
-          const SizedBox(height: 20),
-          Text(context.l10n.todayControlsTitle, style: EllaTextStyles.noteBody.copyWith(fontSize: 28)),
-          const SizedBox(height: 18),
-          if (legacyNecklaceNeedsConfirmation) ...[
-            FilledButton.icon(
-              key: const Key('today-confirm-legacy-necklace-sheet'),
-              onPressed: onConfirmLegacyNecklace,
-              icon: const Icon(Icons.link_rounded),
-              label: Text(context.l10n.todayLegacyNecklaceConfirmAction),
-            ),
-            const SizedBox(height: 12),
-          ] else if (hasNecklace && !necklaceConnected) ...[
-            FilledButton.icon(
-              key: const Key('today-reconnect-known-necklace'),
-              onPressed: necklaceConnecting ? null : onReconnectNecklace,
-              icon: necklaceConnecting
-                  ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Icon(Icons.bluetooth_searching_rounded),
-              label: Text(
-                necklaceConnecting ? context.l10n.todayDockNecklaceConnecting : context.l10n.todayNecklaceOffReconnect,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(color: EllaColors.cardDeep, borderRadius: BorderRadius.circular(2)),
+                ),
               ),
-            ),
-            const SizedBox(height: 12),
-          ],
-          EllaCardSurface(
-            child: Column(
-              children: [
-                _ControlRow(
-                  icon: necklaceConnected && necklaceGlyph != null
-                      ? Image.asset(necklaceGlyph, width: 28, height: 28)
-                      : const Icon(Icons.phone_iphone_rounded, color: EllaColors.tealDeep),
-                  title: context.l10n.todayRecordingSource,
-                  detail: _recordingSource(context),
+              const SizedBox(height: 20),
+              Text(context.l10n.todayControlsTitle, style: EllaTextStyles.noteBody.copyWith(fontSize: 28)),
+              const SizedBox(height: 18),
+              if (legacyNecklaceNeedsConfirmation) ...[
+                FilledButton.icon(
+                  key: const Key('today-confirm-legacy-necklace-sheet'),
+                  onPressed: onConfirmLegacyNecklace,
+                  icon: const Icon(Icons.link_rounded),
+                  label: Text(context.l10n.todayLegacyNecklaceConfirmAction),
                 ),
-                const Divider(height: 1, indent: 64, color: EllaColors.cardDeep),
-                InkWell(
-                  key: const Key('today-manage-necklace'),
-                  onTap: onManageNecklace,
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(minHeight: EllaSizes.listItemMinHeight),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.bluetooth_rounded, color: EllaColors.tealDeep),
-                          const SizedBox(width: 16),
-                          Expanded(
-                            child: Text(
-                              necklaceConnecting
-                                  ? context.l10n.todayStripReconnecting
-                                  : hasNecklace && !necklaceConnected
-                                      ? context.l10n.todayNecklaceOffReconnect
-                                      : context.l10n.todayManageNecklace,
-                              style: EllaTextStyles.secondary.copyWith(fontWeight: FontWeight.w600),
-                            ),
-                          ),
-                          const Icon(Icons.chevron_right_rounded, color: EllaColors.inkSoft),
-                        ],
-                      ),
-                    ),
-                  ),
+                const SizedBox(height: 12),
+              ] else if (hasNecklace && !necklaceConnected) ...[
+                FilledButton.icon(
+                  key: const Key('today-reconnect-known-necklace'),
+                  onPressed: necklaceConnecting ? null : onReconnectNecklace,
+                  icon: necklaceConnecting
+                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.bluetooth_searching_rounded),
+                  label: Text(necklaceConnecting ? context.l10n.todayDockNecklaceConnecting : context.l10n.connect),
                 ),
+                const SizedBox(height: 12),
               ],
-            ),
-          ),
-          if (showWhispers) ...[
-            const SizedBox(height: 12),
-            EllaCardSurface(
-              child: Column(
-                children: [
-                  ConstrainedBox(
-                    key: const Key('guardian-whispers-control'),
-                    constraints: const BoxConstraints(minHeight: 64),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Row(
-                        children: [
-                          EllaBreathingDot(active: whispersVerified && whispersEnabled),
-                          const SizedBox(width: 16),
-                          Expanded(
-                            child: Text(
-                              whispersVerified
-                                  ? whisperStatusLead(whispersEnabled)
-                                  : context.l10n.todayWhispersUnavailable,
-                              style: EllaTextStyles.secondary.copyWith(fontWeight: FontWeight.w600),
-                            ),
-                          ),
-                          if (whispersUpdating)
-                            const SizedBox(
-                              width: 24,
-                              height: 24,
-                              child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
-                            )
-                          else
-                            Switch(
-                              value: whispersEnabled,
-                              onChanged: whispersVerified ? onWhispersChanged : null,
-                              activeTrackColor: EllaColors.tealDeep,
-                              activeThumbColor: EllaColors.paper,
-                            ),
-                        ],
-                      ),
+              EllaCardSurface(
+                child: Column(
+                  children: [
+                    _ControlRow(
+                      icon: recordingSource == EllaCaptureSource.necklace && necklaceGlyph != null
+                          ? Image.asset(necklaceGlyph, width: 28, height: 28)
+                          : const Icon(Icons.phone_iphone_rounded, color: EllaColors.tealDeep),
+                      title: context.l10n.todayRecordingSource,
+                      detail: recordingSource == EllaCaptureSource.necklace
+                          ? context.l10n.todayRecordOnNecklace
+                          : context.l10n.todayRecordOnPhone,
                     ),
-                  ),
-                  const Divider(height: 1, indent: 64, color: EllaColors.cardDeep),
-                  InkWell(
-                    key: const Key('whispers-history-entry'),
-                    onTap: onWhispersHistory,
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(minHeight: EllaSizes.listItemMinHeight),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        child: Row(
-                          children: [
-                            const SizedBox(width: 40),
-                            Expanded(
-                              child: Text(
-                                context.l10n.todayWhispersHistory,
-                                style: EllaTextStyles.secondary.copyWith(
-                                  color: EllaColors.tealDeep,
-                                  fontWeight: FontWeight.w700,
+                    const Divider(height: 1, indent: 64, color: EllaColors.cardDeep),
+                    InkWell(
+                      key: const Key('today-manage-necklace'),
+                      onTap: onManageNecklace,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(minHeight: EllaSizes.listItemMinHeight),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.bluetooth_rounded, color: EllaColors.tealDeep),
+                              const SizedBox(width: 16),
+                              Expanded(
+                                child: Text(
+                                  context.l10n.todayManageNecklace,
+                                  style: EllaTextStyles.secondary.copyWith(fontWeight: FontWeight.w600),
                                 ),
                               ),
-                            ),
-                            const Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep),
-                          ],
+                              const Icon(Icons.chevron_right_rounded, color: EllaColors.inkSoft),
+                            ],
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-          ],
-        ],
-      ),
+              if (showWhispers) ...[
+                const SizedBox(height: 12),
+                EllaCardSurface(
+                  child: Column(
+                    children: [
+                      ConstrainedBox(
+                        key: const Key('guardian-whispers-control'),
+                        constraints: const BoxConstraints(minHeight: 64),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Row(
+                            children: [
+                              EllaBreathingDot(active: whispersVerified && whispersEnabled),
+                              const SizedBox(width: 16),
+                              Expanded(
+                                child: Text(
+                                  whispersVerified
+                                      ? whisperStatusLead(whispersEnabled)
+                                      : context.l10n.todayWhispersUnavailable,
+                                  style: EllaTextStyles.secondary.copyWith(fontWeight: FontWeight.w600),
+                                ),
+                              ),
+                              if (whispersUpdating)
+                                const SizedBox(
+                                  width: 24,
+                                  height: 24,
+                                  child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                                )
+                              else
+                                Switch(
+                                  value: whispersEnabled,
+                                  onChanged: whispersVerified ? onWhispersChanged : null,
+                                  activeTrackColor: EllaColors.tealDeep,
+                                  activeThumbColor: EllaColors.paper,
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const Divider(height: 1, indent: 64, color: EllaColors.cardDeep),
+                      InkWell(
+                        key: const Key('whispers-history-entry'),
+                        onTap: onWhispersHistory,
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(minHeight: EllaSizes.listItemMinHeight),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            child: Row(
+                              children: [
+                                const SizedBox(width: 40),
+                                Expanded(
+                                  child: Text(
+                                    context.l10n.todayWhispersHistory,
+                                    style: EllaTextStyles.secondary.copyWith(
+                                      color: EllaColors.tealDeep,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                                const Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      },
     );
   }
 }

@@ -155,17 +155,10 @@ void main() {
 
   testWidgets('explicit iPhone selection abandons a stale necklace startup before Retry', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
-    final capture = _FakeCaptureProvider(
-      RecordingState.initialising,
-      transcriptReady: false,
-    )..updateRecordingDevice(necklace);
+    final capture = _FakeCaptureProvider(RecordingState.initialising, transcriptReady: false)
+      ..updateRecordingDevice(necklace);
     final device = _FakeDeviceProvider();
-    await _pumpCapturePage(
-      tester,
-      capture,
-      device: device,
-      preferredCaptureSource: EllaCaptureSource.phone,
-    );
+    await _pumpCapturePage(tester, capture, device: device, preferredCaptureSource: EllaCaptureSource.phone);
 
     expect(_captureStatus(tester), 'iPhone · Initializing...');
     capture.setCaptureState(RecordingState.error, transcriptReady: false);
@@ -257,11 +250,7 @@ void main() {
         failure: CaptureDiagnosticFailure.finalizationFailed,
       ),
     );
-    await _pumpCapturePage(
-      tester,
-      capture,
-      onProcessNow: () async => ConversationProcessNowResult.failedUnreported,
-    );
+    await _pumpCapturePage(tester, capture, onProcessNow: () async => ConversationProcessNowResult.failedUnreported);
 
     await tester.tap(find.byKey(const Key('conversation-process-now')));
     await tester.pump();
@@ -387,16 +376,11 @@ void main() {
 
   testWidgets('mute targets active phone capture even when a stale necklace reference exists', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
-    final capture = _FakeCaptureProvider(
-      RecordingState.record,
-      transcriptReady: true,
-      phoneOwnsMobileAudio: true,
-    )..updateRecordingDevice(necklace);
+    final capture = _FakeCaptureProvider(RecordingState.record, transcriptReady: true, phoneOwnsMobileAudio: true)
+      ..updateRecordingDevice(necklace);
     await _pumpCapturePage(tester, capture);
 
-    final unmutedSurface = tester.widget<Container>(
-      find.byKey(const Key('conversation-capture-mute-surface')),
-    );
+    final unmutedSurface = tester.widget<Container>(find.byKey(const Key('conversation-capture-mute-surface')));
     final unmutedDecoration = unmutedSurface.decoration! as BoxDecoration;
     expect(unmutedDecoration.color, EllaColors.elevatedCard);
     expect(find.byIcon(Icons.mic_rounded), findsOneWidget);
@@ -410,8 +394,9 @@ void main() {
     expect(capture.recordingState, RecordingState.stop);
   });
 
-  testWidgets('capture processing remains a single non-destructive action with or without visible text',
-      (tester) async {
+  testWidgets('capture processing remains a single non-destructive action with or without visible text', (
+    tester,
+  ) async {
     final emptyCapture = _FakeCaptureProvider(RecordingState.record, transcriptReady: true, phoneOwnsMobileAudio: true);
     await _pumpCapturePage(tester, emptyCapture);
 
@@ -521,10 +506,20 @@ Future<void> _pumpCapturePage(
 }
 
 class _FakeDeviceProvider extends DeviceProvider {
+  final BtDevice necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
   int reconnects = 0;
 
   @override
-  Future<bool> reconnectKnownDeviceForCapture({required String reason, bool forceFreshBleSession = false}) async {
+  BtDevice? get presentationPairedDevice => necklace;
+
+  @override
+  BtDevice? get presentationConnectedDevice => necklace;
+
+  @override
+  bool get presentationIsConnected => true;
+
+  @override
+  Future<bool> connectDeviceForCurrentUser(BtDevice device) async {
     reconnects++;
     return true;
   }
@@ -565,11 +560,7 @@ class _FakeCaptureProvider extends CaptureProvider {
   @override
   CaptureDiagnostics get captureDiagnostics => _diagnostics;
 
-  void setCaptureState(
-    RecordingState state, {
-    required bool transcriptReady,
-    bool phoneOwnsMobileAudio = false,
-  }) {
+  void setCaptureState(RecordingState state, {required bool transcriptReady, bool phoneOwnsMobileAudio = false}) {
     recordingState = state;
     _transcriptReady = transcriptReady;
     _phoneOwnsMobileAudio = phoneOwnsMobileAudio;

@@ -506,28 +506,20 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
 
       connectingToDeviceId = device.id;
       notifyListeners();
-      await ServiceManager.instance().device.ensureConnection(device.id, force: true);
+      final connected = await deviceProvider!.connectDeviceForCurrentUser(device);
+      if (!connected) throw StateError('Connected device was unavailable after pairing');
       Logger.debug('Connected to device: ${device.name}');
       deviceId = device.id;
       deviceName = device.name;
       deviceType = device.type;
-      var cDevice = await _getConnectedDevice(deviceId);
-      if (cDevice != null) {
-        // DeviceProvider owns the account/profile-bound persistence fence.
-        // Writing the convenience preference here could attach an A device
-        // after Firebase authority has already switched to B.
-        await deviceProvider!.confirmConnectedDeviceForCurrentAuthority(cDevice);
-        SharedPreferencesUtil().deviceName = cDevice.name;
-      }
-      if (cDevice == null) await deviceProvider?.scanAndConnectToDevice();
       var connectedDevice = deviceProvider!.connectedDevice;
       batteryPercentage = deviceProvider!.batteryLevel;
-      isConnected = true;
+      isConnected = connectedDevice?.id == device.id && deviceProvider!.presentationIsConnected;
       isClicked = false;
       connectingToDeviceId = null; // Reset the connecting device
       notifyListeners();
       await Future.delayed(const Duration(seconds: 2));
-      if (connectedDevice == null) throw StateError('Connected device was unavailable after pairing');
+      if (!isConnected || connectedDevice == null) throw StateError('Connected device was unavailable after pairing');
       SharedPreferencesUtil().deviceName = connectedDevice.name;
       foundDevicesMap.clear();
       deviceList.clear();
@@ -556,15 +548,6 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
     deviceType = null;
     deviceId = '';
     notifyListeners();
-  }
-
-  // TODO: thinh, use connection directly
-  Future<BtDevice?> _getConnectedDevice(String deviceId) async {
-    if (deviceId.isEmpty) {
-      return null;
-    }
-    var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
-    return connection?.device;
   }
 
   Future<void> scanDevices({required VoidCallback onShowDialog}) async {
@@ -598,11 +581,7 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   }
 
   @override
-  void onDeviceConnectionStateChanged(
-    String deviceId,
-    DeviceConnectionState state, {
-    int? connectionGeneration,
-  }) {
+  void onDeviceConnectionStateChanged(String deviceId, DeviceConnectionState state, {int? connectionGeneration}) {
     // TODO: implement onDeviceConnectionStateChanged
   }
 
