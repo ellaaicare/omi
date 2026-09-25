@@ -782,10 +782,14 @@ def _recovery_status(
     job: Optional[dict[str, Any]],
     *,
     generation_key: str,
+    authority_digest: str,
 ) -> Optional[str]:
-    artwork_is_current = artwork.get("generation_key") == generation_key
-    job_status = str((job or {}).get("status") or "")
-    attempts = int((job or {}).get("attempt_count") or 0)
+    artwork_is_current = (
+        artwork.get("generation_key") == generation_key and artwork.get("authority_digest") == authority_digest
+    )
+    job_is_current = bool(job and job.get("authority_digest") == authority_digest)
+    job_status = str((job or {}).get("status") or "") if job_is_current else ""
+    attempts = int((job or {}).get("attempt_count") or 0) if job_is_current else 0
     if job_status in {"pending", "processing"}:
         return "retrying" if attempts else "pending"
     if job_status in {"failed", "completed"} or (
@@ -1242,7 +1246,12 @@ class MemoryArtworkService:
             current_artwork = current_artwork if isinstance(current_artwork, dict) else {}
             existing_job = self.repository.get_job(uid, memory_id, generation_key)
             if current_artwork.get("generation_key") == generation_key or existing_job is not None:
-                status = _recovery_status(current_artwork, existing_job, generation_key=generation_key)
+                status = _recovery_status(
+                    current_artwork,
+                    existing_job,
+                    generation_key=generation_key,
+                    authority_digest=authority.authority_digest,
+                )
                 if status is not None:
                     counts[status] += 1
                     items.append({"memory_id": memory_id, "status": status})
@@ -1295,6 +1304,7 @@ class MemoryArtworkService:
                             refreshed_artwork,
                             job,
                             generation_key=reserved_generation_key,
+                            authority_digest=authority.authority_digest,
                         )
                         or "exhausted"
                     )

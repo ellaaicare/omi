@@ -1061,8 +1061,14 @@ def test_recent_recovery_does_not_report_stale_ready_artwork_over_current_pendin
 
     status = artwork._recovery_status(
         {"status": "ready", "generation_key": "b" * 64},
-        {"status": "pending", "attempt_count": 0, "generation_key": generation_key},
+        {
+            "status": "pending",
+            "attempt_count": 0,
+            "generation_key": generation_key,
+            "authority_digest": "digest-a",
+        },
         generation_key=generation_key,
+        authority_digest="digest-a",
     )
 
     assert status == "pending"
@@ -1133,6 +1139,39 @@ def test_recent_recovery_reads_the_generation_reserved_after_source_drift():
     assert result["pending"] == 1
     assert result["exhausted"] == 0
     assert result["items"] == [{"memory_id": "drift", "status": "pending"}]
+
+
+def test_recent_recovery_does_not_report_a_stale_authority_job_as_pending():
+    repository = FakeRepository()
+    old_authority = _authority(digest="digest-old")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(old_authority)
+    repository.conversations[("owner-a", "rotated")] = _terminal_memory("rotated")
+    old_service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=lambda uid: asyncio.sleep(0, result=old_authority),
+        provider_factory=lambda: (_ for _ in ()).throw(AssertionError("recovery must not call provider")),
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    assert asyncio.run(old_service.enqueue("owner-a", "rotated", request_mode="automatic"))["outcome"] == "reserved"
+
+    new_authority = _authority(digest="digest-new")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(new_authority)
+    current_service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=lambda uid: asyncio.sleep(0, result=new_authority),
+        provider_factory=lambda: (_ for _ in ()).throw(AssertionError("recovery must not call provider")),
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+
+    result = asyncio.run(current_service.recover_recent("owner-a"))
+
+    assert result["pending"] == 0
+    assert result["retrying"] == 0
+    assert result["exhausted"] == 1
+    assert result["reserved"] == 0
+    assert result["items"] == [{"memory_id": "rotated", "status": "exhausted"}]
 
 
 def test_recent_recovery_fails_before_inventory_without_current_consent_or_authority():
