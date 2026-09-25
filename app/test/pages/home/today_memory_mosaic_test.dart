@@ -72,6 +72,42 @@ void main() {
     await SharedPreferencesUtil.init();
   });
 
+  test('recent Home artwork recovery selects today and yesterday only, newest first and bounded', () {
+    final memories = [
+      for (var index = 0; index < 6; index++)
+        ServerConversation(
+          id: 'today-$index',
+          createdAt: DateTime(2026, 9, 24, 12 - index),
+          structured: Structured('Today $index', 'Today memory $index.'),
+        ),
+      for (var index = 0; index < 6; index++)
+        ServerConversation(
+          id: 'yesterday-$index',
+          createdAt: DateTime(2026, 9, 23, 12 - index),
+          structured: Structured('Yesterday $index', 'Yesterday memory $index.'),
+        ),
+      ServerConversation(
+        id: 'older',
+        createdAt: DateTime(2026, 9, 22, 12),
+        structured: Structured('Older', 'Older memory.'),
+      ),
+      ServerConversation(
+        id: 'same-date-prior-year',
+        createdAt: DateTime(2025, 9, 24, 12),
+        structured: Structured('Prior year', 'A prior-year memory.'),
+      ),
+    ];
+
+    final selected = homeRecentArtworkRepairMemoryIds(memories, now: DateTime(2026, 9, 24, 20));
+
+    expect(selected, hasLength(homeRecentArtworkRepairLimit));
+    expect(selected, containsAll(<String>['today-0', 'today-1', 'today-2', 'today-3', 'today-4', 'today-5']));
+    expect(selected, containsAll(<String>['yesterday-0', 'yesterday-1']));
+    expect(selected, isNot(contains('yesterday-2')));
+    expect(selected, isNot(contains('older')));
+    expect(selected, isNot(contains('same-date-prior-year')));
+  });
+
   testWidgets('ready Home matches the reviewed Memory Canvas hierarchy', (tester) async {
     final photoData = await rootBundle.load('assets/images/onboarding-bg-1.webp');
     final conversations = _ConversationFixtures.withMemories(photoBase64: base64Encode(photoData.buffer.asUint8List()));
@@ -1165,7 +1201,7 @@ void main() {
     expect(find.text('Artwork studio'), findsOneWidget);
   });
 
-  testWidgets('Home Days repairs only the newest visible day and keeps older days read-only', (tester) async {
+  testWidgets('Home Days repairs today and yesterday while keeping older days read-only', (tester) async {
     MemoryArtworkImage.resetAutomaticGenerationBudgetForTesting();
     addTearDown(MemoryArtworkImage.resetAutomaticGenerationBudgetForTesting);
     final authority = await _installArtworkAuthority();
@@ -1183,24 +1219,25 @@ void main() {
     final conversations = [
       for (var index = 0; index < 2; index++)
         ServerConversation(
-          id: 'newest-$index',
-          createdAt: DateTime(2026, 8, 6, 12 - index),
-          startedAt: DateTime(2026, 8, 6, 12 - index),
-          structured: Structured('Newest memory $index', 'A complete recent memory $index.'),
+          id: 'today-$index',
+          createdAt: DateTime(2026, 8, 9, 12 - index),
+          startedAt: DateTime(2026, 8, 9, 12 - index),
+          structured: Structured('Today memory $index', 'A complete recent memory $index.'),
+        ),
+      for (var index = 0; index < 2; index++)
+        ServerConversation(
+          id: 'yesterday-$index',
+          createdAt: DateTime(2026, 8, 8, 12 - index),
+          startedAt: DateTime(2026, 8, 8, 12 - index),
+          structured: Structured('Yesterday memory $index', 'A recent memory $index from yesterday.'),
         ),
       for (var index = 0; index < 2; index++)
         ServerConversation(
           id: 'older-$index',
-          createdAt: DateTime(2026, 8, 5, 12 - index),
-          startedAt: DateTime(2026, 8, 5, 12 - index),
+          createdAt: DateTime(2026, 8, 7, 12 - index),
+          startedAt: DateTime(2026, 8, 7, 12 - index),
           structured: Structured('Older memory $index', 'An older memory $index.'),
         ),
-      ServerConversation(
-        id: 'same-label-prior-year',
-        createdAt: DateTime(2020, 8, 6, 12),
-        startedAt: DateTime(2020, 8, 6, 12),
-        structured: Structured('Prior-year memory', 'A memory sharing the newest yearless day label.'),
-      ),
     ];
     final harness = await _pumpHome(
       tester,
@@ -1212,55 +1249,68 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
-    final newestDayCard = find.byWidgetPredicate(
-      (widget) => widget is MemoryDayGalleryCard && widget.memories.any((memory) => memory.id == 'newest-0'),
+    final todayCard = find.byWidgetPredicate(
+      (widget) => widget is MemoryDayGalleryCard && widget.memories.any((memory) => memory.id == 'today-0'),
     );
     await tester.scrollUntilVisible(
-      newestDayCard,
+      todayCard,
       500,
       scrollable: find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
     );
     await tester.pump(const Duration(milliseconds: 100));
 
-    final newestArtworkWidgets = tester
+    final todayArtworkWidgets = tester
         .widgetList<MemoryArtworkImage>(
           find.descendant(
-            of: newestDayCard,
+            of: todayCard,
             matching: find.byType(MemoryArtworkImage),
           ),
         )
         .toList(growable: false);
-    expect(newestArtworkWidgets, hasLength(3));
-    expect(
-      newestArtworkWidgets
-          .where((widget) => widget.conversation.id.startsWith('newest-'))
-          .every((widget) => widget.enqueueIfMissing),
-      isTrue,
-    );
-    expect(
-      newestArtworkWidgets.singleWhere((widget) => widget.conversation.id == 'same-label-prior-year').enqueueIfMissing,
-      isFalse,
-      reason: 'a matching yearless label must not make a prior-year memory eligible for automatic repair',
-    );
-    final newestRepairRequests = artwork.displayRequests
-        .where((request) => request.enqueueIfMissing && request.memoryId.startsWith('newest-'))
+    expect(todayArtworkWidgets, hasLength(2));
+    expect(todayArtworkWidgets.every((widget) => widget.enqueueIfMissing), isTrue);
+    expect(todayArtworkWidgets.every((widget) => widget.fallbackAssetPath == memoryArtworkWatercolorFallbackAsset),
+        isTrue);
+    final todayRepairRequests = artwork.displayRequests
+        .where((request) => request.enqueueIfMissing && request.memoryId.startsWith('today-'))
         .map((request) => request.memoryId);
-    expect(newestRepairRequests, containsAll(<String>['newest-0', 'newest-1']));
-    expect(
-      artwork.displayRequests.where(
-        (request) => request.enqueueIfMissing && request.memoryId == 'same-label-prior-year',
-      ),
-      isEmpty,
-    );
+    expect(todayRepairRequests, containsAll(<String>['today-0', 'today-1']));
     expect(artwork.automaticDisplayRequests, isEmpty);
     expect(find.text('Try artwork again'), findsWidgets);
 
     final requestsBeforeRetry = artwork.displayRequests.length;
-    await tester.tap(find.byKey(const Key('memory-artwork-placeholder-newest-0')));
+    await tester.tap(find.byKey(const Key('memory-artwork-photo-retry-today-0')));
     await tester.pump();
 
     expect(artwork.displayRequests.length, requestsBeforeRetry + 1);
-    expect(artwork.displayRequests.last, (memoryId: 'newest-0', enqueueIfMissing: true));
+    expect(artwork.displayRequests.last, (memoryId: 'today-0', enqueueIfMissing: true));
+
+    final yesterdayCard = find.byWidgetPredicate(
+      (widget) => widget is MemoryDayGalleryCard && widget.memories.any((memory) => memory.id == 'yesterday-0'),
+    );
+    await tester.scrollUntilVisible(
+      yesterdayCard,
+      500,
+      scrollable: find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    final yesterdayArtworkWidgets = tester
+        .widgetList<MemoryArtworkImage>(
+          find.descendant(of: yesterdayCard, matching: find.byType(MemoryArtworkImage)),
+        )
+        .toList(growable: false);
+    expect(yesterdayArtworkWidgets, hasLength(2));
+    expect(yesterdayArtworkWidgets.every((widget) => widget.enqueueIfMissing), isTrue);
+    expect(
+      yesterdayArtworkWidgets.every((widget) => widget.fallbackAssetPath == memoryArtworkWatercolorFallbackAsset),
+      isTrue,
+    );
+    expect(
+      artwork.displayRequests.where(
+        (request) => request.enqueueIfMissing && request.memoryId.startsWith('yesterday-'),
+      ),
+      isNotEmpty,
+    );
 
     final olderDayCard = find.byWidgetPredicate(
       (widget) => widget is MemoryDayGalleryCard && widget.memories.any((memory) => memory.id == 'older-0'),
@@ -1276,6 +1326,13 @@ void main() {
       artwork.displayRequests.where((request) => request.enqueueIfMissing && request.memoryId.startsWith('older-')),
       isEmpty,
     );
+    final olderArtworkWidgets = tester
+        .widgetList<MemoryArtworkImage>(
+          find.descendant(of: olderDayCard, matching: find.byType(MemoryArtworkImage)),
+        )
+        .toList(growable: false);
+    expect(olderArtworkWidgets.every((widget) => !widget.enqueueIfMissing), isTrue);
+    expect(olderArtworkWidgets.every((widget) => widget.fallbackAssetPath == null), isTrue);
   });
 
   testWidgets('Home keeps a running full-history artwork queue indeterminate', (tester) async {
@@ -2319,10 +2376,12 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Days'));
     await tester.pumpAndSettle();
-    final unavailableArtwork = find.byKey(const Key('memory-artwork-placeholder-memory-1'));
-    await tester.ensureVisible(unavailableArtwork);
+    final memoryDayCard = find.byWidgetPredicate(
+      (widget) => widget is MemoryDayGalleryCard && widget.memories.any((memory) => memory.id == 'memory-1'),
+    );
+    await tester.ensureVisible(memoryDayCard);
     await tester.pumpAndSettle();
-    await tester.tap(unavailableArtwork);
+    await tester.tap(memoryDayCard);
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('memory-day-list')), findsOneWidget);
 

@@ -26,6 +26,7 @@ import 'package:omi/ella/services/today_card_controller.dart';
 import 'package:omi/ella/services/today_card_repository.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
+import 'package:omi/ella/widgets/memory_artwork_image.dart';
 import 'package:omi/ella/widgets/today_card_surface.dart';
 import 'package:omi/pages/capture/connect.dart';
 import 'package:omi/pages/conversation_capturing/page.dart';
@@ -62,6 +63,8 @@ typedef _ArtworkStudioSnapshot = ({
   MemoryArtworkQueueStatus? queueStatus,
   bool queueControlBusy,
 });
+
+const homeRecentArtworkRepairLimit = 8;
 
 enum _HomeCaptureSource { phone, necklaceOwned, necklaceContinuous }
 
@@ -135,6 +138,26 @@ List<ServerConversation> homeMemoryCanvasSelection(List<ServerConversation> conv
   final sorted = List<ServerConversation>.of(conversations)
     ..sort((a, b) => (b.startedAt ?? b.createdAt).compareTo(a.startedAt ?? a.createdAt));
   return sorted.take(limit).toList(growable: false);
+}
+
+Set<String> homeRecentArtworkRepairMemoryIds(
+  List<ServerConversation> newestFirstMemories, {
+  required DateTime now,
+  int limit = homeRecentArtworkRepairLimit,
+}) {
+  if (limit <= 0) return <String>{};
+  final localNow = now.toLocal();
+  final today = DateTime(localNow.year, localNow.month, localNow.day);
+  final yesterday = today.subtract(const Duration(days: 1));
+  return newestFirstMemories
+      .where((memory) {
+        final value = (memory.startedAt ?? memory.createdAt).toLocal();
+        final day = DateTime(value.year, value.month, value.day);
+        return DateUtils.isSameDay(day, today) || DateUtils.isSameDay(day, yesterday);
+      })
+      .take(limit)
+      .map((memory) => memory.id)
+      .toSet();
 }
 
 String homeMemoryDisplayTitle(ServerConversation conversation, String fallback) {
@@ -1682,9 +1705,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               _homeCaptureFinalizationPending = true;
               _homeCaptureSource = _HomeCaptureSource.necklaceOwned;
             });
-            ScaffoldMessenger.of(
-              context,
-            ).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
             return;
           }
         } else {
@@ -1833,6 +1854,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final memoriesHydrating = orderedMemories.isEmpty && !conversations.hasLoadedConversations;
     final heroMemory = orderedMemories.isEmpty || showDayGallery ? null : orderedMemories.first;
     final remainingMemories = showDayGallery ? orderedMemories : orderedMemories.skip(1).toList(growable: false);
+    final artworkReleaseEnabled = _homeArtworkPreferences?.releaseEnabled == true;
+    final automaticArtworkRepairMemoryIds = _homeMemorySort == MemoryGallerySort.recent && artworkReleaseEnabled
+        ? homeRecentArtworkRepairMemoryIds(orderedMemories, now: now)
+        : <String>{};
+    if (heroMemory != null && artworkReleaseEnabled) automaticArtworkRepairMemoryIds.add(heroMemory.id);
     final showDailyNote = shouldShowDailyNote(_todayCardController.state);
     final showGuardianSurfaces = _guardianAvailable;
     final homeCaptureOwned =
@@ -1915,7 +1941,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                               artworkApi: _memoryArtworkApi,
                               artworkRefreshEpoch: _homeArtworkDisplayEpoch,
                               artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
-                              enqueueArtworkIfMissing: _homeArtworkPreferences?.releaseEnabled == true,
+                              enqueueArtworkIfMissing: automaticArtworkRepairMemoryIds.contains(heroMemory.id),
+                              artworkFallbackAsset: memoryArtworkWatercolorFallbackAsset,
                               onOpen: () => _openMemoryDetail(heroMemory),
                               onDelete: () => _deleteMemory(heroMemory),
                             ),
@@ -1934,7 +1961,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                       ),
                     ),
                   ),
-                ..._homeMemoryFeedSlivers(remainingMemories, now: now),
+                ..._homeMemoryFeedSlivers(
+                  remainingMemories,
+                  now: now,
+                  automaticRepairMemoryIds: automaticArtworkRepairMemoryIds,
+                ),
                 if (conversations.isLoadingMoreConversations)
                   const SliverToBoxAdapter(
                     child: Padding(
@@ -2024,26 +2055,15 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     Navigator.of(context).push(MaterialPageRoute(builder: (_) => ConversationDetailPage(conversation: conversation)));
   }
 
-  List<Widget> _homeMemoryFeedSlivers(List<ServerConversation> memories, {required DateTime now}) {
+  List<Widget> _homeMemoryFeedSlivers(
+    List<ServerConversation> memories, {
+    required DateTime now,
+    required Set<String> automaticRepairMemoryIds,
+  }) {
     if (memories.isEmpty) return const [];
     if (_homeMemoryLayout == MemoryGalleryLayout.days) {
       final groups = groupMemoryConversationsByDay(context, memories, now: now);
       final entries = groups.entries.toList(growable: false);
-      final newestDay = memories
-          .map((memory) => (memory.startedAt ?? memory.createdAt).toLocal())
-          .map((value) => DateTime(value.year, value.month, value.day))
-          .reduce((current, candidate) => candidate.isAfter(current) ? candidate : current);
-      final automaticRepairMemoryIds =
-          _homeMemorySort == MemoryGallerySort.recent && _homeArtworkPreferences?.releaseEnabled == true
-              ? memories
-                  .where((memory) {
-                    final value = (memory.startedAt ?? memory.createdAt).toLocal();
-                    return DateUtils.isSameDay(DateTime(value.year, value.month, value.day), newestDay);
-                  })
-                  .take(4)
-                  .map((memory) => memory.id)
-                  .toSet()
-              : const <String>{};
       return [
         for (var index = 0; index < entries.length; index++)
           SliverPadding(
@@ -2057,6 +2077,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                 artworkRefreshEpoch: _homeArtworkDisplayEpoch,
                 artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
                 automaticRepairMemoryIds: automaticRepairMemoryIds,
+                artworkFallbackMemoryIds: automaticRepairMemoryIds,
                 onOpen: () {
                   final authority = _memoryPresentationAuthorityProvider();
                   if (SharedPreferencesUtil.isPublicBuild && (authority == null || !authority.isExactCurrent())) {
@@ -2094,7 +2115,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               childAspectRatio: 0.86,
             ),
             delegate: SliverChildBuilderDelegate(
-              (context, index) => _homeMemoryCard(memories[index]),
+              (context, index) => _homeMemoryCard(memories[index], automaticRepairMemoryIds: automaticRepairMemoryIds),
               childCount: memories.length,
             ),
           ),
@@ -2107,19 +2128,24 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         sliver: SliverList.separated(
           itemCount: memories.length,
           separatorBuilder: (_, __) => const SizedBox(height: EllaSizes.cardGap),
-          itemBuilder: (context, index) => _homeMemoryCard(memories[index]),
+          itemBuilder: (context, index) =>
+              _homeMemoryCard(memories[index], automaticRepairMemoryIds: automaticRepairMemoryIds),
         ),
       ),
     ];
   }
 
-  Widget _homeMemoryCard(ServerConversation conversation) => MemoryGalleryCard(
+  Widget _homeMemoryCard(ServerConversation conversation, {required Set<String> automaticRepairMemoryIds}) =>
+      MemoryGalleryCard(
         conversation: conversation,
         layout: _homeMemoryLayout,
         displayTitle: homeMemoryDisplayTitle(conversation, context.l10n.untitledConversation),
         artworkApi: _memoryArtworkApi,
         artworkRefreshEpoch: _homeArtworkDisplayEpoch,
         artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
+        enqueueArtworkIfMissing: automaticRepairMemoryIds.contains(conversation.id),
+        artworkFallbackAsset:
+            automaticRepairMemoryIds.contains(conversation.id) ? memoryArtworkWatercolorFallbackAsset : null,
         onOpen: () => _openMemoryDetail(conversation),
         onDelete: () => _deleteMemory(conversation),
       );
@@ -2759,8 +2785,10 @@ class _ArtworkStudioSheet extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 18),
-                Text(context.l10n.memoryArtworkStyle,
-                    style: EllaTextStyles.eyebrow.copyWith(color: EllaColors.inkSoft)),
+                Text(
+                  context.l10n.memoryArtworkStyle,
+                  style: EllaTextStyles.eyebrow.copyWith(color: EllaColors.inkSoft),
+                ),
                 const SizedBox(height: 6),
                 ...styles.map((style) {
                   final selected = preferences.styleVersion == style.$1;

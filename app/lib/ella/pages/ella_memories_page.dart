@@ -602,6 +602,7 @@ class MemoryDayGalleryCard extends StatelessWidget {
     this.artworkRefreshEpoch = 0,
     this.artworkAuthorityEpoch = 0,
     this.automaticRepairMemoryIds = const <String>{},
+    this.artworkFallbackMemoryIds = const <String>{},
   });
 
   final String dayLabel;
@@ -611,6 +612,7 @@ class MemoryDayGalleryCard extends StatelessWidget {
   final int artworkRefreshEpoch;
   final int artworkAuthorityEpoch;
   final Set<String> automaticRepairMemoryIds;
+  final Set<String> artworkFallbackMemoryIds;
 
   @override
   Widget build(BuildContext context) {
@@ -640,6 +642,7 @@ class MemoryDayGalleryCard extends StatelessWidget {
                   artworkRefreshEpoch: artworkRefreshEpoch,
                   artworkAuthorityEpoch: artworkAuthorityEpoch,
                   automaticRepairMemoryIds: automaticRepairMemoryIds,
+                  artworkFallbackMemoryIds: artworkFallbackMemoryIds,
                 ),
               ),
               Padding(
@@ -680,6 +683,7 @@ class _MemoryDayArtworkCollage extends StatelessWidget {
     this.artworkRefreshEpoch = 0,
     this.artworkAuthorityEpoch = 0,
     this.automaticRepairMemoryIds = const <String>{},
+    this.artworkFallbackMemoryIds = const <String>{},
   });
 
   final List<ServerConversation> memories;
@@ -687,6 +691,7 @@ class _MemoryDayArtworkCollage extends StatelessWidget {
   final int artworkRefreshEpoch;
   final int artworkAuthorityEpoch;
   final Set<String> automaticRepairMemoryIds;
+  final Set<String> artworkFallbackMemoryIds;
 
   Widget _art(ServerConversation memory) => MemoryArtworkImage(
         conversation: memory,
@@ -695,6 +700,7 @@ class _MemoryDayArtworkCollage extends StatelessWidget {
         authorityEpoch: artworkAuthorityEpoch,
         enqueueIfMissing: automaticRepairMemoryIds.contains(memory.id),
         allowManualGeneration: true,
+        fallbackAssetPath: artworkFallbackMemoryIds.contains(memory.id) ? memoryArtworkWatercolorFallbackAsset : null,
       );
 
   @override
@@ -924,6 +930,7 @@ class MemoryGalleryCard extends StatelessWidget {
     this.artworkRefreshEpoch = 0,
     this.artworkAuthorityEpoch = 0,
     this.enqueueArtworkIfMissing = false,
+    this.artworkFallbackAsset,
   });
 
   final ServerConversation conversation;
@@ -935,6 +942,7 @@ class MemoryGalleryCard extends StatelessWidget {
   final int artworkRefreshEpoch;
   final int artworkAuthorityEpoch;
   final bool enqueueArtworkIfMissing;
+  final String? artworkFallbackAsset;
 
   String get _title => displayTitle ?? conversation.structured.title;
 
@@ -955,6 +963,7 @@ class MemoryGalleryCard extends StatelessWidget {
                   authorityEpoch: artworkAuthorityEpoch,
                   allowManualGeneration: true,
                   enqueueIfMissing: enqueueArtworkIfMissing,
+                  fallbackAssetPath: artworkFallbackAsset,
                 ),
               ),
               Expanded(
@@ -974,6 +983,7 @@ class MemoryGalleryCard extends StatelessWidget {
                   authorityEpoch: artworkAuthorityEpoch,
                   allowManualGeneration: true,
                   enqueueIfMissing: enqueueArtworkIfMissing,
+                  fallbackAssetPath: artworkFallbackAsset,
                 ),
               ),
               Padding(padding: const EdgeInsets.all(16), child: details),
