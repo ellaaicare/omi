@@ -403,6 +403,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   Future<bool> _runConnectionAttempt(
     Future<bool> Function(int token) operation, {
     String? expectedDeviceId,
+    ValueGetter<bool>? connectionCommittedByAttempt,
     VoidCallback? onCurrentTimeout,
   }) async {
     final expectedDeviceWasConnectedAtStart =
@@ -422,7 +423,8 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       }
       return connected;
     } on TimeoutException {
-      final connected = !expectedDeviceWasConnectedAtStart &&
+      final committedConnection = connectionCommittedByAttempt?.call() ?? !expectedDeviceWasConnectedAtStart;
+      final connected = committedConnection &&
           presentationIsConnected &&
           (expectedDeviceId == null || presentationConnectedDevice?.id == expectedDeviceId);
       if (_isConnectionAttemptCurrent(token)) {
@@ -526,14 +528,24 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   /// Commits a device selected by the current user after the scanner has
   /// resolved it. This is the only post-authority-change path allowed to
   /// restart necklace capture; unsolicited BLE callbacks remain fenced.
-  Future<void> confirmConnectedDeviceForCurrentAuthority(BtDevice device, {int? operationGeneration}) async {
+  Future<void> confirmConnectedDeviceForCurrentAuthority(
+    BtDevice device, {
+    int? operationGeneration,
+    VoidCallback? onConnectionCommitted,
+  }) async {
     if (!_deviceServiceReady) {
       await setConnectedDevice(device);
+      onConnectionCommitted?.call();
       return;
     }
     final generation = operationGeneration ?? ++_deviceOperationGeneration;
     if (!_isDeviceOperationCurrent(generation)) return;
-    await _onDeviceConnected(device, generation, explicitlyAuthorized: true);
+    await _onDeviceConnected(
+      device,
+      generation,
+      explicitlyAuthorized: true,
+      onConnectionCommitted: onConnectionCommitted,
+    );
   }
 
   /// Connects a necklace deliberately selected by the signed-in user. BLE
@@ -543,6 +555,8 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     if (!_deviceServiceReady || device.id.isEmpty || _rememberedDeviceOwnerBinding() == null) return false;
 
     var freshSessionResetStarted = false;
+    var connectionCommittedByAttempt = false;
+    void markConnectionCommitted() => connectionCommittedByAttempt = true;
     return _runConnectionAttempt(
       (token) async {
         final generation = ++_deviceOperationGeneration;
@@ -562,6 +576,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
             operationGeneration: generation,
             explicitlySelectedDevice: device,
             connectionAttemptToken: token,
+            onConnectionCommitted: markConnectionCommitted,
           );
         }
 
@@ -569,7 +584,11 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         if (!_isConnectionAttemptCurrent(token) || !_isDeviceOperationCurrent(generation)) return false;
         final connected = connection?.device;
         if (connected != null && connected.id == device.id) {
-          await confirmConnectedDeviceForCurrentAuthority(connected, operationGeneration: generation);
+          await confirmConnectedDeviceForCurrentAuthority(
+            connected,
+            operationGeneration: generation,
+            onConnectionCommitted: markConnectionCommitted,
+          );
           return presentationIsConnected && presentationConnectedDevice?.id == device.id;
         }
 
@@ -580,9 +599,11 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
           operationGeneration: generation,
           explicitlySelectedDevice: device,
           connectionAttemptToken: token,
+          onConnectionCommitted: markConnectionCommitted,
         );
       },
       expectedDeviceId: device.id,
+      connectionCommittedByAttempt: () => connectionCommittedByAttempt,
       onCurrentTimeout: () {
         if (freshSessionResetStarted) _showFreshSessionUnavailable(device);
       },
@@ -977,6 +998,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     int? operationGeneration,
     bool startCaptureWhenConnected = false,
     BtDevice? explicitlySelectedDevice,
+    VoidCallback? onConnectionCommitted,
   }) async {
     final generation = operationGeneration ?? _deviceOperationGeneration;
     if (!_isConnectionAttemptCurrent(connectionAttemptToken) || !_isDeviceOperationCurrent(generation)) return false;
@@ -991,7 +1013,11 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         }
         if (explicitlySelectedDevice != null) {
           if (resolvedDevice.id != explicitlySelectedDevice.id) return false;
-          await confirmConnectedDeviceForCurrentAuthority(resolvedDevice, operationGeneration: generation);
+          await confirmConnectedDeviceForCurrentAuthority(
+            resolvedDevice,
+            operationGeneration: generation,
+            onConnectionCommitted: onConnectionCommitted,
+          );
         } else if (startCaptureWhenConnected) {
           if (!_isCurrentOwnerBoundDevice(resolvedDevice.id)) return false;
           await _onDeviceConnected(resolvedDevice, generation, explicitlyAuthorized: true);
@@ -1005,7 +1031,11 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         MixpanelManager().deviceConnected();
       } else if (explicitlySelectedDevice != null) {
         if (connectedDevice!.id != explicitlySelectedDevice.id) return false;
-        await confirmConnectedDeviceForCurrentAuthority(connectedDevice!, operationGeneration: generation);
+        await confirmConnectedDeviceForCurrentAuthority(
+          connectedDevice!,
+          operationGeneration: generation,
+          onConnectionCommitted: onConnectionCommitted,
+        );
       }
 
       if (explicitlySelectedDevice != null && connectedDevice?.id != explicitlySelectedDevice.id) return false;
@@ -1025,7 +1055,11 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       var cDevice = await _resolveConnectedDevice(device.id) ?? device;
       if (!_isConnectionAttemptCurrent(connectionAttemptToken) || !_isDeviceOperationCurrent(generation)) return false;
       if (explicitlySelectedDevice != null) {
-        await confirmConnectedDeviceForCurrentAuthority(cDevice, operationGeneration: generation);
+        await confirmConnectedDeviceForCurrentAuthority(
+          cDevice,
+          operationGeneration: generation,
+          onConnectionCommitted: onConnectionCommitted,
+        );
       } else if (startCaptureWhenConnected) {
         if (!_isCurrentOwnerBoundDevice(cDevice.id)) return false;
         await _onDeviceConnected(cDevice, generation, explicitlyAuthorized: true);
@@ -1209,7 +1243,12 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     return (message, hasUpdate, version, latestFirmwareDetails);
   }
 
-  Future<void> _onDeviceConnected(BtDevice device, int operationGeneration, {bool explicitlyAuthorized = false}) async {
+  Future<void> _onDeviceConnected(
+    BtDevice device,
+    int operationGeneration, {
+    bool explicitlyAuthorized = false,
+    VoidCallback? onConnectionCommitted,
+  }) async {
     if (!_isDeviceOperationCurrent(operationGeneration)) return;
     if (_rememberedDeviceOwnerBinding() == null) return;
     if (_authorityReconciliationPending ||
@@ -1231,6 +1270,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     connectedDevice = device;
     pairedDevice = device;
     setIsConnected(true);
+    onConnectionCommitted?.call();
     await _persistRememberedDevice(device, operationGeneration: operationGeneration);
     if (!_isDeviceOperationCurrent(operationGeneration)) return;
     final capture = captureProvider;

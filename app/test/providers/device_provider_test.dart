@@ -1426,6 +1426,50 @@ void main() {
     expect(provider.presentationConnectedDevice?.id, necklace.id);
   });
 
+  test('fresh connection committed before timeout survives slow post-connect capture startup', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final captureStartGate = Completer<void>();
+    final service = _FakeDeviceService(DeviceServiceStatus.ready)..nativeSessionRetained = true;
+    final capture = _RecordingCaptureProvider(
+      startGate: captureStartGate,
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+    )..updateRecordingState(RecordingState.error);
+    var scans = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scans++;
+        return necklace;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      connectionAttemptTimeout: const Duration(milliseconds: 20),
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+    provider
+      ..connectedDevice = necklace
+      ..pairedDevice = necklace
+      ..setIsConnected(true);
+
+    expect(await provider.connectDeviceForCurrentUser(necklace), isTrue);
+    expect(service.disconnectCalls, 1);
+    expect(scans, 1);
+    expect(provider.presentationIsConnected, isTrue);
+    expect(provider.presentationConnectedDevice?.id, necklace.id);
+    expect(provider.connectionAttemptFailed, isFalse);
+    expect(provider.isConnecting, isFalse);
+
+    captureStartGate.complete();
+    await pumpEventQueue();
+
+    expect(provider.presentationIsConnected, isTrue, reason: 'late setup must retain the committed fresh session');
+    expect(provider.presentationConnectedDevice?.id, necklace.id);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+  });
+
   test('timed-out connect clears stale isConnecting and permits the next attempt', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await bindRememberedDeviceForCurrentTestAuthority(necklace);
