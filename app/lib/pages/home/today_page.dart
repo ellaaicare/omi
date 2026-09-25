@@ -605,8 +605,16 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _HomeArtworkAuthoritySnapshot authority, {
     required bool startPreview,
   }) async {
-    await _recoverRecentHomeArtwork();
-    if (startPreview && mounted && _isHomeArtworkAuthorityCurrent(authority)) {
+    var foregroundCycle = _homeArtworkRecoveryForegroundCycle;
+    while (mounted && _isHomeArtworkAuthorityCurrent(authority)) {
+      await _recoverRecentHomeArtwork();
+      if (foregroundCycle == _homeArtworkRecoveryForegroundCycle) break;
+      foregroundCycle = _homeArtworkRecoveryForegroundCycle;
+    }
+    if (startPreview &&
+        mounted &&
+        foregroundCycle == _homeArtworkRecoveryForegroundCycle &&
+        _isHomeArtworkAuthorityCurrent(authority)) {
       await _advanceHomeArtworkBackfill();
     }
   }

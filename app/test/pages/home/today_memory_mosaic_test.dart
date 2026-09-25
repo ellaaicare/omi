@@ -1261,6 +1261,42 @@ void main() {
     expect(artwork.recentRecoveryRequests, 2, reason: 'a new foreground cycle may reconcile idempotently once');
   });
 
+  testWidgets('Home waits for the current foreground recovery before starting historical preview', (tester) async {
+    final authority = await _installArtworkAuthority();
+    final firstRecovery = Completer<void>();
+    final secondRecovery = Completer<void>();
+    final artwork = _FakeMemoryArtworkApi(
+      firstRecentRecoveryGate: firstRecovery,
+      secondRecentRecoveryGate: secondRecovery,
+    );
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.manyMemories(),
+      memoryArtworkApi: artwork,
+      memoryArtworkAuthorityProvider: () => authority,
+    );
+    addTearDown(harness.dispose);
+
+    expect(artwork.recentRecoveryRequests, 1);
+    expect(artwork.backfillCursors, isEmpty);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(artwork.recentRecoveryRequests, 2);
+    expect(artwork.backfillCursors, isEmpty);
+
+    firstRecovery.complete();
+    await tester.pump();
+    expect(artwork.backfillCursors, isEmpty, reason: 'cycle A cannot start preview while cycle B is pending');
+
+    secondRecovery.complete();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(artwork.backfillCursors, hasLength(1));
+  });
+
   testWidgets('Home discards a delayed recent recovery result after account authority changes', (tester) async {
     final authorityA = await _installArtworkAuthority(uid: 'account-a', profileBindingId: 'profile-a');
     var activeAuthority = authorityA;
@@ -2831,6 +2867,7 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
     Map<int, MemoryArtworkQueueStatus?> queueStatusResults = const {},
     Set<int> failedQueueStatusRequests = const {},
     this.firstRecentRecoveryGate,
+    this.secondRecentRecoveryGate,
     this.recentRecovery = const MemoryArtworkRecentRecovery(
       scanned: 0,
       reservationLimit: 10,
@@ -2870,6 +2907,7 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
   final Set<int> _failedQueueStatusRequests;
   final Completer<void>? firstBackfillGate;
   final Completer<void>? firstRecentRecoveryGate;
+  final Completer<void>? secondRecentRecoveryGate;
   final Completer<void>? firstStyleGate;
   final Completer<void>? secondStyleGate;
   final bool failQueueControls;
@@ -2952,6 +2990,7 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
   Future<MemoryArtworkRecentRecovery?> recoverRecent() async {
     final request = recentRecoveryRequests++;
     if (request == 0 && firstRecentRecoveryGate != null) await firstRecentRecoveryGate!.future;
+    if (request == 1 && secondRecentRecoveryGate != null) await secondRecentRecoveryGate!.future;
     return recentRecovery;
   }
 
