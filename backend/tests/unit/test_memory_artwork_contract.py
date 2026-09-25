@@ -1141,7 +1141,7 @@ def test_recent_recovery_reads_the_generation_reserved_after_source_drift():
     assert result["items"] == [{"memory_id": "drift", "status": "pending"}]
 
 
-def test_recent_recovery_does_not_report_a_stale_authority_job_as_pending():
+def test_recent_recovery_replaces_a_stale_authority_job_once():
     repository = FakeRepository()
     old_authority = _authority(digest="digest-old")
     repository.preferences_by_uid["owner-a"] = _accepted_preferences(old_authority)
@@ -1154,6 +1154,8 @@ def test_recent_recovery_does_not_report_a_stale_authority_job_as_pending():
         config=_enabled_config(),
     )
     assert asyncio.run(old_service.enqueue("owner-a", "rotated", request_mode="automatic"))["outcome"] == "reserved"
+    old_generation_key = repository.conversations[("owner-a", "rotated")]["artwork"]["generation_key"]
+    writes_before_rotation = repository.reserve_writes
 
     new_authority = _authority(digest="digest-new")
     repository.preferences_by_uid["owner-a"] = _accepted_preferences(new_authority)
@@ -1165,13 +1167,21 @@ def test_recent_recovery_does_not_report_a_stale_authority_job_as_pending():
         config=_enabled_config(),
     )
 
-    result = asyncio.run(current_service.recover_recent("owner-a"))
+    first = asyncio.run(current_service.recover_recent("owner-a"))
+    current_generation_key = repository.conversations[("owner-a", "rotated")]["artwork"]["generation_key"]
+    second = asyncio.run(current_service.recover_recent("owner-a"))
 
-    assert result["pending"] == 0
-    assert result["retrying"] == 0
-    assert result["exhausted"] == 1
-    assert result["reserved"] == 0
-    assert result["items"] == [{"memory_id": "rotated", "status": "exhausted"}]
+    assert current_generation_key != old_generation_key
+    assert repository.jobs[("owner-a", "rotated", old_generation_key)]["authority_digest"] == "digest-old"
+    assert repository.jobs[("owner-a", "rotated", current_generation_key)]["authority_digest"] == "digest-new"
+    assert first["pending"] == 1
+    assert first["retrying"] == 0
+    assert first["exhausted"] == 0
+    assert first["reserved"] == 1
+    assert first["items"] == [{"memory_id": "rotated", "status": "pending"}]
+    assert second["pending"] == 1
+    assert second["reserved"] == 0
+    assert repository.reserve_writes == writes_before_rotation + 1
 
 
 def test_recent_recovery_fails_before_inventory_without_current_consent_or_authority():

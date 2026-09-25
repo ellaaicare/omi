@@ -740,6 +740,7 @@ def _generation_key(
         "uid": uid,
         "binding_id": authority.binding_id,
         "profile_id": authority.profile_id,
+        "authority_digest": authority.authority_digest,
         "memory_id": memory_id,
         "enrichment_revision": enrichment_revision,
         "style_version": style_version,
