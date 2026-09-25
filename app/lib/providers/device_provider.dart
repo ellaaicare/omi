@@ -1512,8 +1512,15 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     _connectedCaptureRecovery = recovery;
   }
 
-  Future<void> _handleDeviceConnected(String deviceId, int operationGeneration, int connectionGeneration) async {
-    if (!_isDeviceOperationCurrent(operationGeneration) || !_isCurrentDeviceConnectionSession(connectionGeneration)) {
+  Future<void> _handleDeviceConnected(
+    String deviceId,
+    int operationGeneration,
+    int connectionGeneration,
+    int? connectionAttemptToken,
+  ) async {
+    if (!_isDeviceOperationCurrent(operationGeneration) ||
+        !_isCurrentDeviceConnectionSession(connectionGeneration) ||
+        (connectionAttemptToken != null && !_isConnectionAttemptCurrent(connectionAttemptToken))) {
       return;
     }
     if (_authorityReconciliationPending ||
@@ -1525,6 +1532,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     if (device == null ||
         !_isDeviceOperationCurrent(operationGeneration) ||
         !_isCurrentDeviceConnectionSession(connectionGeneration) ||
+        (connectionAttemptToken != null && !_isConnectionAttemptCurrent(connectionAttemptToken)) ||
         _authorityReconciliationPending ||
         !_isCurrentOwnerBoundDevice(device.id)) {
       return;
@@ -1680,8 +1688,11 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         }
         final generation = _deviceOperationGeneration;
         if (!_isDeviceOperationCurrent(generation)) return;
+        final connectionAttemptToken = _activeConnectionAttemptToken;
         _activeDeviceConnectionSession = connectionGeneration;
-        _connectDebouncer.run(() => _handleDeviceConnected(deviceId, generation, connectionGeneration));
+        _connectDebouncer.run(
+          () => _handleDeviceConnected(deviceId, generation, connectionGeneration, connectionAttemptToken),
+        );
         break;
       case DeviceConnectionState.disconnected:
         _connectDebouncer.cancel();

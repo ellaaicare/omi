@@ -1902,6 +1902,55 @@ void main() {
     expect(scanCalls, 3, reason: 'the late first scan remains fenced and cannot restart the exhausted loop');
   });
 
+  test('automatic reconnect fences a native connected callback that resolves after its attempt times out', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final firstScan = Completer<BtDevice?>();
+    final resolution = Completer<BtDevice?>();
+    final resolverEntered = Completer<void>();
+    final capture = _RecordingCaptureProvider();
+    var scanCalls = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      connectionResolver: (_) {
+        if (!resolverEntered.isCompleted) resolverEntered.complete();
+        return resolution.future;
+      },
+      scanConnector: () {
+        scanCalls++;
+        return scanCalls == 1 ? firstScan.future : Future<BtDevice?>.value();
+      },
+      reconnectionInterval: const Duration(milliseconds: 2),
+      maxAutomaticReconnectAttempts: 3,
+      connectionAttemptTimeout: const Duration(milliseconds: 200),
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    await provider.periodicConnect('test timed-out native callback');
+    service.publishConnection(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
+    await resolverEntered.future.timeout(const Duration(seconds: 1));
+
+    for (var attempt = 0; attempt < 200 && !provider.automaticReconnectExhausted; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+
+    expect(scanCalls, 3);
+    expect(provider.automaticReconnectExhausted, isTrue);
+    expect(provider.isConnecting, isFalse);
+
+    resolution.complete(necklace);
+    firstScan.complete();
+    await pumpEventQueue();
+
+    expect(capture.deviceStarts, 0);
+    expect(provider.presentationIsConnected, isFalse);
+    expect(provider.presentationConnectedDevice, isNull);
+    expect(scanCalls, 3, reason: 'the late native callback cannot revive an exhausted reconnect attempt');
+  });
+
   test('automatic reconnect recovers from scan exceptions and exhausts', () async {
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
     var scanCalls = 0;
