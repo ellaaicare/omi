@@ -179,6 +179,140 @@ void main() {
     expect(otherOwner.cacheKey, isNot(first.cacheKey));
   });
 
+  test('recent recovery accepts only the bounded authenticated server contract', () async {
+    final authority = _Authority('owner-a');
+    late String requestedUrl;
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => authority,
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+        onSendAttempt,
+      }) async {
+        requestedUrl = url;
+        expect(method, 'POST');
+        expect(body, isEmpty);
+        expect(timeout, const Duration(seconds: 30));
+        expect(requireAuthCheck, isTrue);
+        expect(expectedAuthenticatedUid, 'owner-a');
+        expect(exactAuthority, same(authority));
+        return http.Response(
+          jsonEncode({
+            'schema_version': memoryArtworkRecentRecoverySchemaVersion,
+            'scanned': 8,
+            'reservation_limit': 10,
+            'reserved': 2,
+            'deferred': 1,
+            'ready': 2,
+            'pending': 2,
+            'retrying': 1,
+            'exhausted': 0,
+            'skipped': 2,
+            'items': [
+              {'memory_id': 'memory-a', 'status': 'pending'},
+              {'memory_id': 'memory-b', 'status': 'retrying'},
+            ],
+          }),
+          202,
+        );
+      },
+    );
+
+    final recovery = await api.recoverRecent();
+
+    expect(requestedUrl, 'https://api.example/v1/ella/memory-artwork/recovery/recent');
+    expect(recovery, isNotNull);
+    expect(recovery!.scanned, 8);
+    expect(recovery.reserved, 2);
+    expect(recovery.pending, 2);
+    expect(recovery.retrying, 1);
+    expect(recovery.hasDisplayableOrActiveArtwork, isTrue);
+  });
+
+  test('recent recovery fails closed for inconsistent counts and stale authority', () async {
+    final malformedAuthority = _Authority('owner-a');
+    final malformed = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => malformedAuthority,
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+        onSendAttempt,
+      }) async =>
+          http.Response(
+        jsonEncode({
+          'schema_version': memoryArtworkRecentRecoverySchemaVersion,
+          'scanned': 2,
+          'reservation_limit': 10,
+          'reserved': 1,
+          'deferred': 0,
+          'ready': 0,
+          'pending': 1,
+          'retrying': 0,
+          'exhausted': 0,
+          'skipped': 0,
+          'items': [
+            {'memory_id': 'memory-a', 'status': 'pending'},
+          ],
+        }),
+        202,
+      ),
+    );
+    expect(await malformed.recoverRecent(), isNull, reason: 'the server totals do not account for every scan');
+
+    final staleAuthority = _Authority('owner-a');
+    final stale = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => staleAuthority,
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+        onSendAttempt,
+      }) async {
+        staleAuthority.current = false;
+        return http.Response(
+          jsonEncode({
+            'schema_version': memoryArtworkRecentRecoverySchemaVersion,
+            'scanned': 0,
+            'reservation_limit': 10,
+            'reserved': 0,
+            'deferred': 0,
+            'ready': 0,
+            'pending': 0,
+            'retrying': 0,
+            'exhausted': 0,
+            'skipped': 0,
+            'items': [],
+          }),
+          202,
+        );
+      },
+    );
+    expect(await stale.recoverRecent(), isNull);
+  });
+
   test('display cache identity matches the authenticated fetch identity', () async {
     final authority = _Authority('owner-a');
     final api = MemoryArtworkApi(
@@ -237,14 +371,8 @@ void main() {
 
     expect(first, hasLength(64));
     expect(repeated, first);
-    expect(
-      ownerAApi.automaticGenerationKey(memoryId: 'memory-a', sourceRevision: 'summary-b'),
-      isNot(first),
-    );
-    expect(
-      ownerBApi.automaticGenerationKey(memoryId: 'memory-a', sourceRevision: 'summary-a'),
-      isNot(first),
-    );
+    expect(ownerAApi.automaticGenerationKey(memoryId: 'memory-a', sourceRevision: 'summary-b'), isNot(first));
+    expect(ownerBApi.automaticGenerationKey(memoryId: 'memory-a', sourceRevision: 'summary-a'), isNot(first));
     ownerA.current = false;
     expect(ownerAApi.automaticGenerationKey(memoryId: 'memory-a', sourceRevision: 'summary-a'), isEmpty);
   });
@@ -269,7 +397,10 @@ void main() {
       }) async {
         if (method == 'POST') {
           requestBodies.add(jsonDecode(body) as Map<String, dynamic>);
-          return http.Response(jsonEncode({'outcome': 'automatic_attempt_already_used', 'status': 'unavailable'}), 200);
+          return http.Response(
+            jsonEncode({'outcome': 'automatic_attempt_already_used', 'status': 'unavailable'}),
+            200,
+          );
         }
         reads += 1;
         return http.Response(
@@ -315,10 +446,7 @@ void main() {
         getCalls += 1;
         if (getCalls <= 2) {
           return http.Response(
-            jsonEncode({
-              'schema_version': memoryArtworkSchemaVersion,
-              'status': 'unavailable',
-            }),
+            jsonEncode({'schema_version': memoryArtworkSchemaVersion, 'status': 'unavailable'}),
             200,
           );
         }
@@ -548,10 +676,7 @@ void main() {
         }) async {
           methods.add(method);
           return http.Response(
-            jsonEncode({
-              'schema_version': memoryArtworkSchemaVersion,
-              if (rawStatus != null) 'status': rawStatus,
-            }),
+            jsonEncode({'schema_version': memoryArtworkSchemaVersion, if (rawStatus != null) 'status': rawStatus}),
             200,
           );
         },
@@ -598,11 +723,7 @@ void main() {
       },
     );
 
-    final result = await api.loadAutomaticallyForDisplay(
-      'memory-new',
-      pollAttempts: 1,
-      pollInterval: Duration.zero,
-    );
+    final result = await api.loadAutomaticallyForDisplay('memory-new', pollAttempts: 1, pollInterval: Duration.zero);
 
     expect(result.isReady, isTrue);
     expect(methods, ['GET', 'GET']);
@@ -647,11 +768,7 @@ void main() {
         },
       );
 
-      final result = await api.loadForDisplay(
-        'memory-terminal-$terminalJob',
-        enqueueIfMissing: true,
-        pollAttempts: 0,
-      );
+      final result = await api.loadForDisplay('memory-terminal-$terminalJob', enqueueIfMissing: true, pollAttempts: 0);
 
       expect(result.status, MemoryArtworkResultStatus.generating, reason: terminalJob);
       expect(methods, ['GET', 'GET', 'POST'], reason: terminalJob);

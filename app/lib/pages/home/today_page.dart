@@ -54,6 +54,7 @@ typedef _HomeArtworkAuthoritySnapshot = ({
   String profileBindingId,
   int generation,
 });
+typedef _HomeArtworkRecoveryAttemptKey = ({String uid, String profileBindingId, int generation, int foregroundCycle});
 typedef _ArtworkStudioSnapshot = ({
   MemoryArtworkPreferences preferences,
   MemoryArtworkLibraries? libraries,
@@ -280,6 +281,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   int _homeArtworkQueueRefreshSequence = 0;
   int _homeArtworkLibrariesRefreshSequence = 0;
   int _homeArtworkDisplayEpoch = 0;
+  int _homeArtworkRecoveryForegroundCycle = 0;
+  _HomeArtworkRecoveryAttemptKey? _homeArtworkRecoveryAttemptKey;
+  Future<void>? _homeArtworkRecoveryInFlight;
   final ValueNotifier<_ArtworkStudioSnapshot?> _homeArtworkStudioState = ValueNotifier(null);
   MemoryGalleryLayout _homeMemoryLayout = MemoryGalleryLayout.journal;
   MemoryGallerySort _homeMemorySort = MemoryGallerySort.recent;
@@ -408,6 +412,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _homeArtworkQueuePollTimer?.cancel();
     _homeArtworkStyleOperationGeneration++;
     _homeArtworkQueueOperationGeneration++;
+    _homeArtworkRecoveryForegroundCycle++;
+    _homeArtworkRecoveryAttemptKey = null;
+    _homeArtworkRecoveryInFlight = null;
     final finalization = _homeCaptureFinalizationInFlight;
     if (finalization != null) {
       _abandonHomeCaptureAfterFinalization = true;
@@ -454,9 +461,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      _homeArtworkRecoveryForegroundCycle++;
       unawaited(_syncTodayCardAuthority(forceReload: true));
       if (_guardianAvailable) unawaited(_loadWhisperState());
       if (_homeArtworkPreferences?.releaseEnabled == true) {
+        unawaited(_recoverRecentHomeArtwork());
         unawaited(_refreshHomeArtworkQueueStatus());
       }
     }
@@ -585,7 +594,73 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       // Preference reloads happen after provisioning, refresh, and lifecycle
       // transitions. Only the first empty state may start a preview; later
       // reloads must not silently reset or extend the bounded batch.
-      if (savedCursor.isEmpty) unawaited(_advanceHomeArtworkBackfill());
+      unawaited(_recoverRecentHomeArtworkThenStartPreview(authority, startPreview: savedCursor.isEmpty));
+    }
+  }
+
+  Future<void> _recoverRecentHomeArtworkThenStartPreview(
+    _HomeArtworkAuthoritySnapshot authority, {
+    required bool startPreview,
+  }) async {
+    await _recoverRecentHomeArtwork();
+    if (startPreview && mounted && _isHomeArtworkAuthorityCurrent(authority)) {
+      await _advanceHomeArtworkBackfill();
+    }
+  }
+
+  Future<void> _recoverRecentHomeArtwork() async {
+    final authority = _captureHomeArtworkAuthority();
+    final preferences = _homeArtworkPreferences;
+    if (authority == null ||
+        preferences == null ||
+        !preferences.releaseEnabled ||
+        preferences.consent != 'accepted' ||
+        preferences.consentVersion.isEmpty) {
+      return;
+    }
+    final foregroundCycle = _homeArtworkRecoveryForegroundCycle;
+    final attemptKey = (
+      uid: authority.uid,
+      profileBindingId: authority.profileBindingId,
+      generation: authority.generation,
+      foregroundCycle: foregroundCycle,
+    );
+    if (_homeArtworkRecoveryAttemptKey == attemptKey) {
+      await (_homeArtworkRecoveryInFlight ?? Future<void>.value());
+      return;
+    }
+    _homeArtworkRecoveryAttemptKey = attemptKey;
+    final operation = _performRecentHomeArtworkRecovery(authority, foregroundCycle);
+    _homeArtworkRecoveryInFlight = operation;
+    try {
+      await operation;
+    } finally {
+      if (identical(_homeArtworkRecoveryInFlight, operation)) {
+        _homeArtworkRecoveryInFlight = null;
+      }
+    }
+  }
+
+  Future<void> _performRecentHomeArtworkRecovery(_HomeArtworkAuthoritySnapshot authority, int foregroundCycle) async {
+    MemoryArtworkRecentRecovery? recovery;
+    try {
+      recovery = await _memoryArtworkApi.recoverRecent();
+    } on ExactAccountAuthorityChangedException {
+      _scheduleHomeArtworkReload();
+      return;
+    } catch (_) {
+      return;
+    }
+    if (!mounted ||
+        recovery == null ||
+        foregroundCycle != _homeArtworkRecoveryForegroundCycle ||
+        !_isHomeArtworkAuthorityCurrent(authority)) {
+      return;
+    }
+    if (recovery.hasDisplayableOrActiveArtwork) {
+      setState(() => _homeArtworkDisplayEpoch++);
+      unawaited(_refreshHomeArtworkQueueStatus());
+      unawaited(_refreshHomeArtworkLibraries());
     }
   }
 
@@ -1863,11 +1938,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final remainingMemories = showDayGallery ? orderedMemories : orderedMemories.skip(1).toList(growable: false);
     final artworkReleaseEnabled = _homeArtworkPreferences?.releaseEnabled == true;
     final automaticArtworkRepairMemoryIds = _homeMemorySort == MemoryGallerySort.recent && artworkReleaseEnabled
-        ? homeRecentArtworkRepairMemoryIds(
-            orderedMemories,
-            now: now,
-            visiblePerDayLimit: showDayGallery ? 4 : null,
-          )
+        ? homeRecentArtworkRepairMemoryIds(orderedMemories, now: now, visiblePerDayLimit: showDayGallery ? 4 : null)
         : <String>{};
     final showDailyNote = shouldShowDailyNote(_todayCardController.state);
     final showGuardianSurfaces = _guardianAvailable;
