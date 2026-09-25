@@ -858,6 +858,166 @@ void main() {
     expect(capture.recordingState, RecordingState.deviceRecord);
   });
 
+  test('connected silent necklace automatically replaces its stale BLE session', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider(
+      failuresBeforeStart: 1,
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+    );
+    var scans = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scans++;
+        return necklace;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      deviceCaptureRetryDelay: Duration.zero,
+      connectedCaptureRecoveryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
+    for (var attempt = 0; attempt < 100 && capture.recordingState != RecordingState.deviceRecord; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+
+    expect(service.disconnectCalls, 1);
+    expect(scans, 1);
+    expect(capture.deviceStarts, 2);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+    expect(provider.presentationConnectedDevice?.id, necklace.id);
+    expect(provider.connectedCaptureRecoveryAttempts, 0, reason: 'live audio resets the bounded recovery budget');
+  });
+
+  test('mid-stream physical audio stall automatically replaces its stale BLE session', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider(
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+    );
+    var scans = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scans++;
+        return necklace;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      connectedCaptureRecoveryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
+    for (var attempt = 0; attempt < 100 && capture.recordingState != RecordingState.deviceRecord; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    expect(capture.deviceStarts, 1);
+
+    capture.updateRecordingState(RecordingState.error);
+    for (var attempt = 0; attempt < 100 && capture.deviceStarts < 2; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+
+    expect(service.disconnectCalls, 1);
+    expect(scans, 1);
+    expect(capture.deviceStarts, 2);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+    expect(provider.presentationConnectedDevice?.id, necklace.id);
+  });
+
+  test('connected silent necklace recovery stops after its bounded retry budget', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider(
+      failuresBeforeStart: 10,
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+    );
+    var scans = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scans++;
+        return necklace;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      deviceCaptureRetryDelay: Duration.zero,
+      connectedCaptureRecoveryDelay: Duration.zero,
+      maxConnectedCaptureRecoveryAttempts: 2,
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
+    for (var attempt = 0; attempt < 100 && provider.connectedCaptureRecoveryAttempts < 2; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    await pumpEventQueue();
+
+    expect(service.disconnectCalls, 2);
+    expect(scans, 2);
+    expect(capture.deviceStarts, 3, reason: 'the initial attempt plus two fresh BLE sessions are allowed');
+    expect(capture.recordingState, RecordingState.error);
+    expect(provider.presentationIsConnected, isTrue);
+    expect(provider.connectedCaptureRecoveryAttempts, 2);
+
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(service.disconnectCalls, 2, reason: 'a persistently silent device must not enter a reconnect loop');
+  });
+
+  test('account authority change cancels pending connected-silent recovery', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace, uid: 'account-a', profileBindingId: 'profile-a');
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider(
+      failuresBeforeStart: 10,
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+    );
+    var scans = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scans++;
+        return necklace;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      deviceCaptureRetryDelay: Duration.zero,
+      connectedCaptureRecoveryDelay: const Duration(milliseconds: 50),
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
+    for (var attempt = 0; attempt < 100 && capture.deviceStarts == 0; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    await pumpEventQueue();
+
+    final preferences = SharedPreferencesUtil()..uid = 'account-b';
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-b');
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    await pumpEventQueue();
+
+    expect(service.disconnectCalls, 0, reason: 'stale account A recovery cannot mutate account B BLE state');
+    expect(scans, 0);
+    expect(capture.deviceStarts, 1);
+    expect(provider.presentationIsConnected, isFalse);
+  });
+
   test('transcription-only retry preserves the healthy BLE session', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await bindRememberedDeviceForCurrentTestAuthority(necklace);

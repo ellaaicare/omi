@@ -38,6 +38,8 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     @visibleForTesting Duration automaticReconnectCooldown = const Duration(minutes: 1),
     @visibleForTesting Duration deviceCaptureRetryDelay = const Duration(milliseconds: 500),
     @visibleForTesting int maxDeviceCaptureStartAttempts = 3,
+    @visibleForTesting Duration connectedCaptureRecoveryDelay = const Duration(seconds: 1),
+    @visibleForTesting int maxConnectedCaptureRecoveryAttempts = 2,
     @visibleForTesting DevicePreferenceWriter? rememberedDeviceWriter,
     @visibleForTesting bool automaticallyReconnectOnReady = true,
   })  : _deviceService = deviceService ?? ServiceManager.instance().device,
@@ -49,6 +51,8 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         _automaticReconnectCooldown = automaticReconnectCooldown,
         _deviceCaptureRetryDelay = deviceCaptureRetryDelay,
         _maxDeviceCaptureStartAttempts = maxDeviceCaptureStartAttempts,
+        _connectedCaptureRecoveryDelay = connectedCaptureRecoveryDelay,
+        _maxConnectedCaptureRecoveryAttempts = maxConnectedCaptureRecoveryAttempts,
         _rememberedDeviceWriter = rememberedDeviceWriter ?? SharedPreferencesUtil().btDeviceSet,
         _automaticallyReconnectOnReady = automaticallyReconnectOnReady {
     _lastDeviceOwnerBinding = _rememberedDeviceOwnerBinding();
@@ -81,15 +85,23 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   final Duration _automaticReconnectCooldown;
   final Duration _deviceCaptureRetryDelay;
   final int _maxDeviceCaptureStartAttempts;
+  final Duration _connectedCaptureRecoveryDelay;
+  final int _maxConnectedCaptureRecoveryAttempts;
   final DevicePreferenceWriter _rememberedDeviceWriter;
   final bool _automaticallyReconnectOnReady;
   final ValueListenable<int> _accountAuthorityChanges = SharedPreferencesUtil.aiConsentAuthorityChanges;
   int _automaticReconnectAttempts = 0;
   bool _automaticReconnectExhausted = false;
   DateTime? _automaticReconnectCooldownUntil;
+  Future<void>? _connectedCaptureRecovery;
+  int _connectedCaptureRecoveryAttempts = 0;
+  String? _connectedCaptureRecoveryDeviceId;
+  int? _connectedCaptureRecoveryAuthorityGeneration;
 
   int get automaticReconnectAttempts => _automaticReconnectAttempts;
   bool get automaticReconnectExhausted => _automaticReconnectExhausted;
+  @visibleForTesting
+  int get connectedCaptureRecoveryAttempts => _connectedCaptureRecoveryAttempts;
 
   bool _havingNewFirmware = false;
   bool get havingNewFirmware => _havingNewFirmware && pairedDevice != null && isConnected;
@@ -241,6 +253,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     _rememberedDeviceAuthorityGeneration++;
     _deviceOperationGeneration++;
     _freshBleSessionRequirement = null;
+    _resetConnectedCaptureRecoveryBudget();
     _requiresExplicitDeviceSelectionAfterAuthorityChange = true;
     _connectDebouncer.cancel();
     _authorityReconciliationPending = true;
@@ -353,11 +366,15 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   }
 
   void _onCaptureProviderChanged() {
-    if (_deferredDeviceCaptureStart != null) return;
     final capture = captureProvider;
+    final activeDevice = connectedDevice;
+    if (activeDevice != null) {
+      _scheduleConnectedCaptureRecovery(activeDevice, _deviceOperationGeneration);
+    }
+    if (_deferredDeviceCaptureStart != null) return;
     final generation = _deferredDeviceCaptureGeneration;
     final deviceId = _deferredDeviceCaptureId;
-    final device = connectedDevice;
+    final device = activeDevice;
     if (capture == null ||
         capture.phoneCaptureOwnsMobileAudio ||
         generation == null ||
@@ -369,7 +386,13 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
 
     _clearDeferredDeviceCapture();
     late final Future<void> resume;
-    resume = _startDeviceCaptureWithRetry(device!, generation).then<void>((_) {}).whenComplete(() {
+    resume = _startDeviceCaptureWithRetry(device!, generation).then<void>((captureStarted) {
+      if (captureStarted) {
+        _resetConnectedCaptureRecoveryBudget();
+      } else {
+        _scheduleConnectedCaptureRecovery(device, generation);
+      }
+    }).whenComplete(() {
       if (identical(_deferredDeviceCaptureStart, resume)) {
         _deferredDeviceCaptureStart = null;
         _onCaptureProviderChanged();
@@ -850,6 +873,8 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     final stored = _rememberedDeviceForCurrentAuthority();
     if (stored == null) return false;
 
+    _resetConnectedCaptureRecoveryBudget();
+
     await _captureTeardown;
     if (!_deviceServiceReady || !_isCurrentOwnerBoundDevice(stored.id)) return false;
 
@@ -971,6 +996,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     Logger.debug('onDisconnected inside: $connectedDevice');
     final disconnectedDeviceId = deviceId ?? connectedDevice?.id ?? pairedDevice?.id;
     _activeDeviceConnectionSession = null;
+    _resetConnectedCaptureRecoveryBudget();
     _deviceOperationGeneration++;
     _havingNewFirmware = false;
     connectedDevice = null;
@@ -1064,7 +1090,12 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       if (capture?.phoneCaptureOwnsMobileAudio == true) {
         _deferDeviceCaptureUntilPhoneReleases(device, operationGeneration);
       } else {
-        await _startDeviceCaptureWithRetry(device, operationGeneration);
+        final captureStarted = await _startDeviceCaptureWithRetry(device, operationGeneration);
+        if (captureStarted) {
+          _resetConnectedCaptureRecoveryBudget();
+        } else {
+          _scheduleConnectedCaptureRecovery(device, operationGeneration);
+        }
       }
       if (!_isDeviceOperationCurrent(operationGeneration)) return;
 
@@ -1157,6 +1188,87 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       '$_maxDeviceCaptureStartAttempts attempts',
     );
     return false;
+  }
+
+  bool _requiresFreshBleSessionForCaptureFailure(CaptureDiagnosticFailure failure) {
+    return failure == CaptureDiagnosticFailure.physicalAudioUnavailable ||
+        failure == CaptureDiagnosticFailure.necklaceAudioSubscriptionUnavailable ||
+        failure == CaptureDiagnosticFailure.necklaceConnectionUnavailable;
+  }
+
+  void _resetConnectedCaptureRecoveryBudget() {
+    _connectedCaptureRecoveryAttempts = 0;
+    _connectedCaptureRecoveryDeviceId = null;
+    _connectedCaptureRecoveryAuthorityGeneration = null;
+  }
+
+  void _scheduleConnectedCaptureRecovery(BtDevice device, int failedOperationGeneration) {
+    final capture = captureProvider;
+    final failure = capture?.captureDiagnostics.failure;
+    if (capture == null ||
+        capture.phoneCaptureOwnsMobileAudio ||
+        capture.recordingState != RecordingState.error ||
+        failure == null ||
+        !_requiresFreshBleSessionForCaptureFailure(failure) ||
+        !_isDeviceOperationCurrent(failedOperationGeneration) ||
+        !isConnected ||
+        connectedDevice?.id != device.id ||
+        !_isCurrentOwnerBoundDevice(device.id)) {
+      return;
+    }
+
+    final authorityGeneration = _rememberedDeviceAuthorityGeneration;
+    if (_connectedCaptureRecoveryDeviceId != device.id ||
+        _connectedCaptureRecoveryAuthorityGeneration != authorityGeneration) {
+      _connectedCaptureRecoveryAttempts = 0;
+      _connectedCaptureRecoveryDeviceId = device.id;
+      _connectedCaptureRecoveryAuthorityGeneration = authorityGeneration;
+    }
+    if (_connectedCaptureRecovery != null ||
+        _connectedCaptureRecoveryAttempts >= _maxConnectedCaptureRecoveryAttempts) {
+      return;
+    }
+
+    late final Future<void> recovery;
+    recovery = (() async {
+      await Future<void>.delayed(_connectedCaptureRecoveryDelay);
+      final currentCapture = captureProvider;
+      final currentFailure = currentCapture?.captureDiagnostics.failure;
+      if (!_isDeviceOperationCurrent(failedOperationGeneration) ||
+          authorityGeneration != _rememberedDeviceAuthorityGeneration ||
+          !_isCurrentOwnerBoundDevice(device.id) ||
+          !isConnected ||
+          connectedDevice?.id != device.id ||
+          currentCapture == null ||
+          currentCapture.phoneCaptureOwnsMobileAudio ||
+          currentCapture.recordingState == RecordingState.deviceRecord ||
+          currentFailure == null ||
+          !_requiresFreshBleSessionForCaptureFailure(currentFailure)) {
+        return;
+      }
+
+      _connectedCaptureRecoveryAttempts++;
+      final recoveryGeneration = ++_deviceOperationGeneration;
+      updateConnectingStatus(true);
+      try {
+        await _resetConnectedDeviceForCaptureRetry(device, recoveryGeneration);
+        if (!_isDeviceOperationCurrent(recoveryGeneration)) return;
+        await scanAndConnectToDevice(operationGeneration: recoveryGeneration, startCaptureWhenConnected: true);
+      } catch (error) {
+        Logger.debug('Automatic silent-necklace recovery failed: $error');
+      } finally {
+        if (_isDeviceOperationCurrent(recoveryGeneration)) updateConnectingStatus(false);
+      }
+    })()
+        .whenComplete(() {
+      if (!identical(_connectedCaptureRecovery, recovery)) return;
+      _connectedCaptureRecovery = null;
+      final currentDevice = connectedDevice;
+      if (currentDevice != null) {
+        _scheduleConnectedCaptureRecovery(currentDevice, _deviceOperationGeneration);
+      }
+    });
+    _connectedCaptureRecovery = recovery;
   }
 
   Future<void> _handleDeviceConnected(String deviceId, int operationGeneration, int connectionGeneration) async {
@@ -1367,6 +1479,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         _reconnectionTimer?.cancel();
         _disconnectDebouncer.cancel();
         _connectDebouncer.cancel();
+        _resetConnectedCaptureRecoveryBudget();
         _bleBatteryLevelListener?.cancel();
         _bleBatteryLevelListener = null;
         connectedDevice = null;
