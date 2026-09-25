@@ -1866,6 +1866,42 @@ void main() {
     expect(provider.isConnecting, isFalse);
   });
 
+  test('automatic reconnect keeps retrying after a timed-out scan and ignores its late result', () async {
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final firstScan = Completer<BtDevice?>();
+    var scanCalls = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () {
+        scanCalls++;
+        return scanCalls == 1 ? firstScan.future : Future<BtDevice?>.value();
+      },
+      reconnectionInterval: const Duration(milliseconds: 2),
+      maxAutomaticReconnectAttempts: 3,
+      connectionAttemptTimeout: const Duration(milliseconds: 10),
+      automaticallyReconnectOnReady: false,
+    );
+    addTearDown(provider.dispose);
+
+    await provider.periodicConnect('test timed-out automatic reconnect');
+    for (var attempt = 0; attempt < 100 && !provider.automaticReconnectExhausted; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+
+    expect(scanCalls, 3);
+    expect(provider.automaticReconnectAttempts, 3);
+    expect(provider.automaticReconnectExhausted, isTrue);
+    expect(provider.isConnecting, isFalse);
+
+    firstScan.complete(necklace);
+    await pumpEventQueue();
+
+    expect(provider.presentationIsConnected, isFalse);
+    expect(provider.presentationConnectedDevice, isNull);
+    expect(scanCalls, 3, reason: 'the late first scan remains fenced and cannot restart the exhausted loop');
+  });
+
   test('automatic reconnect recovers from scan exceptions and exhausts', () async {
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
     var scanCalls = 0;

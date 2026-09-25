@@ -423,6 +423,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     String? expectedDeviceId,
     ValueGetter<bool>? connectionCommittedByAttempt,
     VoidCallback? onCurrentTimeout,
+    bool supersedeDeviceOperationOnTimeout = true,
   }) async {
     final expectedDeviceWasConnectedAtStart =
         expectedDeviceId != null && presentationIsConnected && presentationConnectedDevice?.id == expectedDeviceId;
@@ -447,9 +448,11 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
           (expectedDeviceId == null || presentationConnectedDevice?.id == expectedDeviceId);
       if (_isConnectionAttemptCurrent(token)) {
         if (!connected) {
-          // A timed-out transport future cannot be cancelled. Supersede its
-          // generation so it cannot attach a late device to this account.
-          _deviceOperationGeneration++;
+          // A timed-out transport future cannot be cancelled. Explicit work
+          // supersedes its operation generation so it cannot attach late.
+          // Periodic reconnect owns its generation across attempts, so its
+          // connection token alone fences the timed-out continuation.
+          if (supersedeDeviceOperationOnTimeout) _deviceOperationGeneration++;
           onCurrentTimeout?.call();
           _clearUncommittedConnectionState();
         }
@@ -931,7 +934,14 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         }
         _automaticReconnectAttempts++;
         try {
-          await scanAndConnectToDevice(operationGeneration: generation, startCaptureWhenConnected: boundDeviceOnly);
+          await _runConnectionAttempt(
+            (token) => _scanAndConnectToDevice(
+              operationGeneration: generation,
+              startCaptureWhenConnected: boundDeviceOnly,
+              connectionAttemptToken: token,
+            ),
+            supersedeDeviceOperationOnTimeout: false,
+          );
         } catch (error) {
           Logger.debug('Automatic BLE reconnect failed: $error');
           if (_isDeviceOperationCurrent(generation)) {
