@@ -1095,6 +1095,49 @@ void main() {
     expect(scans, 3, reason: 'the reconnect loop must remain stopped throughout its cooldown');
   });
 
+  test('connected silent recovery stops after bounded owner-only reconnect scan exceptions', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider(
+      failuresBeforeStart: 1,
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+    );
+    var scans = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scans++;
+        throw StateError('synthetic persistent recovery scan failure');
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      reconnectionInterval: const Duration(milliseconds: 2),
+      maxAutomaticReconnectAttempts: 2,
+      automaticReconnectCooldown: const Duration(minutes: 1),
+      deviceCaptureRetryDelay: Duration.zero,
+      connectedCaptureRecoveryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
+    for (var attempt = 0; attempt < 100 && !provider.automaticReconnectExhausted; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+
+    expect(service.disconnectCalls, 1);
+    expect(scans, 3, reason: 'one fresh-session scan plus two bounded owner-only reconnect scans are allowed');
+    expect(capture.deviceStarts, 1);
+    expect(provider.presentationIsConnected, isFalse);
+    expect(provider.automaticReconnectAttempts, 2);
+    expect(provider.automaticReconnectExhausted, isTrue);
+
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(scans, 3, reason: 'throwing reconnect scans must remain stopped throughout cooldown');
+  });
+
   test('account authority change cancels pending connected-silent recovery', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await bindRememberedDeviceForCurrentTestAuthority(necklace, uid: 'account-a', profileBindingId: 'profile-a');
