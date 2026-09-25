@@ -977,6 +977,43 @@ void main() {
     expect(service.disconnectCalls, 2, reason: 'a persistently silent device must not enter a reconnect loop');
   });
 
+  test('connected silent recovery continues through a transient reconnect scan miss', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider(
+      failuresBeforeStart: 1,
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+    );
+    var scans = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scans++;
+        return scans == 1 ? null : necklace;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      reconnectionInterval: const Duration(milliseconds: 2),
+      deviceCaptureRetryDelay: Duration.zero,
+      connectedCaptureRecoveryDelay: Duration.zero,
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
+    for (var attempt = 0; attempt < 100 && capture.recordingState != RecordingState.deviceRecord; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+
+    expect(service.disconnectCalls, 1);
+    expect(scans, greaterThanOrEqualTo(2));
+    expect(capture.deviceStarts, 2);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+    expect(provider.presentationConnectedDevice?.id, necklace.id);
+  });
+
   test('account authority change cancels pending connected-silent recovery', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await bindRememberedDeviceForCurrentTestAuthority(necklace, uid: 'account-a', profileBindingId: 'profile-a');

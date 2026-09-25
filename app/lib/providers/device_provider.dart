@@ -1254,6 +1254,15 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         await _resetConnectedDeviceForCaptureRetry(device, recoveryGeneration);
         if (!_isDeviceOperationCurrent(recoveryGeneration)) return;
         await scanAndConnectToDevice(operationGeneration: recoveryGeneration, startCaptureWhenConnected: true);
+        if (_isDeviceOperationCurrent(recoveryGeneration) && !isConnected && _isCurrentOwnerBoundDevice(device.id)) {
+          unawaited(
+            periodicConnect(
+              'automatic silent-necklace recovery follow-up',
+              boundDeviceOnly: true,
+              operationGeneration: recoveryGeneration,
+            ),
+          );
+        }
       } catch (error) {
         Logger.debug('Automatic silent-necklace recovery failed: $error');
       } finally {
