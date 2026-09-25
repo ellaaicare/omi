@@ -1131,6 +1131,7 @@ void main() {
 
     expect(harness.capture.phoneStops, 1);
     expect(device.reconnects, 1);
+    expect(device.freshSessionReconnects, 1);
     expect(
       harness.capture.captureDiagnostics.source,
       CaptureDiagnosticSource.phone,
@@ -2989,10 +2990,15 @@ class _HomeHarness {
 class _ReconnectTrackingDeviceProvider extends DeviceProvider {
   CaptureProvider? capture;
   int reconnects = 0;
+  int freshSessionReconnects = 0;
 
   @override
-  Future<bool> connectDeviceForCurrentUser(BtDevice device) async {
+  Future<bool> connectDeviceForCurrentUser(
+    BtDevice device, {
+    bool requireFreshSession = false,
+  }) async {
     reconnects++;
+    if (requireFreshSession) freshSessionReconnects++;
     await capture?.streamDeviceRecording(device: presentationConnectedDevice);
     return true;
   }
@@ -3011,7 +3017,10 @@ class _LiveDockDeviceProvider extends DeviceProvider {
   bool get connectionAttemptFailed => _failed;
 
   @override
-  Future<bool> connectDeviceForCurrentUser(BtDevice device) async {
+  Future<bool> connectDeviceForCurrentUser(
+    BtDevice device, {
+    bool requireFreshSession = false,
+  }) async {
     connects++;
     return false;
   }

@@ -566,11 +566,20 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     );
   }
 
-  /// Connects a necklace deliberately selected by the signed-in user. BLE
-  /// ownership is UID-scoped; capture consent is checked later by
-  /// [CaptureProvider.streamDeviceRecording] before any audio leaves the app.
-  Future<bool> connectDeviceForCurrentUser(BtDevice device) async {
-    if (!_deviceServiceReady || device.id.isEmpty || _rememberedDeviceOwnerBinding() == null) return false;
+  /// Connects a necklace deliberately selected by the signed-in user. A forced
+  /// fresh session is accepted only for the device already bound to this UID.
+  /// Capture consent is checked later by [CaptureProvider.streamDeviceRecording]
+  /// before any audio leaves the app.
+  Future<bool> connectDeviceForCurrentUser(
+    BtDevice device, {
+    bool requireFreshSession = false,
+  }) async {
+    if (!_deviceServiceReady ||
+        device.id.isEmpty ||
+        _rememberedDeviceOwnerBinding() == null ||
+        (requireFreshSession && !_isCurrentOwnerBoundDevice(device.id))) {
+      return false;
+    }
 
     var freshSessionResetStarted = false;
     var connectionCommittedByAttempt = false;
@@ -578,6 +587,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     return _runConnectionAttempt(
       (token) async {
         final generation = ++_deviceOperationGeneration;
+        if (requireFreshSession) _markFreshBleSessionRequired(device);
         pairedDevice = device;
         notifyListeners();
 

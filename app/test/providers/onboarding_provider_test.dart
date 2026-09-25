@@ -43,7 +43,11 @@ class _FailedTargetConnectDeviceProvider extends DeviceProvider {
       : super(deviceService: _NoopDeviceService(), automaticallyReconnectOnReady: false);
 
   @override
-  Future<bool> connectDeviceForCurrentUser(BtDevice device) async => false;
+  Future<bool> connectDeviceForCurrentUser(
+    BtDevice device, {
+    bool requireFreshSession = false,
+  }) async =>
+      false;
 }
 
 void main() {

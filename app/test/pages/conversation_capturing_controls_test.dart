@@ -519,7 +519,10 @@ class _FakeDeviceProvider extends DeviceProvider {
   bool get presentationIsConnected => true;
 
   @override
-  Future<bool> connectDeviceForCurrentUser(BtDevice device) async {
+  Future<bool> connectDeviceForCurrentUser(
+    BtDevice device, {
+    bool requireFreshSession = false,
+  }) async {
     reconnects++;
     return true;
   }

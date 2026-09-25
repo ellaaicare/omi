@@ -1304,6 +1304,68 @@ void main() {
     expect(capture.recordingState, RecordingState.deviceRecord);
   });
 
+  test('explicit fresh-session retry resets BLE after phone diagnostics replace the necklace failure', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready)..nativeSessionRetained = true;
+    final capture = _RecordingCaptureProvider()..updateRecordingState(RecordingState.stop);
+    var scans = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scans++;
+        return necklace;
+      },
+      storageListResolver: (_) async => const [],
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+    provider
+      ..connectedDevice = necklace
+      ..pairedDevice = necklace
+      ..setIsConnected(true);
+
+    final recovered = await provider.connectDeviceForCurrentUser(
+      necklace,
+      requireFreshSession: true,
+    );
+    await pumpEventQueue();
+
+    expect(recovered, isTrue);
+    expect(service.disconnectCalls, 1);
+    expect(service.nativeSessionRetained, isFalse);
+    expect(scans, 1);
+    expect(capture.deviceStarts, 1);
+    expect(provider.presentationConnectedDevice?.id, necklace.id);
+  });
+
+  test('explicit fresh-session retry cannot reset a device outside the current UID pairing', () async {
+    final necklaceA = BtDevice(name: 'Ella A', id: 'necklace-a', type: DeviceType.omi, rssi: -30);
+    final necklaceB = BtDevice(name: 'Ella B', id: 'necklace-b', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklaceA);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready)..nativeSessionRetained = true;
+    final provider = DeviceProvider(
+      deviceService: service,
+      storageListResolver: (_) async => const [],
+      automaticallyReconnectOnReady: false,
+    );
+    addTearDown(provider.dispose);
+    provider
+      ..connectedDevice = necklaceA
+      ..pairedDevice = necklaceA
+      ..setIsConnected(true);
+
+    expect(
+      await provider.connectDeviceForCurrentUser(necklaceB, requireFreshSession: true),
+      isFalse,
+    );
+    expect(service.disconnectCalls, 0);
+    expect(service.ensureConnectionCalls, 0);
+    expect(provider.presentationConnectedDevice?.id, necklaceA.id);
+    expect(provider.presentationPairedDevice?.id, necklaceA.id);
+  });
+
   test('failed native disconnect joins capture teardown and leaves explicit retry usable', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await bindRememberedDeviceForCurrentTestAuthority(necklace);

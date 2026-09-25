@@ -302,6 +302,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   MemoryArtworkLibraries? _homeArtworkLibraries;
   MemoryArtworkQueueStatus? _homeArtworkQueueStatus;
   BtDevice? _resumeNecklaceAfterPhoneCapture;
+  bool _resumeNecklaceWithFreshSessionAfterPhoneCapture = false;
   EllaCaptureSource? _selectedCaptureSource;
 
   static const _artworkBackfillComplete = '__complete__';
@@ -415,6 +416,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _homeCaptureAuthorityGeneration++;
     final authorityGeneration = _homeCaptureAuthorityGeneration;
     _resumeNecklaceAfterPhoneCapture = null;
+    _resumeNecklaceWithFreshSessionAfterPhoneCapture = false;
     _externalCaptureFinalizationSource = null;
     _todayCardController.invalidateAuthority();
     _homeArtworkBackfillPollTimer?.cancel();
@@ -1555,13 +1557,18 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
 
   Future<void> _resumeAmbientNecklace() async {
     final device = _resumeNecklaceAfterPhoneCapture;
+    final requireFreshSession = _resumeNecklaceWithFreshSessionAfterPhoneCapture;
     _resumeNecklaceAfterPhoneCapture = null;
+    _resumeNecklaceWithFreshSessionAfterPhoneCapture = false;
     if (device == null || !mounted) return;
     final deviceProvider = context.read<DeviceProvider>();
     final capture = context.read<CaptureProvider>();
     if (!deviceProvider.canResumeAmbientCaptureFor(device)) return;
     try {
-      final connected = await deviceProvider.connectDeviceForCurrentUser(device);
+      final connected = await deviceProvider.connectDeviceForCurrentUser(
+        device,
+        requireFreshSession: requireFreshSession,
+      );
       final resumedDevice = deviceProvider.presentationConnectedDevice;
       if (connected &&
           resumedDevice?.id == device.id &&
@@ -1815,6 +1822,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       if (necklaceTransportOwned) {
         if (necklaceConnected && connectedDevice != null) {
           _resumeNecklaceAfterPhoneCapture = connectedDevice;
+          _resumeNecklaceWithFreshSessionAfterPhoneCapture =
+              todayNecklaceFailureRequiresFreshSession(capture.captureDiagnostics.failure);
         }
         if (capture.recordingState == RecordingState.deviceRecord || capture.recordingState == RecordingState.pause) {
           final hadCapturableContent = capture.captureDiagnostics.hasPhysicalAudio || capture.hasCapturableContent;
