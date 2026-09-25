@@ -1257,7 +1257,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
           connectedDevice?.id != device.id ||
           currentCapture == null ||
           currentCapture.phoneCaptureOwnsMobileAudio ||
-          currentCapture.recordingState == RecordingState.deviceRecord ||
+          currentCapture.recordingState != RecordingState.error ||
           currentFailure == null ||
           !_requiresFreshBleSessionForCaptureFailure(currentFailure)) {
         return;

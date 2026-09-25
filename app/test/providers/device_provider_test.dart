@@ -935,6 +935,45 @@ void main() {
     expect(provider.presentationConnectedDevice?.id, necklace.id);
   });
 
+  test('stopped capture cancels delayed connected-silent recovery without spending its budget', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider(
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+    );
+    var scans = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scans++;
+        return necklace;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      connectedCaptureRecoveryDelay: const Duration(milliseconds: 50),
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
+    for (var attempt = 0; attempt < 100 && capture.recordingState != RecordingState.deviceRecord; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    expect(capture.deviceStarts, 1);
+
+    capture.updateRecordingState(RecordingState.error);
+    capture.updateRecordingState(RecordingState.stop);
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    await pumpEventQueue();
+
+    expect(service.disconnectCalls, 0, reason: 'an intentionally stopped capture must not reset BLE');
+    expect(scans, 0);
+    expect(provider.connectedCaptureRecoveryAttempts, 0, reason: 'cancelled recovery must not spend its budget');
+    expect(provider.presentationConnectedDevice?.id, necklace.id);
+  });
+
   test('connected silent necklace recovery stops after its bounded retry budget', () async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await bindRememberedDeviceForCurrentTestAuthority(necklace);
