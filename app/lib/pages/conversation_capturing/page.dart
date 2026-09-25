@@ -61,12 +61,7 @@ class ConversationCapturingPage extends StatefulWidget {
   final Future<ConversationProcessNowResult> Function()? onProcessNow;
   final EllaCaptureSource? preferredCaptureSource;
 
-  const ConversationCapturingPage({
-    super.key,
-    this.topConversationId,
-    this.onProcessNow,
-    this.preferredCaptureSource,
-  });
+  const ConversationCapturingPage({super.key, this.topConversationId, this.onProcessNow, this.preferredCaptureSource});
 
   @override
   State<ConversationCapturingPage> createState() => _ConversationCapturingPageState();
@@ -372,8 +367,14 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
 
   Future<void> _retryCapture(CaptureProvider provider, DeviceProvider deviceProvider) async {
     if (_captureSource(provider) == EllaCaptureSource.necklace) {
-      final reconnected = await deviceProvider.reconnectKnownDeviceForCapture(reason: 'Transcript necklace retry');
-      if (!mounted || reconnected) return;
+      final target = deviceProvider.presentationConnectedDevice ?? deviceProvider.presentationPairedDevice;
+      final connected = target != null && await deviceProvider.connectDeviceForCurrentUser(target);
+      if (connected &&
+          !provider.phoneCaptureOwnsMobileAudio &&
+          provider.recordingState != RecordingState.deviceRecord) {
+        await provider.streamDeviceRecording(device: deviceProvider.presentationConnectedDevice ?? target);
+      }
+      if (!mounted || provider.recordingState == RecordingState.deviceRecord) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable)));
       return;
     }

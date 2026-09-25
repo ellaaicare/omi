@@ -9399,6 +9399,9 @@ class AppLocalizationsHu extends AppLocalizations {
   String get todayRecordOnPhone => 'Records on this iPhone';
 
   @override
+  String get todayRecordOnNecklace => 'Records with your necklace';
+
+  @override
   String get todayRecordWithNecklace => 'Records with your necklace';
 
   @override
@@ -9621,6 +9624,9 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get todayDockNecklaceNotConnected => 'Necklace not connected';
+
+  @override
+  String get todayDockNecklaceConnectionFailed => 'Can\'t find your necklace · Try again';
 
   @override
   String get todayDockPhoneReady => 'iPhone · Ready';

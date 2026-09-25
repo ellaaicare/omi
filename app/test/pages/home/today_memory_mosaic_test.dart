@@ -183,6 +183,45 @@ void main() {
     await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/ella_home_memory_mosaic.png'));
   });
 
+  testWidgets('necklace dock routes connect through the provider and the open controls sheet stays live', (
+    tester,
+  ) async {
+    final necklace = BtDevice(name: 'Ella necklace', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = _LiveDockDeviceProvider(necklace);
+    final harness = await _pumpHome(tester, conversations: const [], device: device);
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-capture-source-necklace')));
+    await tester.pump();
+    expect(find.text('Necklace not connected'), findsOneWidget);
+    expect(find.text('Connect'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    expect(device.connects, 1);
+
+    device.showFailure();
+    await tester.pump();
+    expect(find.text("Can't find your necklace · Try again"), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('today-dock-status')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('today-reconnect-known-necklace')), findsOneWidget);
+
+    device.showConnecting();
+    await tester.pump();
+    final connectingButton = tester.widget<FilledButton>(find.byKey(const Key('today-reconnect-known-necklace')));
+    expect(connectingButton.onPressed, isNull);
+    expect(find.text('Necklace · Connecting…'), findsWidgets);
+
+    device.showConnected();
+    await tester.pump();
+    expect(find.byKey(const Key('today-reconnect-known-necklace')), findsNothing);
+    expect(find.text('Records with your necklace'), findsOneWidget);
+    expect(find.text('Necklace · Ready'), findsOneWidget);
+    expect(find.text('Record'), findsOneWidget);
+  });
+
   testWidgets('day collage retains existing artwork state when a new memory starts generating', (tester) async {
     final artwork = _FakeMemoryArtworkApi(
       displayResult: const MemoryArtworkResult(
@@ -625,6 +664,7 @@ void main() {
   ) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await _bindHomeNecklace(necklace);
     final device = _ReconnectTrackingDeviceProvider()
       ..pairedDevice = necklace
       ..connectedDevice = necklace
@@ -652,9 +692,112 @@ void main() {
 
     expect(harness.capture.phoneStops, 1);
     expect(device.reconnects, 1);
-    expect(device.freshSessionRequests, [isFalse]);
     expect(harness.capture.deviceStarts, 1);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
+  });
+
+  testWidgets('phone finalization does not reconnect a necklace replaced while the phone owned capture', (
+    tester,
+  ) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final necklaceA = BtDevice(name: 'Ella A', id: 'necklace-a', type: DeviceType.omi, rssi: -30);
+    final necklaceB = BtDevice(name: 'Ella B', id: 'necklace-b', type: DeviceType.omi, rssi: -30);
+    await _bindHomeNecklace(necklaceA);
+    final device = _ReconnectTrackingDeviceProvider()
+      ..pairedDevice = necklaceA
+      ..connectedDevice = necklaceA
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      initialRecordingState: RecordingState.deviceRecord,
+    );
+    addTearDown(harness.dispose);
+    device.capture = harness.capture;
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    expect(harness.capture.recordingState, RecordingState.record);
+
+    device
+      ..connectedDevice = necklaceB
+      ..pairedDevice = necklaceB
+      ..isConnected = true
+      ..notifyListeners();
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(device.reconnects, 0, reason: 'phone completion must not restore a superseded necklace');
+    expect(harness.capture.deviceStarts, 0);
+    expect(device.presentationConnectedDevice?.id, necklaceB.id);
+    expect(harness.capture.recordingState, RecordingState.stop);
+  });
+
+  testWidgets('phone finalization does not reconnect A while replacement B is pending', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final necklaceA = BtDevice(name: 'Ella A', id: 'necklace-a', type: DeviceType.omi, rssi: -30);
+    final necklaceB = BtDevice(name: 'Ella B', id: 'necklace-b', type: DeviceType.omi, rssi: -30);
+    await _bindHomeNecklace(necklaceA);
+    final device = _ReconnectTrackingDeviceProvider()
+      ..pairedDevice = necklaceA
+      ..connectedDevice = necklaceA
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      initialRecordingState: RecordingState.deviceRecord,
+    );
+    addTearDown(harness.dispose);
+    device.capture = harness.capture;
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    expect(harness.capture.recordingState, RecordingState.record);
+
+    device
+      ..pairedDevice = necklaceB
+      ..isConnecting = true
+      ..notifyListeners();
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(device.reconnects, 0);
+    expect(harness.capture.deviceStarts, 0);
+    expect(device.presentationConnectedDevice?.id, necklaceA.id);
+  });
+
+  testWidgets('phone finalization does not resurrect a necklace while unpair is in flight', (tester) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-a', type: DeviceType.omi, rssi: -30);
+    await _bindHomeNecklace(necklace);
+    final device = _ReconnectTrackingDeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      initialRecordingState: RecordingState.deviceRecord,
+    );
+    addTearDown(harness.dispose);
+    device.capture = harness.capture;
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    expect(harness.capture.recordingState, RecordingState.record);
+
+    await SharedPreferencesUtil().btDeviceSet(BtDevice.empty());
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(device.reconnects, 0);
+    expect(harness.capture.deviceStarts, 0);
+    expect(device.presentationConnectedDevice?.id, necklace.id, reason: 'native unpair may still be in flight');
   });
 
   testWidgets('failed phone finalization keeps ambient necklace stopped until the same moment succeeds', (
@@ -662,6 +805,7 @@ void main() {
   ) async {
     SharedPreferencesUtil().showSummarizeConfirmation = false;
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await _bindHomeNecklace(necklace);
     final device = _ReconnectTrackingDeviceProvider()
       ..pairedDevice = necklace
       ..connectedDevice = necklace
@@ -704,7 +848,6 @@ void main() {
     expect(harness.capture.phoneStops, 1, reason: 'retry must not stop the phone transport twice');
     expect(harness.capture.finalizationCalls, 3);
     expect(device.reconnects, 1);
-    expect(device.freshSessionRequests, [isFalse]);
     expect(harness.capture.deviceStarts, 1, reason: 'ambient necklace resumes only after the phone moment succeeds');
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
@@ -951,6 +1094,7 @@ void main() {
 
   testWidgets('necklace transport error is cleaned before an iPhone retry', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await _bindHomeNecklace(necklace);
     final device = _ReconnectTrackingDeviceProvider()
       ..pairedDevice = necklace
       ..connectedDevice = necklace
@@ -987,12 +1131,42 @@ void main() {
 
     expect(harness.capture.phoneStops, 1);
     expect(device.reconnects, 1);
-    expect(device.freshSessionRequests, [isTrue]);
+    expect(device.freshSessionReconnects, 1);
     expect(
       harness.capture.captureDiagnostics.source,
       CaptureDiagnosticSource.phone,
       reason: 'the stale-session decision must survive phone diagnostics replacing the necklace failure',
     );
+    expect(harness.capture.deviceStarts, 1);
+    expect(harness.capture.recordingState, RecordingState.deviceRecord);
+  });
+
+  testWidgets('Home necklace Record routes a definitive physical failure through fresh BLE recovery', (tester) async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = _ReconnectTrackingDeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      initialRecordingState: RecordingState.error,
+      initialCaptureDiagnostics: const CaptureDiagnostics(
+        source: CaptureDiagnosticSource.necklace,
+        phase: CaptureDiagnosticPhase.failed,
+        failure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+      ),
+    );
+    addTearDown(harness.dispose);
+    device.capture = harness.capture;
+
+    await tester.tap(find.byKey(const Key('today-capture-source-necklace')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(device.reconnects, 1);
     expect(harness.capture.deviceStarts, 1);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
@@ -1099,6 +1273,7 @@ void main() {
 
   testWidgets('failed phone start restores the ambient necklace stream', (tester) async {
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await _bindHomeNecklace(necklace);
     final device = _ReconnectTrackingDeviceProvider()
       ..pairedDevice = necklace
       ..connectedDevice = necklace
@@ -1119,7 +1294,6 @@ void main() {
     expect(harness.capture.deviceStops, 1);
     expect(harness.capture.phoneStarts, 1);
     expect(device.reconnects, 1);
-    expect(device.freshSessionRequests, [isFalse]);
     expect(harness.capture.deviceStarts, 1);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
     expect(find.text('Necklace is recording · iPhone selected'), findsOneWidget);
@@ -2780,6 +2954,12 @@ TranscriptSegment _liveTranscriptSegment(String id) => TranscriptSegment(
       translations: const [],
     );
 
+Future<void> _bindHomeNecklace(BtDevice device) async {
+  final preferences = SharedPreferencesUtil()..uid = 'test-user';
+  await preferences.btDeviceSet(device);
+  await preferences.btDeviceOwnerBindingSet('test-user');
+}
+
 class _HomeHarness {
   const _HomeHarness({
     required this.capture,
@@ -2810,16 +2990,59 @@ class _HomeHarness {
 class _ReconnectTrackingDeviceProvider extends DeviceProvider {
   CaptureProvider? capture;
   int reconnects = 0;
+  int freshSessionReconnects = 0;
 
   @override
-  Future<bool> reconnectKnownDeviceForCapture({required String reason, bool forceFreshBleSession = false}) async {
+  Future<bool> connectDeviceForCurrentUser(
+    BtDevice device, {
+    bool requireFreshSession = false,
+  }) async {
     reconnects++;
-    freshSessionRequests.add(forceFreshBleSession);
+    if (requireFreshSession) freshSessionReconnects++;
     await capture?.streamDeviceRecording(device: presentationConnectedDevice);
     return true;
   }
+}
 
-  final List<bool> freshSessionRequests = [];
+class _LiveDockDeviceProvider extends DeviceProvider {
+  _LiveDockDeviceProvider(this.necklace) {
+    pairedDevice = necklace;
+  }
+
+  final BtDevice necklace;
+  int connects = 0;
+  bool _failed = false;
+
+  @override
+  bool get connectionAttemptFailed => _failed;
+
+  @override
+  Future<bool> connectDeviceForCurrentUser(
+    BtDevice device, {
+    bool requireFreshSession = false,
+  }) async {
+    connects++;
+    return false;
+  }
+
+  void showFailure() {
+    _failed = true;
+    isConnecting = false;
+    notifyListeners();
+  }
+
+  void showConnecting() {
+    _failed = false;
+    isConnecting = true;
+    notifyListeners();
+  }
+
+  void showConnected() {
+    _failed = false;
+    isConnecting = false;
+    connectedDevice = necklace;
+    setIsConnected(true);
+  }
 }
 
 class _MutableExactAuthority implements ExactAccountAuthorityVerifier {

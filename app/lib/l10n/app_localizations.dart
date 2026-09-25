@@ -17439,6 +17439,12 @@ abstract class AppLocalizations {
   /// **'Records on this iPhone'**
   String get todayRecordOnPhone;
 
+  /// No description provided for @todayRecordOnNecklace.
+  ///
+  /// In en, this message translates to:
+  /// **'Records with your necklace'**
+  String get todayRecordOnNecklace;
+
   /// No description provided for @todayRecordWithNecklace.
   ///
   /// In en, this message translates to:
@@ -17822,6 +17828,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Necklace not connected'**
   String get todayDockNecklaceNotConnected;
+
+  /// No description provided for @todayDockNecklaceConnectionFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Can\'t find your necklace · Try again'**
+  String get todayDockNecklaceConnectionFailed;
 
   /// No description provided for @todayDockPhoneReady.
   ///
