@@ -746,21 +746,9 @@ def _reserve_generation_transaction(
         (isinstance(current, dict) and current.get("generation_key") == generation_key) or current_job
     ):
         return {"outcome": "automatic_attempt_already_used", "artwork": dict(current)}
-    published = conversation.get(PUBLISHED_ARTWORK_FIELD) or {}
     update: dict[str, Any] = {ARTWORK_FIELD: artwork_state}
-    if (
-        isinstance(current, dict)
-        and current.get("status") == "ready"
-        and str(current.get("object_key") or "").strip()
-        and current.get("enrichment_revision") == enrichment_revision
-    ):
+    if isinstance(current, dict) and current.get("status") == "ready" and str(current.get("object_key") or "").strip():
         update[PUBLISHED_ARTWORK_FIELD] = dict(current)
-    elif not (
-        isinstance(published, dict)
-        and published.get("status") == "ready"
-        and published.get("enrichment_revision") == enrichment_revision
-    ):
-        update[PUBLISHED_ARTWORK_FIELD] = firestore.DELETE_FIELD
     transaction.update(conversation_ref, update)
     if job_ref is not None and job_state is not None:
         # A worker owns a processing record before it refreshes a retry's
@@ -1514,6 +1502,154 @@ def clear_published_artwork(
         _conversation_ref(uid, memory_id),
         object_key=object_key,
         object_generation=object_generation,
+    )
+
+
+_RUNTIME_ONLY_FAILURE_CODES = frozenset(
+    {
+        "authority_changed",
+        "authority_unavailable",
+        "memory_artwork_preference_authority_stale",
+        "preference_changed",
+    }
+)
+
+
+def _restore_permanent_artwork_transaction(
+    transaction,
+    user_ref,
+    conversation_ref,
+    *,
+    binding_id: str,
+    profile_id: str,
+    authority_digest: str,
+) -> dict[str, Any]:
+    user_snapshot = user_ref.get(transaction=transaction)
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    if not user_snapshot.exists or not conversation_snapshot.exists:
+        return {"outcome": "not_found"}
+    user = user_snapshot.to_dict() or {}
+    conversation = conversation_snapshot.to_dict() or {}
+    preferences = user.get(PREFERENCES_FIELD)
+    if bool(user.get(DELETION_PENDING_FIELD)) or not isinstance(preferences, dict):
+        return {"outcome": "blocked"}
+    if preferences.get("binding_id") != binding_id or preferences.get("profile_id") != profile_id:
+        return {"outcome": "authority_mismatch"}
+
+    candidate_field = None
+    candidate: dict[str, Any] = {}
+    for field_name in (ARTWORK_FIELD, PUBLISHED_ARTWORK_FIELD):
+        state = conversation.get(field_name)
+        if not isinstance(state, dict) or not str(state.get("object_key") or "").strip():
+            continue
+        status = str(state.get("status") or "")
+        failure_code = str(state.get("failure_code") or "")
+        if status == "ready" or (status == "unavailable" and failure_code in _RUNTIME_ONLY_FAILURE_CODES):
+            candidate_field = field_name
+            candidate = dict(state)
+            break
+    if candidate_field is None:
+        return {"outcome": "not_restorable"}
+    if candidate.get("binding_id") != binding_id or candidate.get("profile_id") != profile_id:
+        return {"outcome": "authority_mismatch"}
+
+    was_restored = candidate.get("status") != "ready" or candidate.get("authority_digest") != authority_digest
+    candidate.update(
+        {
+            "status": "ready",
+            "authority_digest": authority_digest,
+            "binding_id": binding_id,
+            "profile_id": profile_id,
+            "updated_at": datetime.now(timezone.utc),
+        }
+    )
+    candidate.pop("failure_code", None)
+    candidate.pop("lease_token", None)
+    candidate.pop("lease_expires_at", None)
+    updated_preferences = {
+        **preferences,
+        "authority_digest": authority_digest,
+        "updated_at": datetime.now(timezone.utc),
+    }
+    transaction.set(user_ref, {PREFERENCES_FIELD: updated_preferences}, merge=True)
+    transaction.update(conversation_ref, {candidate_field: candidate})
+    return {
+        "outcome": "restored" if was_restored else "ready",
+        "field": candidate_field,
+        "artwork": candidate,
+    }
+
+
+@transactional
+def _restore_permanent_artwork(transaction, user_ref, conversation_ref, **kwargs):
+    return _restore_permanent_artwork_transaction(transaction, user_ref, conversation_ref, **kwargs)
+
+
+def restore_permanent_artwork(
+    uid: str,
+    memory_id: str,
+    *,
+    binding_id: str,
+    profile_id: str,
+    authority_digest: str,
+) -> dict[str, Any]:
+    return _restore_permanent_artwork(
+        db.transaction(),
+        _user_ref(uid),
+        _conversation_ref(uid, memory_id),
+        binding_id=binding_id,
+        profile_id=profile_id,
+        authority_digest=authority_digest,
+    )
+
+
+def _attach_artwork_renditions_transaction(
+    transaction,
+    conversation_ref,
+    *,
+    source_object_key: str,
+    source_object_generation: str,
+    rendition_update: dict[str, Any],
+) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    conversation = snapshot.to_dict() or {}
+    updates: dict[str, Any] = {}
+    for field_name in (ARTWORK_FIELD, PUBLISHED_ARTWORK_FIELD):
+        state = conversation.get(field_name)
+        if not isinstance(state, dict):
+            continue
+        if state.get("object_key") != source_object_key or str(state.get("object_generation") or "") != str(
+            source_object_generation
+        ):
+            continue
+        updates[field_name] = {**state, **rendition_update, "updated_at": datetime.now(timezone.utc)}
+    if not updates:
+        return False
+    transaction.update(conversation_ref, updates)
+    return True
+
+
+@transactional
+def _attach_artwork_renditions(transaction, conversation_ref, **kwargs):
+    return _attach_artwork_renditions_transaction(transaction, conversation_ref, **kwargs)
+
+
+def attach_artwork_renditions(
+    uid: str,
+    memory_id: str,
+    *,
+    source_object_key: str,
+    source_object_generation: str,
+    rendition_update: dict[str, Any],
+) -> bool:
+    return _attach_artwork_renditions(
+        db.transaction(),
+        _conversation_ref(uid, memory_id),
+        source_object_key=source_object_key,
+        source_object_generation=source_object_generation,
+        rendition_update=rendition_update,
     )
 
 

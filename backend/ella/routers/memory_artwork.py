@@ -6,7 +6,7 @@ import os
 import re
 from typing import Literal, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ella.services.memory_artwork import (
@@ -54,6 +54,11 @@ class MemoryArtworkQueueControlRequest(BaseModel):
     action: Literal["pause", "resume", "cancel"]
     generation_id: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
     auto_continue: bool = False
+
+
+class MemoryArtworkPermanentRecoveryRequest(BaseModel):
+    cursor: Optional[str] = Field(default=None, min_length=1, max_length=256, pattern=r"^[^/]+$")
+    limit: int = Field(default=50, ge=1, le=100)
 
 
 def require_memory_artwork_service(
@@ -122,6 +127,22 @@ async def put_memory_artwork_preferences(
 async def get_memory_artwork(memory_id: str, uid: str = Depends(get_exact_firebase_uid)):
     try:
         return await MemoryArtworkService().signed_url(uid, memory_id)
+    except MemoryArtworkError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/memory-artwork/day/{day}")
+async def get_memory_artwork_day(
+    day: str,
+    utc_offset_minutes: int = Query(default=0, ge=-840, le=840),
+    uid: str = Depends(get_exact_firebase_uid),
+):
+    try:
+        return await MemoryArtworkService().day_artwork(
+            uid,
+            day,
+            utc_offset_minutes=utc_offset_minutes,
+        )
     except MemoryArtworkError as exc:
         raise _http_error(exc) from exc
 
@@ -258,6 +279,22 @@ async def get_memory_artwork_queue(uid: str = Depends(get_exact_firebase_uid)):
 async def recover_recent_memory_artwork(uid: str = Depends(get_exact_firebase_uid)):
     try:
         return await MemoryArtworkService().recover_recent(uid)
+    except MemoryArtworkError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/memory-artwork/recovery/permanent", status_code=202)
+async def recover_permanent_memory_artwork(
+    payload: Optional[MemoryArtworkPermanentRecoveryRequest] = None,
+    uid: str = Depends(get_exact_firebase_uid),
+):
+    try:
+        request = payload or MemoryArtworkPermanentRecoveryRequest()
+        return await MemoryArtworkService().recover_permanent_artwork(
+            uid,
+            cursor_memory_id=request.cursor,
+            limit=request.limit,
+        )
     except MemoryArtworkError as exc:
         raise _http_error(exc) from exc
 
