@@ -42,6 +42,7 @@ def _load_service_module():
         "set_backfill_control",
         "pause_observed_legacy_auto_continue_control",
         "list_jobs_for_uid",
+        "get_job",
         "get_conversation",
         "list_conversations_page",
         "list_recent_conversations",
@@ -319,6 +320,10 @@ class FakeRepository:
     def list_jobs_for_uid(self, uid, *, migrate_legacy_jobs=True):
         self.job_list_migration_requests.append(migrate_legacy_jobs)
         return [copy.deepcopy(job) for (owner, _, _), job in self.jobs.items() if owner == uid]
+
+    def get_job(self, uid, memory_id, generation_key):
+        job = self.jobs.get((uid, memory_id, generation_key))
+        return copy.deepcopy(job) if job is not None else None
 
     def get_conversation(self, uid, memory_id):
         value = self.conversations.get((uid, memory_id))
@@ -935,6 +940,7 @@ def test_queue_status_separates_active_queued_retrying_failed_and_style_generati
     assert status["active"] == 1
     assert status["queued"] == 1
     assert status["retrying"] == 1
+    assert status["exhausted"] == 1
     assert status["failed"] == 1
     assert status["total"] == 5
     assert status["remaining"] == 4
@@ -943,6 +949,159 @@ def test_queue_status_separates_active_queued_retrying_failed_and_style_generati
     by_style = {item["style_version"]: item for item in status["styles"]}
     assert by_style["ella.memory_artwork.style.paper-collage.v1"]["ready"] == 1
     assert by_style["ella.memory_artwork.style.paper-collage.v1"]["state"] == "paused"
+
+
+def test_recent_recovery_is_recent_first_idempotent_and_reports_durable_states():
+    repository = FakeRepository()
+    authority = _authority()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(authority)
+    base_time = datetime(2026, 9, 24, tzinfo=timezone.utc)
+
+    ready = _terminal_memory("ready", created_at=base_time)
+    ready["artwork"] = _ready_artwork(
+        ready,
+        authority=authority,
+        style_version=artwork.DEFAULT_STYLE_VERSION,
+    )
+    stale = _terminal_memory("stale", created_at=base_time - timedelta(minutes=1))
+    stale["artwork"] = _ready_artwork(
+        stale,
+        authority=authority,
+        style_version=artwork.DEFAULT_STYLE_VERSION,
+    )
+    stale["active_summary_version_id"] = "summary-stale-corrected"
+    stale["structured"]["overview"] = "A corrected walk near a garden."
+    missing = _terminal_memory("missing", created_at=base_time - timedelta(minutes=2))
+    exhausted = _terminal_memory("exhausted", created_at=base_time - timedelta(minutes=3))
+    retrying = _terminal_memory("retrying", created_at=base_time - timedelta(minutes=4))
+    for memory in (ready, stale, missing, exhausted, retrying):
+        repository.conversations[("owner-a", memory["id"])] = memory
+
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=lambda: (_ for _ in ()).throw(AssertionError("recovery must not call provider")),
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    asyncio.run(service.enqueue("owner-a", "exhausted", request_mode="automatic"))
+    exhausted_artwork = repository.conversations[("owner-a", "exhausted")]["artwork"]
+    exhausted_key = exhausted_artwork["generation_key"]
+    exhausted_artwork.update({"status": "unavailable", "failure_code": "memory_artwork_provider_failed"})
+    repository.jobs[("owner-a", "exhausted", exhausted_key)].update(
+        {"status": "failed", "attempt_count": artwork.WORKER_MAX_ATTEMPTS}
+    )
+    asyncio.run(service.enqueue("owner-a", "retrying", request_mode="automatic"))
+    retrying_artwork = repository.conversations[("owner-a", "retrying")]["artwork"]
+    retrying_key = retrying_artwork["generation_key"]
+    retrying_artwork.update({"status": "unavailable", "failure_code": "memory_artwork_provider_failed"})
+    repository.jobs[("owner-a", "retrying", retrying_key)].update({"status": "pending", "attempt_count": 2})
+    writes_before_recovery = repository.reserve_writes
+
+    first = asyncio.run(service.recover_recent("owner-a"))
+
+    assert first == {
+        "schema_version": artwork.ARTWORK_RECENT_RECOVERY_SCHEMA_VERSION,
+        "scanned": 5,
+        "reservation_limit": artwork.RECENT_RECOVERY_RESERVATION_LIMIT,
+        "reserved": 2,
+        "deferred": 0,
+        "ready": 1,
+        "pending": 2,
+        "retrying": 1,
+        "exhausted": 1,
+        "skipped": 0,
+        "items": [
+            {"memory_id": "stale", "status": "pending"},
+            {"memory_id": "missing", "status": "pending"},
+            {"memory_id": "exhausted", "status": "exhausted"},
+            {"memory_id": "retrying", "status": "retrying"},
+        ],
+    }
+    assert repository.reserve_writes == writes_before_recovery + 2
+    assert repository.conversations[("owner-a", "ready")]["artwork"]["status"] == "ready"
+
+    second = asyncio.run(service.recover_recent("owner-a"))
+
+    assert second["reserved"] == 0
+    assert second["pending"] == 2
+    assert second["retrying"] == 1
+    assert second["exhausted"] == 1
+    assert repository.reserve_writes == writes_before_recovery + 2
+
+
+def test_recent_recovery_caps_new_reservations_without_starving_later_candidates():
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    now = datetime(2026, 9, 24, tzinfo=timezone.utc)
+    for index in range(12):
+        memory = _terminal_memory(f"memory-{index}", created_at=now - timedelta(minutes=index))
+        repository.conversations[("owner-a", memory["id"])] = memory
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=lambda: (_ for _ in ()).throw(AssertionError("recovery must not call provider")),
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+
+    first = asyncio.run(service.recover_recent("owner-a"))
+    second = asyncio.run(service.recover_recent("owner-a"))
+
+    assert first["reserved"] == artwork.RECENT_RECOVERY_RESERVATION_LIMIT
+    assert first["deferred"] == 2
+    assert second["reserved"] == 2
+    assert second["deferred"] == 0
+    assert second["pending"] == 12
+    assert repository.reserve_writes == 12
+
+
+def test_recent_recovery_does_not_report_stale_ready_artwork_over_current_pending_job():
+    generation_key = "a" * 64
+
+    status = artwork._recovery_status(
+        {"status": "ready", "generation_key": "b" * 64},
+        {"status": "pending", "attempt_count": 0, "generation_key": generation_key},
+        generation_key=generation_key,
+    )
+
+    assert status == "pending"
+
+
+def test_recent_recovery_fails_before_inventory_without_current_consent_or_authority():
+    class NeverScanRepository(FakeRepository):
+        def list_conversations_page(self, uid, *, limit, cursor_memory_id=None):
+            raise AssertionError("recovery must fence authority before inventory")
+
+    repository = NeverScanRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    without_consent = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        global_consent_checker=lambda uid: False,
+        config=_enabled_config(),
+    )
+
+    with pytest.raises(artwork.MemoryArtworkError) as denied:
+        asyncio.run(without_consent.recover_recent("owner-a"))
+    assert denied.value.code == "memory_artwork_consent_required"
+
+    repository.preferences_by_uid["owner-a"]["authority_digest"] = "stale"
+    with_stale_authority = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        global_consent_checker=lambda uid: True,
+        config=_enabled_config(),
+    )
+    with pytest.raises(artwork.MemoryArtworkError) as stale:
+        asyncio.run(with_stale_authority.recover_recent("owner-a"))
+    assert stale.value.code == "memory_artwork_preference_authority_stale"
+
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    repository.deletion_pending.add("owner-a")
+    with pytest.raises(artwork.MemoryArtworkError) as deletion:
+        asyncio.run(with_stale_authority.recover_recent("owner-a"))
+    assert deletion.value.code == "memory_artwork_deletion_pending"
 
 
 def test_legacy_job_metadata_is_recovered_only_from_its_exact_generation():
@@ -962,6 +1121,42 @@ def test_legacy_job_metadata_is_recovered_only_from_its_exact_generation():
     }
     conversation["artwork"]["generation_key"] = "b" * 64
     assert artwork_database._legacy_job_metadata(legacy, conversation) == {}
+
+
+def test_get_job_rejects_a_hash_addressed_record_with_mismatched_subject_fields(monkeypatch):
+    class Snapshot:
+        exists = True
+        id = "job-id"
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def to_dict(self):
+            return copy.deepcopy(self.payload)
+
+    class Reference:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def get(self):
+            return Snapshot(self.payload)
+
+    payload = {
+        "uid": "owner-a",
+        "memory_id": "memory-a",
+        "generation_key": "a" * 64,
+        "status": "pending",
+    }
+    reference = Reference(payload)
+    monkeypatch.setattr(artwork_database, "_job_ref", lambda *args: reference)
+
+    assert artwork_database.get_job("owner-a", "memory-a", "a" * 64) == {
+        **payload,
+        "job_id": "job-id",
+    }
+
+    reference.payload = {**payload, "uid": "owner-b"}
+    assert artwork_database.get_job("owner-a", "memory-a", "a" * 64) is None
 
 
 def test_pause_blocks_new_reconciliation_and_generation_leases_but_does_not_revoke_active_claim():
@@ -5851,6 +6046,10 @@ def test_mounted_route_rejects_unauthenticated_request_before_service_work(monke
             self.calls += 1
             return {"status": "ready"}
 
+        async def recover_recent(self, uid):
+            self.calls += 1
+            return {"status": "pending"}
+
     fake = NeverCalled()
     monkeypatch.setattr(router_module, "MemoryArtworkService", lambda: fake)
     app = FastAPI()
@@ -5858,7 +6057,9 @@ def test_mounted_route_rejects_unauthenticated_request_before_service_work(monke
     client = TestClient(app)
 
     response = client.get("/v1/ella/memories/memory-1/artwork")
+    recovery_response = client.post("/v1/ella/memory-artwork/recovery/recent")
     assert response.status_code == 401
+    assert recovery_response.status_code == 401
     assert fake.calls == 0
 
 
@@ -6125,6 +6326,10 @@ def test_queue_routes_bind_status_and_control_to_authenticated_owner(monkeypatch
                 "control_state": "paused",
             }
 
+        async def recover_recent(self, uid):
+            calls.append(("recovery", uid))
+            return {"schema_version": artwork.ARTWORK_RECENT_RECOVERY_SCHEMA_VERSION, "items": []}
+
     monkeypatch.setattr(router_module, "MemoryArtworkService", Service)
     app = FastAPI()
     app.include_router(router_module.router)
@@ -6136,10 +6341,16 @@ def test_queue_routes_bind_status_and_control_to_authenticated_owner(monkeypatch
         "/v1/ella/memory-artwork/queue/control",
         json={"action": "pause", "generation_id": "a" * 64},
     )
+    recovery_response = client.post("/v1/ella/memory-artwork/recovery/recent")
 
     assert status_response.status_code == 200
     assert control_response.status_code == 200
-    assert calls == [("status", "owner-a"), ("control", "owner-a", "pause", "a" * 64, False)]
+    assert recovery_response.status_code == 202
+    assert calls == [
+        ("status", "owner-a"),
+        ("control", "owner-a", "pause", "a" * 64, False),
+        ("recovery", "owner-a"),
+    ]
 
 
 def test_queue_control_route_returns_conflict_for_stale_generation(monkeypatch):

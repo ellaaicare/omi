@@ -604,6 +604,16 @@ def list_jobs_for_uid(uid: str, *, migrate_legacy_jobs: bool = True) -> list[dic
     return jobs
 
 
+def get_job(uid: str, memory_id: str, generation_key: str) -> Optional[dict[str, Any]]:
+    snapshot = _job_ref(uid, memory_id, generation_key).get()
+    if not snapshot.exists:
+        return None
+    job = snapshot.to_dict() or {}
+    if job.get("uid") != uid or job.get("memory_id") != memory_id or job.get("generation_key") != generation_key:
+        return None
+    return {**job, "job_id": snapshot.id}
+
+
 def get_conversation(uid: str, memory_id: str) -> Optional[dict[str, Any]]:
     snapshot = _conversation_ref(uid, memory_id).get()
     return snapshot.to_dict() if snapshot.exists else None
