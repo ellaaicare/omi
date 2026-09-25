@@ -71,6 +71,7 @@ def _load_service_module():
         "list_pending_reconciliation_jobs",
         "claim_reconciliation_job",
         "finish_reconciliation_job",
+        "storage_cleanup_required",
     ):
         setattr(database_stub, name, lambda *args, **kwargs: None)
     database_stub.STORAGE_CLEANUP_REQUIRED_FIELD = "memory_artwork_storage_cleanup_required"
@@ -201,7 +202,7 @@ class FakeRepository:
         self.conversations = {}
         self.reserve_writes = 0
         self.jobs = {}
-        self.storage_cleanup_required = set()
+        self.storage_cleanup_required_uids = set()
         self.deletion_pending = set()
         self.reconciliation_jobs = {}
         self.backfill_controls = {}
@@ -504,11 +505,21 @@ class FakeRepository:
         binding_id,
         profile_id,
         authority_digest,
+        consent_version,
     ):
         conversation = self.conversations.get((uid, memory_id))
         preferences = self.preferences_by_uid.get(uid) or {}
         if conversation is None:
             return {"outcome": "not_found"}
+        if (
+            preferences.get("consent") != "accepted"
+            or preferences.get("consent_version") != consent_version
+            or uid in self.deletion_pending
+            or conversation.get("deletion_pending")
+            or conversation.get("discarded")
+            or artwork._source_is_sensitive(conversation)
+        ):
+            return {"outcome": "blocked"}
         if preferences.get("binding_id") != binding_id or preferences.get("profile_id") != profile_id:
             return {"outcome": "authority_mismatch"}
         for field in ("artwork", "published_artwork"):
@@ -813,7 +824,7 @@ class FakeRepository:
             return False
         if not self.job_claim_is_current(uid, memory_id, generation_key, lease_token=job_lease_token):
             return False
-        self.storage_cleanup_required.add(uid)
+        self.storage_cleanup_required_uids.add(uid)
         return True
 
     def renew_publication_claim(
@@ -840,6 +851,9 @@ class FakeRepository:
         conversation["artwork"]["lease_expires_at"] = publication_expiry
         self.jobs[(uid, memory_id, generation_key)]["lease_expires_at"] = publication_expiry
         return True
+
+    def storage_cleanup_required(self, uid):
+        return uid in self.storage_cleanup_required_uids
 
 
 def _run_claimed_process(service, repository, uid="owner-a", memory_id="memory-1"):
@@ -921,6 +935,14 @@ class FakeStore:
         self.deletes.append(kwargs)
 
     def delete_memory_prefix(self, **kwargs):
+        self.prefix_deletes.append(kwargs)
+        return 0
+
+    def delete_memory_all_bindings(self, **kwargs):
+        self.prefix_deletes.append(kwargs)
+        return 0
+
+    def delete_user_prefix(self, **kwargs):
         self.prefix_deletes.append(kwargs)
         return 0
 
@@ -1355,6 +1377,45 @@ def test_permanent_recovery_restores_runtime_stale_and_backfills_variants_withou
     assert [item["w"] for item in recovered["variants"]] == [384, 768, 1536]
     assert repository.conversations[("owner-a", "source-changed")]["artwork"]["status"] == "unavailable"
     assert store.deletes == []
+
+
+def test_permanent_recovery_erases_new_renditions_when_source_becomes_sensitive_before_attach(monkeypatch):
+    class SensitiveDuringAttachRepository(FakeRepository):
+        def attach_artwork_renditions(self, uid, memory_id, **kwargs):
+            self.conversations[(uid, memory_id)]["ella_tags"] = ["caregiver-private"]
+            return False
+
+    repository = SensitiveDuringAttachRepository()
+    authority = _authority(digest="stable-owner-profile-digest")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(authority)
+    memory = _terminal_memory("restorable")
+    memory["artwork"] = {
+        **_ready_artwork(memory, authority=authority, style_version=artwork.DEFAULT_STYLE_VERSION),
+        "generation_key": "a" * 64,
+        "object_generation": "7",
+        "content_type": "image/png",
+    }
+    repository.conversations[("owner-a", "restorable")] = memory
+    store = FakeStore()
+
+    def erase_sensitive(uid, memory_id, conversation, *, lock_proof, store):
+        store.delete_memory_all_bindings(uid=uid, memory_id=memory_id)
+
+    monkeypatch.setattr(artwork, "delete_memory_artwork_for_exclusion", erase_sensitive)
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=lambda uid: asyncio.sleep(0, result=authority),
+        provider_factory=lambda: (_ for _ in ()).throw(AssertionError("recovery must not call a provider")),
+        store_factory=lambda: store,
+        config=_enabled_config(provider=False),
+    )
+
+    result = asyncio.run(service.recover_permanent_artwork("owner-a"))
+
+    assert result["variant_backfilled"] == 0
+    assert result["failures"] == 1
+    assert result["provider_calls"] == 0
+    assert store.prefix_deletes == [{"uid": "owner-a", "memory_id": "restorable"}]
 
 
 def test_generation_identity_ignores_runtime_fingerprint_and_revision():
@@ -2288,6 +2349,39 @@ def test_disabled_and_declined_states_never_call_provider():
     assert provider.calls == 0
 
 
+def test_declining_artwork_consent_erases_user_prefix_without_runtime_resolution(monkeypatch):
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    erasures = []
+
+    def erase(uid, *, lock_proof, repository):
+        erasures.append(uid)
+        return 4
+
+    async def runtime_must_not_run(uid):
+        raise AssertionError("declining consent must not depend on runtime availability")
+
+    monkeypatch.setattr(artwork, "delete_user_artwork_for_consent", erase)
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=runtime_must_not_run,
+        config=_enabled_config(),
+    )
+
+    result = asyncio.run(
+        service.set_preferences(
+            "owner-a",
+            consent="declined",
+            consent_version=artwork.ARTWORK_CONSENT_VERSION,
+            style_version=artwork.DEFAULT_STYLE_VERSION,
+        )
+    )
+
+    assert result["consent"] == "declined"
+    assert repository.preferences_by_uid["owner-a"]["consent"] == "declined"
+    assert erasures == ["owner-a"]
+
+
 def test_environment_owner_gate_fails_closed_before_repository_or_provider(monkeypatch):
     monkeypatch.setenv("ELLA_MEMORY_ARTWORK_ENABLED", "true")
     monkeypatch.setenv("ELLA_MEMORY_ARTWORK_RELEASE_ENABLED", "true")
@@ -2452,7 +2546,7 @@ def test_idempotent_generation_and_owner_scoped_signed_url():
     assert provider.calls == 1
     assert len(store.puts) == 4
     assert {entry["rendition"] for entry in store.puts} == {"master", "w384", "w768", "w1536"}
-    assert repository.storage_cleanup_required == {"owner-a"}
+    assert repository.storage_cleanup_required_uids == {"owner-a"}
 
     with pytest.raises(artwork.MemoryArtworkError) as missing:
         asyncio.run(service.signed_url("owner-b", "memory-1"))
@@ -3290,7 +3384,7 @@ def test_failed_storage_write_remains_covered_by_cleanup_marker():
         _run_claimed_process(service, repository)
 
     assert failure.value.code == "memory_artwork_storage_failed"
-    assert repository.storage_cleanup_required == {"owner-a"}
+    assert repository.storage_cleanup_required_uids == {"owner-a"}
 
 
 def test_cleanup_marker_failure_prevents_object_upload():
@@ -3617,7 +3711,7 @@ def test_signed_url_requires_current_bound_consent(preference_change, expected):
     assert bool(store.signed) is expected.startswith("ready")
 
 
-def test_signed_url_rechecks_sensitive_source_before_release():
+def test_signed_url_rechecks_sensitive_source_before_release(monkeypatch):
     repository = FakeRepository()
     memory = _terminal_memory("memory-1")
     memory["ella_tags"] = ["caregiver-private"]
@@ -3640,6 +3734,10 @@ def test_signed_url_rechecks_sensitive_source_before_release():
         config=_enabled_config(),
     )
 
+    def erase_sensitive(uid, memory_id, conversation, *, lock_proof, store):
+        store.delete_memory_all_bindings(uid=uid, memory_id=memory_id)
+
+    monkeypatch.setattr(artwork, "delete_memory_artwork_for_exclusion", erase_sensitive)
     result = asyncio.run(service.signed_url("owner-a", "memory-1"))
 
     assert result == {
@@ -3648,6 +3746,7 @@ def test_signed_url_rechecks_sensitive_source_before_release():
         "failure_code": "memory_artwork_sensitive_source_excluded",
     }
     assert store.signed == []
+    assert store.prefix_deletes == [{"uid": "owner-a", "memory_id": "memory-1"}]
 
     for drift in ("enrichment_revision", "prompt", "discarded"):
         repository = FakeRepository()
@@ -3684,6 +3783,32 @@ def test_signed_url_rechecks_sensitive_source_before_release():
             assert result["status"] == "ready"
             assert result["stale"] is True
             assert store.signed
+
+
+def test_signed_url_rejects_conversation_deletion_before_signing():
+    repository = FakeRepository()
+    memory = _terminal_memory("memory-1")
+    memory["deletion_pending"] = True
+    memory["artwork"] = _ready_artwork(
+        memory,
+        authority=_authority(),
+        style_version=artwork.DEFAULT_STYLE_VERSION,
+    )
+    repository.conversations[("owner-a", "memory-1")] = memory
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    store = FakeStore()
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        store_factory=lambda: store,
+        config=_enabled_config(),
+    )
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        asyncio.run(service.signed_url("owner-a", "memory-1"))
+
+    assert failure.value.code == "memory_artwork_deletion_pending"
+    assert store.signed == []
 
 
 def test_signed_url_does_not_depend_on_runtime_resolution_and_honors_declined_consent():
@@ -4587,6 +4712,7 @@ def test_firestore_permanent_restore_is_transactional_and_runtime_failure_only()
 
     preferences = {
         "consent": "accepted",
+        "consent_version": artwork.ARTWORK_CONSENT_VERSION,
         "binding_id": "binding-owner-a",
         "profile_id": "profile-owner-a",
         "authority_digest": "legacy-runtime-fingerprint",
@@ -4614,6 +4740,7 @@ def test_firestore_permanent_restore_is_transactional_and_runtime_failure_only()
         binding_id="binding-owner-a",
         profile_id="profile-owner-a",
         authority_digest="stable-owner-profile-digest",
+        consent_version=artwork.ARTWORK_CONSENT_VERSION,
     )
 
     assert result["outcome"] == "restored"
@@ -4632,8 +4759,43 @@ def test_firestore_permanent_restore_is_transactional_and_runtime_failure_only()
         binding_id="binding-owner-a",
         profile_id="profile-owner-a",
         authority_digest="stable-owner-profile-digest",
+        consent_version=artwork.ARTWORK_CONSENT_VERSION,
     )
     assert denied["outcome"] == "not_restorable"
+
+    conversation_ref.state[artwork_database.ARTWORK_FIELD].update(
+        {"status": "unavailable", "failure_code": "authority_changed"}
+    )
+    user_ref.state[artwork_database.PREFERENCES_FIELD]["consent"] = "declined"
+    declined_transaction = Transaction()
+    declined = artwork_database._restore_permanent_artwork_transaction(
+        declined_transaction,
+        user_ref,
+        conversation_ref,
+        binding_id="binding-owner-a",
+        profile_id="profile-owner-a",
+        authority_digest="stable-owner-profile-digest",
+        consent_version=artwork.ARTWORK_CONSENT_VERSION,
+    )
+    assert declined["outcome"] == "blocked"
+    assert conversation_ref.state[artwork_database.ARTWORK_FIELD]["status"] == "unavailable"
+    assert declined_transaction.updates == 0
+
+    user_ref.state[artwork_database.PREFERENCES_FIELD]["consent"] = "accepted"
+    conversation_ref.state["deletion_pending"] = True
+    deleting_transaction = Transaction()
+    deleting = artwork_database._restore_permanent_artwork_transaction(
+        deleting_transaction,
+        user_ref,
+        conversation_ref,
+        binding_id="binding-owner-a",
+        profile_id="profile-owner-a",
+        authority_digest="stable-owner-profile-digest",
+        consent_version=artwork.ARTWORK_CONSENT_VERSION,
+    )
+    assert deleting["outcome"] == "blocked"
+    assert conversation_ref.state[artwork_database.ARTWORK_FIELD]["status"] == "unavailable"
+    assert deleting_transaction.updates == 0
 
 
 def test_firestore_authority_stabilization_preserves_latest_consent_and_style():
@@ -6256,6 +6418,64 @@ def test_content_addressed_artwork_keys_are_stable_immutable_and_owner_scoped():
     )
 
 
+def test_memory_erasure_deletes_every_historical_binding_version():
+    class Blob:
+        def __init__(self, name):
+            self.name = name
+            self.deleted = False
+
+        def delete(self):
+            self.deleted = True
+
+    blobs = [
+        Blob(
+            memory_artwork_storage.object_key_for(
+                uid="owner-a",
+                profile_binding_id=f"binding-{index}",
+                memory_id="memory-1",
+                generation_key=f"{index + 1:064x}",
+                content_type="image/jpeg",
+            )
+        )
+        for index in range(3)
+    ]
+    other_memory = Blob(
+        memory_artwork_storage.object_key_for(
+            uid="owner-a",
+            profile_binding_id="binding-3",
+            memory_id="memory-2",
+            generation_key="4" * 64,
+            content_type="image/jpeg",
+        )
+    )
+    other_owner = Blob(
+        memory_artwork_storage.object_key_for(
+            uid="owner-b",
+            profile_binding_id="binding-4",
+            memory_id="memory-1",
+            generation_key="5" * 64,
+            content_type="image/jpeg",
+        )
+    )
+    blobs.extend((other_memory, other_owner))
+
+    class Bucket:
+        def list_blobs(self, *, prefix):
+            return [blob for blob in blobs if blob.name.startswith(prefix)]
+
+    class Client:
+        def bucket(self, bucket_name):
+            assert bucket_name == "private-artwork"
+            return Bucket()
+
+    store = memory_artwork_storage.GCSMemoryArtworkStore(bucket_name="private-artwork", client=Client())
+
+    assert store.delete_memory_all_bindings(uid="owner-a", memory_id="memory-1") == 3
+    assert all(blob.deleted for blob in blobs[:3])
+    assert other_memory.deleted is False
+    assert other_owner.deleted is False
+
+
 def test_gcs_signed_url_wraps_transient_existence_failure_without_signing():
     class UnavailableBlob:
         def exists(self):
@@ -6305,17 +6525,13 @@ def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
         memory_artwork_storage._validated_owner_key("owner-b", "memory-1", object_key)
     assert str(mismatch.value) == "memory_artwork_object_owner_mismatch"
 
-    deleted = []
-    prefix_deleted = []
+    all_binding_deletes = []
     real_store_class = memory_artwork_storage.GCSMemoryArtworkStore
 
     class RecordingStore:
-        def delete(self, **kwargs):
-            deleted.append(kwargs)
-
-        def delete_memory_prefix(self, **kwargs):
-            prefix_deleted.append(kwargs)
-            return 1
+        def delete_memory_all_bindings(self, **kwargs):
+            all_binding_deletes.append(kwargs)
+            return 3
 
     monkeypatch.setattr(memory_artwork_storage, "GCSMemoryArtworkStore", RecordingStore)
     memory_artwork_storage.delete_conversation_artwork_if_present(
@@ -6335,47 +6551,14 @@ def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
             },
         },
     )
-    assert deleted == [
-        {
-            "uid": "owner-a",
-            "memory_id": "memory-1",
-            "object_key": object_key,
-        },
-        {
-            "uid": "owner-a",
-            "memory_id": "memory-1",
-            "object_key": memory_artwork_storage.object_key_for(
-                uid="owner-a",
-                profile_binding_id="binding-owner-a-v0",
-                memory_id="memory-1",
-                generation_key="b" * 64,
-                content_type="image/png",
-            ),
-        },
-    ]
-    assert prefix_deleted == [
-        {
-            "uid": "owner-a",
-            "memory_id": "memory-1",
-            "profile_binding_id": "binding-owner-a",
-        },
-        {
-            "uid": "owner-a",
-            "memory_id": "memory-1",
-            "profile_binding_id": "binding-owner-a-v0",
-        },
-    ]
+    assert all_binding_deletes == [{"uid": "owner-a", "memory_id": "memory-1"}]
 
     memory_artwork_storage.delete_conversation_artwork_if_present(
         "owner-a",
         "memory-2",
         {"artwork": {"status": "generating", "binding_id": "binding-owner-a"}},
     )
-    assert prefix_deleted[-1] == {
-        "uid": "owner-a",
-        "memory_id": "memory-2",
-        "profile_binding_id": "binding-owner-a",
-    }
+    assert all_binding_deletes[-1] == {"uid": "owner-a", "memory_id": "memory-2"}
 
     real_store = object.__new__(real_store_class)
     with pytest.raises(memory_artwork_storage.MemoryArtworkStorageError) as unbound:

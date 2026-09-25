@@ -328,6 +328,25 @@ class GCSMemoryArtworkStore:
             deleted += 1
         return deleted
 
+    def delete_memory_all_bindings(self, *, uid: str, memory_id: str) -> int:
+        if not memory_id or len(memory_id) > 256 or re.fullmatch(r"[A-Za-z0-9_.:-]+", memory_id) is None:
+            raise MemoryArtworkStorageError("memory_artwork_id_invalid")
+        owner_digest = _sha256(uid)
+        prefix = f"users/{owner_digest}/profiles/"
+        deleted = 0
+        for blob in self.client.bucket(self.bucket_name).list_blobs(prefix=prefix):
+            match = ARTWORK_OBJECT_RE.fullmatch(str(blob.name or "")) or CONTENT_ADDRESSED_ARTWORK_OBJECT_RE.fullmatch(
+                str(blob.name or "")
+            )
+            if match is None or match.group("owner") != owner_digest or match.group("memory") != memory_id:
+                continue
+            try:
+                blob.delete()
+            except NotFound:
+                continue
+            deleted += 1
+        return deleted
+
     def delete_user_prefix(self, *, uid: str) -> int:
         prefix = f"users/{_sha256(uid)}/"
         deleted = 0
@@ -347,17 +366,25 @@ def delete_conversation_artwork_if_present(uid: str, memory_id: str, conversatio
     ]
     if not artwork_states:
         return
-    store = GCSMemoryArtworkStore()
-    object_keys = {str(state.get("object_key") or "") for state in artwork_states}
-    for object_key in sorted(object_keys - {""}):
-        store.delete(uid=uid, memory_id=memory_id, object_key=object_key)
-    binding_ids = {str(state.get("binding_id") or "") for state in artwork_states}
-    for binding_id in sorted(binding_ids - {""}):
-        store.delete_memory_prefix(
-            uid=uid,
-            memory_id=memory_id,
-            profile_binding_id=binding_id,
-        )
+    GCSMemoryArtworkStore().delete_memory_all_bindings(uid=uid, memory_id=memory_id)
+
+
+def delete_memory_artwork_for_exclusion(
+    uid: str,
+    memory_id: str,
+    conversation: dict,
+    *,
+    lock_proof: MemoryArtworkPublicationLockProof,
+    store=None,
+) -> None:
+    require_memory_artwork_publication_lock(uid, lock_proof)
+    artwork_states = [
+        state
+        for state in (conversation.get("artwork"), conversation.get("published_artwork"))
+        if isinstance(state, dict) and state
+    ]
+    if artwork_states:
+        (store or GCSMemoryArtworkStore()).delete_memory_all_bindings(uid=uid, memory_id=memory_id)
 
 
 def delete_all_user_artwork(uid: str, *, cleanup_required: bool = False) -> int:
@@ -366,6 +393,21 @@ def delete_all_user_artwork(uid: str, *, cleanup_required: bool = False) -> int:
             raise MemoryArtworkStorageError("memory_artwork_storage_cleanup_unavailable")
         return 0
     return GCSMemoryArtworkStore().delete_user_prefix(uid=uid)
+
+
+def delete_user_artwork_for_consent(
+    uid: str,
+    *,
+    lock_proof: MemoryArtworkPublicationLockProof,
+    repository=None,
+) -> int:
+    if repository is None:
+        repository = default_memory_artwork_repository
+    require_memory_artwork_publication_lock(uid, lock_proof)
+    return delete_all_user_artwork(
+        uid,
+        cleanup_required=repository.storage_cleanup_required(uid),
+    )
 
 
 def prepare_account_artwork_deletion(uid: str, *, repository=None, lock_proof=None) -> int:

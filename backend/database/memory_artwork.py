@@ -725,6 +725,19 @@ def _terminal_enrichment_matches(conversation: dict[str, Any], enrichment_revisi
     )
 
 
+def _artwork_source_is_sensitive(conversation: dict[str, Any]) -> bool:
+    assessment = conversation.get("internal_assessment") or {}
+    signal = conversation.get("ella_signal") or {}
+    tags = {str(value).strip().lower() for value in (conversation.get("ella_tags") or [])}
+    risk = str(assessment.get("risk_level") or "").strip().lower() if isinstance(assessment, dict) else ""
+    guardian_relevant = bool(signal.get("guardian_relevant")) if isinstance(signal, dict) else False
+    return bool(
+        tags & {"caregiver-private", "safety", "distress", "emergency", "self-harm"}
+        or guardian_relevant
+        or risk in {"medium", "high", "critical"}
+    )
+
+
 def _reserve_generation_transaction(
     transaction,
     user_ref,
@@ -1580,6 +1593,7 @@ def _restore_permanent_artwork_transaction(
     binding_id: str,
     profile_id: str,
     authority_digest: str,
+    consent_version: str,
 ) -> dict[str, Any]:
     user_snapshot = user_ref.get(transaction=transaction)
     conversation_snapshot = conversation_ref.get(transaction=transaction)
@@ -1589,6 +1603,14 @@ def _restore_permanent_artwork_transaction(
     conversation = conversation_snapshot.to_dict() or {}
     preferences = user.get(PREFERENCES_FIELD)
     if bool(user.get(DELETION_PENDING_FIELD)) or not isinstance(preferences, dict):
+        return {"outcome": "blocked"}
+    if (
+        preferences.get("consent") != "accepted"
+        or preferences.get("consent_version") != consent_version
+        or bool(conversation.get("deletion_pending"))
+        or bool(conversation.get("discarded"))
+        or _artwork_source_is_sensitive(conversation)
+    ):
         return {"outcome": "blocked"}
     if preferences.get("binding_id") != binding_id or preferences.get("profile_id") != profile_id:
         return {"outcome": "authority_mismatch"}
@@ -1649,6 +1671,7 @@ def restore_permanent_artwork(
     binding_id: str,
     profile_id: str,
     authority_digest: str,
+    consent_version: str,
 ) -> dict[str, Any]:
     return _restore_permanent_artwork(
         db.transaction(),
@@ -1657,6 +1680,7 @@ def restore_permanent_artwork(
         binding_id=binding_id,
         profile_id=profile_id,
         authority_digest=authority_digest,
+        consent_version=consent_version,
     )
 
 
@@ -1672,6 +1696,12 @@ def _attach_artwork_renditions_transaction(
     if not snapshot.exists:
         return False
     conversation = snapshot.to_dict() or {}
+    if (
+        bool(conversation.get("deletion_pending"))
+        or bool(conversation.get("discarded"))
+        or _artwork_source_is_sensitive(conversation)
+    ):
+        return False
     updates: dict[str, Any] = {}
     for field_name in (ARTWORK_FIELD, PUBLISHED_ARTWORK_FIELD):
         state = conversation.get(field_name)

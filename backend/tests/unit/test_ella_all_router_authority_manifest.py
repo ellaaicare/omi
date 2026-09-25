@@ -266,6 +266,7 @@ ROUTE_GROUPS = (
         "firebase_exact_owner",
         "staged_public",
         ("GET", "/v1/ella/memory-artwork/libraries", "get_memory_artwork_libraries"),
+        ("GET", "/v1/ella/memory-artwork/day/{day}", "get_memory_artwork_day"),
         ("GET", "/v1/ella/memory-artwork/preferences", "get_memory_artwork_preferences"),
         ("PUT", "/v1/ella/memory-artwork/preferences", "put_memory_artwork_preferences"),
         ("GET", "/v1/ella/memories/{memory_id}/artwork", "get_memory_artwork"),
@@ -275,6 +276,7 @@ ROUTE_GROUPS = (
         ("GET", "/v1/ella/memory-artwork/reconciliation", "get_memory_artwork_reconciliation"),
         ("GET", "/v1/ella/memory-artwork/queue", "get_memory_artwork_queue"),
         ("POST", "/v1/ella/memory-artwork/recovery/recent", "recover_recent_memory_artwork"),
+        ("POST", "/v1/ella/memory-artwork/recovery/permanent", "recover_permanent_memory_artwork"),
         ("POST", "/v1/ella/memory-artwork/queue/control", "control_memory_artwork_queue"),
     ),
     _group(

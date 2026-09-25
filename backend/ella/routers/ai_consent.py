@@ -12,7 +12,7 @@ from ella.services.ai_consent import (
     ConsentSubmission,
     get_ai_consent_service,
 )
-from ella.services.consent_authority import submit_with_managed_cloud_authority
+from ella.services.consent_authority import ArtworkConsentErasureUnavailable, submit_with_managed_cloud_authority
 from database.managed_cloud_consent import ManagedCloudAuthorityUnavailable
 from utils.ella.exact_firebase_auth import (
     FirebaseTokenIdentity,
@@ -92,4 +92,9 @@ async def submit_ai_consent(
         raise HTTPException(
             status_code=503,
             detail={"code": "managed_cloud_consent_authority_unavailable"},
+        ) from exc
+    except ArtworkConsentErasureUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "artwork_consent_erasure_unavailable"},
         ) from exc

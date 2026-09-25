@@ -887,6 +887,9 @@ def test_managed_cloud_consent_orders_denial_before_firestore_and_grant_after(
         events.append("postgres:granted")
         return {"decision": "granted"}
 
+    async def erase_artwork(uid):
+        events.append("artwork:erased")
+
     monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", uid)
     monkeypatch.setattr(repository, "record", record)
     monkeypatch.setattr(
@@ -899,6 +902,7 @@ def test_managed_cloud_consent_orders_denial_before_firestore_and_grant_after(
         "synchronize_grant",
         grant,
     )
+    monkeypatch.setattr(consent_authority, "_erase_artwork_for_denial", erase_artwork)
 
     asyncio.run(
         consent_authority.submit_with_managed_cloud_authority(
@@ -923,7 +927,65 @@ def test_managed_cloud_consent_orders_denial_before_firestore_and_grant_after(
         "postgres:granted",
         "postgres:revoked",
         "firestore:revoked",
+        "artwork:erased",
     ]
+
+
+def test_consent_revocation_stays_denied_when_artwork_erasure_is_unavailable(monkeypatch):
+    uid = "user-a"
+    service = _service()
+
+    async def unavailable(_uid):
+        raise consent_authority.ArtworkConsentErasureUnavailable("artwork_consent_erasure_unavailable")
+
+    monkeypatch.setattr(consent_authority, "_erase_artwork_for_denial", unavailable)
+
+    with pytest.raises(consent_authority.ArtworkConsentErasureUnavailable):
+        asyncio.run(
+            consent_authority.submit_with_managed_cloud_authority(
+                uid=uid,
+                submission=_submission(decision="revoked", request_id="request-revoke-artwork-unavailable"),
+                service=service,
+            )
+        )
+
+    assert service.status(uid)["authorized"] is False
+
+
+def test_consent_api_returns_typed_503_after_durable_denial_when_artwork_erasure_is_unavailable(monkeypatch):
+    service = _service()
+
+    async def unavailable(_uid):
+        raise consent_authority.ArtworkConsentErasureUnavailable("artwork_consent_erasure_unavailable")
+
+    monkeypatch.setattr(ai_consent, "get_ai_consent_service", lambda: service)
+    monkeypatch.setattr(consent_authority, "_erase_artwork_for_denial", unavailable)
+    monkeypatch.delenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", raising=False)
+    monkeypatch.delenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", raising=False)
+    monkeypatch.delenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", raising=False)
+    app = FastAPI()
+    app.include_router(ai_consent.router)
+    app.dependency_overrides[get_firebase_token_identity] = lambda: FirebaseTokenIdentity(uid="user-a")
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/users/ai-consent",
+        json={
+            "decision": "revoked",
+            "policy_version": consent.CURRENT_POLICY_VERSION,
+            "processor_set_hash": consent.CURRENT_PROCESSOR_SET_HASH,
+            "scope_version": consent.CURRENT_SCOPE_VERSION,
+            "scope_hash": consent.CURRENT_SCOPE_HASH,
+            "request_id": "request-api-revoke-erasure-failure",
+            "app_version": "1.0.0",
+            "build_number": "804",
+            "locale": "en-US",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": {"code": "artwork_consent_erasure_unavailable"}}
+    assert service.status("user-a")["authorized"] is False
 
 
 def test_self_hosted_grant_passes_only_verified_email_to_authority(monkeypatch):
@@ -1107,10 +1169,14 @@ def test_authenticated_api_records_exact_v7_profile_bound_receipt(monkeypatch):
 def test_authenticated_api_allows_terminal_decisions_without_verified_email(monkeypatch, decision):
     service = _service()
     denials = []
+    erasures = []
 
     async def deny(**kwargs):
         denials.append(kwargs)
         return {"decision": kwargs["decision"], "authority_absent": True}
+
+    async def erase_artwork(uid):
+        erasures.append(uid)
 
     monkeypatch.setattr(ai_consent, "get_ai_consent_service", lambda: service)
     monkeypatch.delenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", raising=False)
@@ -1121,6 +1187,7 @@ def test_authenticated_api_allows_terminal_decisions_without_verified_email(monk
         "synchronize_denial",
         deny,
     )
+    monkeypatch.setattr(consent_authority, "_erase_artwork_for_denial", erase_artwork)
     app = FastAPI()
     app.include_router(ai_consent.router)
     app.dependency_overrides[get_firebase_token_identity] = lambda: FirebaseTokenIdentity(uid="user-a")
@@ -1150,3 +1217,4 @@ def test_authenticated_api_allows_terminal_decisions_without_verified_email(monk
             "verified_email": "",
         }
     ]
+    assert erasures == ["user-a"]

@@ -40,6 +40,8 @@ from utils.ella.memory_artwork_storage import (
     MemoryArtworkStorageError,
     StoredArtwork,
     acquire_memory_artwork_publication_lock,
+    delete_memory_artwork_for_exclusion,
+    delete_user_artwork_for_consent,
 )
 
 ARTWORK_SCHEMA_VERSION = "ella.memory_artwork.v1"
@@ -336,6 +338,8 @@ class MemoryArtworkRepository(Protocol):
 
     def finish_reconciliation_job(self, job_id: str, **kwargs) -> bool: ...
 
+    def storage_cleanup_required(self, uid: str) -> bool: ...
+
 
 class FirestoreMemoryArtworkRepository:
     get_preferences = staticmethod(artwork_db.get_preferences)
@@ -369,6 +373,7 @@ class FirestoreMemoryArtworkRepository:
     list_pending_reconciliation_jobs = staticmethod(artwork_db.list_pending_reconciliation_jobs)
     claim_reconciliation_job = staticmethod(artwork_db.claim_reconciliation_job)
     finish_reconciliation_job = staticmethod(artwork_db.finish_reconciliation_job)
+    storage_cleanup_required = staticmethod(artwork_db.storage_cleanup_required)
 
 
 class MemoryArtworkProvider(Protocol):
@@ -392,6 +397,10 @@ class MemoryArtworkStore(Protocol):
     def delete(self, **kwargs) -> None: ...
 
     def delete_memory_prefix(self, **kwargs) -> int: ...
+
+    def delete_memory_all_bindings(self, **kwargs) -> int: ...
+
+    def delete_user_prefix(self, **kwargs) -> int: ...
 
 
 async def _bounded_provider_post(
@@ -997,21 +1006,48 @@ class MemoryArtworkService:
             raise MemoryArtworkError("memory_artwork_consent_version_stale")
         if style_version not in SUPPORTED_STYLE_VERSIONS:
             raise MemoryArtworkError("memory_artwork_style_version_invalid")
-        authority = await self.authority_resolver(uid)
-        self.repository.set_preferences(
-            uid,
-            {
+        if consent == "declined":
+            current = self.repository.get_preferences(uid)
+            declined = {
+                **current,
                 "schema_version": ARTWORK_SCHEMA_VERSION,
-                "consent": consent,
+                "consent": "declined",
                 "consent_version": consent_version,
                 "style_version": style_version,
-                "binding_id": authority.binding_id,
-                "profile_id": authority.profile_id,
-                "authority_digest": authority.authority_digest,
                 "updated_at": datetime.now(timezone.utc),
-            },
-            backfill_control_state="running" if consent == "accepted" else "cancelled",
-        )
+            }
+            declined.pop(artwork_db.DELETION_PENDING_FIELD, None)
+            declined.pop(artwork_db.STORAGE_CLEANUP_REQUIRED_FIELD, None)
+            try:
+                async with acquire_memory_artwork_publication_lock(uid) as lock_proof:
+                    self.repository.set_preferences(
+                        uid,
+                        declined,
+                        backfill_control_state="cancelled",
+                    )
+                    delete_user_artwork_for_consent(
+                        uid,
+                        lock_proof=lock_proof,
+                        repository=self.repository,
+                    )
+            except Exception as exc:
+                raise MemoryArtworkError("memory_artwork_consent_erasure_failed", retryable=True) from exc
+        else:
+            authority = await self.authority_resolver(uid)
+            self.repository.set_preferences(
+                uid,
+                {
+                    "schema_version": ARTWORK_SCHEMA_VERSION,
+                    "consent": consent,
+                    "consent_version": consent_version,
+                    "style_version": style_version,
+                    "binding_id": authority.binding_id,
+                    "profile_id": authority.profile_id,
+                    "authority_digest": authority.authority_digest,
+                    "updated_at": datetime.now(timezone.utc),
+                },
+                backfill_control_state="running",
+            )
         return await self.preferences(uid)
 
     @staticmethod
@@ -1399,7 +1435,7 @@ class MemoryArtworkService:
         skipped = 0
         failures = 0
 
-        async with acquire_memory_artwork_publication_lock(uid):
+        async with acquire_memory_artwork_publication_lock(uid) as lock_proof:
             store = self.store_factory()
             for conversation in page:
                 memory_id = str(conversation.get("id") or "")
@@ -1412,6 +1448,7 @@ class MemoryArtworkService:
                     binding_id=authority.binding_id,
                     profile_id=authority.profile_id,
                     authority_digest=authority.authority_digest,
+                    consent_version=ARTWORK_CONSENT_VERSION,
                 )
                 outcome = str(result.get("outcome") or "")
                 if outcome == "restored":
@@ -1421,6 +1458,17 @@ class MemoryArtworkService:
                     continue
                 artwork = result.get("artwork") or {}
                 if not isinstance(artwork, dict):
+                    skipped += 1
+                    continue
+                current_preferences = self.repository.get_preferences(uid)
+                current_conversation = self.repository.get_conversation(uid, memory_id) or {}
+                if (
+                    not self.global_consent_checker(uid)
+                    or not _preferences_match_authority(current_preferences, authority)
+                    or current_conversation.get("deletion_pending")
+                    or current_conversation.get("discarded")
+                    or _source_is_sensitive(current_conversation)
+                ):
                     skipped += 1
                     continue
                 existing_variants = artwork.get("variants") or []
@@ -1489,6 +1537,22 @@ class MemoryArtworkService:
                         source_object_generation=source_object_generation,
                         rendition_update=rendition_update,
                     ):
+                        latest_preferences = self.repository.get_preferences(uid)
+                        latest_conversation = self.repository.get_conversation(uid, memory_id) or {}
+                        if (
+                            not self.global_consent_checker(uid)
+                            or not _preferences_match_authority(latest_preferences, authority)
+                            or latest_conversation.get("deletion_pending")
+                            or latest_conversation.get("discarded")
+                            or _source_is_sensitive(latest_conversation)
+                        ):
+                            delete_memory_artwork_for_exclusion(
+                                uid,
+                                memory_id,
+                                {"artwork": rendition_update},
+                                lock_proof=lock_proof,
+                                store=store,
+                            )
                         raise MemoryArtworkError("memory_artwork_variant_backfill_conflict", retryable=True)
                     variant_backfilled += 1
                 except Exception:
@@ -2278,6 +2342,8 @@ class MemoryArtworkService:
         conversation = self.repository.get_conversation(uid, memory_id)
         if conversation is None:
             raise MemoryArtworkError("memory_artwork_memory_not_found")
+        if conversation.get("deletion_pending"):
+            raise MemoryArtworkError("memory_artwork_deletion_pending")
         if conversation.get("discarded"):
             return {
                 "schema_version": ARTWORK_SCHEMA_VERSION,
@@ -2299,6 +2365,19 @@ class MemoryArtworkService:
                 "failure_code": "memory_artwork_consent_required",
             }
         if _source_is_sensitive(conversation):
+            try:
+                async with acquire_memory_artwork_publication_lock(uid) as lock_proof:
+                    latest_conversation = self.repository.get_conversation(uid, memory_id)
+                    if latest_conversation is not None and _source_is_sensitive(latest_conversation):
+                        delete_memory_artwork_for_exclusion(
+                            uid,
+                            memory_id,
+                            latest_conversation,
+                            lock_proof=lock_proof,
+                            store=self.store_factory(),
+                        )
+            except Exception as exc:
+                raise MemoryArtworkError("memory_artwork_sensitive_erasure_failed", retryable=True) from exc
             return {
                 "schema_version": ARTWORK_SCHEMA_VERSION,
                 "status": "unavailable",
