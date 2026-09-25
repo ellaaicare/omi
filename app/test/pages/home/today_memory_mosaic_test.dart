@@ -695,6 +695,45 @@ void main() {
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });
 
+  testWidgets('phone finalization does not reconnect a necklace replaced while the phone owned capture', (
+    tester,
+  ) async {
+    SharedPreferencesUtil().showSummarizeConfirmation = false;
+    final necklaceA = BtDevice(name: 'Ella A', id: 'necklace-a', type: DeviceType.omi, rssi: -30);
+    final necklaceB = BtDevice(name: 'Ella B', id: 'necklace-b', type: DeviceType.omi, rssi: -30);
+    final device = _ReconnectTrackingDeviceProvider()
+      ..pairedDevice = necklaceA
+      ..connectedDevice = necklaceA
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      initialRecordingState: RecordingState.deviceRecord,
+    );
+    addTearDown(harness.dispose);
+    device.capture = harness.capture;
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+    expect(harness.capture.recordingState, RecordingState.record);
+
+    device
+      ..connectedDevice = necklaceB
+      ..pairedDevice = necklaceB
+      ..isConnected = true
+      ..notifyListeners();
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(device.reconnects, 0, reason: 'phone completion must not restore a superseded necklace');
+    expect(harness.capture.deviceStarts, 0);
+    expect(device.presentationConnectedDevice?.id, necklaceB.id);
+    expect(harness.capture.recordingState, RecordingState.stop);
+  });
+
   testWidgets('failed phone finalization keeps ambient necklace stopped until the same moment succeeds', (
     tester,
   ) async {
@@ -1029,6 +1068,36 @@ void main() {
       CaptureDiagnosticSource.phone,
       reason: 'the stale-session decision must survive phone diagnostics replacing the necklace failure',
     );
+    expect(harness.capture.deviceStarts, 1);
+    expect(harness.capture.recordingState, RecordingState.deviceRecord);
+  });
+
+  testWidgets('Home necklace Record routes a definitive physical failure through fresh BLE recovery', (tester) async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final device = _ReconnectTrackingDeviceProvider()
+      ..pairedDevice = necklace
+      ..connectedDevice = necklace
+      ..isConnected = true;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      device: device,
+      initialRecordingState: RecordingState.error,
+      initialCaptureDiagnostics: const CaptureDiagnostics(
+        source: CaptureDiagnosticSource.necklace,
+        phase: CaptureDiagnosticPhase.failed,
+        failure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+      ),
+    );
+    addTearDown(harness.dispose);
+    device.capture = harness.capture;
+
+    await tester.tap(find.byKey(const Key('today-capture-source-necklace')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('today-record-moment')));
+    await tester.pump();
+
+    expect(device.reconnects, 1);
     expect(harness.capture.deviceStarts, 1);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
   });

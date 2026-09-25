@@ -34,6 +34,7 @@ class _FakeDeviceService implements IDeviceService {
   Object? disconnectError;
   bool nativeSessionRetained = false;
   Completer<DeviceConnection?>? ensureConnectionGate;
+  Completer<void>? disconnectGate;
   final Map<Object, IDeviceServiceSubsciption> _subscriptions = {};
 
   void publish(DeviceServiceStatus next) {
@@ -84,6 +85,7 @@ class _FakeDeviceService implements IDeviceService {
   @override
   Future<void> disconnectDevice() async {
     disconnectCalls++;
+    await disconnectGate?.future;
     final error = disconnectError;
     if (error != null) throw error;
     nativeSessionRetained = false;
@@ -1370,6 +1372,58 @@ void main() {
     expect(capture.deviceStarts, 1);
     expect(provider.presentationConnectedDevice?.id, necklace.id);
     expect(provider.isConnecting, isFalse);
+  });
+
+  test('timed-out fresh-session reset cannot report or apply a late disconnect as success', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final disconnectGate = Completer<void>();
+    final service = _FakeDeviceService(DeviceServiceStatus.ready)
+      ..disconnectGate = disconnectGate
+      ..nativeSessionRetained = true;
+    final capture = _RecordingCaptureProvider(
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+    )..updateRecordingState(RecordingState.error);
+    var scans = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scans++;
+        return necklace;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      connectionAttemptTimeout: const Duration(milliseconds: 20),
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+    provider
+      ..connectedDevice = necklace
+      ..pairedDevice = necklace
+      ..setIsConnected(true);
+
+    expect(await provider.connectDeviceForCurrentUser(necklace), isFalse);
+    expect(provider.presentationIsConnected, isFalse);
+    expect(provider.presentationConnectedDevice, isNull);
+    expect(provider.presentationPairedDevice?.id, necklace.id);
+    expect(provider.connectionAttemptFailed, isTrue);
+    expect(provider.isConnecting, isFalse);
+    expect(scans, 0);
+
+    disconnectGate.complete();
+    await pumpEventQueue();
+
+    expect(provider.presentationIsConnected, isFalse, reason: 'late reset completion must remain superseded');
+    expect(provider.presentationConnectedDevice, isNull);
+    expect(scans, 0, reason: 'the timed-out attempt must not begin a late scan');
+    expect(capture.deviceStarts, 0);
+
+    service.disconnectGate = null;
+    expect(await provider.connectDeviceForCurrentUser(necklace), isTrue);
+    expect(service.disconnectCalls, 2, reason: 'explicit retry must prove a fresh native session');
+    expect(scans, 1);
+    expect(provider.presentationConnectedDevice?.id, necklace.id);
   });
 
   test('timed-out connect clears stale isConnecting and permits the next attempt', () async {

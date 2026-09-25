@@ -403,7 +403,10 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   Future<bool> _runConnectionAttempt(
     Future<bool> Function(int token) operation, {
     String? expectedDeviceId,
+    VoidCallback? onCurrentTimeout,
   }) async {
+    final expectedDeviceWasConnectedAtStart =
+        expectedDeviceId != null && presentationIsConnected && presentationConnectedDevice?.id == expectedDeviceId;
     final token = ++_connectionAttemptSequence;
     _activeConnectionAttemptToken = token;
     _connectionAttemptStartedAt = DateTime.now();
@@ -419,13 +422,15 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       }
       return connected;
     } on TimeoutException {
-      final connected =
-          presentationIsConnected && (expectedDeviceId == null || presentationConnectedDevice?.id == expectedDeviceId);
+      final connected = !expectedDeviceWasConnectedAtStart &&
+          presentationIsConnected &&
+          (expectedDeviceId == null || presentationConnectedDevice?.id == expectedDeviceId);
       if (_isConnectionAttemptCurrent(token)) {
         if (!connected) {
           // A timed-out transport future cannot be cancelled. Supersede its
           // generation so it cannot attach a late device to this account.
           _deviceOperationGeneration++;
+          onCurrentTimeout?.call();
           _clearUncommittedConnectionState();
         }
         _connectionAttemptFailed = !connected;
@@ -537,6 +542,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   Future<bool> connectDeviceForCurrentUser(BtDevice device) async {
     if (!_deviceServiceReady || device.id.isEmpty || _rememberedDeviceOwnerBinding() == null) return false;
 
+    var freshSessionResetStarted = false;
     return _runConnectionAttempt(
       (token) async {
         final generation = ++_deviceOperationGeneration;
@@ -549,6 +555,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
             pendingFreshSession || (failure != null && _requiresFreshBleSessionForCaptureFailure(failure));
         final canReplaceCurrentSession = isConnected && (connectedDevice == null || connectedDevice?.id == device.id);
         if (requiresFreshSession && (pendingFreshSession || canReplaceCurrentSession)) {
+          freshSessionResetStarted = true;
           await _prepareFreshBleSessionForCaptureRecovery(device, generation);
           if (!_isConnectionAttemptCurrent(token) || !_isDeviceOperationCurrent(generation)) return false;
           return _scanAndConnectToDevice(
@@ -576,7 +583,20 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         );
       },
       expectedDeviceId: device.id,
+      onCurrentTimeout: () {
+        if (freshSessionResetStarted) _showFreshSessionUnavailable(device);
+      },
     );
+  }
+
+  void _showFreshSessionUnavailable(BtDevice device, {bool requireFreshSession = true}) {
+    if (requireFreshSession) _markFreshBleSessionRequired(device);
+    connectedDevice = null;
+    pairedDevice = device;
+    isConnected = false;
+    isDeviceStorageSupport = false;
+    batteryLevel = -1;
+    notifyListeners();
   }
 
   Future<void> _prepareFreshBleSessionForCaptureRecovery(BtDevice device, int generation) async {
@@ -592,7 +612,6 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     StackTrace? resetFailureStack;
     try {
       await _deviceService.disconnectDevice();
-      _clearFreshBleSessionRequirement(device);
     } catch (error, stack) {
       resetFailure = error;
       resetFailureStack = stack;
@@ -605,12 +624,8 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     }
     if (!_isDeviceOperationCurrent(generation)) return;
 
-    connectedDevice = null;
-    pairedDevice = device;
-    isConnected = false;
-    isDeviceStorageSupport = false;
-    batteryLevel = -1;
-    notifyListeners();
+    if (resetFailure == null) _clearFreshBleSessionRequirement(device);
+    _showFreshSessionUnavailable(device, requireFreshSession: resetFailure != null);
     if (resetFailure != null) Error.throwWithStackTrace(resetFailure, resetFailureStack!);
   }
 

@@ -534,7 +534,16 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
       deviceList.removeWhere((element) => element.id == device.id);
       isClicked = false; // Allow clicks again after finishing the operation
       connectingToDeviceId = null; // Reset the connecting device
-      deviceProvider!.setIsConnected(false);
+      final activeDevice = deviceProvider!.presentationConnectedDevice;
+      if (activeDevice != null && deviceProvider!.presentationIsConnected) {
+        isConnected = true;
+        deviceId = activeDevice.id;
+        deviceName = activeDevice.name;
+        deviceType = activeDevice.type;
+        batteryPercentage = deviceProvider!.batteryLevel;
+      } else {
+        isConnected = false;
+      }
       notifyListeners();
     }
 

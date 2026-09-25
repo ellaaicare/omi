@@ -126,6 +126,14 @@ String whisperStatusLead(bool enabled) => enabled ? 'Whispers are on' : 'Whisper
 
 bool canReadDailyNote({required bool loading, required String text}) => !loading && text.trim().isNotEmpty;
 
+bool todayNecklaceFailureRequiresFreshSession(CaptureDiagnosticFailure? failure) => switch (failure) {
+      CaptureDiagnosticFailure.physicalAudioUnavailable ||
+      CaptureDiagnosticFailure.necklaceAudioSubscriptionUnavailable ||
+      CaptureDiagnosticFailure.necklaceConnectionUnavailable =>
+        true,
+      _ => false,
+    };
+
 bool shouldShowDailyNote(TodayCardViewState state) {
   final card = state.card;
   return card != null && card.headline.trim().isNotEmpty && card.body.trim().isNotEmpty;
@@ -1551,10 +1559,16 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (device == null || !mounted) return;
     final deviceProvider = context.read<DeviceProvider>();
     final capture = context.read<CaptureProvider>();
+    final currentDevice = deviceProvider.presentationConnectedDevice ?? deviceProvider.presentationPairedDevice;
+    if (currentDevice?.id != device.id) return;
     try {
       final connected = await deviceProvider.connectDeviceForCurrentUser(device);
-      if (connected && !capture.phoneCaptureOwnsMobileAudio && capture.recordingState != RecordingState.deviceRecord) {
-        await capture.streamDeviceRecording(device: deviceProvider.presentationConnectedDevice ?? device);
+      final resumedDevice = deviceProvider.presentationConnectedDevice;
+      if (connected &&
+          resumedDevice?.id == device.id &&
+          !capture.phoneCaptureOwnsMobileAudio &&
+          capture.recordingState != RecordingState.deviceRecord) {
+        await capture.streamDeviceRecording(device: resumedDevice);
       }
     } catch (_) {
       // The phone-owned moment is already finalized. Necklace recovery remains
@@ -1689,7 +1703,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (target == null || !device.presentationIsConnected) return;
     setState(() => _homeCaptureStarting = true);
     try {
-      await capture.streamDeviceRecording(device: target);
+      if (todayNecklaceFailureRequiresFreshSession(capture.captureDiagnostics.failure)) {
+        await device.connectDeviceForCurrentUser(target);
+      } else {
+        await capture.streamDeviceRecording(device: target);
+      }
       if (!mounted || capture.recordingState == RecordingState.deviceRecord || capture.phoneCaptureOwnsMobileAudio) {
         return;
       }
