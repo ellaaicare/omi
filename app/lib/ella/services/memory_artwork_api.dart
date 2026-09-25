@@ -9,6 +9,7 @@ import 'package:omi/services/wals/wal_owner_authority.dart';
 
 const memoryArtworkSchemaVersion = 'ella.memory_artwork.v1';
 const memoryArtworkLibrariesSchemaVersion = 'ella.memory_artwork.libraries.v1';
+const memoryArtworkRecentRecoverySchemaVersion = 'ella.memory_artwork.recent_recovery.v1';
 const memoryArtworkDefaultStyle = 'ella.memory_artwork.style.soft-gouache.v1';
 const memoryArtworkPaperCollageStyle = 'ella.memory_artwork.style.paper-collage.v1';
 const memoryArtworkGraphicLandscapeStyle = 'ella.memory_artwork.style.graphic-landscape.v1';
@@ -165,6 +166,32 @@ class MemoryArtworkBackfillPage {
   final bool hasMore;
   final String? nextCursor;
   final MemoryArtworkBackfillMode mode;
+}
+
+class MemoryArtworkRecentRecovery {
+  const MemoryArtworkRecentRecovery({
+    required this.scanned,
+    required this.reservationLimit,
+    required this.reserved,
+    required this.deferred,
+    required this.ready,
+    required this.pending,
+    required this.retrying,
+    required this.exhausted,
+    required this.skipped,
+  });
+
+  final int scanned;
+  final int reservationLimit;
+  final int reserved;
+  final int deferred;
+  final int ready;
+  final int pending;
+  final int retrying;
+  final int exhausted;
+  final int skipped;
+
+  bool get hasDisplayableOrActiveArtwork => ready > 0 || reserved > 0 || pending > 0 || retrying > 0;
 }
 
 class MemoryArtworkStyleProgress {
@@ -575,6 +602,19 @@ class MemoryArtworkApi {
 
   Future<bool> backfillRecent() async => await backfillNext() != null;
 
+  Future<MemoryArtworkRecentRecovery?> recoverRecent() async {
+    final authority = _authorityProvider();
+    if (authority == null || !authority.isExactCurrent()) return null;
+    final response = await _call(
+      authority,
+      method: 'POST',
+      path: 'v1/ella/memory-artwork/recovery/recent',
+      timeout: const Duration(seconds: 30),
+    );
+    if (response?.statusCode != 202 || !authority.isExactCurrent()) return null;
+    return _recentRecoveryFromPayload(_jsonObject(response!.body));
+  }
+
   Future<MemoryArtworkQueueStatus?> queueStatus() async {
     final authority = _authorityProvider();
     if (authority == null) return null;
@@ -662,6 +702,59 @@ class MemoryArtworkApi {
   }
 
   static int _nonNegativeInt(Object? value) => value is int && value >= 0 ? value : 0;
+
+  static MemoryArtworkRecentRecovery? _recentRecoveryFromPayload(Map<String, dynamic>? payload) {
+    if (payload == null || payload['schema_version'] != memoryArtworkRecentRecoverySchemaVersion) return null;
+    final scanned = _strictNonNegativeInt(payload['scanned']);
+    final reservationLimit = _strictNonNegativeInt(payload['reservation_limit']);
+    final reserved = _strictNonNegativeInt(payload['reserved']);
+    final deferred = _strictNonNegativeInt(payload['deferred']);
+    final ready = _strictNonNegativeInt(payload['ready']);
+    final pending = _strictNonNegativeInt(payload['pending']);
+    final retrying = _strictNonNegativeInt(payload['retrying']);
+    final exhausted = _strictNonNegativeInt(payload['exhausted']);
+    final skipped = _strictNonNegativeInt(payload['skipped']);
+    final items = payload['items'];
+    if (scanned == null ||
+        reservationLimit == null ||
+        reservationLimit < 1 ||
+        reservationLimit > 10 ||
+        reserved == null ||
+        reserved > reservationLimit ||
+        deferred == null ||
+        ready == null ||
+        pending == null ||
+        retrying == null ||
+        exhausted == null ||
+        skipped == null ||
+        items is! List ||
+        scanned != ready + pending + retrying + exhausted + skipped + deferred) {
+      return null;
+    }
+    for (final raw in items) {
+      if (raw is! Map) return null;
+      final item = Map<String, dynamic>.from(raw);
+      final memoryId = item['memory_id']?.toString().trim() ?? '';
+      final status = item['status']?.toString().trim() ?? '';
+      final failureCode = item['failure_code']?.toString().trim() ?? '';
+      if (memoryId.isEmpty ||
+          !const {'ready', 'pending', 'retrying', 'exhausted'}.contains(status) ||
+          (failureCode.isNotEmpty && !RegExp(r'^[a-z0-9_]{1,80}$').hasMatch(failureCode))) {
+        return null;
+      }
+    }
+    return MemoryArtworkRecentRecovery(
+      scanned: scanned,
+      reservationLimit: reservationLimit,
+      reserved: reserved,
+      deferred: deferred,
+      ready: ready,
+      pending: pending,
+      retrying: retrying,
+      exhausted: exhausted,
+      skipped: skipped,
+    );
+  }
 
   static DateTime? _dateOnly(Object? value) {
     final parsed = DateTime.tryParse(value?.toString() ?? '');
