@@ -49,6 +49,7 @@ ARTWORK_LIBRARIES_SCHEMA_VERSION = "ella.memory_artwork.libraries.v1"
 ARTWORK_PROMPT_CONTRACT_VERSION = "ella.memory_artwork.prompt.v2"
 ARTWORK_PROVIDER_CONTRACT_VERSION = "ella.artwork.service.v1"
 ARTWORK_RECONCILIATION_SCHEMA_VERSION = "ella.memory_artwork.reconciliation.v1"
+ARTWORK_RECENT_RECOVERY_SCHEMA_VERSION = "ella.memory_artwork.recent_recovery.v1"
 DEFAULT_STYLE_VERSION = "ella.memory_artwork.style.soft-gouache.v1"
 SUPPORTED_STYLE_VERSIONS = {
     DEFAULT_STYLE_VERSION,
@@ -130,6 +131,8 @@ TARGET_WIDTH = 1536
 TARGET_HEIGHT = 1024
 MAX_BACKFILL_MEMORIES = 10
 BACKFILL_SCAN_LIMIT = 50
+RECENT_RECOVERY_SCAN_LIMIT = 50
+RECENT_RECOVERY_RESERVATION_LIMIT = 10
 DEFAULT_PREVIEW_DAY_LIMIT = 3
 MAX_BACKFILL_ENRICHMENT_RECOVERIES = 3
 PROVIDER_TIMEOUT_SECONDS_ENV = "ELLA_MEMORY_ARTWORK_PROVIDER_TIMEOUT_SECONDS"
@@ -266,6 +269,8 @@ class MemoryArtworkRepository(Protocol):
 
     def list_jobs_for_uid(self, uid: str, *, migrate_legacy_jobs: bool = True) -> list[dict[str, Any]]: ...
 
+    def get_job(self, uid: str, memory_id: str, generation_key: str) -> Optional[dict[str, Any]]: ...
+
     def get_conversation(self, uid: str, memory_id: str) -> Optional[dict[str, Any]]: ...
 
     def list_conversations_page(
@@ -322,6 +327,7 @@ class FirestoreMemoryArtworkRepository:
     set_backfill_control = staticmethod(artwork_db.set_backfill_control)
     pause_observed_legacy_auto_continue_control = staticmethod(artwork_db.pause_observed_legacy_auto_continue_control)
     list_jobs_for_uid = staticmethod(artwork_db.list_jobs_for_uid)
+    get_job = staticmethod(artwork_db.get_job)
     get_conversation = staticmethod(artwork_db.get_conversation)
     list_conversations_page = staticmethod(artwork_db.list_conversations_page)
     list_ready_artwork_conversations = staticmethod(artwork_db.list_ready_artwork_conversations)
@@ -734,6 +740,7 @@ def _generation_key(
         "uid": uid,
         "binding_id": authority.binding_id,
         "profile_id": authority.profile_id,
+        "authority_digest": authority.authority_digest,
         "memory_id": memory_id,
         "enrichment_revision": enrichment_revision,
         "style_version": style_version,
@@ -769,6 +776,28 @@ def _release_artwork(conversation: dict[str, Any]) -> tuple[dict[str, Any], bool
         failure_code = str(current.get("failure_code") or "") if isinstance(current, dict) else ""
         return published, current_status == "generating", failure_code or None
     return current if isinstance(current, dict) else {}, False, None
+
+
+def _recovery_status(
+    artwork: dict[str, Any],
+    job: Optional[dict[str, Any]],
+    *,
+    generation_key: str,
+    authority_digest: str,
+) -> Optional[str]:
+    artwork_is_current = (
+        artwork.get("generation_key") == generation_key and artwork.get("authority_digest") == authority_digest
+    )
+    job_is_current = bool(job and job.get("authority_digest") == authority_digest)
+    job_status = str((job or {}).get("status") or "") if job_is_current else ""
+    attempts = int((job or {}).get("attempt_count") or 0) if job_is_current else 0
+    if job_status in {"pending", "processing"}:
+        return "retrying" if attempts else "pending"
+    if job_status in {"failed", "completed"} or (
+        artwork_is_current and artwork.get("status") in {"generating", "ready", "unavailable"}
+    ):
+        return "exhausted"
+    return None
 
 
 def _inventory_release_artwork(
@@ -1015,7 +1044,7 @@ class MemoryArtworkService:
 
     @staticmethod
     def _queue_counts(jobs: list[dict[str, Any]], *, authority_digest: str, style_version: str) -> dict[str, int]:
-        counts = {"ready": 0, "active": 0, "queued": 0, "retrying": 0, "failed": 0}
+        counts = {"ready": 0, "active": 0, "queued": 0, "retrying": 0, "exhausted": 0}
         now = datetime.now(timezone.utc)
         for job in jobs:
             if job.get("authority_digest") != authority_digest or job.get("style_version") != style_version:
@@ -1033,9 +1062,14 @@ class MemoryArtworkService:
             elif status == "pending":
                 counts["retrying" if attempts else "queued"] += 1
             elif status == "failed":
-                counts["failed"] += 1
-        counts["total"] = sum(counts.values())
-        counts["remaining"] = counts["active"] + counts["queued"] + counts["retrying"] + counts["failed"]
+                counts["exhausted"] += 1
+        # Keep the old field as a compatibility alias while exposing the
+        # terminal state the client can present truthfully.
+        counts["failed"] = counts["exhausted"]
+        counts["total"] = (
+            counts["ready"] + counts["active"] + counts["queued"] + counts["retrying"] + counts["exhausted"]
+        )
+        counts["remaining"] = counts["active"] + counts["queued"] + counts["retrying"] + counts["exhausted"]
         return counts
 
     async def queue_status(self, uid: str) -> dict[str, Any]:
@@ -1146,6 +1180,148 @@ class MemoryArtworkService:
                 ],
                 default=None,
             ),
+        }
+
+    async def recover_recent(self, uid: str) -> dict[str, Any]:
+        """Reserve a bounded, recent-first set without reopening a used generation."""
+
+        if not self.config.allows_uid(uid):
+            raise MemoryArtworkError("memory_artwork_internal_owner_required")
+        if not (self.config.enabled and self.config.release_enabled and self.config.provider_enabled):
+            raise MemoryArtworkError("memory_artwork_generation_disabled")
+        authority = await self.authority_resolver(uid)
+        preferences = self.repository.get_preferences(uid)
+        style_version = str(preferences.get("style_version") or "")
+        if not self.global_consent_checker(uid):
+            raise MemoryArtworkError("memory_artwork_consent_required")
+        if preferences.get(artwork_db.DELETION_PENDING_FIELD):
+            raise MemoryArtworkError("memory_artwork_deletion_pending")
+        if style_version not in SUPPORTED_STYLE_VERSIONS or not _preferences_match_authority(
+            preferences,
+            authority,
+            style_version=style_version,
+        ):
+            raise MemoryArtworkError("memory_artwork_preference_authority_stale")
+
+        conversations = self.repository.list_conversations_page(uid, limit=RECENT_RECOVERY_SCAN_LIMIT)
+        counts = {"ready": 0, "pending": 0, "retrying": 0, "exhausted": 0, "skipped": 0}
+        items: list[dict[str, str]] = []
+        reservations = 0
+        deferred = 0
+
+        for conversation in conversations:
+            memory_id = str(conversation.get("id") or "")
+            if not memory_id or conversation.get("discarded") or _source_is_sensitive(conversation):
+                counts["skipped"] += 1
+                continue
+            enrichment_revision = _terminal_enrichment(conversation)
+            if enrichment_revision is None:
+                counts["skipped"] += 1
+                continue
+            if (
+                _inventory_release_artwork(
+                    conversation,
+                    preferences=preferences,
+                    authority=authority,
+                )
+                is not None
+            ):
+                counts["ready"] += 1
+                continue
+
+            try:
+                _, prompt_sha256 = _prompt_for(conversation, style_version)
+            except MemoryArtworkError as exc:
+                counts["exhausted"] += 1
+                items.append({"memory_id": memory_id, "status": "exhausted", "failure_code": exc.code})
+                continue
+            generation_key = _generation_key(
+                uid=uid,
+                authority=authority,
+                memory_id=memory_id,
+                enrichment_revision=enrichment_revision,
+                style_version=style_version,
+                prompt_sha256=prompt_sha256,
+            )
+            current_artwork = conversation.get(artwork_db.ARTWORK_FIELD) or {}
+            current_artwork = current_artwork if isinstance(current_artwork, dict) else {}
+            existing_job = self.repository.get_job(uid, memory_id, generation_key)
+            if current_artwork.get("generation_key") == generation_key or existing_job is not None:
+                status = _recovery_status(
+                    current_artwork,
+                    existing_job,
+                    generation_key=generation_key,
+                    authority_digest=authority.authority_digest,
+                )
+                if status is not None:
+                    counts[status] += 1
+                    items.append({"memory_id": memory_id, "status": status})
+                    continue
+            if reservations >= RECENT_RECOVERY_RESERVATION_LIMIT:
+                deferred += 1
+                continue
+
+            try:
+                result = await self.enqueue(
+                    uid,
+                    memory_id,
+                    origin=TERMINAL_ENRICHMENT_ORIGIN,
+                    request_mode="automatic",
+                )
+            except MemoryArtworkError as exc:
+                if exc.code in {
+                    "memory_artwork_consent_required",
+                    "memory_artwork_deletion_pending",
+                    "memory_artwork_internal_owner_required",
+                    "memory_artwork_preference_authority_stale",
+                }:
+                    raise
+                counts["exhausted"] += 1
+                items.append({"memory_id": memory_id, "status": "exhausted", "failure_code": exc.code})
+                continue
+
+            outcome = str(result.get("outcome") or "")
+            if outcome in {"declined", "consent_required"}:
+                raise MemoryArtworkError("memory_artwork_consent_required")
+            if outcome == "disabled":
+                raise MemoryArtworkError("memory_artwork_generation_disabled")
+            if outcome == "automatic_attempt_already_used":
+                status = "exhausted"
+            elif result.get("status") == "ready":
+                status = "ready"
+            else:
+                refreshed = self.repository.get_conversation(uid, memory_id) or {}
+                refreshed_artwork = refreshed.get(artwork_db.ARTWORK_FIELD) or {}
+                refreshed_artwork = refreshed_artwork if isinstance(refreshed_artwork, dict) else {}
+                reserved_generation_key = str(refreshed_artwork.get("generation_key") or "")
+                if len(reserved_generation_key) != 64 or any(
+                    char not in "0123456789abcdef" for char in reserved_generation_key
+                ):
+                    status = "exhausted"
+                else:
+                    job = self.repository.get_job(uid, memory_id, reserved_generation_key)
+                    status = (
+                        _recovery_status(
+                            refreshed_artwork,
+                            job,
+                            generation_key=reserved_generation_key,
+                            authority_digest=authority.authority_digest,
+                        )
+                        or "exhausted"
+                    )
+            if outcome == "reserved":
+                reservations += 1
+            counts[status] += 1
+            items.append({"memory_id": memory_id, "status": status})
+
+        return {
+            "schema_version": ARTWORK_RECENT_RECOVERY_SCHEMA_VERSION,
+            "scanned": len(conversations),
+            "reservation_limit": RECENT_RECOVERY_RESERVATION_LIMIT,
+            "reserved": reservations,
+            "deferred": deferred,
+            **counts,
+            "items": items,
         }
 
     async def libraries(self, uid: str) -> dict[str, Any]:

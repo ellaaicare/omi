@@ -254,6 +254,14 @@ async def get_memory_artwork_queue(uid: str = Depends(get_exact_firebase_uid)):
         raise _http_error(exc) from exc
 
 
+@router.post("/memory-artwork/recovery/recent", status_code=202)
+async def recover_recent_memory_artwork(uid: str = Depends(get_exact_firebase_uid)):
+    try:
+        return await MemoryArtworkService().recover_recent(uid)
+    except MemoryArtworkError as exc:
+        raise _http_error(exc) from exc
+
+
 @router.post("/memory-artwork/queue/control")
 async def control_memory_artwork_queue(
     payload: MemoryArtworkQueueControlRequest,
