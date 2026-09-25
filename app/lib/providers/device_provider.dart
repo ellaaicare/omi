@@ -167,6 +167,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   bool _authorityReconciliationPending = false;
   String? _lastDeviceOwnerBinding;
   int? _activeDeviceConnectionSession;
+  ({String deviceId, String ownerBinding, int authorityGeneration})? _freshBleSessionRequirement;
   bool _disposed = false;
 
   void Function(BtDevice device)? onDeviceConnected;
@@ -239,6 +240,35 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     return boundDevice != null && boundDevice.id == deviceId;
   }
 
+  bool _requiresFreshBleSessionFor(BtDevice device) {
+    final requirement = _freshBleSessionRequirement;
+    final ownerBinding = _rememberedDeviceOwnerBinding();
+    return requirement != null &&
+        ownerBinding != null &&
+        requirement.deviceId == device.id &&
+        requirement.ownerBinding == ownerBinding &&
+        requirement.authorityGeneration == _rememberedDeviceAuthorityGeneration;
+  }
+
+  bool _hasPendingFreshBleSessionRequirement() {
+    final device = _rememberedDeviceForCurrentAuthority();
+    return device != null && _requiresFreshBleSessionFor(device);
+  }
+
+  void _markFreshBleSessionRequired(BtDevice device) {
+    final ownerBinding = _rememberedDeviceOwnerBinding();
+    if (ownerBinding == null) return;
+    _freshBleSessionRequirement = (
+      deviceId: device.id,
+      ownerBinding: ownerBinding,
+      authorityGeneration: _rememberedDeviceAuthorityGeneration,
+    );
+  }
+
+  void _clearFreshBleSessionRequirement(BtDevice device) {
+    if (_requiresFreshBleSessionFor(device)) _freshBleSessionRequirement = null;
+  }
+
   void _handleAccountAuthorityChanged() {
     // The notifier can fire immediately before a replacement UID is persisted.
     // Fence callbacks now, but do not invalidate an in-flight same-UID connect
@@ -276,6 +306,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     // fresh, owner-bound reconnect started after this point can clear the fence.
     _rememberedDeviceAuthorityGeneration++;
     _deviceOperationGeneration++;
+    _freshBleSessionRequirement = null;
     _activeConnectionAttemptToken = null;
     _connectionAttemptStartedAt = null;
     _resetConnectedCaptureRecoveryBudget();
@@ -329,7 +360,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
 
   Future<void> _resumeBoundDeviceAfterTeardown(int generation) async {
     await _captureTeardown;
-    if (!_isDeviceOperationCurrent(generation) || pairedDevice == null) {
+    if (!_isDeviceOperationCurrent(generation) || pairedDevice == null || _hasPendingFreshBleSessionRequirement()) {
       return;
     }
     await periodicConnect('device service resumed', boundDeviceOnly: true, operationGeneration: generation);
@@ -361,12 +392,18 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   }
 
   void _clearUncommittedConnectionState() {
-    if (isConnected) return;
+    if (isConnected) {
+      pairedDevice = connectedDevice;
+      return;
+    }
     connectedDevice = null;
     isDeviceStorageSupport = false;
   }
 
-  Future<bool> _runConnectionAttempt(Future<bool> Function(int token) operation) async {
+  Future<bool> _runConnectionAttempt(
+    Future<bool> Function(int token) operation, {
+    String? expectedDeviceId,
+  }) async {
     final token = ++_connectionAttemptSequence;
     _activeConnectionAttemptToken = token;
     _connectionAttemptStartedAt = DateTime.now();
@@ -382,7 +419,8 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       }
       return connected;
     } on TimeoutException {
-      final connected = presentationIsConnected;
+      final connected =
+          presentationIsConnected && (expectedDeviceId == null || presentationConnectedDevice?.id == expectedDeviceId);
       if (_isConnectionAttemptCurrent(token)) {
         if (!connected) {
           // A timed-out transport future cannot be cancelled. Supersede its
@@ -499,28 +537,81 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   Future<bool> connectDeviceForCurrentUser(BtDevice device) async {
     if (!_deviceServiceReady || device.id.isEmpty || _rememberedDeviceOwnerBinding() == null) return false;
 
-    return _runConnectionAttempt((token) async {
-      final generation = ++_deviceOperationGeneration;
-      pairedDevice = device;
-      notifyListeners();
+    return _runConnectionAttempt(
+      (token) async {
+        final generation = ++_deviceOperationGeneration;
+        pairedDevice = device;
+        notifyListeners();
 
-      final connection = await _deviceService.ensureConnection(device.id, force: true);
-      if (!_isConnectionAttemptCurrent(token) || !_isDeviceOperationCurrent(generation)) return false;
-      final connected = connection?.device;
-      if (connected != null && connected.id == device.id) {
-        await confirmConnectedDeviceForCurrentAuthority(connected, operationGeneration: generation);
-        return presentationIsConnected && presentationConnectedDevice?.id == device.id;
-      }
+        final failure = captureProvider?.captureDiagnostics.failure;
+        final pendingFreshSession = _requiresFreshBleSessionFor(device);
+        final requiresFreshSession =
+            pendingFreshSession || (failure != null && _requiresFreshBleSessionForCaptureFailure(failure));
+        final canReplaceCurrentSession = isConnected && (connectedDevice == null || connectedDevice?.id == device.id);
+        if (requiresFreshSession && (pendingFreshSession || canReplaceCurrentSession)) {
+          await _prepareFreshBleSessionForCaptureRecovery(device, generation);
+          if (!_isConnectionAttemptCurrent(token) || !_isDeviceOperationCurrent(generation)) return false;
+          return _scanAndConnectToDevice(
+            operationGeneration: generation,
+            explicitlySelectedDevice: device,
+            connectionAttemptToken: token,
+          );
+        }
 
-      // Some transports complete discovery separately from force-connect. Use
-      // the same scan fallback as background reconnect, but keep the explicit
-      // target and UID fence for this attempt.
-      return _scanAndConnectToDevice(
-        operationGeneration: generation,
-        explicitlySelectedDevice: device,
-        connectionAttemptToken: token,
-      );
-    });
+        final connection = await _deviceService.ensureConnection(device.id, force: true);
+        if (!_isConnectionAttemptCurrent(token) || !_isDeviceOperationCurrent(generation)) return false;
+        final connected = connection?.device;
+        if (connected != null && connected.id == device.id) {
+          await confirmConnectedDeviceForCurrentAuthority(connected, operationGeneration: generation);
+          return presentationIsConnected && presentationConnectedDevice?.id == device.id;
+        }
+
+        // Some transports complete discovery separately from force-connect. Use
+        // the same scan fallback as background reconnect, but keep the explicit
+        // target and UID fence for this attempt.
+        return _scanAndConnectToDevice(
+          operationGeneration: generation,
+          explicitlySelectedDevice: device,
+          connectionAttemptToken: token,
+        );
+      },
+      expectedDeviceId: device.id,
+    );
+  }
+
+  Future<void> _prepareFreshBleSessionForCaptureRecovery(BtDevice device, int generation) async {
+    _markFreshBleSessionRequired(device);
+    _activeDeviceConnectionSession = null;
+    _disconnectDebouncer.cancel();
+    _connectDebouncer.cancel();
+    _reconnectionTimer?.cancel();
+    _clearDeferredDeviceCapture();
+
+    final teardown = _teardownCaptureForDevice(device.id);
+    Object? resetFailure;
+    StackTrace? resetFailureStack;
+    try {
+      await _deviceService.disconnectDevice();
+      _clearFreshBleSessionRequirement(device);
+    } catch (error, stack) {
+      resetFailure = error;
+      resetFailureStack = stack;
+    }
+    try {
+      await teardown;
+    } catch (error, stack) {
+      resetFailure ??= error;
+      resetFailureStack ??= stack;
+    }
+    if (!_isDeviceOperationCurrent(generation)) return;
+
+    connectedDevice = null;
+    pairedDevice = device;
+    isConnected = false;
+    isDeviceStorageSupport = false;
+    batteryLevel = -1;
+    notifyListeners();
+    if (resetFailure != null) Error.throwWithStackTrace(resetFailure, resetFailureStack!);
   }
 
   Future<void> _persistRememberedDevice(BtDevice device, {int? operationGeneration}) async {
@@ -735,11 +826,16 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     final generation = operationGeneration ?? _deviceOperationGeneration;
     if (!_isDeviceOperationCurrent(generation)) return;
     _reconnectionTimer?.cancel();
+    if (_hasPendingFreshBleSessionRequirement()) return;
     _automaticReconnectAttempts = 0;
     _automaticReconnectExhausted = false;
     _automaticReconnectCooldownUntil = null;
     scan(t) async {
       if (!_isDeviceOperationCurrent(generation)) {
+        t.cancel();
+        return;
+      }
+      if (_hasPendingFreshBleSessionRequirement()) {
         t.cancel();
         return;
       }
@@ -963,6 +1059,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     _authorityReconciliationGeneration++;
     _authorityReconciliationPending = false;
     _activeDeviceConnectionSession = null;
+    _freshBleSessionRequirement = null;
     _activeConnectionAttemptToken = null;
     _connectionAttemptStartedAt = null;
     WidgetsBinding.instance.removeObserver(this);
@@ -987,9 +1084,9 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   Future<void> resumeKnownDeviceConnection({required String reason}) async {
     if (!_deviceServiceReady || isConnected) return;
     final stored = _rememberedDeviceForCurrentAuthority();
-    if (stored == null) return;
+    if (stored == null || _requiresFreshBleSessionFor(stored)) return;
     await _captureTeardown;
-    if (!_deviceServiceReady || isConnected) return;
+    if (!_deviceServiceReady || isConnected || _requiresFreshBleSessionFor(stored)) return;
     final generation = ++_deviceOperationGeneration;
     pairedDevice = stored;
     _automaticReconnectCooldownUntil = null;
@@ -1295,18 +1392,20 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       }
 
       _connectedCaptureRecoveryAttempts++;
-      final recoveryGeneration = ++_deviceOperationGeneration;
-      try {
-        final resolved = (await _deviceService.ensureConnection(device.id, force: true))?.device ??
-            await _resolveConnectedDevice(device.id);
-        if (resolved == null ||
-            !_isDeviceOperationCurrent(recoveryGeneration) ||
-            !_isCurrentOwnerBoundDevice(resolved.id)) {
-          return;
-        }
-        await _onDeviceConnected(resolved, recoveryGeneration);
-      } catch (error) {
-        Logger.debug('Automatic silent-necklace recovery failed: $error');
+      final recovered = await connectDeviceForCurrentUser(device);
+      final recoveryGeneration = _deviceOperationGeneration;
+      if (!recovered &&
+          !_requiresFreshBleSessionFor(device) &&
+          _isDeviceOperationCurrent(recoveryGeneration) &&
+          _isCurrentOwnerBoundDevice(device.id) &&
+          !isConnected) {
+        unawaited(
+          periodicConnect(
+            'automatic silent-necklace recovery follow-up',
+            boundDeviceOnly: true,
+            operationGeneration: recoveryGeneration,
+          ),
+        );
       }
     })()
         .whenComplete(() {
