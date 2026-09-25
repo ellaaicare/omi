@@ -1379,6 +1379,54 @@ void main() {
     expect(provider.connectionAttemptFailed, isFalse);
   });
 
+  test('an older timeout cannot invalidate a newer in-flight connection attempt', () async {
+    final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final firstConnection = Completer<DeviceConnection?>();
+    final secondConnection = Completer<DeviceConnection?>();
+    final service = _FakeDeviceService(DeviceServiceStatus.ready)..ensureConnectionGate = firstConnection;
+    final capture = _RecordingCaptureProvider();
+    var scans = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scans++;
+        return necklace;
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      connectionAttemptTimeout: const Duration(milliseconds: 100),
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    final staleAttempt = provider.connectDeviceForCurrentUser(necklace);
+    for (var attempt = 0; attempt < 20 && service.ensureConnectionCalls == 0; attempt++) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    service.ensureConnectionGate = secondConnection;
+    final currentAttempt = provider.connectDeviceForCurrentUser(necklace);
+    for (var attempt = 0; attempt < 20 && service.ensureConnectionCalls < 2; attempt++) {
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    expect(await staleAttempt, isFalse);
+    expect(provider.isConnecting, isTrue);
+    expect(provider.connectionAttemptFailed, isFalse);
+
+    secondConnection.complete(null);
+    expect(await currentAttempt, isTrue);
+    await pumpEventQueue();
+
+    expect(scans, 1);
+    expect(provider.presentationConnectedDevice?.id, necklace.id);
+    expect(provider.presentationIsConnected, isTrue);
+    expect(provider.isConnecting, isFalse);
+    expect(provider.connectionAttemptFailed, isFalse);
+  });
+
   test('in-flight connected resolution cannot repopulate after stop', () async {
     final service = _FakeDeviceService(DeviceServiceStatus.ready);
     final necklace = BtDevice(name: 'Ella', id: 'necklace-1', type: DeviceType.omi, rssi: -30);

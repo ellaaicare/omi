@@ -383,13 +383,15 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       return connected;
     } on TimeoutException {
       final connected = presentationIsConnected;
-      if (!connected) {
-        // A timed-out transport future cannot be cancelled. Supersede its
-        // generation so it cannot attach a late device to this account.
-        _deviceOperationGeneration++;
-        _clearUncommittedConnectionState();
+      if (_isConnectionAttemptCurrent(token)) {
+        if (!connected) {
+          // A timed-out transport future cannot be cancelled. Supersede its
+          // generation so it cannot attach a late device to this account.
+          _deviceOperationGeneration++;
+          _clearUncommittedConnectionState();
+        }
+        _connectionAttemptFailed = !connected;
       }
-      if (_isConnectionAttemptCurrent(token)) _connectionAttemptFailed = !connected;
       return connected;
     } catch (error) {
       Logger.debug('BLE connection attempt failed: $error');
