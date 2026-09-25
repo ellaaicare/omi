@@ -784,14 +784,12 @@ def _recovery_status(
     generation_key: str,
 ) -> Optional[str]:
     artwork_is_current = artwork.get("generation_key") == generation_key
-    if artwork_is_current and artwork.get("status") == "ready":
-        return "ready"
     job_status = str((job or {}).get("status") or "")
     attempts = int((job or {}).get("attempt_count") or 0)
     if job_status in {"pending", "processing"}:
         return "retrying" if attempts else "pending"
     if job_status in {"failed", "completed"} or (
-        artwork_is_current and artwork.get("status") in {"generating", "unavailable"}
+        artwork_is_current and artwork.get("status") in {"generating", "ready", "unavailable"}
     ):
         return "exhausted"
     return None
@@ -1285,8 +1283,21 @@ class MemoryArtworkService:
                 refreshed = self.repository.get_conversation(uid, memory_id) or {}
                 refreshed_artwork = refreshed.get(artwork_db.ARTWORK_FIELD) or {}
                 refreshed_artwork = refreshed_artwork if isinstance(refreshed_artwork, dict) else {}
-                job = self.repository.get_job(uid, memory_id, generation_key)
-                status = _recovery_status(refreshed_artwork, job, generation_key=generation_key) or "exhausted"
+                reserved_generation_key = str(refreshed_artwork.get("generation_key") or "")
+                if len(reserved_generation_key) != 64 or any(
+                    char not in "0123456789abcdef" for char in reserved_generation_key
+                ):
+                    status = "exhausted"
+                else:
+                    job = self.repository.get_job(uid, memory_id, reserved_generation_key)
+                    status = (
+                        _recovery_status(
+                            refreshed_artwork,
+                            job,
+                            generation_key=reserved_generation_key,
+                        )
+                        or "exhausted"
+                    )
             if outcome == "reserved":
                 reservations += 1
             counts[status] += 1

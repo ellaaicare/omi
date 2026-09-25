@@ -1068,6 +1068,73 @@ def test_recent_recovery_does_not_report_stale_ready_artwork_over_current_pendin
     assert status == "pending"
 
 
+def test_recent_recovery_reports_current_objectless_ready_artwork_as_exhausted():
+    repository = FakeRepository()
+    authority = _authority()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(authority)
+    memory = _terminal_memory("objectless")
+    memory["artwork"] = _ready_artwork(
+        memory,
+        authority=authority,
+        style_version=artwork.DEFAULT_STYLE_VERSION,
+    )
+    memory["artwork"]["generation_key"] = artwork._generation_key(
+        uid="owner-a",
+        authority=authority,
+        memory_id="objectless",
+        enrichment_revision=memory["active_summary_version_id"],
+        style_version=artwork.DEFAULT_STYLE_VERSION,
+        prompt_sha256=memory["artwork"]["prompt_sha256"],
+    )
+    memory["artwork"].pop("object_key")
+    repository.conversations[("owner-a", "objectless")] = memory
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=lambda: (_ for _ in ()).throw(AssertionError("recovery must not call provider")),
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+
+    result = asyncio.run(service.recover_recent("owner-a"))
+
+    assert result["ready"] == 0
+    assert result["exhausted"] == 1
+    assert result["reserved"] == 0
+    assert result["items"] == [{"memory_id": "objectless", "status": "exhausted"}]
+
+
+def test_recent_recovery_reads_the_generation_reserved_after_source_drift():
+    class SourceDriftRepository(FakeRepository):
+        def list_conversations_page(self, uid, *, limit, cursor_memory_id=None):
+            snapshot = super().list_conversations_page(
+                uid,
+                limit=limit,
+                cursor_memory_id=cursor_memory_id,
+            )
+            self.conversations[(uid, "drift")]["active_summary_version_id"] = "summary-drift-corrected"
+            return snapshot
+
+    repository = SourceDriftRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    repository.conversations[("owner-a", "drift")] = _terminal_memory("drift")
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=lambda: (_ for _ in ()).throw(AssertionError("recovery must not call provider")),
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+
+    result = asyncio.run(service.recover_recent("owner-a"))
+
+    reserved_key = repository.conversations[("owner-a", "drift")]["artwork"]["generation_key"]
+    assert repository.jobs[("owner-a", "drift", reserved_key)]["status"] == "pending"
+    assert result["pending"] == 1
+    assert result["exhausted"] == 0
+    assert result["items"] == [{"memory_id": "drift", "status": "pending"}]
+
+
 def test_recent_recovery_fails_before_inventory_without_current_consent_or_authority():
     class NeverScanRepository(FakeRepository):
         def list_conversations_page(self, uid, *, limit, cursor_memory_id=None):
