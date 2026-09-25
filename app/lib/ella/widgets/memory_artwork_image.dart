@@ -17,6 +17,8 @@ typedef MemoryArtworkCacheEvictor = Future<void> Function(String cacheKey);
 
 enum _MemoryArtworkFallbackKind { preparing, unavailable }
 
+const memoryArtworkWatercolorFallbackAsset = 'assets/images/ella-memory-watercolor-fallback.png';
+
 bool _artworkReadinessChanged(ServerConversation previous, ServerConversation current) {
   String? enrichmentValue(ServerConversation conversation, String key) =>
       conversation.enrichmentState?[key]?.toString();
@@ -45,6 +47,7 @@ class MemoryArtworkImage extends StatefulWidget {
     this.authorityEpoch = 0,
     this.enqueueIfMissing = false,
     this.allowManualGeneration = false,
+    this.fallbackAssetPath,
   });
 
   final ServerConversation conversation;
@@ -87,6 +90,10 @@ class MemoryArtworkImage extends StatefulWidget {
   /// authenticated display read confirms that artwork is unavailable.
   /// Passive list rendering remains read-only.
   final bool allowManualGeneration;
+
+  /// A bundled, non-personal image shown behind the truthful progress/retry
+  /// treatment when a high-priority surface has no generated artwork yet.
+  final String? fallbackAssetPath;
 
   static const _automaticGenerationBudgetCapacity = 256;
   static const _automaticPreEgressAttemptLimit = 3;
@@ -657,12 +664,29 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     if (bytes != null) {
       return _sourcePhotoFallback(context, bytes, kind: kind);
     }
+    final fallbackAssetPath = widget.fallbackAssetPath;
+    if (fallbackAssetPath != null && fallbackAssetPath.isNotEmpty) {
+      return _assetFallback(context, fallbackAssetPath, kind: kind);
+    }
     return _placeholder(kind);
   }
 
+  Widget _assetFallback(BuildContext context, String assetPath, {required _MemoryArtworkFallbackKind kind}) {
+    final image = Semantics(
+      image: true,
+      label: context.l10n.memoryArtworkUnavailableLabel,
+      child: Image.asset(
+        assetPath,
+        key: Key('memory-artwork-local-fallback-${widget.conversation.id}'),
+        fit: widget.fit,
+        gaplessPlayback: true,
+        errorBuilder: (_, __, ___) => _placeholder(kind),
+      ),
+    );
+    return _fallbackImageWithAction(context, image, kind: kind);
+  }
+
   Widget _sourcePhotoFallback(BuildContext context, Uint8List bytes, {required _MemoryArtworkFallbackKind kind}) {
-    final isPreparing = kind == _MemoryArtworkFallbackKind.preparing;
-    final canGenerate = !isPreparing && !_manualGenerationInFlight && _canManuallyGenerate(_remoteResult);
     final photo = Semantics(
       image: true,
       label: context.l10n.todayMemoryPhotoLabel,
@@ -674,12 +698,18 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         errorBuilder: (_, __, ___) => _placeholder(kind),
       ),
     );
-    if (!isPreparing && !canGenerate) return photo;
+    return _fallbackImageWithAction(context, photo, kind: kind);
+  }
+
+  Widget _fallbackImageWithAction(BuildContext context, Widget image, {required _MemoryArtworkFallbackKind kind}) {
+    final isPreparing = kind == _MemoryArtworkFallbackKind.preparing;
+    final canGenerate = !isPreparing && !_manualGenerationInFlight && _canManuallyGenerate(_remoteResult);
+    if (!isPreparing && !canGenerate) return image;
     return LayoutBuilder(
       builder: (context, constraints) => Stack(
         fit: StackFit.expand,
         children: [
-          photo,
+          image,
           if (isPreparing)
             Center(
               child: Semantics(

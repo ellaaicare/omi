@@ -1244,6 +1244,47 @@ void main() {
     expect(find.text('Preparing illustration…'), findsOneWidget);
   });
 
+  testWidgets('a high-priority memory uses a bundled fallback and keeps retry available', (tester) async {
+    final api = _ManualGenerationArtworkApi(initialFailureCode: 'memory_artwork_provider_failed');
+    final conversation = ServerConversation(
+      id: 'recent-memory-fallback',
+      createdAt: DateTime(2026, 9, 24),
+      structured: Structured('[Ella] A recent memory', '[Ella] A useful enriched summary.'),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: SizedBox(
+          width: 320,
+          height: 220,
+          child: MemoryArtworkImage(
+            conversation: conversation,
+            api: api,
+            cachedFileLookup: (_) async => null,
+            allowManualGeneration: true,
+            fallbackAssetPath: memoryArtworkWatercolorFallbackAsset,
+            maxTransientRetries: 0,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byKey(const Key('memory-artwork-local-fallback-recent-memory-fallback')), findsOneWidget);
+    expect(find.text('Illustration unavailable'), findsNothing);
+    final retry = find.byKey(const Key('memory-artwork-photo-retry-recent-memory-fallback'));
+    expect(retry, findsOneWidget);
+
+    await tester.tap(retry);
+    await tester.pump();
+
+    expect(api.enqueueRequests, [isFalse, isTrue]);
+    expect(find.byKey(const Key('memory-artwork-local-fallback-recent-memory-fallback')), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-generation-progress-recent-memory-fallback')), findsOneWidget);
+  });
+
   testWidgets('a source photo keeps artwork retry and preparing progress visible', (tester) async {
     final api = _ManualGenerationArtworkApi();
     final photoData = await rootBundle.load('assets/images/onboarding-bg-1.webp');
