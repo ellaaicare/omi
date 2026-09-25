@@ -425,6 +425,63 @@ def get_preferences(uid: str) -> dict[str, Any]:
     return result
 
 
+def _stabilize_preferences_authority_transaction(
+    transaction,
+    user_ref,
+    *,
+    binding_id: str,
+    profile_id: str,
+    authority_digest: str,
+    now: datetime,
+) -> dict[str, Any]:
+    snapshot = user_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return {}
+    user = snapshot.to_dict() or {}
+    stored = user.get(PREFERENCES_FIELD)
+    preferences = dict(stored) if isinstance(stored, dict) else {}
+    if user.get(DELETION_PENDING_FIELD):
+        return {**preferences, DELETION_PENDING_FIELD: True}
+    if (
+        preferences.get("binding_id") == binding_id
+        and preferences.get("profile_id") == profile_id
+        and preferences.get("authority_digest") != authority_digest
+    ):
+        preferences = {
+            **preferences,
+            "authority_digest": authority_digest,
+            "updated_at": now,
+        }
+        transaction.set(user_ref, {PREFERENCES_FIELD: preferences}, merge=True)
+    if user.get(STORAGE_CLEANUP_REQUIRED_FIELD):
+        return {**preferences, STORAGE_CLEANUP_REQUIRED_FIELD: True}
+    return preferences
+
+
+@transactional
+def _stabilize_preferences_authority(transaction, user_ref, **kwargs):
+    return _stabilize_preferences_authority_transaction(transaction, user_ref, **kwargs)
+
+
+def stabilize_preferences_authority(
+    uid: str,
+    *,
+    binding_id: str,
+    profile_id: str,
+    authority_digest: str,
+) -> dict[str, Any]:
+    """Refresh only the stable authority digest from a transactional preference read."""
+
+    return _stabilize_preferences_authority(
+        db.transaction(),
+        _user_ref(uid),
+        binding_id=binding_id,
+        profile_id=profile_id,
+        authority_digest=authority_digest,
+        now=datetime.now(timezone.utc),
+    )
+
+
 def set_preferences(
     uid: str,
     preferences: dict[str, Any],

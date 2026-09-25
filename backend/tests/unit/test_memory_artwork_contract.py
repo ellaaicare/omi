@@ -1,12 +1,14 @@
 import asyncio
 import base64
 import copy
+import gc
 import hashlib
 import importlib.util
 import io
 import json
 import sys
 import types
+import weakref
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,6 +39,7 @@ def _load_service_module():
     database_stub = types.ModuleType("database.memory_artwork")
     for name in (
         "get_preferences",
+        "stabilize_preferences_authority",
         "set_preferences",
         "get_backfill_control",
         "set_backfill_control",
@@ -231,6 +234,20 @@ class FakeRepository:
                 "pause_reason": "",
                 "updated_at": datetime.now(timezone.utc),
             }
+
+    def stabilize_preferences_authority(self, uid, *, binding_id, profile_id, authority_digest):
+        preferences = self.get_preferences(uid)
+        if (
+            not preferences.get(artwork.artwork_db.DELETION_PENDING_FIELD)
+            and preferences.get("binding_id") == binding_id
+            and preferences.get("profile_id") == profile_id
+            and preferences.get("authority_digest") != authority_digest
+        ):
+            preferences["authority_digest"] = authority_digest
+            preferences["updated_at"] = datetime.now(timezone.utc)
+            preferences.pop(artwork.artwork_db.DELETION_PENDING_FIELD, None)
+            self.preferences_by_uid[uid] = copy.deepcopy(preferences)
+        return preferences
 
     def get_backfill_control(self, uid):
         return copy.deepcopy(self.backfill_controls.get(uid, {}))
@@ -1424,6 +1441,52 @@ def test_responsive_renditions_are_three_by_two_and_strip_exif():
         with Image.open(io.BytesIO(rendition.image_bytes)) as decoded:
             assert decoded.size == (rendition.pixel_width, rendition.pixel_height)
             assert len(decoded.getexif()) == 0
+
+
+def test_generation_releases_rendition_objects_before_final_authority_await(monkeypatch):
+    repository = FakeRepository()
+    authority = _authority()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(authority)
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    rendition_refs = []
+    original_responsive_renditions = artwork._responsive_renditions
+
+    def tracked_renditions(image_bytes):
+        renditions = original_responsive_renditions(image_bytes)
+        rendition_refs.extend(weakref.ref(rendition) for rendition in renditions)
+        return renditions
+
+    class NonRetainingStore(FakeStore):
+        def put(self, **kwargs):
+            content_digest = hashlib.sha256(kwargs["image_bytes"]).hexdigest()
+            rendition = kwargs.get("rendition", "master")
+            return artwork.StoredArtwork(
+                object_key=f"private/{content_digest}-{rendition}",
+                object_generation="7",
+                content_type=kwargs["content_type"],
+                byte_size=len(kwargs["image_bytes"]),
+                cache_key=content_digest,
+            )
+
+    async def resolving_authority(uid):
+        if rendition_refs:
+            gc.collect()
+            assert all(reference() is None for reference in rendition_refs)
+        return authority
+
+    monkeypatch.setattr(artwork, "_responsive_renditions", tracked_renditions)
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=resolving_authority,
+        provider_factory=FakeProvider,
+        store_factory=NonRetainingStore,
+        config=_enabled_config(),
+    )
+
+    assert asyncio.run(service.enqueue("owner-a", "memory-1"))["outcome"] == "reserved"
+    assert _run_claimed_process(service, repository) == {"outcome": "ready", "status": "ready"}
+    assert rendition_refs
+    assert all(reference() is None for reference in rendition_refs)
 
 
 def test_legacy_job_metadata_is_recovered_only_from_its_exact_generation():
@@ -3861,6 +3924,48 @@ def test_day_artwork_batches_only_the_requested_local_calendar_day():
     assert result["items"][0]["artwork"]["status"] == "ready"
 
 
+def test_day_artwork_paginates_past_two_hundred_newer_memories():
+    class PagingRepository(FakeRepository):
+        def __init__(self):
+            super().__init__()
+            self.page_calls = 0
+
+        def list_conversations_page(self, uid, *, limit, cursor_memory_id=None):
+            self.page_calls += 1
+            return super().list_conversations_page(
+                uid,
+                limit=limit,
+                cursor_memory_id=cursor_memory_id,
+            )
+
+    repository = PagingRepository()
+    authority = _authority()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(authority)
+    target = _terminal_memory("target", created_at=datetime(2026, 1, 15, 12, tzinfo=timezone.utc))
+    target["artwork"] = {
+        **_ready_artwork(target, authority=authority, style_version=artwork.DEFAULT_STYLE_VERSION),
+        "generation_key": "a" * 64,
+    }
+    repository.conversations[("owner-a", "target")] = target
+    for index in range(201):
+        memory_id = f"newer-{index:03d}"
+        repository.conversations[("owner-a", memory_id)] = _terminal_memory(
+            memory_id,
+            created_at=datetime(2026, 2, 1, 12, tzinfo=timezone.utc) + timedelta(minutes=index),
+        )
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=lambda uid: (_ for _ in ()).throw(AssertionError("read must not resolve runtime")),
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+
+    result = asyncio.run(service.day_artwork("owner-a", "2026-01-15", utc_offset_minutes=0))
+
+    assert repository.page_calls == 2
+    assert [item["memory_id"] for item in result["items"]] == ["target"]
+
+
 def test_backfill_limits_enrichment_recovery_candidates_and_rejects_stale_cursor():
     repository = FakeRepository()
     repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
@@ -4529,6 +4634,62 @@ def test_firestore_permanent_restore_is_transactional_and_runtime_failure_only()
         authority_digest="stable-owner-profile-digest",
     )
     assert denied["outcome"] == "not_restorable"
+
+
+def test_firestore_authority_stabilization_preserves_latest_consent_and_style():
+    class Snapshot:
+        exists = True
+
+        def __init__(self, state):
+            self.state = state
+
+        def to_dict(self):
+            return copy.deepcopy(self.state)
+
+    class Reference:
+        def __init__(self, state):
+            self.state = state
+
+        def get(self, transaction=None):
+            return Snapshot(self.state)
+
+    class Transaction:
+        def __init__(self):
+            self.writes = 0
+
+        def set(self, reference, payload, merge=False):
+            self.writes += 1
+            assert merge is True
+            reference.state.update(copy.deepcopy(payload))
+
+    latest_preferences = {
+        "consent": "declined",
+        "consent_version": artwork.ARTWORK_CONSENT_VERSION,
+        "style_version": "ella.memory_artwork.style.paper-collage.v1",
+        "binding_id": "binding-owner-a",
+        "profile_id": "profile-owner-a",
+        "authority_digest": "legacy-runtime-digest",
+    }
+    user_ref = Reference({artwork_database.PREFERENCES_FIELD: latest_preferences})
+    transaction = Transaction()
+
+    result = artwork_database._stabilize_preferences_authority_transaction(
+        transaction,
+        user_ref,
+        binding_id="binding-owner-a",
+        profile_id="profile-owner-a",
+        authority_digest="stable-owner-profile-digest",
+        now=datetime(2026, 9, 25, tzinfo=timezone.utc),
+    )
+
+    assert result["consent"] == "declined"
+    assert result["style_version"] == "ella.memory_artwork.style.paper-collage.v1"
+    assert result["authority_digest"] == "stable-owner-profile-digest"
+    assert user_ref.state[artwork_database.PREFERENCES_FIELD]["consent"] == "declined"
+    assert user_ref.state[artwork_database.PREFERENCES_FIELD]["style_version"] == (
+        "ella.memory_artwork.style.paper-collage.v1"
+    )
+    assert transaction.writes == 1
 
 
 def test_firestore_terminal_reservation_promotes_existing_pending_historical_job():
