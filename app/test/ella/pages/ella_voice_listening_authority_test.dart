@@ -147,4 +147,46 @@ void main() {
     expect(gate.isCurrent(firstGeneration!), isFalse);
     expect(gate.finish(), isFalse);
   });
+
+  test('failed phone capture keeps its technical error without consent remap or replacement', () async {
+    final gate = StandardVoiceStartupSerialGate();
+    final startupGeneration = gate.begin();
+    var status = 'voiceError';
+    var revalidationCalls = 0;
+    var listenCalls = 0;
+
+    expect(startupGeneration, isNotNull);
+    gate.cancel();
+    final shouldContinue = await continueStandardVoiceAfterCapturePreparation(
+      capturePrepared: false,
+      revalidateAuthority: () async {
+        revalidationCalls++;
+        status = 'consentReview';
+        return true;
+      },
+    );
+    if (shouldContinue) listenCalls++;
+
+    expect(shouldContinue, isFalse);
+    expect(revalidationCalls, 0);
+    expect(listenCalls, 0);
+    expect(status, 'voiceError');
+    expect(gate.isCurrent(startupGeneration!), isFalse);
+    expect(gate.finish(), isFalse);
+  });
+
+  test('successful phone capture still revalidates authority', () async {
+    var revalidationCalls = 0;
+
+    final shouldContinue = await continueStandardVoiceAfterCapturePreparation(
+      capturePrepared: true,
+      revalidateAuthority: () async {
+        revalidationCalls++;
+        return true;
+      },
+    );
+
+    expect(shouldContinue, isTrue);
+    expect(revalidationCalls, 1);
+  });
 }

@@ -98,6 +98,15 @@ Future<bool> startStandardVoiceListeningIfAuthorized({
   return true;
 }
 
+@visibleForTesting
+Future<bool> continueStandardVoiceAfterCapturePreparation({
+  required bool capturePrepared,
+  required Future<bool> Function() revalidateAuthority,
+}) async {
+  if (!capturePrepared) return false;
+  return revalidateAuthority();
+}
+
 Future<bool> armEllaVoiceTranscriptSessionBeforeTransport({
   required V2VTurnReconciler reconciler,
   required String authenticatedUid,
@@ -775,8 +784,12 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     }
 
     final capturePrepared = await _preparePhoneCaptureForVoice(v2v: false);
-    if (!await _revalidateStandardVoiceStartup(startupGeneration)) return;
-    if (!capturePrepared) return;
+    if (!await continueStandardVoiceAfterCapturePreparation(
+      capturePrepared: capturePrepared,
+      revalidateAuthority: () => _revalidateStandardVoiceStartup(startupGeneration),
+    )) {
+      return;
+    }
 
     // Stop audio player to release audio session before mic starts
     try {
@@ -1118,6 +1131,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     if (acknowledged || !mounted) return acknowledged;
 
     _voiceStartupGuard.cancel();
+    if (!v2v) _cancelStandardVoiceListeningStartup();
     _standardVoiceConsentLease?.stop();
     _standardVoiceConsentLease = null;
     setState(() {
