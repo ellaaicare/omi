@@ -31,11 +31,13 @@ class SharedPreferencesUtil {
   static String _verifiedAiConsentScopeHash = '';
   static DateTime? _verifiedAiConsentAt;
   static int _aiConsentAuthorityGeneration = 0;
+  static int _terminalAccountConsentAuthorityGeneration = 0;
   static final ValueNotifier<int> _aiConsentAuthorityChanges = ValueNotifier<int>(0);
   static String _verifiedEllaProvisioningUid = '';
   static int _verifiedEllaProvisioningBindingRevision = 0;
   static String _verifiedEllaProvisioningPolicyRevision = '';
   static int _verifiedEllaProvisioningAuthorityGeneration = -1;
+  static int _ellaProvisioningTerminalAuthorityGeneration = 0;
 
   static const bool isPublicBuild = bool.fromEnvironment('ELLA_PUBLIC_BUILD');
   static const bool isTodayDesignPreviewConfigured = bool.fromEnvironment('ELLA_TODAY_DESIGN_PREVIEW');
@@ -64,7 +66,7 @@ class SharedPreferencesUtil {
   }
 
   set uid(String value) {
-    if (value != uid) _invalidateAiConsentAuthority();
+    if (value != uid) _invalidateAiConsentAuthority(terminal: true);
     saveString('uid', value);
   }
 
@@ -72,12 +74,18 @@ class SharedPreferencesUtil {
 
   int get aiConsentAuthorityGeneration => _aiConsentAuthorityGeneration;
 
+  int get terminalAccountConsentAuthorityGeneration => _terminalAccountConsentAuthorityGeneration;
+
+  int get ellaProvisioningTerminalAuthorityGeneration => _ellaProvisioningTerminalAuthorityGeneration;
+
   static ValueListenable<int> get aiConsentAuthorityChanges => _aiConsentAuthorityChanges;
 
   @visibleForTesting
   static void resetProcessLocalAuthorityStateForTesting() {
     _aiConsentAuthorityGeneration = 0;
+    _terminalAccountConsentAuthorityGeneration = 0;
     _aiConsentAuthorityChanges.value = 0;
+    _ellaProvisioningTerminalAuthorityGeneration = 0;
     clearAiConsentServerVerification();
     _clearEllaProvisioningServerVerification();
   }
@@ -434,8 +442,9 @@ class SharedPreferencesUtil {
     _verifiedAiConsentAt = null;
   }
 
-  static void _invalidateAiConsentAuthority() {
+  static void _invalidateAiConsentAuthority({bool terminal = false}) {
     _aiConsentAuthorityGeneration++;
+    if (terminal) _terminalAccountConsentAuthorityGeneration++;
     clearAiConsentServerVerification();
     _preferences?.remove(_aiConsentLastServerConfirmedAtKey);
     _preferences?.remove(_aiConsentLastServerConfirmedUidKey);
@@ -447,7 +456,7 @@ class SharedPreferencesUtil {
   /// Invalidates every delayed account operation before Firebase identity is
   /// allowed to change. This is intentionally synchronous so no in-flight
   /// result can commit while transition quiescence is awaiting service stops.
-  void invalidateAccountAuthorityForTransition() => _invalidateAiConsentAuthority();
+  void invalidateAccountAuthorityForTransition() => _invalidateAiConsentAuthority(terminal: true);
 
   void acceptAiConsent({
     String receiptId = '',
@@ -491,7 +500,7 @@ class SharedPreferencesUtil {
   }
 
   void declineAiConsent() {
-    _invalidateAiConsentAuthority();
+    _invalidateAiConsentAuthority(terminal: true);
     aiConsentAccepted = false;
     remove('aiConsentAcceptedAt');
     remove('aiConsentReceiptId');
@@ -998,6 +1007,14 @@ class SharedPreferencesUtil {
   /// cached receipt used to render an already-established account shell.
   void invalidateEllaProvisioningServerVerification() => _clearEllaProvisioningServerVerification();
 
+  /// Fences sessions created before an authoritative terminal provisioning
+  /// response. Transient revalidation and consent metadata rotation only
+  /// clear verification; they must not invalidate an already-active session.
+  void invalidateEllaProvisioningTerminalAuthority() {
+    _ellaProvisioningTerminalAuthorityGeneration++;
+    _clearEllaProvisioningServerVerification();
+  }
+
   static void _clearEllaProvisioningServerVerification() {
     _verifiedEllaProvisioningUid = '';
     _verifiedEllaProvisioningBindingRevision = 0;
@@ -1022,7 +1039,7 @@ class SharedPreferencesUtil {
 
     if (previousUid == newUid) return;
 
-    _invalidateAiConsentAuthority();
+    _invalidateAiConsentAuthority(terminal: true);
     await quarantineLegacyAccountCaches();
 
     if (previousUid.isNotEmpty) {
@@ -1348,7 +1365,7 @@ class SharedPreferencesUtil {
   Future<bool> remove(String key) async => await _preferences?.remove(key) ?? false;
 
   Future<bool> clear() async {
-    _invalidateAiConsentAuthority();
+    _invalidateAiConsentAuthority(terminal: true);
     return await _preferences?.clear() ?? false;
   }
 }

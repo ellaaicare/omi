@@ -21,20 +21,24 @@ class _TimerPollHandle implements EllaProvisioningPollHandle {
 }
 
 typedef EllaProvisioningScheduler = EllaProvisioningPollHandle Function(Duration delay, VoidCallback callback);
+typedef EllaProvisioningReceiptSaver = Future<void> Function(String uid, Map<String, dynamic> receipt);
 
 class EllaProvisioningProvider extends ChangeNotifier {
   EllaProvisioningProvider({
     EllaProvisioningTransport? transport,
     SharedPreferencesUtil? preferences,
     EllaProvisioningScheduler? scheduler,
+    EllaProvisioningReceiptSaver? receiptSaver,
     this.maxPollAttempts = 30,
   })  : _transport = transport ?? const EllaProvisioningHttpTransport(),
         _preferences = preferences ?? SharedPreferencesUtil(),
-        _scheduler = scheduler ?? ((delay, callback) => _TimerPollHandle(delay, callback));
+        _scheduler = scheduler ?? ((delay, callback) => _TimerPollHandle(delay, callback)),
+        _receiptSaver = receiptSaver;
 
   final EllaProvisioningTransport _transport;
   final SharedPreferencesUtil _preferences;
   final EllaProvisioningScheduler _scheduler;
+  final EllaProvisioningReceiptSaver? _receiptSaver;
   final int maxPollAttempts;
 
   EllaProvisioningState state = EllaProvisioningState.idle;
@@ -54,6 +58,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
   bool _requestInFlight = false;
   bool _retryEnsureAfterCurrentRequest = false;
   bool _revalidatingOperationalReceipt = false;
+  Object? _authorityCoordinatorOwner;
 
   bool get isOperational => state == EllaProvisioningState.ready && receipt?.isOperational == true;
 
@@ -74,6 +79,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
       return;
     }
     if (_activeUid == uid) {
+      _bindAuthorityCoordinator(uid);
       final consentReceiptId = requestContext.consentReceiptId;
       if (consentReceiptId.isNotEmpty && consentReceiptId != _requestContext?.consentReceiptId) {
         setConsentReceiptId(consentReceiptId);
@@ -98,6 +104,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     final generation = ++_generation;
     _cancelPoll();
     _activeUid = uid;
+    _bindAuthorityCoordinator(uid);
     _requestContext = requestContext;
     _requestContextEpoch++;
     _pollAttempts = 0;
@@ -149,11 +156,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
   }
 
   void setConsentReceiptId(String receiptId) {
-    final context = _requestContext;
-    if (receiptId.isEmpty || context == null || context.consentReceiptId == receiptId) return;
-    _requestContext = context.copyWithConsentReceiptId(receiptId);
-    _requestContextEpoch++;
-    unawaited(retry(preserveOperationalReceipt: false));
+    unawaited(_revalidateConsentReceipt(_activeUid, receiptId).then<void>((_) {}));
   }
 
   void setForeground(bool value) {
@@ -173,6 +176,8 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _generation++;
     _requestContextEpoch++;
     _cancelPoll();
+    _unbindAuthorityCoordinator();
+    _endProvisioningOwnership();
     _activeUid = '';
     _requestContext = null;
     _pollAttempts = 0;
@@ -231,11 +236,26 @@ class EllaProvisioningProvider extends ChangeNotifier {
 
   Future<void> _applyResponse(EllaProvisioningResponse response, int generation, int requestContextEpoch) async {
     if (!_isCurrentRequest(generation, requestContextEpoch)) return;
-    _preferences.invalidateEllaProvisioningServerVerification();
     final nextReceipt = response.receipt;
+    final rejectedTerminal = !response.isAccepted &&
+        (response.statusCode == 401 ||
+            response.statusCode == 403 ||
+            response.statusCode == 409 ||
+            response.statusCode == 426 ||
+            (nextReceipt?.state == EllaProvisioningState.blocked && nextReceipt?.retryable != true));
+    final acceptedTerminal = response.isAccepted &&
+        nextReceipt != null &&
+        ((nextReceipt.state == EllaProvisioningState.ready && !nextReceipt.isOperational) ||
+            (nextReceipt.state == EllaProvisioningState.blocked && nextReceipt.retryable != true));
+    final terminalResponse = rejectedTerminal || acceptedTerminal;
+    if (terminalResponse) {
+      _preferences.invalidateEllaProvisioningTerminalAuthority();
+    } else {
+      _preferences.invalidateEllaProvisioningServerVerification();
+    }
     if (!response.isAccepted || nextReceipt == null) {
       if (nextReceipt != null) {
-        await _preferences.saveEllaProvisioningReceipt(_activeUid, nextReceipt.toCacheJson());
+        await _saveReceipt(nextReceipt);
         if (!_isCurrentRequest(generation, requestContextEpoch)) return;
         receipt = nextReceipt;
       }
@@ -254,12 +274,17 @@ class EllaProvisioningProvider extends ChangeNotifier {
           response.statusCode == 409 ||
           response.statusCode == 426 ||
           (nextReceipt?.state == EllaProvisioningState.blocked && nextReceipt?.retryable != true);
-      _setFailure(code, blocked: blocked, preserveOperationalReceipt: !blocked);
+      _setFailure(
+        code,
+        blocked: blocked,
+        preserveOperationalReceipt: !blocked,
+        terminalAlreadyFenced: terminalResponse,
+      );
       if (_shouldPoll) _schedulePoll(generation, _backoffDelay);
       return;
     }
 
-    await _preferences.saveEllaProvisioningReceipt(_activeUid, nextReceipt.toCacheJson());
+    await _saveReceipt(nextReceipt);
     if (!_isCurrentRequest(generation, requestContextEpoch)) return;
     receipt = nextReceipt;
     errorCode = nextReceipt.errorCode;
@@ -267,6 +292,8 @@ class EllaProvisioningProvider extends ChangeNotifier {
     if (nextReceipt.state == EllaProvisioningState.ready && !nextReceipt.isOperational) {
       state = EllaProvisioningState.blocked;
       errorCode = 'incomplete_ready_receipt';
+    } else if (nextReceipt.state == EllaProvisioningState.blocked && nextReceipt.retryable != true) {
+      state = EllaProvisioningState.blocked;
     } else if (_pollAttempts >= maxPollAttempts &&
         (nextReceipt.state == EllaProvisioningState.queued ||
             nextReceipt.state == EllaProvisioningState.provisioning ||
@@ -297,13 +324,27 @@ class EllaProvisioningProvider extends ChangeNotifier {
     }
   }
 
-  void _setFailure(String code, {bool blocked = false, bool preserveOperationalReceipt = false}) {
+  Future<void> _saveReceipt(EllaProvisioningReceipt nextReceipt) async {
+    final saver = _receiptSaver ?? _preferences.saveEllaProvisioningReceipt;
+    await saver(_activeUid, nextReceipt.toCacheJson());
+  }
+
+  void _setFailure(
+    String code, {
+    bool blocked = false,
+    bool preserveOperationalReceipt = false,
+    bool terminalAlreadyFenced = false,
+  }) {
     // A transient foreground refresh must not replace an already-working Home
     // with setup UI. The provider still reports isOperational=false, so
     // protected operations remain fail-closed until fresh authority succeeds.
     _revalidatingOperationalReceipt =
         !blocked && preserveOperationalReceipt && _revalidatingOperationalReceipt && receipt?.isOperational == true;
-    _preferences.invalidateEllaProvisioningServerVerification();
+    if (blocked && !terminalAlreadyFenced) {
+      _preferences.invalidateEllaProvisioningTerminalAuthority();
+    } else if (!blocked) {
+      _preferences.invalidateEllaProvisioningServerVerification();
+    }
     errorCode = code;
     state = blocked ? EllaProvisioningState.blocked : EllaProvisioningState.degraded;
     notifyListeners();
@@ -347,6 +388,46 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _pollHandle = null;
   }
 
+  void _endProvisioningOwnership() {
+    if (_activeUid.isEmpty) return;
+    _preferences.invalidateEllaProvisioningTerminalAuthority();
+  }
+
+  void _bindAuthorityCoordinator(String uid) {
+    _unbindAuthorityCoordinator();
+    _authorityCoordinatorOwner = EllaProvisioningAuthorityCoordinator.register(
+      uid: uid,
+      revalidator: _revalidateConsentReceipt,
+    );
+  }
+
+  void _unbindAuthorityCoordinator() {
+    final owner = _authorityCoordinatorOwner;
+    if (owner == null) return;
+    EllaProvisioningAuthorityCoordinator.unregister(owner);
+    _authorityCoordinatorOwner = null;
+  }
+
+  Future<bool> _revalidateConsentReceipt(String uid, String receiptId) async {
+    final context = _requestContext;
+    if (uid.isEmpty || uid != _activeUid || uid != _preferences.uid || receiptId.isEmpty || context == null) {
+      return false;
+    }
+    final bindingRevision = receipt?.bindingRevision ?? 0;
+    if (context.consentReceiptId == receiptId &&
+        bindingRevision > 0 &&
+        _preferences.hasCurrentEllaProvisioningAuthority(uid: uid, bindingRevision: bindingRevision)) {
+      return true;
+    }
+    if (context.consentReceiptId == receiptId && (_requestInFlight || _pollHandle != null || _shouldPoll)) {
+      return true;
+    }
+    _requestContext = context.copyWithConsentReceiptId(receiptId);
+    _requestContextEpoch++;
+    await retry(preserveOperationalReceipt: false);
+    return uid == _activeUid && uid == _preferences.uid;
+  }
+
   bool _isCurrentRequest(int generation, int requestContextEpoch) =>
       generation == _generation && requestContextEpoch == _requestContextEpoch;
 
@@ -364,6 +445,9 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _generation++;
     _requestContextEpoch++;
     _cancelPoll();
+    _unbindAuthorityCoordinator();
+    _endProvisioningOwnership();
+    _activeUid = '';
     _preferences.invalidateEllaProvisioningServerVerification();
     super.dispose();
   }

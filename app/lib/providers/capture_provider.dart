@@ -1518,7 +1518,7 @@ class CaptureProvider extends ChangeNotifier
     // Keep late frames bound to the capture-start authority. Unknown/stale
     // frames are retained for quarantine and never inherit the next account.
     if (!_isDeviceCaptureCurrent(session)) {
-      _wal.getSyncs().phone.onByteStream(snapshot, ownerAtCapture: captureAuthority.owner);
+      _wal.getSyncs().phone.onByteStream(snapshot, authorityAtCapture: captureAuthority);
       return;
     }
 
@@ -1541,7 +1541,7 @@ class CaptureProvider extends ChangeNotifier
         (session.socket.state != SocketServiceState.connected || SharedPreferencesUtil().unlimitedLocalStorageEnabled);
     if (walSupported != _isWalSupported) setIsWalSupported(walSupported);
     if (walSupported) {
-      _wal.getSyncs().phone.onByteStream(snapshot, ownerAtCapture: captureAuthority.owner);
+      _wal.getSyncs().phone.onByteStream(snapshot, authorityAtCapture: captureAuthority);
     }
 
     if (physicalPayload.isEmpty) return;

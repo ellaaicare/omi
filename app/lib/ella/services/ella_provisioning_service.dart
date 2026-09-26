@@ -1,4 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
 
 import 'package:uuid/uuid.dart';
 
@@ -15,6 +18,50 @@ const bool isHermesProvisioningGateEnabled = SharedPreferencesUtil.isPublicBuild
 const String ellaProvisioningTargetSchema = 'hermes-user-v1';
 
 enum EllaProvisioningState { idle, checking, queued, provisioning, ready, degraded, blocked }
+
+typedef EllaProvisioningAuthorityRevalidator = FutureOr<bool> Function(String uid, String consentReceiptId);
+
+/// Routes consent receipt rotation back to the process-local provisioning
+/// owner without coupling capture services to the provider layer.
+class EllaProvisioningAuthorityCoordinator {
+  EllaProvisioningAuthorityCoordinator._();
+
+  static Object? _owner;
+  static String _uid = '';
+  static EllaProvisioningAuthorityRevalidator? _revalidator;
+
+  static Object register({required String uid, required EllaProvisioningAuthorityRevalidator revalidator}) {
+    final owner = Object();
+    _owner = owner;
+    _uid = uid;
+    _revalidator = revalidator;
+    return owner;
+  }
+
+  static void unregister(Object owner) {
+    if (!identical(_owner, owner)) return;
+    _owner = null;
+    _uid = '';
+    _revalidator = null;
+  }
+
+  static Future<bool> revalidate({required String uid, required String consentReceiptId}) async {
+    final owner = _owner;
+    final revalidator = _revalidator;
+    if (owner == null || revalidator == null || uid.isEmpty || uid != _uid || consentReceiptId.isEmpty) {
+      return false;
+    }
+    final accepted = await revalidator(uid, consentReceiptId);
+    return accepted && identical(_owner, owner) && _uid == uid;
+  }
+
+  @visibleForTesting
+  static void resetForTesting() {
+    _owner = null;
+    _uid = '';
+    _revalidator = null;
+  }
+}
 
 class EllaProvisioningRequestContext {
   EllaProvisioningRequestContext({

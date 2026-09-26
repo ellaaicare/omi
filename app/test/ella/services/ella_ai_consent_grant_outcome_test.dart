@@ -303,7 +303,7 @@ void main() {
     expect(preferences.aiConsentLastServerConfirmedAt, previousConfirmation);
   });
 
-  test('active refresh rejects a newer grant for a different profile binding', () async {
+  test('active refresh adopts a newer same-account server grant and profile binding', () async {
     final preferences = SharedPreferencesUtil();
     const firstReceipt = '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1';
     const replacementReceipt = '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-2';
@@ -331,10 +331,38 @@ void main() {
       expectedServerDecidedAt: DateTime.utc(2026, 8, 7),
     );
 
-    expect(result.disposition, AiConsentAuthorityRefreshDisposition.accountChanged);
-    expect(result.supportCode, 'profile_binding_changed');
-    expect(preferences.aiConsentReceiptId, firstReceipt);
+    expect(result.disposition, AiConsentAuthorityRefreshDisposition.verified);
+    expect(result.renewsStartupGrace, isTrue);
+    expect(preferences.aiConsentReceiptId, replacementReceipt);
+    expect(preferences.aiConsentProfileBindingId, 'binding-2');
+    expect(preferences.aiConsentAccepted, isTrue);
+  });
+
+  test('active refresh reconciles local profile drift to the same-account server grant', () async {
+    final preferences = SharedPreferencesUtil();
+    const receiptId = '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1';
+    preferences.acceptAiConsent(
+      receiptId: receiptId,
+      uid: uid,
+      profileBindingId: 'binding-1',
+      serverDecidedAt: '2026-08-07T00:00:00Z',
+    );
+    await preferences.saveString('aiConsentProfileBindingId', 'local-drift');
+    final transport = _FakeTransport(
+      fetchResult: AiConsentFetchResult(httpStatus: 200, status: _currentGrantStatus(uid)),
+    );
+
+    final result = await _service(transport).refreshActiveSessionAuthority(
+      uid: uid,
+      expectedReceiptId: receiptId,
+      expectedServerDecidedAt: DateTime.utc(2026, 8, 7),
+    );
+
+    expect(result.disposition, AiConsentAuthorityRefreshDisposition.verified);
+    expect(result.renewsStartupGrace, isTrue);
+    expect(preferences.aiConsentReceiptId, receiptId);
     expect(preferences.aiConsentProfileBindingId, 'binding-1');
+    expect(preferences.aiConsentAccepted, isTrue);
   });
 
   test('active refresh applies an explicit revoked state immediately', () async {
@@ -355,6 +383,37 @@ void main() {
       expectedServerDecidedAt: DateTime.utc(2026, 8, 7),
     );
 
+    expect(result.disposition, AiConsentAuthorityRefreshDisposition.revoked);
+    expect(preferences.aiConsentAccepted, isFalse);
+  });
+
+  test('terminal refresh survives benign persona and profile drift while in flight', () async {
+    final preferences = SharedPreferencesUtil();
+    const receiptId = '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1';
+    preferences.acceptAiConsent(
+      receiptId: receiptId,
+      uid: uid,
+      profileBindingId: 'binding-1',
+      serverDecidedAt: '2026-08-07T00:00:00Z',
+    );
+    final fetchCompleter = Completer<AiConsentFetchResult>();
+    final refresh = _service(_FakeTransport(fetchCompleter: fetchCompleter)).refreshActiveSessionAuthority(
+      uid: uid,
+      expectedReceiptId: receiptId,
+      expectedServerDecidedAt: DateTime.utc(2026, 8, 7),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    preferences.verifiedPersonaId = 'persona-2';
+    preferences.acceptAiConsent(
+      receiptId: receiptId,
+      uid: uid,
+      profileBindingId: 'binding-2',
+      serverDecidedAt: '2026-08-07T00:00:00Z',
+    );
+    fetchCompleter.complete(const AiConsentFetchResult(httpStatus: 200, authorityState: 'revoked'));
+
+    final result = await refresh;
     expect(result.disposition, AiConsentAuthorityRefreshDisposition.revoked);
     expect(preferences.aiConsentAccepted, isFalse);
   });

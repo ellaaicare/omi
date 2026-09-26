@@ -244,6 +244,7 @@ ActiveWalAuthority _activeCaptureAuthority(_CaptureAuthority authority) => Activ
       ),
       consent: AiConsentAuthoritySnapshot(
         generation: 1,
+        terminalAccountConsentGeneration: 0,
         uid: authority.uid,
         verifiedPersonaId: null,
         profileBindingId: 'profile-a',

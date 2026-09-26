@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
+import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ai_consent_policy.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
@@ -17,9 +18,12 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {
+    EllaProvisioningAuthorityCoordinator.resetForTesting();
     SharedPreferences.setMockInitialValues({});
     await SharedPreferencesUtil.init();
   });
+
+  tearDown(EllaProvisioningAuthorityCoordinator.resetForTesting);
 
   test('authenticated provisioning gate is enabled by default', () {
     expect(isHermesProvisioningGateEnabled, isTrue);
@@ -349,7 +353,8 @@ void main() {
 
     await provider.start(uid: 'uid-a', requestContext: _requestContext);
     expect(provider.isOperational, isTrue);
-    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+    final activeAuthority = WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a');
+    expect(activeAuthority, isNotNull);
     expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
 
     await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
@@ -359,6 +364,7 @@ void main() {
     expect(provider.state, EllaProvisioningState.degraded);
     expect(provider.errorCode, 'network_unavailable');
     expect(provider.receipt?.isOperational, isTrue);
+    expect(activeAuthority!.isCurrent(preferences: preferences, authenticatedUid: 'uid-a'), isTrue);
     expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
     expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
     expect(scheduled, hasLength(1));
@@ -374,7 +380,8 @@ void main() {
     );
 
     await provider.start(uid: 'uid-a', requestContext: _requestContext);
-    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+    final activeAuthority = WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a');
+    expect(activeAuthority, isNotNull);
     expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
     await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
 
@@ -383,8 +390,175 @@ void main() {
     expect(provider.state, EllaProvisioningState.degraded);
     expect(provider.errorCode, 'provider_unavailable');
     expect(provider.receipt?.isOperational, isTrue);
+    expect(activeAuthority!.isCurrent(preferences: preferences, authenticatedUid: 'uid-a'), isTrue);
     expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
     expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
+  });
+
+  test('terminal responses fence active authority before receipt persistence and exactly once', () async {
+    final terminalResponses = <({String name, EllaProvisioningResponse response})>[
+      for (final statusCode in const [401, 403, 409, 426])
+        (
+          name: 'HTTP $statusCode',
+          response: EllaProvisioningResponse(
+            statusCode: statusCode,
+            receipt: const EllaProvisioningReceipt(
+              state: EllaProvisioningState.provisioning,
+              retryable: true,
+            ),
+          ),
+        ),
+      (
+        name: 'non-retryable blocked receipt',
+        response: const EllaProvisioningResponse(
+          statusCode: 200,
+          receipt: EllaProvisioningReceipt(
+            state: EllaProvisioningState.blocked,
+            retryable: false,
+            errorCode: 'blocked',
+          ),
+        ),
+      ),
+      (
+        name: 'unknown blocked receipt',
+        response: const EllaProvisioningResponse(
+          statusCode: 200,
+          receipt: EllaProvisioningReceipt(
+            state: EllaProvisioningState.blocked,
+            errorCode: 'blocked',
+          ),
+        ),
+      ),
+      (
+        name: 'incomplete ready receipt',
+        response: const EllaProvisioningResponse(
+          statusCode: 200,
+          receipt: EllaProvisioningReceipt(state: EllaProvisioningState.ready),
+        ),
+      ),
+    ];
+
+    for (final testCase in terminalResponses) {
+      SharedPreferences.setMockInitialValues({});
+      SharedPreferencesUtil.resetProcessLocalAuthorityStateForTesting();
+      await SharedPreferencesUtil.init();
+      final preferences = await _prepareOperationalConsent();
+      final receiptStore = _DeferredSecondReceiptStore(preferences);
+      final provider = EllaProvisioningProvider(
+        transport: _ReadyThenRevalidationTransport(response: testCase.response),
+        preferences: preferences,
+        receiptSaver: receiptStore.save,
+        scheduler: _discardedPollScheduler,
+      );
+
+      await provider.start(uid: 'uid-a', requestContext: _requestContext);
+      final activeAuthority = WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a');
+      final initialTerminalGeneration = preferences.ellaProvisioningTerminalAuthorityGeneration;
+      expect(activeAuthority, isNotNull, reason: testCase.name);
+
+      final revalidation = provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
+      await receiptStore.secondWriteStarted.future;
+
+      expect(receiptStore.writes, 2, reason: testCase.name);
+      expect(
+        preferences.ellaProvisioningTerminalAuthorityGeneration,
+        initialTerminalGeneration + 1,
+        reason: testCase.name,
+      );
+      expect(
+        activeAuthority!.isCurrent(preferences: preferences, authenticatedUid: 'uid-a'),
+        isFalse,
+        reason: testCase.name,
+      );
+
+      receiptStore.releaseSecondWrite();
+      await revalidation;
+
+      expect(
+        preferences.ellaProvisioningTerminalAuthorityGeneration,
+        initialTerminalGeneration + 1,
+        reason: testCase.name,
+      );
+      provider.dispose();
+    }
+  });
+
+  test('retryable response preserves active authority while receipt persistence is suspended', () async {
+    final preferences = await _prepareOperationalConsent();
+    final receiptStore = _DeferredSecondReceiptStore(preferences);
+    final provider = EllaProvisioningProvider(
+      transport: _ReadyThenRevalidationTransport(
+        response: const EllaProvisioningResponse(
+          statusCode: 202,
+          receipt: EllaProvisioningReceipt(
+            state: EllaProvisioningState.provisioning,
+            retryable: true,
+          ),
+        ),
+      ),
+      preferences: preferences,
+      receiptSaver: receiptStore.save,
+      scheduler: _discardedPollScheduler,
+    );
+
+    await provider.start(uid: 'uid-a', requestContext: _requestContext);
+    final activeAuthority = WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a');
+    final initialTerminalGeneration = preferences.ellaProvisioningTerminalAuthorityGeneration;
+    expect(activeAuthority, isNotNull);
+
+    final revalidation = provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
+    await receiptStore.secondWriteStarted.future;
+
+    expect(receiptStore.writes, 2);
+    expect(preferences.ellaProvisioningTerminalAuthorityGeneration, initialTerminalGeneration);
+    expect(activeAuthority!.isCurrent(preferences: preferences, authenticatedUid: 'uid-a'), isTrue);
+
+    receiptStore.releaseSecondWrite();
+    await revalidation;
+
+    expect(preferences.ellaProvisioningTerminalAuthorityGeneration, initialTerminalGeneration);
+    expect(activeAuthority.isCurrent(preferences: preferences, authenticatedUid: 'uid-a'), isTrue);
+    provider.dispose();
+  });
+
+  test('reset fences a held active authority exactly once when provisioning ownership ends', () async {
+    final preferences = await _prepareOperationalConsent();
+    final provider = EllaProvisioningProvider(
+      transport: _ReadyThenRevalidationTransport(),
+      preferences: preferences,
+      scheduler: _discardedPollScheduler,
+    );
+
+    await provider.start(uid: 'uid-a', requestContext: _requestContext);
+    final activeAuthority = WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a');
+    final initialTerminalGeneration = preferences.ellaProvisioningTerminalAuthorityGeneration;
+    expect(activeAuthority, isNotNull);
+
+    provider.reset();
+
+    expect(preferences.ellaProvisioningTerminalAuthorityGeneration, initialTerminalGeneration + 1);
+    expect(activeAuthority!.isCurrent(preferences: preferences, authenticatedUid: 'uid-a'), isFalse);
+    provider.dispose();
+    expect(preferences.ellaProvisioningTerminalAuthorityGeneration, initialTerminalGeneration + 1);
+  });
+
+  test('dispose fences a held active authority exactly once when provisioning ownership ends', () async {
+    final preferences = await _prepareOperationalConsent();
+    final provider = EllaProvisioningProvider(
+      transport: _ReadyThenRevalidationTransport(),
+      preferences: preferences,
+      scheduler: _discardedPollScheduler,
+    );
+
+    await provider.start(uid: 'uid-a', requestContext: _requestContext);
+    final activeAuthority = WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a');
+    final initialTerminalGeneration = preferences.ellaProvisioningTerminalAuthorityGeneration;
+    expect(activeAuthority, isNotNull);
+
+    provider.dispose();
+
+    expect(preferences.ellaProvisioningTerminalAuthorityGeneration, initialTerminalGeneration + 1);
+    expect(activeAuthority!.isCurrent(preferences: preferences, authenticatedUid: 'uid-a'), isFalse);
   });
 
   test('hard auth and update failures close operational authority', () async {
@@ -398,13 +572,19 @@ void main() {
       final provider = EllaProvisioningProvider(transport: transport, preferences: preferences);
 
       await provider.start(uid: 'uid-a', requestContext: _requestContext);
-      expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+      final activeAuthority = WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a');
+      expect(activeAuthority, isNotNull);
       expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
       await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
 
       expect(provider.state, EllaProvisioningState.blocked, reason: 'HTTP $statusCode');
       expect(provider.isOperational, isFalse, reason: 'HTTP $statusCode');
       expect(provider.isRevalidatingOperational, isFalse, reason: 'HTTP $statusCode');
+      expect(
+        activeAuthority!.isCurrent(preferences: preferences, authenticatedUid: 'uid-a'),
+        isFalse,
+        reason: 'HTTP $statusCode',
+      );
       expect(
         WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'),
         isNull,
@@ -437,12 +617,14 @@ void main() {
     );
 
     await provider.start(uid: 'uid-a', requestContext: _requestContext);
-    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+    final activeAuthority = WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a');
+    expect(activeAuthority, isNotNull);
     expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
     await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
 
     expect(provider.state, EllaProvisioningState.provisioning);
     expect(provider.isRevalidatingOperational, isFalse);
+    expect(activeAuthority!.isCurrent(preferences: preferences, authenticatedUid: 'uid-a'), isTrue);
     expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
     expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
   });
@@ -563,6 +745,7 @@ void main() {
   });
 
   test('provider retries pending ensure with a newly acknowledged consent receipt', () async {
+    SharedPreferencesUtil().uid = 'uid-a';
     final scheduled = <_FakePollHandle>[];
     final transport = _FakeTransport(
       ensureResponses: const [
@@ -593,6 +776,142 @@ void main() {
     expect(transport.ensureCalls, 2);
     expect(transport.ensureContexts.last.consentReceiptId, 'consent-2');
     provider.dispose();
+  });
+
+  test('active consent receipt rotation recaptures production provisioning and WAL authority', () async {
+    final preferences = SharedPreferencesUtil()
+      ..uid = 'uid-a'
+      ..verifiedPersonaId = 'persona-a';
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-a',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
+    );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: 'aicr_receipt-a',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile-binding-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+    final provisioningTransport = _FakeTransport(
+      ensureResponses: [
+        _readyProvisioningResponse(bindingRevision: 1),
+        _readyProvisioningResponse(bindingRevision: 2),
+      ],
+    );
+    final provider = EllaProvisioningProvider(
+      transport: provisioningTransport,
+      preferences: preferences,
+    );
+    await provider.start(
+      uid: 'uid-a',
+      requestContext: EllaProvisioningRequestContext(
+        appVersion: '1.0.572+866',
+        locale: 'en-US',
+        timezone: 'America/Los_Angeles',
+        clientRequestId: 'active-refresh-a',
+        consentReceiptId: 'aicr_receipt-a',
+      ),
+    );
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-a',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
+    );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: 'aicr_receipt-a',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile-binding-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+    await preferences.markEllaProvisioningVerified('uid-a');
+    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+
+    final consentTransport = _FakeConsentTransport(
+      policy: AiConsentPolicy.bundled,
+      statusResponse: AiConsentStatus(
+        subjectUid: 'uid-a',
+        authorized: true,
+        policy: AiConsentPolicy.bundled,
+        decision: AiConsentDecision.granted.wireValue,
+        receiptId: 'aicr_receipt-b',
+        policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+        processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+        appVersion: '1.0.572',
+        buildNumber: '866',
+        locale: 'en-US',
+        profileBindingId: 'profile-binding-b',
+        scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+        scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+        serverDecidedAt: DateTime.utc(2026, 7, 27, 0, 1),
+      ),
+    );
+    final consentService = EllaAiConsentService(
+      transport: consentTransport,
+      preferences: preferences,
+      pilotLocaleRestricted: false,
+    );
+    final lease = AiConsentActiveSessionLease(
+      uid: 'uid-a',
+      preferences: preferences,
+      refreshAuthority: (uid, receiptId, decidedAt) => consentService.refreshActiveSessionAuthority(
+        uid: uid,
+        expectedReceiptId: receiptId,
+        expectedServerDecidedAt: decidedAt,
+      ),
+      onAuthorityLost: () {},
+    )..start();
+
+    await lease.refreshNow();
+
+    final owner = WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a');
+    expect(consentTransport.statusCalls, 1);
+    expect(provisioningTransport.ensureCalls, 2);
+    expect(provisioningTransport.ensureContexts.last.consentReceiptId, 'aicr_receipt-b');
+    expect(owner, isNotNull);
+    expect(owner!.owner.consentReceiptId, 'aicr_receipt-b');
+    expect(owner.owner.bindingRevision, 2);
+    expect(lease.hasCurrentAuthority, isTrue);
+
+    lease.stop();
+    provider.dispose();
+    expect(
+      await EllaProvisioningAuthorityCoordinator.revalidate(
+        uid: 'uid-a',
+        consentReceiptId: 'aicr_receipt-b',
+      ),
+      isFalse,
+    );
+  });
+
+  test('provisioning revalidation coordinator ignores a callback from another account', () async {
+    final calls = <String>[];
+    final owner = EllaProvisioningAuthorityCoordinator.register(
+      uid: 'uid-b',
+      revalidator: (uid, receiptId) {
+        calls.add('$uid:$receiptId');
+        return true;
+      },
+    );
+
+    expect(
+      await EllaProvisioningAuthorityCoordinator.revalidate(
+        uid: 'uid-a',
+        consentReceiptId: 'aicr_receipt-a',
+      ),
+      isFalse,
+    );
+    expect(calls, isEmpty);
+
+    EllaProvisioningAuthorityCoordinator.unregister(owner);
   });
 
   test('same-account replacement consent receipt fails closed before provisioning recaptures authority', () async {
@@ -1285,6 +1604,26 @@ class _ReadyThenRevalidationTransport implements EllaProvisioningTransport {
   Future<EllaProvisioningResponse> status() => throw StateError('status should not be called');
 }
 
+class _DeferredSecondReceiptStore {
+  _DeferredSecondReceiptStore(this.preferences);
+
+  final SharedPreferencesUtil preferences;
+  final Completer<void> secondWriteStarted = Completer<void>();
+  final Completer<void> _releaseSecondWrite = Completer<void>();
+  int writes = 0;
+
+  Future<void> save(String uid, Map<String, dynamic> receipt) async {
+    writes++;
+    if (writes == 2) {
+      secondWriteStarted.complete();
+      await _releaseSecondWrite.future;
+    }
+    await preferences.saveEllaProvisioningReceipt(uid, receipt);
+  }
+
+  void releaseSecondWrite() => _releaseSecondWrite.complete();
+}
+
 class _AlwaysFailingProvisioningTransport implements EllaProvisioningTransport {
   @override
   Future<EllaProvisioningResponse> ensure(EllaProvisioningRequestContext context) =>
@@ -1371,6 +1710,15 @@ class _FakeConsentTransport extends EllaAiConsentTransport {
   Future<AiConsentStatus?> fetchStatus() async {
     statusCalls++;
     return statusResponse;
+  }
+
+  @override
+  Future<AiConsentFetchResult> fetchStatusWithDetails() async {
+    statusCalls++;
+    return AiConsentFetchResult(
+      status: statusResponse,
+      httpStatus: statusResponse == null ? 503 : 200,
+    );
   }
 
   @override
