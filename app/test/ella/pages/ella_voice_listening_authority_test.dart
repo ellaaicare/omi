@@ -120,4 +120,31 @@ void main() {
     expect(listenCalls, 0);
     expect(authorityLossCalls, 1);
   });
+
+  test('replacement startup queues while a stale attempt unwinds', () {
+    final gate = StandardVoiceStartupSerialGate();
+    final firstGeneration = gate.begin();
+
+    expect(firstGeneration, isNotNull);
+    expect(gate.begin(), isNull);
+    expect(gate.isCurrent(firstGeneration!), isFalse);
+    expect(gate.finish(), isTrue);
+
+    final replacementGeneration = gate.begin();
+    expect(replacementGeneration, isNotNull);
+    expect(gate.isCurrent(replacementGeneration!), isTrue);
+    expect(gate.finish(), isFalse);
+  });
+
+  test('cancel drops a queued replacement startup', () {
+    final gate = StandardVoiceStartupSerialGate();
+    final firstGeneration = gate.begin();
+
+    expect(firstGeneration, isNotNull);
+    expect(gate.begin(), isNull);
+    gate.cancel();
+
+    expect(gate.isCurrent(firstGeneration!), isFalse);
+    expect(gate.finish(), isFalse);
+  });
 }

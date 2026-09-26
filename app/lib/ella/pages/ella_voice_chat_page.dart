@@ -48,6 +48,37 @@ import 'package:omi/utils/l10n_extensions.dart';
 typedef MemoryScopeConversationLoader = Future<ServerConversation?> Function(String conversationId);
 
 @visibleForTesting
+class StandardVoiceStartupSerialGate {
+  int _generation = 0;
+  bool _running = false;
+  bool _replacementPending = false;
+
+  int? begin() {
+    _generation++;
+    if (_running) {
+      _replacementPending = true;
+      return null;
+    }
+    _running = true;
+    return _generation;
+  }
+
+  bool isCurrent(int generation) => _generation == generation;
+
+  void cancel() {
+    _generation++;
+    _replacementPending = false;
+  }
+
+  bool finish() {
+    _running = false;
+    final shouldStartReplacement = _replacementPending;
+    _replacementPending = false;
+    return shouldStartReplacement;
+  }
+}
+
+@visibleForTesting
 Future<bool> startStandardVoiceListeningIfAuthorized({
   required SharedPreferencesUtil preferences,
   required AiConsentActiveSessionLease? lease,
@@ -236,9 +267,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   bool _speechAvailable = false;
   String _currentWords = '';
 
-  /// Guard against concurrent _startListening() calls
-  bool _isRestarting = false;
-
   /// ScrollController for the transcript area
   final ScrollController _transcriptScrollController = ScrollController();
 
@@ -252,7 +280,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   /// V2V client for WebSocket-based voice-to-voice mode
   V2VClient? _v2vClient;
   AiConsentActiveSessionLease? _standardVoiceConsentLease;
-  int _standardVoiceStartupGeneration = 0;
+  final StandardVoiceStartupSerialGate _standardVoiceStartupGate = StandardVoiceStartupSerialGate();
   final VoiceSessionStartupGuard _voiceStartupGuard = VoiceSessionStartupGuard();
   bool _isV2VMode = false;
   String _activeV2VProvider = '';
@@ -631,11 +659,11 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   void _cancelStandardVoiceListeningStartup() {
-    _standardVoiceStartupGeneration++;
+    _standardVoiceStartupGate.cancel();
   }
 
   bool _isCurrentStandardVoiceStartup(int startupGeneration) =>
-      mounted && _voiceModeActive && !_isV2VMode && _standardVoiceStartupGeneration == startupGeneration;
+      mounted && _voiceModeActive && !_isV2VMode && _standardVoiceStartupGate.isCurrent(startupGeneration);
 
   bool _hasFullStandardVoiceStartupAuthority(int startupGeneration) {
     if (!_isCurrentStandardVoiceStartup(startupGeneration) || _standardVoiceConsentLease?.hasCurrentAuthority != true) {
@@ -650,7 +678,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   Future<void> _handleStandardVoiceAuthorityLostForAttempt(int startupGeneration) async {
-    if (_standardVoiceStartupGeneration != startupGeneration) return;
+    if (!_standardVoiceStartupGate.isCurrent(startupGeneration)) return;
     await _handleStandardVoiceConsentAuthorityLost();
   }
 
@@ -661,22 +689,24 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   Future<void> _startListening() async {
-    if (_isRestarting) {
-      debugPrint('[VoiceChat] Already restarting, skipping');
+    final startupGeneration = _standardVoiceStartupGate.begin();
+    if (startupGeneration == null) {
+      debugPrint('[VoiceChat] Voice startup already running; queued replacement');
       return;
     }
-    final startupGeneration = ++_standardVoiceStartupGeneration;
-    if (!_hasFullStandardVoiceStartupAuthority(startupGeneration)) {
-      await _handleStandardVoiceConsentAuthorityLost();
-      return;
-    }
-    debugPrint('[VoiceChat] _startListening called');
-    _isRestarting = true;
 
     try {
+      if (!_hasFullStandardVoiceStartupAuthority(startupGeneration)) {
+        await _handleStandardVoiceConsentAuthorityLost();
+        return;
+      }
+      debugPrint('[VoiceChat] _startListening called');
       await _startListeningInner(startupGeneration);
     } finally {
-      _isRestarting = false;
+      final shouldStartReplacement = _standardVoiceStartupGate.finish();
+      if (shouldStartReplacement && mounted && _voiceModeActive && !_isV2VMode) {
+        unawaited(_startListening());
+      }
     }
   }
 
