@@ -47,6 +47,26 @@ import 'package:omi/utils/l10n_extensions.dart';
 
 typedef MemoryScopeConversationLoader = Future<ServerConversation?> Function(String conversationId);
 
+@visibleForTesting
+Future<bool> startStandardVoiceListeningIfAuthorized({
+  required SharedPreferencesUtil preferences,
+  required AiConsentActiveSessionLease? lease,
+  required bool Function() isLifecycleCurrent,
+  required Future<void> Function() listen,
+  required FutureOr<void> Function() onAuthorityLost,
+}) async {
+  final authority = AiConsentActiveSessionLease.authorityForSessionStart(
+    preferences: preferences,
+    expectedUid: preferences.uid,
+  );
+  if (!isLifecycleCurrent() || lease?.hasCurrentAuthority != true || authority == null) {
+    await onAuthorityLost();
+    return false;
+  }
+  await listen();
+  return true;
+}
+
 Future<bool> armEllaVoiceTranscriptSessionBeforeTransport({
   required V2VTurnReconciler reconciler,
   required String authenticatedUid,
@@ -232,6 +252,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   /// V2V client for WebSocket-based voice-to-voice mode
   V2VClient? _v2vClient;
   AiConsentActiveSessionLease? _standardVoiceConsentLease;
+  int _standardVoiceStartupGeneration = 0;
   final VoiceSessionStartupGuard _voiceStartupGuard = VoiceSessionStartupGuard();
   bool _isV2VMode = false;
   String _activeV2VProvider = '';
@@ -409,6 +430,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     _notifyMemorySessionEnded(_activeSessionId);
     _v2vTurnReconciler.endSession(_activeSessionId);
     _voiceStartupGuard.dispose();
+    _cancelStandardVoiceListeningStartup();
     _voiceModeActive = false;
     _typewriterTimer?.cancel();
     _quotaClock?.cancel();
@@ -554,6 +576,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   void _pauseVoiceMode({bool cancelStartup = true}) {
     debugPrint('[VoiceChat] Pausing voice mode');
     if (cancelStartup) _voiceStartupGuard.cancel();
+    _cancelStandardVoiceListeningStartup();
     _voiceModeActive = false;
     _isV2VMode = false;
     _standardVoiceConsentLease?.stop();
@@ -587,6 +610,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   Future<void> _handleStandardVoiceConsentAuthorityLost() async {
+    _cancelStandardVoiceListeningStartup();
+    _standardVoiceConsentLease?.stop();
     _standardVoiceConsentLease = null;
     _voiceModeActive = false;
     _isV2VMode = false;
@@ -605,28 +630,59 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     });
   }
 
-  Future<void> _startListening() async {
-    if (_standardVoiceConsentLease?.hasCurrentAuthority != true) {
-      await _handleStandardVoiceConsentAuthorityLost();
-      return;
-    }
-    debugPrint('[VoiceChat] _startListening called');
+  void _cancelStandardVoiceListeningStartup() {
+    _standardVoiceStartupGeneration++;
+  }
 
+  bool _isCurrentStandardVoiceStartup(int startupGeneration) =>
+      mounted && _voiceModeActive && !_isV2VMode && _standardVoiceStartupGeneration == startupGeneration;
+
+  bool _hasFullStandardVoiceStartupAuthority(int startupGeneration) {
+    if (!_isCurrentStandardVoiceStartup(startupGeneration) || _standardVoiceConsentLease?.hasCurrentAuthority != true) {
+      return false;
+    }
+    final preferences = SharedPreferencesUtil();
+    return AiConsentActiveSessionLease.authorityForSessionStart(
+          preferences: preferences,
+          expectedUid: preferences.uid,
+        ) !=
+        null;
+  }
+
+  Future<void> _handleStandardVoiceAuthorityLostForAttempt(int startupGeneration) async {
+    if (_standardVoiceStartupGeneration != startupGeneration) return;
+    await _handleStandardVoiceConsentAuthorityLost();
+  }
+
+  Future<bool> _revalidateStandardVoiceStartup(int startupGeneration) async {
+    if (_hasFullStandardVoiceStartupAuthority(startupGeneration)) return true;
+    await _handleStandardVoiceAuthorityLostForAttempt(startupGeneration);
+    return false;
+  }
+
+  Future<void> _startListening() async {
     if (_isRestarting) {
       debugPrint('[VoiceChat] Already restarting, skipping');
       return;
     }
+    final startupGeneration = ++_standardVoiceStartupGeneration;
+    if (!_hasFullStandardVoiceStartupAuthority(startupGeneration)) {
+      await _handleStandardVoiceConsentAuthorityLost();
+      return;
+    }
+    debugPrint('[VoiceChat] _startListening called');
     _isRestarting = true;
 
     try {
-      await _startListeningInner();
+      await _startListeningInner(startupGeneration);
     } finally {
       _isRestarting = false;
     }
   }
 
-  Future<void> _startListeningInner() async {
+  Future<void> _startListeningInner(int startupGeneration) async {
     final micStatus = await Permission.microphone.request();
+    if (!await _revalidateStandardVoiceStartup(startupGeneration)) return;
     if (!micStatus.isGranted) {
       if (!mounted) return;
       if (micStatus.isPermanentlyDenied) {
@@ -667,6 +723,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     }
 
     final speechStatus = await Permission.speech.request();
+    if (!await _revalidateStandardVoiceStartup(startupGeneration)) return;
     if (!speechStatus.isGranted) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -677,6 +734,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
     if (!_speechAvailable) {
       await _initSpeech();
+      if (!await _revalidateStandardVoiceStartup(startupGeneration)) return;
       if (!_speechAvailable) {
         if (!mounted) return;
         ScaffoldMessenger.of(
@@ -686,22 +744,26 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       }
     }
 
-    if (!await _preparePhoneCaptureForVoice(v2v: false)) return;
+    final capturePrepared = await _preparePhoneCaptureForVoice(v2v: false);
+    if (!await _revalidateStandardVoiceStartup(startupGeneration)) return;
+    if (!capturePrepared) return;
 
     // Stop audio player to release audio session before mic starts
     try {
       await _audioPlayer.stop();
     } catch (_) {}
+    if (!await _revalidateStandardVoiceStartup(startupGeneration)) return;
 
     // Ensure previous speech session is fully stopped
     if (_speech.isListening) {
       debugPrint('[VoiceChat] Stopping previous speech session');
       await _speech.stop();
+      if (!await _revalidateStandardVoiceStartup(startupGeneration)) return;
     }
 
     // Small delay to let iOS audio session switch from playback to recording
     await Future.delayed(const Duration(milliseconds: 300));
-    if (!mounted || !_voiceModeActive) return;
+    if (!await _revalidateStandardVoiceStartup(startupGeneration)) return;
 
     _currentWords = '';
     _typewriterTimer?.cancel();
@@ -715,28 +777,12 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
     debugPrint('[VoiceChat] Starting speech recognition');
     try {
-      await _speech.listen(
-        onResult: _onSpeechResult,
-        onSoundLevelChange: (level) {
-          if (!mounted || _orbState != VoiceOrbState.listening) return;
-          final normalized = ((level + 2) / 12).clamp(0.0, 1.0);
-          setState(() {
-            _audioLevel = normalized;
-          });
-        },
-        listenMode: ListenMode.dictation,
-        pauseFor: const Duration(seconds: 3),
-        listenFor: const Duration(seconds: 60),
-        cancelOnError: false,
-        partialResults: true,
-      );
-      debugPrint('[VoiceChat] speech.listen() started');
-    } catch (e) {
-      debugPrint('[VoiceChat] speech.listen() failed: $e — retrying in 500ms');
-      await Future.delayed(const Duration(milliseconds: 500));
-      if (!mounted || !_voiceModeActive) return;
-      try {
-        await _speech.listen(
+      final started = await startStandardVoiceListeningIfAuthorized(
+        preferences: SharedPreferencesUtil(),
+        lease: _standardVoiceConsentLease,
+        isLifecycleCurrent: () => _isCurrentStandardVoiceStartup(startupGeneration),
+        onAuthorityLost: () => _handleStandardVoiceAuthorityLostForAttempt(startupGeneration),
+        listen: () => _speech.listen(
           onResult: _onSpeechResult,
           onSoundLevelChange: (level) {
             if (!mounted || _orbState != VoiceOrbState.listening) return;
@@ -745,12 +791,46 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
               _audioLevel = normalized;
             });
           },
-          listenMode: ListenMode.dictation,
           pauseFor: const Duration(seconds: 3),
           listenFor: const Duration(seconds: 60),
-          cancelOnError: false,
-          partialResults: true,
+          listenOptions: SpeechListenOptions(
+            listenMode: ListenMode.dictation,
+            cancelOnError: false,
+            partialResults: true,
+          ),
+        ),
+      );
+      if (!started) return;
+      debugPrint('[VoiceChat] speech.listen() started');
+    } catch (e) {
+      debugPrint('[VoiceChat] speech.listen() failed: $e — retrying in 500ms');
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (!await _revalidateStandardVoiceStartup(startupGeneration)) return;
+      try {
+        final restarted = await startStandardVoiceListeningIfAuthorized(
+          preferences: SharedPreferencesUtil(),
+          lease: _standardVoiceConsentLease,
+          isLifecycleCurrent: () => _isCurrentStandardVoiceStartup(startupGeneration),
+          onAuthorityLost: () => _handleStandardVoiceAuthorityLostForAttempt(startupGeneration),
+          listen: () => _speech.listen(
+            onResult: _onSpeechResult,
+            onSoundLevelChange: (level) {
+              if (!mounted || _orbState != VoiceOrbState.listening) return;
+              final normalized = ((level + 2) / 12).clamp(0.0, 1.0);
+              setState(() {
+                _audioLevel = normalized;
+              });
+            },
+            pauseFor: const Duration(seconds: 3),
+            listenFor: const Duration(seconds: 60),
+            listenOptions: SpeechListenOptions(
+              listenMode: ListenMode.dictation,
+              cancelOnError: false,
+              partialResults: true,
+            ),
+          ),
         );
+        if (!restarted) return;
         debugPrint('[VoiceChat] speech.listen() retry succeeded');
       } catch (e2) {
         debugPrint('[VoiceChat] speech.listen() retry also failed: $e2');
