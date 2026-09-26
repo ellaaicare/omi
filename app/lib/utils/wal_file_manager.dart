@@ -66,6 +66,121 @@ class WalFileManager {
     _initialization = null;
   }
 
+  static Future<bool> rotateActiveSessionOwner(
+    List<Wal> wals, {
+    required WalOwner previousOwner,
+    required ActiveWalAuthority capturedAuthority,
+    required ActiveWalAuthority currentAuthority,
+  }) async {
+    await init(activeOwner: _activeOwner);
+    final capturedOwner = capturedAuthority.owner;
+    final currentOwner = currentAuthority.owner;
+    final previousActiveOwner = _activeOwner;
+    if (previousActiveOwner == null ||
+        !previousOwner.hasValidAuthorityIdentity ||
+        !capturedOwner.hasValidAuthorityIdentity ||
+        !currentOwner.hasValidAuthorityIdentity ||
+        !previousActiveOwner.matches(previousOwner) ||
+        previousOwner.uid != capturedOwner.uid ||
+        capturedOwner.uid != currentOwner.uid ||
+        !capturedAuthority.isCurrent() ||
+        !currentAuthority.isCurrent()) {
+      return false;
+    }
+
+    final previousActiveDirectory = _activeDirectory!;
+    final nextActiveDirectory = Directory(p.join(_accountsDirectory.path, currentOwner.storageNamespace));
+    if (previousActiveDirectory.path != nextActiveDirectory.path &&
+        (File(p.join(nextActiveDirectory.path, _walFileName)).existsSync() ||
+            File(p.join(nextActiveDirectory.path, _walBackupFileName)).existsSync())) {
+      return false;
+    }
+
+    final rotations = <_WalOwnerRotation>[];
+    for (final wal in wals) {
+      if (wal.status == WalStatus.quarantined || wal.owner?.matches(previousOwner) != true) continue;
+      File? source;
+      File? destination;
+      if (wal.storage == WalStorage.disk && wal.filePath != null && wal.filePath!.isNotEmpty) {
+        final sourcePath = await resolveWalFilePath(wal);
+        if (sourcePath == null) return false;
+        source = File(sourcePath);
+        if (!await source.exists()) return false;
+        destination = File(p.join(nextActiveDirectory.path, p.basename(sourcePath)));
+        if (source.path != destination.path && await destination.exists()) return false;
+      }
+      rotations.add(
+        _WalOwnerRotation(
+          wal: wal,
+          previousOwner: wal.owner!,
+          previousPath: wal.filePath,
+          source: source,
+          destination: destination,
+        ),
+      );
+    }
+
+    final copiedDestinations = <File>[];
+    try {
+      await nextActiveDirectory.create(recursive: true);
+      for (final rotation in rotations) {
+        final source = rotation.source;
+        final destination = rotation.destination;
+        if (source != null && destination != null && source.path != destination.path) {
+          await source.copy(destination.path);
+          copiedDestinations.add(destination);
+        }
+        rotation.wal.owner = currentOwner;
+        if (destination != null) rotation.wal.filePath = destination.path;
+      }
+      if (!capturedAuthority.isCurrent() || !currentAuthority.isCurrent()) {
+        throw StateError('WAL owner authority changed during rotation');
+      }
+
+      _activeOwner = currentOwner;
+      await saveWals(wals);
+    } catch (error) {
+      _activeOwner = previousActiveOwner;
+      for (final rotation in rotations) {
+        rotation.wal.owner = rotation.previousOwner;
+        rotation.wal.filePath = rotation.previousPath;
+      }
+      for (final destination in copiedDestinations) {
+        try {
+          if (await destination.exists()) await destination.delete();
+        } catch (_) {
+          // The original remains authoritative; later isolation cleanup can remove the copy.
+        }
+      }
+      Logger.debug('WalFileManager: Active WAL owner rotation failed (${error.runtimeType})');
+      return false;
+    }
+
+    for (final rotation in rotations) {
+      final source = rotation.source;
+      final destination = rotation.destination;
+      if (source != null && destination != null && source.path != destination.path) {
+        try {
+          if (await source.exists()) await source.delete();
+        } catch (error) {
+          Logger.debug('WalFileManager: Could not remove superseded WAL copy (${error.runtimeType})');
+        }
+      }
+    }
+    if (previousActiveDirectory.path != nextActiveDirectory.path) {
+      for (final filename in [_walFileName, _walBackupFileName]) {
+        try {
+          final staleManifest = File(p.join(previousActiveDirectory.path, filename));
+          if (await staleManifest.exists()) await staleManifest.delete();
+        } catch (error) {
+          Logger.debug('WalFileManager: Could not remove superseded WAL manifest (${error.runtimeType})');
+        }
+      }
+    }
+    Logger.debug('WalFileManager: Rotated active same-account WAL owner');
+    return true;
+  }
+
   static Future<List<Wal>> loadWals({WalOwner? activeOwner}) async {
     await init(activeOwner: activeOwner);
     final active = await _readWals(_activeWalFile);
@@ -370,4 +485,20 @@ class WalFileManager {
     if (changed) await saveWals(wals);
     return changed;
   }
+}
+
+class _WalOwnerRotation {
+  const _WalOwnerRotation({
+    required this.wal,
+    required this.previousOwner,
+    required this.previousPath,
+    required this.source,
+    required this.destination,
+  });
+
+  final Wal wal;
+  final WalOwner previousOwner;
+  final String? previousPath;
+  final File? source;
+  final File? destination;
 }

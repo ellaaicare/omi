@@ -20,6 +20,9 @@ class LocalWalSyncImpl implements LocalWalSync {
   List<List<int>> _frames = [];
   List<bool> _frameSynced = [];
   List<WalOwner?> _frameOwners = [];
+  List<ActiveWalAuthority?> _frameAuthorities = [];
+  ActiveWalAuthority? _adoptedFrameAuthority;
+  WalOwner? _adoptedFrameOwner;
 
   Timer? _chunkingTimer;
   Timer? _flushingTimer;
@@ -132,6 +135,7 @@ class LocalWalSyncImpl implements LocalWalSync {
     _frames = [];
     _frameSynced = [];
     _frameOwners = [];
+    _frameAuthorities = [];
   }
 
   Future<void> _drainForStop() async {
@@ -182,6 +186,7 @@ class LocalWalSyncImpl implements LocalWalSync {
     _frames.clear();
     _frameSynced.clear();
     _frameOwners.clear();
+    _frameAuthorities.clear();
   }
 
   bool _ownersMatch(WalOwner? left, WalOwner? right) {
@@ -200,6 +205,7 @@ class LocalWalSyncImpl implements LocalWalSync {
     _frames = [];
     _frameSynced = [];
     _frameOwners = [];
+    _frameAuthorities = [];
 
     _framesPerSecond = codec.getFramesPerSecond();
     _codec = codec;
@@ -233,12 +239,38 @@ class LocalWalSyncImpl implements LocalWalSync {
 
     final authority = _activeAuthority();
     final capturedOwners = _frameOwners.sublist(low, high);
+    final capturedAuthorities = _frameAuthorities.sublist(low, high);
     final firstOwner = capturedOwners.first;
     final oneExactOwner =
         firstOwner != null && capturedOwners.every((candidate) => candidate?.matches(firstOwner) == true);
-    final owner = oneExactOwner && authority != null && authority.isCurrent() && firstOwner.matches(authority.owner)
-        ? firstOwner
-        : null;
+    final capturedAuthority = capturedAuthorities.first;
+    final oneCaptureAuthority = capturedAuthority != null &&
+        capturedAuthorities.every((candidate) => identical(candidate, capturedAuthority)) &&
+        capturedAuthority.owner.matches(firstOwner!);
+    WalOwner? owner;
+    if (oneExactOwner &&
+        oneCaptureAuthority &&
+        capturedAuthority.isCurrent() &&
+        authority != null &&
+        authority.isCurrent() &&
+        authority.uid == capturedAuthority.uid) {
+      final previousOwner = identical(_adoptedFrameAuthority, capturedAuthority) ? _adoptedFrameOwner : firstOwner;
+      if (previousOwner != null && previousOwner.matches(authority.owner)) {
+        owner = authority.owner;
+      } else {
+        final rotated = await WalFileManager.rotateActiveSessionOwner(
+          _wals,
+          previousOwner: previousOwner!,
+          capturedAuthority: capturedAuthority,
+          currentAuthority: authority,
+        );
+        if (rotated) owner = authority.owner;
+      }
+      if (owner != null) {
+        _adoptedFrameAuthority = capturedAuthority;
+        _adoptedFrameOwner = owner;
+      }
+    }
 
     // Unknown, mixed, or stale-owner audio is evidence that must be retained in
     // quarantine even when it is shorter than the normal loss threshold.
@@ -319,6 +351,7 @@ class LocalWalSyncImpl implements LocalWalSync {
     _frames.removeRange(0, pivot);
     _frameSynced.removeRange(0, pivot);
     _frameOwners.removeRange(0, pivot);
+    _frameAuthorities.removeRange(0, pivot);
   }
 
   Future _flush() async {
@@ -412,11 +445,18 @@ class LocalWalSyncImpl implements LocalWalSync {
   }
 
   @override
-  void onByteStream(List<int> value, {required WalOwner? ownerAtCapture}) {
+  void onByteStream(List<int> value, {required ActiveWalAuthority? authorityAtCapture}) {
     _frames.add(value);
     _frameSynced.add(false);
-    _frameOwners.add(ownerAtCapture);
+    _frameOwners.add(authorityAtCapture?.owner);
+    _frameAuthorities.add(authorityAtCapture);
   }
+
+  @visibleForTesting
+  Future<void> chunkForTesting() => _chunk();
+
+  @visibleForTesting
+  Future<void> flushForTesting() => _flush();
 
   @override
   void onBytesSync(List<int> value) {

@@ -273,8 +273,8 @@ void main() {
 
     final capture = File('${lib.path}/providers/capture_provider.dart').readAsStringSync();
     expect(capture, contains('registerCaptureProducer(stopForAccountTransition)'));
-    expect(capture, contains('ownerAtCapture: captureAuthority.owner'));
-    expect(capture, isNot(contains('ownerAtCapture: null')));
+    expect(capture, contains('authorityAtCapture: captureAuthority'));
+    expect(capture, isNot(contains('authorityAtCapture: null')));
   });
 }
 
