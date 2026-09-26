@@ -1972,6 +1972,8 @@ async def _stream_handler(
                     except asyncio.TimeoutError:
                         continue
                 return 'unavailable'
+            except AiConsentWebSocketRejected as exc:
+                return 'consent_deferred' if exc.retryable else 'consent_required'
             except Exception as e:
                 print(f"Failed to send process_conversation request: {e}", uid, session_id)
                 return 'unavailable'

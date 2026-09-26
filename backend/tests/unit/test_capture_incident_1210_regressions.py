@@ -287,6 +287,112 @@ def test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing(
     assert fallback_calls == ["conversation-a"]
 
 
+def test_consent_rejection_defers_both_conversation_processing_callers_without_fallback():
+    class ConsentRejected(RuntimeError):
+        def __init__(self, *, retryable: bool):
+            self.retryable = retryable
+
+    class PusherSocket:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, payload):
+            self.sent.append(bytes(payload))
+
+    socket = PusherSocket()
+    rejection = {"retryable": True}
+
+    async def consent_rejected_send(_payload):
+        raise ConsentRejected(retryable=rejection["retryable"])
+
+    request_processing = _nested_function(
+        "routers/transcribe.py",
+        "request_conversation_processing",
+        {
+            "AiConsentWebSocketRejected": ConsentRejected,
+            "asyncio": asyncio,
+            "bytes": bytes,
+            "json": json,
+            "PUSHER_PROCESSING_RESPONSE_TIMEOUT_SECONDS": 1.0,
+            "struct": struct,
+        },
+        {
+            "language": "en",
+            "pending_conversation_requests": {},
+            "pending_request_event": asyncio.Event(),
+            "pusher_connected": True,
+            "pusher_ws": socket,
+            "send_pusher_payload": consent_rejected_send,
+            "session_id": "socket-a",
+            "uid": "uid-a",
+            "websocket_active": True,
+        },
+    )
+    conversation = {
+        "id": "conversation-a",
+        "status": "processing",
+        "transcript_segments": [{"id": "segment-a", "text": "captured"}],
+        "photos": [],
+    }
+    fallback_calls = []
+
+    async def fallback(value):
+        fallback_calls.append(value["id"])
+
+    cleanup = _nested_function(
+        "routers/transcribe.py",
+        "cleanup_processing_conversations",
+        {
+            "conversations_db": SimpleNamespace(get_processing_conversations=lambda _uid: [conversation]),
+            "PUSHER_ENABLED": True,
+        },
+        {
+            "_create_conversation_fallback": fallback,
+            "request_conversation_processing": request_processing,
+            "session_id": "socket-a",
+            "uid": "uid-a",
+        },
+    )
+    process = _nested_function(
+        "routers/transcribe.py",
+        "_process_conversation",
+        {
+            "complete_rotated_capture": lambda *_args: True,
+            "conversations_db": SimpleNamespace(
+                get_conversation=lambda *_args: conversation,
+                delete_conversation=lambda *_args, **_kwargs: None,
+            ),
+            "PUSHER_ENABLED": True,
+        },
+        {
+            "_create_conversation_fallback": fallback,
+            "_latency_log": lambda *_args, **_kwargs: None,
+            "_wait_for_capture_buffers_to_drain": lambda _conversation_id: asyncio.sleep(0, result=True),
+            "generation_id": "generation-a",
+            "on_conversation_processing_started": lambda _conversation_id: None,
+            "owner_token": "socket-a",
+            "request_conversation_processing": request_processing,
+            "session_id": "socket-a",
+            "uid": "uid-a",
+        },
+    )
+
+    async def scenario():
+        assert await request_processing("conversation-a") == "consent_deferred"
+        await cleanup()
+        assert await process("conversation-a", wait_for_buffers=True) is True
+        rejection["retryable"] = False
+        assert await request_processing("conversation-a") == "consent_required"
+        await cleanup()
+        assert await process("conversation-a", wait_for_buffers=True) is True
+
+    asyncio.run(scenario())
+
+    assert socket.sent == []
+    assert fallback_calls == []
+    assert conversation["status"] == "processing"
+
+
 def test_pusher_processing_request_waits_for_terminal_response():
     async def send_with_consent(consent_guard, provider_send, payload):
         await consent_guard()
