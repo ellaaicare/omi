@@ -348,6 +348,75 @@ void main() {
     expect(await WalFileManager.getQuarantineCount(), 0);
   });
 
+  test('syncAll rotates a pending disk WAL without waiting for another frame chunk', () async {
+    final ownerA = _owner('uid-a');
+    final ownerB = _rotatedOwner('uid-a', suffix: 'b', bindingRevision: 4, generation: 8);
+    final capturedAuthority = _authority(ownerA, () => true);
+    ActiveWalAuthority? currentAuthority = capturedAuthority;
+    var uploads = 0;
+    SharedPreferencesUtil().unlimitedLocalStorageEnabled = true;
+    await WalFileManager.init(baseDirectory: directory, activeOwner: ownerA);
+    final sync = LocalWalSyncImpl(
+      listener,
+      currentOwner: () => currentAuthority?.owner,
+      activeAuthority: () => currentAuthority,
+      upload: (files, uid) async {
+        expect(uid, 'uid-a');
+        uploads++;
+        return SyncLocalFilesResponse(newConversationIds: ['conversation-a'], updatedConversationIds: []);
+      },
+    );
+    await sync.initializeForTesting();
+    await sync.onAudioCodecChanged(BleAudioCodec.opusFS320);
+    _appendChunkableFrames(sync, capturedAuthority);
+    await sync.chunkForTesting();
+    await sync.flushForTesting();
+    final pendingWal = (await sync.getAllWals()).single;
+
+    currentAuthority = null;
+    await sync.syncAll();
+    expect(uploads, 0);
+    expect(pendingWal.owner?.matches(ownerA), isTrue);
+    expect(pendingWal.status, WalStatus.miss);
+    expect(await WalFileManager.getQuarantineCount(), 0);
+
+    currentAuthority = _authority(ownerB, () => true);
+    await sync.syncAll();
+
+    expect(uploads, 1);
+    expect(pendingWal.owner?.matches(ownerB), isTrue);
+    expect(pendingWal.status, WalStatus.synced);
+    expect(await WalFileManager.getQuarantineCount(), 0);
+  });
+
+  test('stop rotates a pending disk WAL without waiting for another frame chunk', () async {
+    final ownerA = _owner('uid-a');
+    final ownerB = _rotatedOwner('uid-a', suffix: 'b', bindingRevision: 4, generation: 8);
+    final capturedAuthority = _authority(ownerA, () => true);
+    var currentAuthority = capturedAuthority;
+    SharedPreferencesUtil().unlimitedLocalStorageEnabled = true;
+    await WalFileManager.init(baseDirectory: directory, activeOwner: ownerA);
+    final sync = LocalWalSyncImpl(
+      listener,
+      currentOwner: () => currentAuthority.owner,
+      activeAuthority: () => currentAuthority,
+    );
+    await sync.initializeForTesting();
+    await sync.onAudioCodecChanged(BleAudioCodec.opusFS320);
+    _appendChunkableFrames(sync, capturedAuthority);
+    await sync.chunkForTesting();
+    await sync.flushForTesting();
+    final pendingWal = (await sync.getAllWals()).single;
+
+    currentAuthority = _authority(ownerB, () => true);
+    await sync.stop();
+
+    expect(pendingWal.owner?.matches(ownerB), isTrue);
+    expect(pendingWal.status, WalStatus.miss);
+    expect(pendingWal.storage, WalStorage.disk);
+    expect(pendingWal.quarantineReason, isNull);
+  });
+
   test('rollover skips a superseded intermediate owner while file copy is suspended', () async {
     final ownerA = _owner('uid-a');
     final ownerB = _rotatedOwner('uid-a', suffix: 'b', bindingRevision: 4, generation: 8);

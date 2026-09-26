@@ -129,6 +129,8 @@ class LocalWalSyncImpl implements LocalWalSync {
     _chunkingTimer?.cancel();
     _flushingTimer?.cancel();
 
+    await _waitForInitialization();
+    await _preparePendingWalsForCurrentAuthority();
     await _drainForStop();
     await _flush();
 
@@ -248,37 +250,14 @@ class LocalWalSyncImpl implements LocalWalSync {
         capturedAuthority.owner.matches(firstOwner!);
     WalOwner? owner;
     if (oneExactOwner && oneCaptureAuthority && capturedAuthority.isCurrent()) {
-      var previousOwner = identical(_adoptedFrameAuthority, capturedAuthority) ? _adoptedFrameOwner : firstOwner;
-      for (var attempt = 0; attempt < 3 && owner == null; attempt++) {
-        final targetAuthority = _activeAuthority();
-        if (previousOwner == null ||
-            targetAuthority == null ||
-            !capturedAuthority.isCurrent() ||
-            !targetAuthority.isCurrent() ||
-            targetAuthority.uid != capturedAuthority.uid) {
-          break;
-        }
-        if (previousOwner.matches(targetAuthority.owner)) {
-          owner = targetAuthority.owner;
-          break;
-        }
-        final rotated = await WalFileManager.rotateActiveSessionOwner(
-          _wals,
-          previousOwner: previousOwner,
-          capturedAuthority: capturedAuthority,
-          targetAuthority: targetAuthority,
-          readCurrentAuthority: _activeAuthority,
-        );
-        if (rotated) previousOwner = targetAuthority.owner;
-
-        final exactCurrent = _activeAuthority();
-        if (rotated &&
-            exactCurrent != null &&
-            exactCurrent.isCurrent() &&
-            exactCurrent.owner.matches(targetAuthority.owner)) {
-          owner = targetAuthority.owner;
-        }
-      }
+      final previousOwner = identical(_adoptedFrameAuthority, capturedAuthority) ? _adoptedFrameOwner : firstOwner;
+      final exactAuthority = previousOwner == null
+          ? null
+          : await _rotateActiveSessionOwner(
+              capturedAuthority: capturedAuthority,
+              previousOwner: previousOwner,
+            );
+      owner = exactAuthority?.owner;
       if (owner != null) {
         _adoptedFrameAuthority = capturedAuthority;
         _adoptedFrameOwner = owner;
@@ -414,6 +393,85 @@ class LocalWalSyncImpl implements LocalWalSync {
     await _saveWalsToFile();
   }
 
+  Future<ActiveWalAuthority?> _rotateActiveSessionOwner({
+    required ActiveWalAuthority capturedAuthority,
+    required WalOwner previousOwner,
+  }) async {
+    var activeOwner = previousOwner;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      final targetAuthority = _activeAuthority();
+      if (targetAuthority == null ||
+          !capturedAuthority.isCurrent() ||
+          !targetAuthority.isCurrent() ||
+          targetAuthority.uid != capturedAuthority.uid) {
+        return null;
+      }
+      if (!activeOwner.matches(targetAuthority.owner)) {
+        final rotated = await WalFileManager.rotateActiveSessionOwner(
+          _wals,
+          previousOwner: activeOwner,
+          capturedAuthority: capturedAuthority,
+          targetAuthority: targetAuthority,
+          readCurrentAuthority: _activeAuthority,
+        );
+        if (!rotated) continue;
+        activeOwner = targetAuthority.owner;
+      }
+
+      final exactCurrent = _activeAuthority();
+      if (exactCurrent != null &&
+          exactCurrent.isCurrent() &&
+          exactCurrent.uid == capturedAuthority.uid &&
+          exactCurrent.owner.matches(activeOwner)) {
+        return exactCurrent;
+      }
+    }
+    return null;
+  }
+
+  Future<ActiveWalAuthority?> _preparePendingWalsForCurrentAuthority() async {
+    var currentAuthority = _activeAuthority();
+    final pending = _wals.where((wal) => wal.status != WalStatus.quarantined).toList();
+    if (pending.isEmpty) return currentAuthority;
+
+    final previousOwner = pending.first.owner;
+    if (previousOwner == null || !pending.every((wal) => wal.owner?.matches(previousOwner) == true)) {
+      return currentAuthority;
+    }
+    if (currentAuthority != null && currentAuthority.isCurrent() && previousOwner.matches(currentAuthority.owner)) {
+      return currentAuthority;
+    }
+
+    final capturedAuthority = _adoptedFrameAuthority;
+    if (capturedAuthority == null ||
+        !capturedAuthority.isCurrent() ||
+        capturedAuthority.uid != previousOwner.uid ||
+        (currentAuthority != null && currentAuthority.uid != capturedAuthority.uid)) {
+      return currentAuthority;
+    }
+
+    currentAuthority = await _rotateActiveSessionOwner(
+      capturedAuthority: capturedAuthority,
+      previousOwner: previousOwner,
+    );
+    if (currentAuthority != null) {
+      _adoptedFrameOwner = currentAuthority.owner;
+    }
+    return currentAuthority ?? _activeAuthority();
+  }
+
+  bool _canRetryPendingOwnerRollover(List<Wal> pending, ActiveWalAuthority? currentAuthority) {
+    if (pending.isEmpty) return false;
+    final capturedAuthority = _adoptedFrameAuthority;
+    final owner = pending.first.owner;
+    return capturedAuthority != null &&
+        capturedAuthority.isCurrent() &&
+        owner != null &&
+        owner.uid == capturedAuthority.uid &&
+        pending.every((wal) => wal.owner?.matches(owner) == true) &&
+        (currentAuthority == null || currentAuthority.uid == capturedAuthority.uid);
+  }
+
   Future<void> _saveWalsToFile() async {
     Logger.debug('Saving WALs to file');
     await WalFileManager.saveWals(_wals);
@@ -498,8 +556,13 @@ class LocalWalSyncImpl implements LocalWalSync {
     IWifiConnectionListener? connectionListener,
   }) async {
     await _flush();
-    final authority = _activeAuthority();
+    final authority = await _preparePendingWalsForCurrentAuthority();
     final pending = _wals.where((w) => w.status == WalStatus.miss && w.storage == WalStorage.disk).toList();
+    if (_canRetryPendingOwnerRollover(pending, authority) &&
+        (authority == null || pending.any((wal) => wal.owner?.matches(authority.owner) != true))) {
+      Logger.debug('LocalWalSync: Deferring pending WAL upload until owner rollover can commit');
+      return null;
+    }
     for (final wal in pending) {
       if (authority == null || wal.owner == null || !wal.owner!.matches(authority.owner)) {
         await WalFileManager.quarantineWal(wal, reason: 'upload_owner_mismatch', persist: false);
@@ -613,7 +676,12 @@ class LocalWalSyncImpl implements LocalWalSync {
     IWifiConnectionListener? connectionListener,
   }) async {
     await _flush();
-    final authority = _activeAuthority();
+    final authority = await _preparePendingWalsForCurrentAuthority();
+    if (_canRetryPendingOwnerRollover([wal], authority) &&
+        (authority == null || wal.owner?.matches(authority.owner) != true)) {
+      Logger.debug('LocalWalSync: Deferring WAL upload until owner rollover can commit');
+      return null;
+    }
     if (authority == null || wal.owner == null || !wal.owner!.matches(authority.owner)) {
       await _quarantineBatch([wal], 'upload_owner_mismatch');
       return null;
