@@ -32,8 +32,11 @@ class ActiveWalAuthority implements AccountCommitAuthority {
     if (currentCheck != null) return currentCheck!();
     final prefs = preferences ?? SharedPreferencesUtil();
     final currentUid = authenticatedUid ?? WalOwnerAuthority.authenticatedUid;
-    final currentOwner = WalOwnerAuthority.currentOwner(preferences: prefs, authenticatedUid: currentUid);
-    return currentOwner != null && owner.matches(currentOwner) && consent.isCurrent(preferences: prefs);
+    return owner.hasValidAuthorityIdentity &&
+        consent.uid == owner.uid &&
+        currentUid == owner.uid &&
+        prefs.uid == owner.uid &&
+        consent.isCurrent(preferences: prefs);
   }
 
   @override

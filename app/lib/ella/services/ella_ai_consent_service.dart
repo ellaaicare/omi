@@ -454,15 +454,6 @@ class EllaAiConsentService {
         supportCode: 'authority_superseded',
       );
     }
-    final expectedProfileBindingId = persistenceAuthority.profileBindingId;
-    if (expectedProfileBindingId.isEmpty || status.profileBindingId != expectedProfileBindingId) {
-      return AiConsentAuthorityRefreshResult(
-        AiConsentAuthorityRefreshDisposition.accountChanged,
-        status: status,
-        supportCode: 'profile_binding_changed',
-      );
-    }
-
     final decidedAt = status.serverDecidedAt;
     final sameReceipt = status.receiptId == expectedReceiptId;
     final newerReceipt = status.receiptId.startsWith(SharedPreferencesUtil.currentAiConsentReceiptPrefix) &&
@@ -482,7 +473,7 @@ class EllaAiConsentService {
     // matches the bundled contract. A server-authorized same/newer receipt may
     // still keep this active lease alive across non-material deploy drift.
     var persistedVerifiedGrant = false;
-    if (status.isCurrentGrantFor(uid, expectedProfileBindingId: expectedProfileBindingId)) {
+    if (status.isCurrentGrantFor(uid)) {
       persistedVerifiedGrant = _persistVerifiedGrant(persistenceAuthority, status);
     }
     if (persistedVerifiedGrant) {

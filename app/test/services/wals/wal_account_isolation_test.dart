@@ -271,6 +271,28 @@ void main() {
     expect(WalOwnerAuthority.active(preferences: prefs, authenticatedUid: 'uid-a'), isNull);
   });
 
+  test('active WAL authority survives same-account server receipt and profile rotation', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await _grantOperationalAuthority(prefs, 'uid-a');
+    final authority = WalOwnerAuthority.active(preferences: prefs, authenticatedUid: 'uid-a');
+    expect(authority, isNotNull);
+
+    prefs.acceptAiConsent(
+      receiptId: 'aicr_uid-a-new',
+      uid: 'uid-a',
+      profileBindingId: 'profile-uid-a-new',
+      serverDecidedAt: '2026-08-02T00:01:00Z',
+    );
+
+    expect(authority!.isCurrent(preferences: prefs, authenticatedUid: 'uid-a'), isTrue);
+    expect(authority.owner.consentReceiptId, 'aicr_uid-a');
+    expect(authority.owner.profileBindingId, 'profile-uid-a');
+
+    expect(authority.isCurrent(preferences: prefs, authenticatedUid: 'uid-b'), isFalse);
+    prefs.declineAiConsent();
+    expect(authority.isCurrent(preferences: prefs, authenticatedUid: 'uid-a'), isFalse);
+  });
+
   test('authority fingerprint uses canonical fields and malformed identifiers fail closed', () async {
     final first = _owner('uid-a');
     final second = WalOwner(
