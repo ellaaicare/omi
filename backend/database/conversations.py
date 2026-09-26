@@ -3362,7 +3362,13 @@ def _transfer_capture_conversation_owner_transaction(
     expected_owner_id = str(expected_previous_owner_id or "").strip()
     if current_owner_id and current_owner_id != expected_owner_id:
         return False
-    transaction.update(previous_ref, {"capture_owner_id": None})
+    transaction.update(
+        previous_ref,
+        {
+            "capture_owner_id": None,
+            "status": ConversationStatus.processing.value,
+        },
+    )
     transaction.update(next_ref, {"capture_owner_id": str(next_owner_id or "").strip() or None})
     return True
 
@@ -3412,11 +3418,25 @@ def _rollback_capture_conversation_owner_transfer_transaction(
     next_snapshot = next_ref.get(transaction=transaction)
     if not previous_snapshot.exists or not next_snapshot.exists:
         return False
-    previous_owner = str((previous_snapshot.to_dict() or {}).get("capture_owner_id") or "").strip()
+    previous = previous_snapshot.to_dict() or {}
+    previous_status = getattr(previous.get("status"), "value", previous.get("status"))
+    previous_owner = str(previous.get("capture_owner_id") or "").strip()
     next_owner = str((next_snapshot.to_dict() or {}).get("capture_owner_id") or "").strip()
-    if previous_owner or next_owner != str(expected_next_owner_id or "").strip():
+    if (
+        previous_status != ConversationStatus.processing.value
+        or previous_owner
+        or previous.get("initial_processing_claimed_at") is not None
+        or str(previous.get("initial_processing_claim_token") or "").strip()
+        or next_owner != str(expected_next_owner_id or "").strip()
+    ):
         return False
-    transaction.update(previous_ref, {"capture_owner_id": str(previous_owner_id or "").strip() or None})
+    transaction.update(
+        previous_ref,
+        {
+            "capture_owner_id": str(previous_owner_id or "").strip() or None,
+            "status": ConversationStatus.in_progress.value,
+        },
+    )
     transaction.delete(next_ref)
     return True
 

@@ -548,7 +548,13 @@ def _install_authority_transaction(
             and predecessor.get('capture_state') == 'drained'
             and expired_predecessor_can_handoff
         )
-        if predecessor_status != 'in_progress':
+        predecessor_is_unclaimed_processing = bool(
+            predecessor_status == 'processing'
+            and not str(predecessor.get('capture_owner_id') or '').strip()
+            and predecessor.get('initial_processing_claimed_at') is None
+            and not str(predecessor.get('initial_processing_claim_token') or '').strip()
+        )
+        if predecessor_status != 'in_progress' and not predecessor_is_unclaimed_processing:
             return False
         if predecessor_is_v2 and not (active_predecessor_can_handoff or drained_predecessor_can_handoff):
             return False

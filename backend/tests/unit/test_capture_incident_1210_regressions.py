@@ -393,6 +393,222 @@ def test_consent_rejection_defers_both_conversation_processing_callers_without_f
     assert conversation["status"] == "processing"
 
 
+def _rotated_capture_consent_harness():
+    conversations = _load_conversations_module()
+    predecessor = {
+        "id": "conversation-a",
+        "status": "in_progress",
+        "capture_owner_id": "socket-a",
+        "transcript_segments": [{"id": "segment-a", "text": "captured"}],
+        "photos": [],
+    }
+    successor = {
+        "id": "conversation-b",
+        "status": "in_progress",
+        "capture_owner_id": None,
+    }
+
+    class Ref:
+        def __init__(self, data):
+            self.data = data
+
+        def get(self, transaction=None):
+            return SimpleNamespace(exists=True, to_dict=lambda: dict(self.data))
+
+    class Transaction:
+        def __init__(self):
+            self.updates = []
+
+        def update(self, ref, payload):
+            self.updates.append((ref, payload))
+
+        def apply(self):
+            for ref, payload in self.updates:
+                ref.data.update(payload)
+
+    predecessor_ref = Ref(predecessor)
+    successor_ref = Ref(successor)
+
+    def rotate(next_owner_id):
+        successor["capture_owner_id"] = next_owner_id
+        transaction = Transaction()
+        transferred = conversations._transfer_capture_conversation_owner_transaction(
+            transaction,
+            predecessor_ref,
+            successor_ref,
+            "socket-a",
+            next_owner_id,
+        )
+        assert transferred is True
+        transaction.apply()
+        return True
+
+    fallback_calls = []
+    provider_dispatches = []
+    processing_started = []
+    completion_attempts = []
+    state = {"authority_available": False}
+
+    class Repository:
+        @staticmethod
+        def get_conversation(_uid, conversation_id):
+            assert conversation_id == predecessor["id"]
+            return predecessor
+
+        @staticmethod
+        def get_processing_conversations(_uid):
+            return [predecessor] if predecessor["status"] == "processing" else []
+
+        @staticmethod
+        def delete_conversation(*_args, **_kwargs):
+            raise AssertionError("captured content must not be deleted")
+
+    async def fallback(conversation):
+        fallback_calls.append(conversation["id"])
+
+    async def request_processing(conversation_id):
+        if not state["authority_available"]:
+            return "consent_deferred"
+        provider_dispatches.append(conversation_id)
+        predecessor["status"] = "completed"
+        return "processed"
+
+    async def buffers_drained(_conversation_id, **_kwargs):
+        return True
+
+    def complete_rotated_capture(*_args):
+        completion_attempts.append(predecessor["id"])
+        return False
+
+    repository = Repository()
+    process = _nested_function(
+        "routers/transcribe.py",
+        "_process_conversation",
+        {
+            "complete_rotated_capture": complete_rotated_capture,
+            "conversations_db": repository,
+            "PUSHER_ENABLED": True,
+        },
+        {
+            "_create_conversation_fallback": fallback,
+            "_latency_log": lambda *_args, **_kwargs: None,
+            "_wait_for_capture_buffers_to_drain": buffers_drained,
+            "generation_id": "generation-a",
+            "on_conversation_processing_started": processing_started.append,
+            "owner_token": "socket-a",
+            "request_conversation_processing": request_processing,
+            "session_id": "socket-a",
+            "uid": "uid-a",
+        },
+    )
+    cleanup = _nested_function(
+        "routers/transcribe.py",
+        "cleanup_processing_conversations",
+        {
+            "conversations_db": repository,
+            "PUSHER_ENABLED": True,
+        },
+        {
+            "_create_conversation_fallback": fallback,
+            "request_conversation_processing": request_processing,
+            "session_id": "socket-a",
+            "uid": "uid-a",
+        },
+    )
+    return SimpleNamespace(
+        cleanup=cleanup,
+        completion_attempts=completion_attempts,
+        fallback_calls=fallback_calls,
+        predecessor=predecessor,
+        process=process,
+        processing_started=processing_started,
+        provider_dispatches=provider_dispatches,
+        rotate=rotate,
+        state=state,
+    )
+
+
+def test_silence_rotation_keeps_deferred_consent_predecessor_retryable_until_recovery():
+    harness = _rotated_capture_consent_harness()
+    harness.rotate("socket-b")
+
+    async def process_with_default(conversation_id):
+        return await harness.process(conversation_id, wait_for_buffers=True)
+
+    process_after_rotation = _nested_function(
+        "routers/transcribe.py",
+        "_process_conversation_after_rotation",
+        {"asyncio": asyncio},
+        {"_process_conversation": process_with_default},
+    )
+
+    asyncio.run(process_after_rotation("conversation-a"))
+
+    assert harness.predecessor["status"] == "processing"
+    assert harness.predecessor["capture_owner_id"] is None
+    assert harness.processing_started == ["conversation-a"]
+    assert harness.completion_attempts == ["conversation-a"]
+    assert harness.fallback_calls == []
+    assert harness.provider_dispatches == []
+
+    harness.state["authority_available"] = True
+    asyncio.run(harness.cleanup())
+    assert harness.provider_dispatches == ["conversation-a"]
+    assert harness.predecessor["status"] == "completed"
+
+
+def test_disconnect_rotation_keeps_deferred_consent_predecessor_retryable_until_recovery():
+    harness = _rotated_capture_consent_harness()
+
+    async def create_successor(**kwargs):
+        assert kwargs == {
+            "expected_conversation_id": "conversation-a",
+            "expected_owner_id": "socket-a",
+            "new_owner_id": None,
+            "adopt": False,
+        }
+        return harness.rotate(None)
+
+    async def buffers_drained(_conversation_id, **_kwargs):
+        return True
+
+    finalize_disconnect = _nested_function(
+        "routers/transcribe.py",
+        "_finalize_current_conversation_on_disconnect",
+        {
+            "ConversationStatus": SimpleNamespace(in_progress="in_progress"),
+            "conversations_db": SimpleNamespace(
+                get_conversation=lambda _uid, _conversation_id: harness.predecessor,
+            ),
+            "drain_capture_persistence_batches": lambda *_args: None,
+        },
+        {
+            "_create_new_in_progress_conversation": create_successor,
+            "_latency_log": lambda *_args, **_kwargs: None,
+            "_process_conversation": harness.process,
+            "_wait_for_capture_buffers_to_drain": buffers_drained,
+            "current_conversation_id": "conversation-a",
+            "generation_id": "generation-a",
+            "session_id": "socket-a",
+            "uid": "uid-a",
+        },
+    )
+
+    asyncio.run(finalize_disconnect())
+
+    assert harness.predecessor["status"] == "processing"
+    assert harness.predecessor["capture_owner_id"] is None
+    assert harness.processing_started == ["conversation-a"]
+    assert harness.completion_attempts == ["conversation-a"]
+    assert harness.fallback_calls == []
+    assert harness.provider_dispatches == []
+
+    harness.state["authority_available"] = True
+    asyncio.run(harness.cleanup())
+    assert harness.provider_dispatches == ["conversation-a"]
+    assert harness.predecessor["status"] == "completed"
+
+
 def test_pusher_processing_request_settles_every_coalesced_waiter():
     class ConsentRejected(RuntimeError):
         def __init__(self, *, retryable: bool):
@@ -1958,9 +2174,73 @@ def test_capture_owner_transfer_fences_the_previous_firestore_generation():
 
     assert transferred is True
     assert transaction.updates == [
-        ("old", {"capture_owner_id": None}),
+        ("old", {"capture_owner_id": None, "status": "processing"}),
         ("new", {"capture_owner_id": "socket-new"}),
     ]
+
+
+def test_capture_owner_transfer_rollback_restores_only_an_unclaimed_predecessor():
+    conversations = _load_conversations_module()
+
+    class Ref:
+        def __init__(self, ref_id, data):
+            self.id = ref_id
+            self.data = data
+
+        def get(self, transaction=None):
+            return SimpleNamespace(exists=True, to_dict=lambda: self.data)
+
+    class Transaction:
+        def __init__(self):
+            self.updates = []
+            self.deletes = []
+
+        def update(self, ref, payload):
+            self.updates.append((ref.id, payload))
+
+        def delete(self, ref):
+            self.deletes.append(ref.id)
+
+    previous = Ref(
+        "old",
+        {
+            "status": "processing",
+            "capture_owner_id": None,
+            "initial_processing_claimed_at": None,
+            "initial_processing_claim_token": None,
+        },
+    )
+    successor = Ref("new", {"status": "in_progress", "capture_owner_id": "socket-new"})
+    transaction = Transaction()
+
+    rolled_back = conversations._rollback_capture_conversation_owner_transfer_transaction(
+        transaction,
+        previous,
+        successor,
+        "socket-old",
+        "socket-new",
+    )
+
+    assert rolled_back is True
+    assert transaction.updates == [
+        ("old", {"capture_owner_id": "socket-old", "status": "in_progress"}),
+    ]
+    assert transaction.deletes == ["new"]
+
+    previous.data["initial_processing_claim_token"] = "processing-claim"
+    claimed_transaction = Transaction()
+    assert (
+        conversations._rollback_capture_conversation_owner_transfer_transaction(
+            claimed_transaction,
+            previous,
+            successor,
+            "socket-old",
+            "socket-new",
+        )
+        is False
+    )
+    assert claimed_transaction.updates == []
+    assert claimed_transaction.deletes == []
 
 
 def test_ownership_loss_exits_old_stream_and_photos_have_no_unfenced_write_path():
