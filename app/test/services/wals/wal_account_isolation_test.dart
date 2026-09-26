@@ -348,6 +348,95 @@ void main() {
     expect(await WalFileManager.getQuarantineCount(), 0);
   });
 
+  test('rollover skips a superseded intermediate owner while file copy is suspended', () async {
+    final ownerA = _owner('uid-a');
+    final ownerB = _rotatedOwner('uid-a', suffix: 'b', bindingRevision: 4, generation: 8);
+    final ownerC = _rotatedOwner('uid-a', suffix: 'c', bindingRevision: 5, generation: 9);
+    final capturedAuthority = _authority(ownerA, () => true);
+    var currentAuthority = capturedAuthority;
+    final copySuspended = Completer<void>();
+    final resumeCopy = Completer<void>();
+    var hookCalls = 0;
+    WalFileManager.rotationBeforeCommitForTesting = () async {
+      if (hookCalls++ != 0) return;
+      copySuspended.complete();
+      await resumeCopy.future;
+    };
+    SharedPreferencesUtil().unlimitedLocalStorageEnabled = true;
+    await WalFileManager.init(baseDirectory: directory, activeOwner: ownerA);
+    final sync = LocalWalSyncImpl(
+      listener,
+      currentOwner: () => currentAuthority.owner,
+      activeAuthority: () => currentAuthority,
+    );
+    await sync.initializeForTesting();
+    await sync.onAudioCodecChanged(BleAudioCodec.opusFS320);
+    final earlierAudio = File('${directory.path}/before-overlap.bin')..writeAsBytesSync([7, 8, 9]);
+    await sync.addExternalWal(_wal(owner: ownerA, path: earlierAudio.path));
+    _appendChunkableFrames(sync, capturedAuthority);
+
+    currentAuthority = _authority(ownerB, () => true);
+    final chunk = sync.chunkForTesting();
+    await copySuspended.future;
+    currentAuthority = _authority(ownerC, () => true);
+    resumeCopy.complete();
+    await chunk;
+    await sync.flushForTesting();
+
+    final pending = await sync.getAllWals();
+    expect(pending, hasLength(2));
+    expect(pending.every((wal) => wal.owner?.matches(ownerC) == true), isTrue);
+    expect(pending.every((wal) => wal.owner?.matches(ownerB) == false), isTrue);
+    expect(pending.every((wal) => wal.status == WalStatus.miss), isTrue);
+    expect(await WalFileManager.getQuarantineCount(), 0);
+    final intermediateDirectory = Directory('${directory.path}/ella_wal_accounts/${ownerB.storageNamespace}');
+    expect(File('${intermediateDirectory.path}/wals.json').existsSync(), isFalse);
+    expect(File('${intermediateDirectory.path}/wals_backup.json').existsSync(), isFalse);
+  });
+
+  test('rollover restores manifests and original audio when commit fails after destination manifest write', () async {
+    final ownerA = _owner('uid-a');
+    final ownerB = _rotatedOwner('uid-a', suffix: 'b', bindingRevision: 4, generation: 8);
+    final authorityA = _authority(ownerA, () => true);
+    final authorityB = _authority(ownerB, () => true);
+    await WalFileManager.init(baseDirectory: directory, activeOwner: ownerA);
+    final source = File('${directory.path}/rollback-source.bin')..writeAsBytesSync([1, 2, 3]);
+    final wal = _wal(owner: ownerA, path: source.path);
+    await WalFileManager.bindExternalWal(wal, owner: ownerA);
+    await WalFileManager.saveWals([wal]);
+    final originalPath = wal.filePath!;
+    WalFileManager.rotationAfterActiveManifestWriteForTesting = () async {
+      throw const FileSystemException('injected manifest commit failure');
+    };
+
+    final rotated = await WalFileManager.rotateActiveSessionOwner(
+      [wal],
+      previousOwner: ownerA,
+      capturedAuthority: authorityA,
+      targetAuthority: authorityB,
+      readCurrentAuthority: () => authorityB,
+    );
+
+    expect(rotated, isFalse);
+    expect(wal.owner?.matches(ownerA), isTrue);
+    expect(wal.filePath, originalPath);
+    expect(File(originalPath).readAsBytesSync(), [1, 2, 3]);
+    final destinationDirectory = Directory('${directory.path}/ella_wal_accounts/${ownerB.storageNamespace}');
+    expect(File('${destinationDirectory.path}/wals.json').existsSync(), isFalse);
+    expect(File('${destinationDirectory.path}/wals_backup.json').existsSync(), isFalse);
+    expect(
+      destinationDirectory.listSync().whereType<File>().where((file) => file.path.endsWith('.bin')),
+      isEmpty,
+    );
+
+    WalFileManager.resetForTesting();
+    await WalFileManager.init(baseDirectory: directory, activeOwner: ownerA);
+    final restored = await WalFileManager.loadWals(activeOwner: ownerA);
+    expect(restored, hasLength(1));
+    expect(restored.single.owner?.matches(ownerA), isTrue);
+    expect(File(restored.single.filePath!).readAsBytesSync(), [1, 2, 3]);
+  });
+
   test('account transition cannot adopt capture-start frames into the next UID', () async {
     final ownerA = _owner('uid-a');
     final ownerB = _owner('uid-b');
@@ -637,6 +726,7 @@ ActiveWalAuthority _authority(WalOwner owner, bool Function() current) => Active
       owner: owner,
       consent: AiConsentAuthoritySnapshot(
         generation: owner.authorityGenerationAtCapture,
+        terminalAccountConsentGeneration: 0,
         uid: owner.uid,
         verifiedPersonaId: null,
         profileBindingId: owner.profileBindingId,

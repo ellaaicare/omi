@@ -228,6 +228,49 @@ void main() {
     expect(authority!.isCurrent(preferences: preferences), isFalse);
   });
 
+  test('terminal consent loss cannot be erased by a newer same-account grant', () async {
+    var refreshCalls = 0;
+    var authorityLossCalls = 0;
+    final authority = AiConsentAuthoritySnapshot.capture(preferences: preferences, expectedUid: 'uid-a');
+    final lease = AiConsentActiveSessionLease(
+      uid: 'uid-a',
+      preferences: preferences,
+      authority: authority,
+      refreshAuthority: (_, __, ___) async {
+        refreshCalls++;
+        return const AiConsentAuthorityRefreshResult(AiConsentAuthorityRefreshDisposition.verified);
+      },
+      onAuthorityLost: () {
+        authorityLossCalls++;
+      },
+    )..start();
+
+    preferences.declineAiConsent();
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-b',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-b',
+      serverDecidedAt: '2026-07-27T00:01:00Z',
+    );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: 'aicr_receipt-b',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile-binding-b',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+
+    expect(authority!.isCurrent(preferences: preferences), isFalse);
+    expect(lease.hasCurrentAuthority, isFalse);
+    await lease.refreshNow();
+
+    expect(refreshCalls, 0);
+    expect(authorityLossCalls, 1);
+    expect(lease.isActive, isFalse);
+  });
+
   test('verified deploy drift schedules a normal refresh interval instead of spinning at zero delay', () async {
     final durableConfirmation = DateTime.utc(2026, 7, 27, 0, 0);
     preferences.markAiConsentLastServerConfirmed(

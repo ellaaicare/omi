@@ -2211,6 +2211,7 @@ ActiveWalAuthority _activeAuthority(String uid, bool Function() current) {
     owner: owner,
     consent: AiConsentAuthoritySnapshot(
       generation: 7,
+      terminalAccountConsentGeneration: 0,
       uid: uid,
       verifiedPersonaId: null,
       profileBindingId: owner.profileBindingId,

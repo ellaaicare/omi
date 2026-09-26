@@ -237,7 +237,6 @@ class LocalWalSyncImpl implements LocalWalSync {
     var timerStart = timerEnd - (high - low) ~/ _framesPerSecond;
     var chunkFrameCount = high - low;
 
-    final authority = _activeAuthority();
     final capturedOwners = _frameOwners.sublist(low, high);
     final capturedAuthorities = _frameAuthorities.sublist(low, high);
     final firstOwner = capturedOwners.first;
@@ -248,27 +247,49 @@ class LocalWalSyncImpl implements LocalWalSync {
         capturedAuthorities.every((candidate) => identical(candidate, capturedAuthority)) &&
         capturedAuthority.owner.matches(firstOwner!);
     WalOwner? owner;
-    if (oneExactOwner &&
-        oneCaptureAuthority &&
-        capturedAuthority.isCurrent() &&
-        authority != null &&
-        authority.isCurrent() &&
-        authority.uid == capturedAuthority.uid) {
-      final previousOwner = identical(_adoptedFrameAuthority, capturedAuthority) ? _adoptedFrameOwner : firstOwner;
-      if (previousOwner != null && previousOwner.matches(authority.owner)) {
-        owner = authority.owner;
-      } else {
+    if (oneExactOwner && oneCaptureAuthority && capturedAuthority.isCurrent()) {
+      var previousOwner = identical(_adoptedFrameAuthority, capturedAuthority) ? _adoptedFrameOwner : firstOwner;
+      for (var attempt = 0; attempt < 3 && owner == null; attempt++) {
+        final targetAuthority = _activeAuthority();
+        if (previousOwner == null ||
+            targetAuthority == null ||
+            !capturedAuthority.isCurrent() ||
+            !targetAuthority.isCurrent() ||
+            targetAuthority.uid != capturedAuthority.uid) {
+          break;
+        }
+        if (previousOwner.matches(targetAuthority.owner)) {
+          owner = targetAuthority.owner;
+          break;
+        }
         final rotated = await WalFileManager.rotateActiveSessionOwner(
           _wals,
-          previousOwner: previousOwner!,
+          previousOwner: previousOwner,
           capturedAuthority: capturedAuthority,
-          currentAuthority: authority,
+          targetAuthority: targetAuthority,
+          readCurrentAuthority: _activeAuthority,
         );
-        if (rotated) owner = authority.owner;
+        if (rotated) previousOwner = targetAuthority.owner;
+
+        final exactCurrent = _activeAuthority();
+        if (rotated &&
+            exactCurrent != null &&
+            exactCurrent.isCurrent() &&
+            exactCurrent.owner.matches(targetAuthority.owner)) {
+          owner = targetAuthority.owner;
+        }
       }
       if (owner != null) {
         _adoptedFrameAuthority = capturedAuthority;
         _adoptedFrameOwner = owner;
+      }
+    }
+
+    if (owner == null && oneExactOwner && oneCaptureAuthority && capturedAuthority.isCurrent()) {
+      final currentAuthority = _activeAuthority();
+      if (currentAuthority == null || (currentAuthority.isCurrent() && currentAuthority.uid == capturedAuthority.uid)) {
+        Logger.debug('LocalWalSync: Deferring authorized frames until WAL owner rollover can commit');
+        return;
       }
     }
 

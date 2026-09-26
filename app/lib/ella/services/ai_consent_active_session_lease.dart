@@ -39,6 +39,7 @@ class AiConsentLeaseDiagnostics {
 class AiConsentAuthoritySnapshot {
   const AiConsentAuthoritySnapshot({
     required this.generation,
+    required this.terminalAccountConsentGeneration,
     required this.uid,
     required this.verifiedPersonaId,
     required this.profileBindingId,
@@ -51,6 +52,7 @@ class AiConsentAuthoritySnapshot {
   });
 
   final int generation;
+  final int terminalAccountConsentGeneration;
   final String uid;
   final String? verifiedPersonaId;
   final String profileBindingId;
@@ -78,6 +80,7 @@ class AiConsentAuthoritySnapshot {
     }
     return AiConsentAuthoritySnapshot(
       generation: current.aiConsentAuthorityGeneration,
+      terminalAccountConsentGeneration: current.terminalAccountConsentAuthorityGeneration,
       uid: uid,
       verifiedPersonaId: verifiedPersonaId,
       profileBindingId: current.aiConsentProfileBindingId,
@@ -93,6 +96,7 @@ class AiConsentAuthoritySnapshot {
   bool isCurrent({SharedPreferencesUtil? preferences}) {
     final current = preferences ?? SharedPreferencesUtil();
     if (!current.getBool('aiConsentAccepted', defaultValue: false) ||
+        current.terminalAccountConsentAuthorityGeneration != terminalAccountConsentGeneration ||
         current.uid != uid ||
         current.aiConsentReceiptUid != uid) {
       return false;
