@@ -1,8 +1,12 @@
+import 'dart:async';
 import 'dart:collection';
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
+
+import 'package:omi/backend/preferences.dart';
 
 class MemoryArtworkCache {
   MemoryArtworkCache._();
@@ -11,6 +15,7 @@ class MemoryArtworkCache {
   static const int _maxTrustedDisplayKeys = 1000;
   static const int _maxSuppressedDisplayKeys = 4096;
   static const Duration _evictionTimeout = Duration(seconds: 5);
+  static const String _displayAliasesPreferenceKey = 'ellaMemoryArtworkDisplayAliasesV2';
   static CacheManager? _manager;
   static final LinkedHashMap<String, String> _displayAliases = LinkedHashMap();
   static final LinkedHashSet<String> _trustedDisplayKeys = LinkedHashSet();
@@ -22,6 +27,7 @@ class MemoryArtworkCache {
   static int _nextRecoveryCacheGeneration = 0;
   static final String _networkOnlyCacheNamespace = _createNetworkOnlyCacheNamespace();
   static bool _diskReadsDisabled = false;
+  static bool _persistentAliasesLoaded = false;
 
   static CacheManager get manager => _manager ??= CacheManager(
         Config('ellaMemoryArtworkCacheV1', stalePeriod: const Duration(days: 30), maxNrOfCacheObjects: 1000),
@@ -38,14 +44,16 @@ class MemoryArtworkCache {
   /// returned by the artwork endpoint. Sliver recycling must not make an
   /// already-downloaded image wait for that endpoint again.
   static String resolveDisplayCacheKey(String provisionalCacheKey) {
+    _loadPersistentAliases();
     if (provisionalCacheKey.isEmpty || _diskReadsDisabled) return '';
     final authoritativeCacheKey = _displayAliases[provisionalCacheKey];
     if (authoritativeCacheKey != null) {
-      if (_suppressedDisplayKeys.contains(authoritativeCacheKey) || !_trustDisplayKey(authoritativeCacheKey)) {
+      if (_suppressedDisplayKeys.contains(authoritativeCacheKey)) {
         return '';
       }
       _displayAliases.remove(provisionalCacheKey);
       _displayAliases[provisionalCacheKey] = authoritativeCacheKey;
+      _trustDisplayKey(authoritativeCacheKey, addIfMissing: true);
       return authoritativeCacheKey;
     }
     if (_suppressedDisplayKeys.contains(provisionalCacheKey) || !_trustDisplayKey(provisionalCacheKey)) return '';
@@ -58,6 +66,7 @@ class MemoryArtworkCache {
     required bool Function() isAuthorityCurrent,
     Duration evictionWaitTimeout = _evictionTimeout,
   }) async {
+    _loadPersistentAliases();
     if (authoritativeCacheKey.isEmpty || !isAuthorityCurrent()) return null;
     if (_diskReadsDisabled) {
       // Suppression overflow discards per-key disk authority, but a newly
@@ -88,7 +97,7 @@ class MemoryArtworkCache {
     String? existingRecoveryCacheKey;
     for (final cacheKey in cacheKeys) {
       final candidate = _displayAliases[cacheKey];
-      if (candidate != null && !_suppressedDisplayKeys.contains(candidate)) {
+      if (candidate != null && !cacheKeys.contains(candidate) && !_suppressedDisplayKeys.contains(candidate)) {
         existingRecoveryCacheKey = candidate;
         break;
       }
@@ -106,15 +115,23 @@ class MemoryArtworkCache {
       _displayAliases.remove(cacheKey);
       _displayAliases[cacheKey] = publishedCacheKey;
     }
+    if (provisionalCacheKey.isNotEmpty && provisionalCacheKey != publishedCacheKey) {
+      _displayAliases.remove(provisionalCacheKey);
+      _displayAliases[provisionalCacheKey] = publishedCacheKey;
+    }
     while (_displayAliases.length > _maxDisplayAliases) {
       _displayAliases.remove(_displayAliases.keys.first);
     }
     _trustDisplayKey(publishedCacheKey, addIfMissing: true);
+    await _persistDisplayAliases();
     return publishedCacheKey;
   }
 
   static void forgetDisplayCacheKey(String provisionalCacheKey) {
-    if (provisionalCacheKey.isNotEmpty) _displayAliases.remove(provisionalCacheKey);
+    _loadPersistentAliases();
+    if (provisionalCacheKey.isNotEmpty && _displayAliases.remove(provisionalCacheKey) != null) {
+      unawaited(_persistDisplayAliases());
+    }
   }
 
   /// Blocks disk reads synchronously while terminal-policy cleanup removes the
@@ -122,6 +139,7 @@ class MemoryArtworkCache {
   /// so a relaunch cannot read persistent files until the endpoint validates
   /// them again.
   static void suppressDisplayCacheKeys(Iterable<String> cacheKeys) {
+    _loadPersistentAliases();
     final keys = cacheKeys.where((cacheKey) => cacheKey.isNotEmpty).toSet();
     if (keys.isEmpty) return;
     _displayAliases.removeWhere(
@@ -137,6 +155,7 @@ class MemoryArtworkCache {
     if (_suppressedDisplayKeys.length > _maxSuppressedDisplayKeys) {
       _enterFailClosedDiskMode();
     }
+    unawaited(_persistDisplayAliases());
   }
 
   static Future<void> evictSuppressedDisplayCacheKeys(
@@ -217,19 +236,28 @@ class MemoryArtworkCache {
   /// the exact account/profile key in the new process.
   @visibleForTesting
   static void resetRuntimeTrustForTesting() {
-    revokeRuntimeTrust();
+    _displayAliases.clear();
+    _trustedDisplayKeys.clear();
+    _suppressedDisplayKeys.clear();
+    _suppressionGenerations.clear();
+    _completedEvictionGenerations.clear();
+    _pendingEvictions.clear();
+    _diskReadsDisabled = false;
+    _persistentAliasesLoaded = false;
   }
 
   /// Revokes every in-memory artwork capability without deleting owner-scoped
   /// files. A freshly authenticated authority must validate each key before a
   /// persistent file can be read again.
   static void revokeRuntimeTrust({bool preserveDisplayAliases = false}) {
+    _loadPersistentAliases();
     if (!preserveDisplayAliases) {
       _displayAliases.clear();
       _suppressedDisplayKeys.clear();
       _suppressionGenerations.clear();
       _completedEvictionGenerations.clear();
       _diskReadsDisabled = false;
+      unawaited(SharedPreferencesUtil().remove(_displayAliasesPreferenceKey));
     }
     _trustedDisplayKeys.clear();
     // A detached terminal eviction can still delete its key after authority
@@ -244,6 +272,7 @@ class MemoryArtworkCache {
     _suppressionGenerations.clear();
     _completedEvictionGenerations.clear();
     _pendingEvictions.clear();
+    unawaited(_persistDisplayAliases());
   }
 
   static Future<void> clear() async {
@@ -254,9 +283,45 @@ class MemoryArtworkCache {
     _completedEvictionGenerations.clear();
     _pendingEvictions.clear();
     _diskReadsDisabled = false;
+    _persistentAliasesLoaded = true;
     _nextRecoveryCacheGeneration = 0;
+    await SharedPreferencesUtil().remove(_displayAliasesPreferenceKey);
     final activeManager = _manager;
     if (activeManager == null) return;
     await activeManager.emptyCache();
   }
+
+  static void _loadPersistentAliases() {
+    if (_persistentAliasesLoaded) return;
+    _persistentAliasesLoaded = true;
+    final encoded = SharedPreferencesUtil().getString(_displayAliasesPreferenceKey);
+    if (encoded.isEmpty) return;
+    try {
+      final decoded = jsonDecode(encoded);
+      if (decoded is! Map) return;
+      for (final entry in decoded.entries) {
+        final provisional = entry.key.toString();
+        final authoritative = entry.value?.toString() ?? '';
+        if (!_persistentCacheKey.hasMatch(provisional) || !_persistentCacheKey.hasMatch(authoritative)) continue;
+        _displayAliases[provisional] = authoritative;
+      }
+      while (_displayAliases.length > _maxDisplayAliases) {
+        _displayAliases.remove(_displayAliases.keys.first);
+      }
+    } catch (_) {
+      _displayAliases.clear();
+    }
+  }
+
+  static Future<void> _persistDisplayAliases() async {
+    if (!_persistentAliasesLoaded) return;
+    final aliases = <String, String>{
+      for (final entry in _displayAliases.entries)
+        if (_persistentCacheKey.hasMatch(entry.key) && _persistentCacheKey.hasMatch(entry.value))
+          entry.key: entry.value,
+    };
+    await SharedPreferencesUtil().saveString(_displayAliasesPreferenceKey, jsonEncode(aliases));
+  }
+
+  static final RegExp _persistentCacheKey = RegExp(r'^[a-f0-9]{64}$');
 }

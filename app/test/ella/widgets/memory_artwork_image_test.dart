@@ -789,7 +789,8 @@ void main() {
 
     expect(find.byKey(const Key('memory-generated-artwork-memory-after-suppression-capacity')), findsNothing);
     expect(find.byType(CachedNetworkImage), findsNothing);
-    expect(find.text('Illustration unavailable'), findsOneWidget);
+    expect(find.text('Illustration unavailable'), findsNothing);
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-after-suppression-capacity')), findsOneWidget);
     expect(persistentCacheLookups, 0, reason: 'terminal cleanup cannot expose a disk artifact that was never written');
     expect(MemoryArtworkCache.isPersistentManagerInitializedForTesting, isFalse);
   });
@@ -875,7 +876,7 @@ void main() {
     expect(MemoryArtworkCache.resolveDisplayCacheKey(recoveredCacheKey!), isEmpty);
   });
 
-  test('same-account reauthentication revalidates an existing recovery alias without losing its file key', () async {
+  test('same-account reauthentication keeps an owner-scoped recovery alias available', () async {
     const provisionalKey = 'reauth-provisional-key';
     const authoritativeKey = 'reauth-authoritative-key';
     MemoryArtworkCache.suppressDisplayCacheKeys({provisionalKey, authoritativeKey});
@@ -889,7 +890,7 @@ void main() {
     expect(recoveredCacheKey, isNotNull);
 
     MemoryArtworkCache.revokeRuntimeTrust(preserveDisplayAliases: true);
-    expect(MemoryArtworkCache.resolveDisplayCacheKey(provisionalKey), isEmpty);
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(provisionalKey), recoveredCacheKey);
 
     expect(
       await MemoryArtworkCache.rememberDisplayCacheKey(
@@ -1132,7 +1133,7 @@ void main() {
     expect(find.text('Illustration unavailable'), findsNothing);
   });
 
-  testWidgets('suppresses cached artwork while corrected enrichment is nonterminal', (tester) async {
+  testWidgets('keeps cached artwork while corrected enrichment is nonterminal', (tester) async {
     final api = _DelayedArtworkApi();
     final cachedFile = File('assets/images/onboarding-bg-1.webp');
     await trustDisplayKey('owner-profile-memory-revision-cache-key');
@@ -1171,8 +1172,8 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    expect(find.byKey(const Key('memory-cached-artwork-memory-enrichment-pending')), findsNothing);
-    expect(find.text('Illustration unavailable'), findsOneWidget);
+    expect(find.byKey(const Key('memory-cached-artwork-memory-enrichment-pending')), findsOneWidget);
+    expect(find.text('Illustration unavailable'), findsNothing);
   });
 
   testWidgets('visible artwork never enqueues work just because the card is rendered', (tester) async {
@@ -1228,7 +1229,8 @@ void main() {
     await tester.pump();
 
     expect(api.enqueueRequests, [isFalse], reason: 'rendering the unavailable card remains read-only');
-    expect(find.text('Try artwork again'), findsOneWidget);
+    expect(find.text('Try artwork again'), findsNothing);
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-manual-generation')), findsOneWidget);
     expect(find.byIcon(Icons.auto_awesome_outlined), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('memory-artwork-placeholder-memory-manual-generation')));
@@ -1237,19 +1239,20 @@ void main() {
     await tester.pump();
 
     expect(api.enqueueRequests, [isFalse, isTrue], reason: 'repeated taps cannot create duplicate generation calls');
-    expect(find.text('Preparing illustration…'), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-generation-progress-memory-manual-generation')), findsOneWidget);
 
     api.generationResult.complete(const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating));
     await tester.pump();
-    expect(find.text('Preparing illustration…'), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-generation-progress-memory-manual-generation')), findsOneWidget);
   });
 
-  testWidgets('a high-priority memory uses a bundled fallback and keeps retry available', (tester) async {
+  testWidgets('a high-priority memory uses its typographic fallback and keeps retry available', (tester) async {
     final api = _ManualGenerationArtworkApi(initialFailureCode: 'memory_artwork_provider_failed');
     final conversation = ServerConversation(
       id: 'recent-memory-fallback',
       createdAt: DateTime(2026, 9, 24),
-      structured: Structured('[Ella] A recent memory', '[Ella] A useful enriched summary.'),
+      structured:
+          Structured('[Ella] A recent memory', '[Ella] A useful enriched summary.', emoji: '🪽', category: 'family'),
     );
 
     await tester.pumpWidget(
@@ -1264,7 +1267,6 @@ void main() {
             api: api,
             cachedFileLookup: (_) async => null,
             allowManualGeneration: true,
-            fallbackAssetPath: memoryArtworkWatercolorFallbackAsset,
             maxTransientRetries: 0,
           ),
         ),
@@ -1272,16 +1274,18 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.byKey(const Key('memory-artwork-local-fallback-recent-memory-fallback')), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-placeholder-recent-memory-fallback')), findsOneWidget);
+    expect(find.text('A recent memory'), findsOneWidget);
+    expect(find.text('🪽'), findsOneWidget);
     expect(find.text('Illustration unavailable'), findsNothing);
-    final retry = find.byKey(const Key('memory-artwork-photo-retry-recent-memory-fallback'));
+    final retry = find.byKey(const Key('memory-artwork-placeholder-recent-memory-fallback'));
     expect(retry, findsOneWidget);
 
     await tester.tap(retry);
     await tester.pump();
 
     expect(api.enqueueRequests, [isFalse, isTrue]);
-    expect(find.byKey(const Key('memory-artwork-local-fallback-recent-memory-fallback')), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-placeholder-recent-memory-fallback')), findsOneWidget);
     expect(find.byKey(const Key('memory-artwork-generation-progress-recent-memory-fallback')), findsOneWidget);
   });
 
@@ -1414,7 +1418,7 @@ void main() {
     expect(find.byKey(const Key('memory-artwork-placeholder-memory-hero-recovery')), findsOneWidget);
   });
 
-  testWidgets('automatic recovery releases a failed preflight claim and retries one enqueue', (tester) async {
+  testWidgets('day-batched production display does not issue per-tile automatic mutations', (tester) async {
     final authority = _MutableArtworkAuthority();
     var getRequests = 0;
     var postRequests = 0;
@@ -1478,11 +1482,11 @@ void main() {
     await tester.pump(const Duration(milliseconds: 1));
     await tester.pump();
 
-    expect(getRequests, 6, reason: 'the scheduled retry must repeat both safety reads after the first one fails');
-    expect(postRequests, 1, reason: 'only the retry that reaches the POST boundary consumes the automatic claim');
+    expect(getRequests, 1, reason: 'one day response owns the display read for this refresh revision');
+    expect(postRequests, 0, reason: 'recent recovery owns automatic reservations, not an individual tile');
   });
 
-  testWidgets('pre-egress failure retries once and post-egress loss keeps the one-shot claim', (tester) async {
+  testWidgets('day-batched display does not cross the legacy per-memory mutation boundary', (tester) async {
     final authority = _MutableArtworkAuthority();
     var getRequests = 0;
     var postAttempts = 0;
@@ -1556,12 +1560,12 @@ void main() {
     await tester.pump(const Duration(milliseconds: 1));
     await tester.pump();
 
-    expect(getRequests, 7, reason: 'the final passive read must reconcile the ambiguous sent request');
-    expect(postAttempts, 2, reason: 'the pre-egress failure must leave exactly one retryable mutation attempt');
-    expect(sentPostRequests, 1, reason: 'response loss after egress must keep the one-shot claim committed');
+    expect(getRequests, 1, reason: 'the day response is shared and rechecked only by a parent refresh revision');
+    expect(postAttempts, 0, reason: 'a visible tile cannot reserve artwork work');
+    expect(sentPostRequests, 0, reason: 'no tile mutation may reach egress');
   });
 
-  testWidgets('pre-egress retry budget survives card recycling and parent refreshes', (tester) async {
+  testWidgets('production card recycling never spends the legacy per-tile generation budget', (tester) async {
     final authority = _MutableArtworkAuthority();
     var postAttempts = 0;
     final api = MemoryArtworkApi(
@@ -1616,7 +1620,7 @@ void main() {
       await tester.pump();
     }
 
-    expect(postAttempts, 3, reason: 'one owner/profile/source revision has a process-wide pre-egress budget');
+    expect(postAttempts, 0, reason: 'recent recovery and the queue own automatic generation');
   });
 
   testWidgets('hero automatic generation stays one-shot across recreation and leaves one manual retry', (tester) async {
@@ -1662,7 +1666,8 @@ void main() {
       1,
       reason: 'recreation and queue epochs must not buy another automatic generation attempt',
     );
-    expect(find.text('Try artwork again'), findsOneWidget);
+    expect(find.text('Try artwork again'), findsNothing);
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-hero-one-shot')), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('memory-artwork-placeholder-memory-hero-one-shot')));
     await tester.pump();
@@ -1781,7 +1786,8 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('Illustration unavailable'), findsOneWidget);
+    expect(find.text('Illustration unavailable'), findsNothing);
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-policy-blocked')), findsOneWidget);
     expect(find.text('Try artwork again'), findsNothing);
     expect(find.byIcon(Icons.auto_awesome_outlined), findsNothing);
     expect(api.enqueueRequests, [isFalse]);
@@ -1859,7 +1865,8 @@ void main() {
     await tester.pump();
 
     expect(find.byKey(const Key('memory-cached-artwork-memory-declined')), findsNothing);
-    expect(find.text('Illustration unavailable'), findsOneWidget);
+    expect(find.text('Illustration unavailable'), findsNothing);
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-declined')), findsOneWidget);
   });
 
   testWidgets('terminal suppression removes the authoritative alias before the card is recycled', (tester) async {
@@ -1939,12 +1946,12 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('Preparing illustration…'), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-generation-progress-memory-generating')), findsOneWidget);
     expect(find.byKey(const Key('memory-artwork-generation-progress-memory-generating')), findsOneWidget);
 
     api.remoteResult.complete(const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating));
     await tester.pump();
-    expect(find.text('Preparing illustration…'), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-generation-progress-memory-generating')), findsOneWidget);
   });
 
   testWidgets('continues refreshing a visible generating illustration until it becomes ready', (tester) async {
@@ -1970,7 +1977,7 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('Preparing illustration…'), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-generation-progress-memory-eventually-ready')), findsOneWidget);
     expect(api.loadCalls, 1);
     expect(api.lastPollAttempts, 0, reason: 'each visible card performs one display read per queue revision');
 
@@ -2005,7 +2012,7 @@ void main() {
     await tester.pump();
     expect(api.loadCalls, 1);
     expect(api.lastEnqueueIfMissing, isFalse);
-    expect(find.text('Preparing illustration…'), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-generation-progress-memory-queue-complete')), findsOneWidget);
 
     await tester.pumpWidget(buildArtwork(1));
     await tester.pump();
@@ -2043,7 +2050,8 @@ void main() {
 
     expect(api.loadCalls, 1, reason: 'terminal missing artwork must not poll forever');
     expect(api.lastEnqueueIfMissing, isFalse, reason: 'displaying a card must not spend image allowance');
-    expect(find.text('Illustration unavailable'), findsOneWidget);
+    expect(find.text('Illustration unavailable'), findsNothing);
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-terminal-unavailable')), findsOneWidget);
 
     await tester.pumpWidget(buildArtwork(1));
     await tester.pump();
@@ -2448,7 +2456,7 @@ void main() {
     expect(find.byKey(const Key('memory-generated-artwork-memory-style-refresh')), findsOneWidget);
   });
 
-  testWidgets('failed signed image load evicts cache and refreshes the signed URL', (tester) async {
+  testWidgets('failed signed image load preserves cache and refreshes the signed URL', (tester) async {
     final api = _RefreshingArtworkApi();
     final evictedKeys = <String>[];
     final conversation = ServerConversation(
@@ -2481,8 +2489,8 @@ void main() {
     image.errorListener!(Exception('expired signed URL'));
     await tester.pump();
 
-    expect(evictedKeys, ['ready-artwork-cache-key']);
-    expect(find.text('Preparing illustration…'), findsOneWidget);
+    expect(evictedKeys, isEmpty);
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-expired-signed-url')), findsOneWidget);
 
     await tester.pump(const Duration(milliseconds: 10));
     await tester.pump();
@@ -2541,8 +2549,9 @@ void main() {
 
     expect(api.loadCalls, 4, reason: 'initial readiness plus two bounded signed-URL recovery reads');
     expect(api.lastEnqueueIfMissing, isFalse);
-    expect(evictedKeys, hasLength(2));
-    expect(find.text('Illustration unavailable'), findsOneWidget);
+    expect(evictedKeys, isEmpty);
+    expect(find.text('Illustration unavailable'), findsNothing);
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-repeated-signed-url-failure')), findsOneWidget);
   });
 
   testWidgets('does not poll a terminal enrichment result until the parent publishes a new revision', (tester) async {
@@ -2568,7 +2577,8 @@ void main() {
     await tester.pumpWidget(buildArtwork(0));
     await tester.pump();
 
-    expect(find.text('Illustration unavailable'), findsOneWidget);
+    expect(find.text('Illustration unavailable'), findsNothing);
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-awaiting-enrichment')), findsOneWidget);
     expect(api.loadCalls, 1);
 
     await tester.pump(const Duration(milliseconds: 100));
@@ -2609,7 +2619,8 @@ void main() {
     await tester.pumpWidget(buildArtwork(conversation(terminal: false)));
     await tester.pump();
 
-    expect(find.text('Illustration unavailable'), findsOneWidget);
+    expect(find.text('Illustration unavailable'), findsNothing);
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-enrichment-transition')), findsOneWidget);
     expect(api.loadCalls, 1);
     expect(api.enqueueRequests, [isFalse]);
 
@@ -2645,7 +2656,8 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('Illustration unavailable'), findsOneWidget);
+    expect(find.text('Illustration unavailable'), findsNothing);
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-visible-enrichment-transition')), findsOneWidget);
     expect(api.loadCalls, 1);
     expect(api.enqueueRequests, [isFalse]);
 
@@ -2689,7 +2701,8 @@ void main() {
 
     expect(api.loadCalls, 3);
     expect(api.enqueueRequests, everyElement(isFalse));
-    expect(find.text('Illustration unavailable'), findsOneWidget);
+    expect(find.text('Illustration unavailable'), findsNothing);
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-persistently-pending-enrichment')), findsOneWidget);
   });
 
   testWidgets('enrichment polling does not consume the later generating retry budget', (tester) async {
@@ -2752,7 +2765,7 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('Preparing illustration…'), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-generating-compact')), findsOneWidget);
     expect(find.byIcon(Icons.brush_outlined), findsNothing);
     expect(tester.takeException(), isNull);
   });

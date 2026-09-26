@@ -43,6 +43,15 @@ enum MemoryArtworkGenerationMode { manual, automatic }
 /// image allowance. A preview always targets one bounded recent page.
 enum MemoryArtworkBackfillMode { preview, all }
 
+class MemoryArtworkVariant {
+  const MemoryArtworkVariant({required this.width, required this.url, required this.cacheKey, required this.bytes});
+
+  final int width;
+  final Uri url;
+  final String cacheKey;
+  final int bytes;
+}
+
 class MemoryArtworkResult {
   const MemoryArtworkResult({
     required this.status,
@@ -54,6 +63,10 @@ class MemoryArtworkResult {
     this.refreshPending = false,
     this.refreshFailureCode = '',
     this.requestedStyleVersion = '',
+    this.stale = false,
+    this.pixelWidth,
+    this.selectedVariantWidth,
+    this.variants = const <MemoryArtworkVariant>[],
     this.authority,
   });
 
@@ -66,10 +79,36 @@ class MemoryArtworkResult {
   final bool refreshPending;
   final String refreshFailureCode;
   final String requestedStyleVersion;
+  final bool stale;
+  final int? pixelWidth;
+  final int? selectedVariantWidth;
+  final List<MemoryArtworkVariant> variants;
   final ExactAccountAuthorityVerifier? authority;
 
   bool get isReady => status == MemoryArtworkResultStatus.ready && url != null;
   bool get isAuthorityCurrent => authority?.isExactCurrent() ?? true;
+
+  MemoryArtworkResult forPhysicalWidth(double physicalWidth) {
+    if (!isReady || variants.isEmpty) return this;
+    final target = physicalWidth.isFinite && physicalWidth > 0 ? physicalWidth.ceil() : variants.last.width;
+    final selected = variants.firstWhere((variant) => variant.width >= target, orElse: () => variants.last);
+    return MemoryArtworkResult(
+      status: status,
+      url: selected.url,
+      cacheKey: selected.cacheKey,
+      styleVersion: styleVersion,
+      enrichmentRevision: enrichmentRevision,
+      failureCode: failureCode,
+      refreshPending: refreshPending,
+      refreshFailureCode: refreshFailureCode,
+      requestedStyleVersion: requestedStyleVersion,
+      stale: stale,
+      pixelWidth: pixelWidth,
+      selectedVariantWidth: selected.width,
+      variants: variants,
+      authority: authority,
+    );
+  }
 
   /// Generation is an explicit side effect, so unknown and policy-sensitive
   /// states fail closed. The empty code is the server's canonical state for a
@@ -88,6 +127,14 @@ class MemoryArtworkResult {
         'memory_artwork_storage_failed',
         'memory_artwork_worker_failed',
       }.contains(failureCode);
+}
+
+class MemoryArtworkDay {
+  const MemoryArtworkDay({required this.day, required this.utcOffsetMinutes, required this.items});
+
+  final String day;
+  final int utcOffsetMinutes;
+  final Map<String, MemoryArtworkResult> items;
 }
 
 class MemoryArtworkPreferences {
@@ -276,6 +323,12 @@ class MemoryArtworkApi {
   final MemoryArtworkHttpCall _request;
   final MemoryArtworkAuthorityProvider _authorityProvider;
   final String _baseUrl;
+  final Map<String, Future<MemoryArtworkDay?>> _dayRequests = <String, Future<MemoryArtworkDay?>>{};
+
+  /// Production clients resolve a first-party API base URL. Test doubles that
+  /// intentionally provide only the legacy item method can keep exercising
+  /// that seam without issuing real network work.
+  bool get supportsDayArtworkBatch => _resolvedBaseUrl().isNotEmpty;
 
   String cacheKeyForDisplay({
     required String memoryId,
@@ -295,12 +348,13 @@ class MemoryArtworkApi {
   String automaticGenerationKey({required String memoryId, required String sourceRevision}) {
     final authority = _authorityProvider();
     if (authority == null || memoryId.trim().isEmpty || !authority.isExactCurrent()) return '';
-    return _cacheKey(
-      authority: authority,
-      memoryId: memoryId,
-      styleVersion: 'automatic-visible-card',
-      enrichmentRevision: sourceRevision,
-    );
+    return sha256
+        .convert(
+          utf8.encode(
+            'ella-memory-artwork-automatic-v1\n${authority.uid}\n$memoryId\nautomatic-visible-card\n$sourceRevision',
+          ),
+        )
+        .toString();
   }
 
   Future<MemoryArtworkResult> fetch(String memoryId) async {
@@ -422,32 +476,76 @@ class MemoryArtworkApi {
     if (payload == null || payload['schema_version'] != memoryArtworkSchemaVersion) {
       return _unavailable('memory_artwork_response_invalid');
     }
-    final status = MemoryArtworkResultStatus.values.asNameMap()[payload['status']?.toString() ?? ''];
-    if (status == null) return _unavailable('memory_artwork_response_invalid');
-    final rawUrl = payload['url']?.toString().trim() ?? '';
-    final url = Uri.tryParse(rawUrl);
-    if (status == MemoryArtworkResultStatus.ready && (url == null || url.scheme != 'https' || url.host.isEmpty)) {
+    if (payload['status'] == MemoryArtworkResultStatus.ready.name &&
+        !_isHttpsUrl(Uri.tryParse(payload['url']?.toString().trim() ?? ''))) {
       return _unavailable('memory_artwork_url_invalid');
     }
-    return MemoryArtworkResult(
-      status: status,
-      url: status == MemoryArtworkResultStatus.ready ? url : null,
-      cacheKey: status == MemoryArtworkResultStatus.ready
-          ? _cacheKey(
-              authority: authority,
-              memoryId: memoryId,
-              styleVersion: payload['style_version']?.toString().trim() ?? '',
-              enrichmentRevision: payload['enrichment_revision']?.toString().trim() ?? '',
-            )
-          : '',
-      styleVersion: payload['style_version']?.toString().trim() ?? '',
-      enrichmentRevision: payload['enrichment_revision']?.toString().trim() ?? '',
-      failureCode: payload['failure_code']?.toString().trim() ?? '',
-      refreshPending: payload['refresh_pending'] == true,
-      refreshFailureCode: payload['refresh_failure_code']?.toString().trim() ?? '',
-      requestedStyleVersion: payload['requested_style_version']?.toString().trim() ?? '',
-      authority: authority,
+    return _resultFromPayload(authority: authority, memoryId: memoryId, payload: payload) ??
+        _unavailable('memory_artwork_response_invalid');
+  }
+
+  Future<MemoryArtworkDay?> fetchDay(
+    DateTime localDay, {
+    required int utcOffsetMinutes,
+    int authorityRevision = 0,
+    int contentRevision = 0,
+  }) {
+    final authority = _authorityProvider();
+    if (authority == null || !authority.isExactCurrent() || utcOffsetMinutes < -840 || utcOffsetMinutes > 840) {
+      return Future<MemoryArtworkDay?>.value(null);
+    }
+    final day = _dayString(localDay);
+    final requestKey = '${authority.uid}\n$day\n$utcOffsetMinutes\n$authorityRevision\n$contentRevision';
+    final existing = _dayRequests[requestKey];
+    if (existing != null) return existing;
+    final request = _fetchDayWithAuthority(
+      authority,
+      day: day,
+      utcOffsetMinutes: utcOffsetMinutes,
     );
+    _dayRequests[requestKey] = request;
+    while (_dayRequests.length > 64) {
+      _dayRequests.remove(_dayRequests.keys.first);
+    }
+    return request;
+  }
+
+  Future<MemoryArtworkDay?> _fetchDayWithAuthority(
+    ExactAccountAuthorityVerifier authority, {
+    required String day,
+    required int utcOffsetMinutes,
+  }) async {
+    final response = await _call(
+      authority,
+      method: 'GET',
+      path: 'v1/ella/memory-artwork/day/$day?utc_offset_minutes=$utcOffsetMinutes',
+    );
+    if (response?.statusCode != 200 || !authority.isExactCurrent()) return null;
+    final payload = _jsonObject(response!.body);
+    if (payload == null ||
+        payload['schema_version'] != memoryArtworkSchemaVersion ||
+        payload['day'] != day ||
+        payload['utc_offset_minutes'] != utcOffsetMinutes ||
+        payload['items'] is! List) {
+      return null;
+    }
+    final items = <String, MemoryArtworkResult>{};
+    for (final rawItem in payload['items'] as List) {
+      if (rawItem is! Map) return null;
+      final item = Map<String, dynamic>.from(rawItem);
+      final memoryId = item['memory_id']?.toString().trim() ?? '';
+      final artworkPayload = item['artwork'];
+      if (memoryId.isEmpty || artworkPayload is! Map || items.containsKey(memoryId)) return null;
+      final result = _resultFromPayload(
+        authority: authority,
+        memoryId: memoryId,
+        payload: Map<String, dynamic>.from(artworkPayload),
+      );
+      if (result?.isReady != true) return null;
+      items[memoryId] = result!;
+    }
+    if (!authority.isExactCurrent()) return null;
+    return MemoryArtworkDay(day: day, utcOffsetMinutes: utcOffsetMinutes, items: Map.unmodifiable(items));
   }
 
   Future<MemoryArtworkResult> _enqueueWithAuthority(
@@ -703,6 +801,89 @@ class MemoryArtworkApi {
 
   static int _nonNegativeInt(Object? value) => value is int && value >= 0 ? value : 0;
 
+  static MemoryArtworkResult? _resultFromPayload({
+    required ExactAccountAuthorityVerifier authority,
+    required String memoryId,
+    required Map<String, dynamic> payload,
+  }) {
+    if (payload['schema_version'] != memoryArtworkSchemaVersion) return null;
+    final status = MemoryArtworkResultStatus.values.asNameMap()[payload['status']?.toString() ?? ''];
+    if (status == null) return null;
+    final styleVersion = payload['style_version']?.toString().trim() ?? '';
+    final enrichmentRevision = payload['enrichment_revision']?.toString().trim() ?? '';
+    final rawUrl = payload['url']?.toString().trim() ?? '';
+    final url = Uri.tryParse(rawUrl);
+    if (status == MemoryArtworkResultStatus.ready && !_isHttpsUrl(url)) return null;
+
+    final serverCacheKey = payload['cache_key']?.toString().trim() ?? '';
+    final legacyCacheKey = _cacheKey(
+      authority: authority,
+      memoryId: memoryId,
+      styleVersion: styleVersion,
+      enrichmentRevision: enrichmentRevision,
+    );
+    final masterWidth = _strictPositiveInt(payload['pixel_width']);
+    final cacheKey = status == MemoryArtworkResultStatus.ready
+        ? serverCacheKey.isEmpty
+            ? legacyCacheKey
+            : _contentCacheKey(
+                authority: authority,
+                memoryId: memoryId,
+                serverCacheKey: serverCacheKey,
+                width: masterWidth ?? 0,
+              )
+        : '';
+    final variants = <MemoryArtworkVariant>[];
+    final rawVariants = payload['variants'];
+    if (rawVariants != null && rawVariants is! List) return null;
+    for (final rawVariant in rawVariants is List ? rawVariants : const <Object>[]) {
+      if (rawVariant is! Map) return null;
+      final variant = Map<String, dynamic>.from(rawVariant);
+      final width = _strictPositiveInt(variant['w']);
+      final bytes = _strictNonNegativeInt(variant['bytes']);
+      final variantUrl = Uri.tryParse(variant['url']?.toString().trim() ?? '');
+      if (width == null || bytes == null || !_isHttpsUrl(variantUrl) || variants.any((item) => item.width == width)) {
+        return null;
+      }
+      variants.add(
+        MemoryArtworkVariant(
+          width: width,
+          url: variantUrl!,
+          bytes: bytes,
+          cacheKey: _contentCacheKey(
+            authority: authority,
+            memoryId: memoryId,
+            serverCacheKey: serverCacheKey.isEmpty ? legacyCacheKey : serverCacheKey,
+            width: width,
+          ),
+        ),
+      );
+    }
+    variants.sort((a, b) => a.width.compareTo(b.width));
+    return MemoryArtworkResult(
+      status: status,
+      url: status == MemoryArtworkResultStatus.ready ? url : null,
+      cacheKey: cacheKey,
+      styleVersion: styleVersion,
+      enrichmentRevision: enrichmentRevision,
+      failureCode: payload['failure_code']?.toString().trim() ?? '',
+      refreshPending: payload['refresh_pending'] == true,
+      refreshFailureCode: payload['refresh_failure_code']?.toString().trim() ?? '',
+      requestedStyleVersion: payload['requested_style_version']?.toString().trim() ?? '',
+      stale: payload['stale'] == true,
+      pixelWidth: masterWidth,
+      variants: List.unmodifiable(variants),
+      authority: authority,
+    );
+  }
+
+  static bool _isHttpsUrl(Uri? value) => value != null && value.scheme == 'https' && value.host.isNotEmpty;
+
+  static int? _strictPositiveInt(Object? value) => value is int && value > 0 ? value : null;
+
+  static String _dayString(DateTime value) =>
+      '${value.year.toString().padLeft(4, '0')}-${value.month.toString().padLeft(2, '0')}-${value.day.toString().padLeft(2, '0')}';
+
   static MemoryArtworkRecentRecovery? _recentRecoveryFromPayload(Map<String, dynamic>? payload) {
     if (payload == null || payload['schema_version'] != memoryArtworkRecentRecoverySchemaVersion) return null;
     final scanned = _strictNonNegativeInt(payload['scanned']);
@@ -888,15 +1069,18 @@ class MemoryArtworkApi {
     required String styleVersion,
     required String enrichmentRevision,
   }) {
-    final ownerNamespace = authority is ActiveWalAuthority
-        ? authority.owner.storageNamespace
-        : sha256.convert(utf8.encode(authority.uid)).toString().substring(0, 24);
-    return sha256
-        .convert(
-          utf8.encode('ella-memory-artwork-cache-v1\n$ownerNamespace\n$memoryId\n$styleVersion\n$enrichmentRevision'),
-        )
-        .toString();
+    return sha256.convert(utf8.encode('ella-memory-artwork-cache-v2\n${authority.uid}\n$memoryId')).toString();
   }
+
+  static String _contentCacheKey({
+    required ExactAccountAuthorityVerifier authority,
+    required String memoryId,
+    required String serverCacheKey,
+    required int width,
+  }) =>
+      sha256
+          .convert(utf8.encode('ella-memory-artwork-content-v2\n${authority.uid}\n$memoryId\n$serverCacheKey\n$width'))
+          .toString();
 }
 
 final _generationId = RegExp(r'^[0-9a-f]{64}$');

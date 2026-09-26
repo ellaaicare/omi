@@ -26,7 +26,6 @@ import 'package:omi/ella/services/today_card_controller.dart';
 import 'package:omi/ella/services/today_card_repository.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
-import 'package:omi/ella/widgets/memory_artwork_image.dart';
 import 'package:omi/ella/widgets/today_card_surface.dart';
 import 'package:omi/pages/capture/connect.dart';
 import 'package:omi/pages/conversation_capturing/page.dart';
@@ -36,6 +35,7 @@ import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/ella_provisioning_provider.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
+import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
@@ -180,20 +180,7 @@ Set<String> homeRecentArtworkRepairMemoryIds(
 }
 
 String homeMemoryDisplayTitle(ServerConversation conversation, String fallback) {
-  var title = conversation.structured.title
-      .replaceFirst(RegExp(r'^🪽\s*'), '')
-      .replaceFirst(RegExp(r'^(?:\[[^\]]+\]\s*)+'), '')
-      .trim();
-  title = title.split(RegExp(r'\s*(?:,|\band\b)\s*', caseSensitive: false)).first.trim();
-  title = title.replaceAll(
-    RegExp(
-      r'\b(?:doctor|medical|clinical|monitoring|emergency|alert|tracking|detecting)(?:[- ]\w+)?\b',
-      caseSensitive: false,
-    ),
-    '',
-  );
-  final words = title.split(RegExp(r'\s+')).where((word) => word.isNotEmpty).take(4).toList();
-  return words.isEmpty ? fallback : words.join(' ');
+  return safeMemoryDisplayTitle(conversation.structured.title, fallback);
 }
 
 class TodayPage extends StatefulWidget {
@@ -2052,9 +2039,6 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                               artworkRefreshEpoch: _homeArtworkDisplayEpoch,
                               artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
                               enqueueArtworkIfMissing: automaticArtworkRepairMemoryIds.contains(heroMemory.id),
-                              artworkFallbackAsset: automaticArtworkRepairMemoryIds.contains(heroMemory.id)
-                                  ? memoryArtworkWatercolorFallbackAsset
-                                  : null,
                               onOpen: () => _openMemoryDetail(heroMemory),
                               onDelete: () => _deleteMemory(heroMemory),
                             ),
@@ -2190,7 +2174,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                 artworkRefreshEpoch: _homeArtworkDisplayEpoch,
                 artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
                 automaticRepairMemoryIds: automaticRepairMemoryIds,
-                artworkFallbackMemoryIds: automaticRepairMemoryIds,
+                now: now,
                 onOpen: () {
                   final authority = _memoryPresentationAuthorityProvider();
                   if (SharedPreferencesUtil.isPublicBuild && (authority == null || !authority.isExactCurrent())) {
@@ -2257,8 +2241,6 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         artworkRefreshEpoch: _homeArtworkDisplayEpoch,
         artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
         enqueueArtworkIfMissing: automaticRepairMemoryIds.contains(conversation.id),
-        artworkFallbackAsset:
-            automaticRepairMemoryIds.contains(conversation.id) ? memoryArtworkWatercolorFallbackAsset : null,
         onOpen: () => _openMemoryDetail(conversation),
         onDelete: () => _deleteMemory(conversation),
       );

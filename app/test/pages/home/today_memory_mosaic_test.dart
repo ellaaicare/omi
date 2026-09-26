@@ -258,7 +258,13 @@ void main() {
               return SizedBox(
                 width: 360,
                 height: 420,
-                child: MemoryDayGalleryCard(dayLabel: 'TODAY', memories: memories, artworkApi: artwork, onOpen: () {}),
+                child: MemoryDayGalleryCard(
+                  dayLabel: 'TODAY',
+                  memories: memories,
+                  artworkApi: artwork,
+                  now: DateTime(2026, 9, 23),
+                  onOpen: () {},
+                ),
               );
             },
           ),
@@ -1543,7 +1549,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(artwork.recentRecoveryRequests, 1);
-    expect(find.byKey(const Key('memory-artwork-local-fallback-memory-1')), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-1')), findsOneWidget);
+    expect(find.text('Illustration unavailable'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
@@ -1635,19 +1642,16 @@ void main() {
         .toList(growable: false);
     expect(todayArtworkWidgets, hasLength(2));
     expect(todayArtworkWidgets.every((widget) => widget.enqueueIfMissing), isTrue);
-    expect(
-      todayArtworkWidgets.every((widget) => widget.fallbackAssetPath == memoryArtworkWatercolorFallbackAsset),
-      isTrue,
-    );
     final todayRepairRequests = artwork.displayRequests
         .where((request) => request.enqueueIfMissing && request.memoryId.startsWith('today-'))
         .map((request) => request.memoryId);
     expect(todayRepairRequests, containsAll(<String>['today-0', 'today-1']));
     expect(artwork.automaticDisplayRequests, isEmpty);
-    expect(find.text('Try artwork again'), findsWidgets);
+    expect(find.text('Try artwork again'), findsNothing);
+    expect(find.byKey(const Key('memory-artwork-placeholder-today-0')), findsOneWidget);
 
     final requestsBeforeRetry = artwork.displayRequests.length;
-    await tester.tap(find.byKey(const Key('memory-artwork-photo-retry-today-0')));
+    await tester.tap(find.byKey(const Key('memory-artwork-placeholder-today-0')));
     await tester.pump();
 
     expect(artwork.displayRequests.length, requestsBeforeRetry + 1);
@@ -1667,10 +1671,6 @@ void main() {
         .toList(growable: false);
     expect(yesterdayArtworkWidgets, hasLength(2));
     expect(yesterdayArtworkWidgets.every((widget) => widget.enqueueIfMissing), isTrue);
-    expect(
-      yesterdayArtworkWidgets.every((widget) => widget.fallbackAssetPath == memoryArtworkWatercolorFallbackAsset),
-      isTrue,
-    );
     expect(
       artwork.displayRequests.where((request) => request.enqueueIfMissing && request.memoryId.startsWith('yesterday-')),
       isNotEmpty,
@@ -1693,8 +1693,8 @@ void main() {
     final olderArtworkWidgets = tester
         .widgetList<MemoryArtworkImage>(find.descendant(of: olderDayCard, matching: find.byType(MemoryArtworkImage)))
         .toList(growable: false);
+    expect(olderArtworkWidgets, hasLength(1));
     expect(olderArtworkWidgets.every((widget) => !widget.enqueueIfMissing), isTrue);
-    expect(olderArtworkWidgets.every((widget) => widget.fallbackAssetPath == null), isTrue);
   });
 
   testWidgets('Home keeps a running full-history artwork queue indeterminate', (tester) async {
@@ -2866,7 +2866,6 @@ void main() {
       find.byWidgetPredicate((widget) => widget is MemoryGalleryCard && widget.conversation.id == 'oldest-read-only-0'),
     );
     expect(hero.enqueueArtworkIfMissing, isFalse);
-    expect(hero.artworkFallbackAsset, isNull);
     expect(
       artwork.displayRequests.where((request) => request.memoryId == 'oldest-read-only-0' && request.enqueueIfMissing),
       isEmpty,

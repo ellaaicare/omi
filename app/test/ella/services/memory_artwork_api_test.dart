@@ -179,6 +179,106 @@ void main() {
     expect(otherOwner.cacheKey, isNot(first.cacheKey));
   });
 
+  test('day artwork coalesces by revision and selects the smallest sufficient stable variant', () async {
+    final authority = _Authority('owner-a');
+    final requestedUrls = <String>[];
+    var signedRevision = 0;
+    final api = MemoryArtworkApi(
+      baseUrl: 'https://api.example/',
+      authorityProvider: () => authority,
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+        onSendAttempt,
+      }) async {
+        requestedUrls.add(url);
+        signedRevision += 1;
+        expect(method, 'GET');
+        expect(expectedAuthenticatedUid, 'owner-a');
+        expect(exactAuthority, same(authority));
+        return http.Response(
+          jsonEncode({
+            'schema_version': memoryArtworkSchemaVersion,
+            'day': '2026-09-24',
+            'utc_offset_minutes': -420,
+            'items': [
+              {
+                'memory_id': 'memory-a',
+                'artwork': {
+                  'schema_version': memoryArtworkSchemaVersion,
+                  'status': 'ready',
+                  'url': 'https://private-storage.example/master?signature=$signedRevision',
+                  'cache_key': 'stable-object-version',
+                  'pixel_width': 1536,
+                  'style_version': memoryArtworkDefaultStyle,
+                  'enrichment_revision': 'summary-a',
+                  'variants': [
+                    {
+                      'w': 1536,
+                      'url': 'https://private-storage.example/1536?signature=$signedRevision',
+                      'bytes': 15360,
+                    },
+                    {
+                      'w': 384,
+                      'url': 'https://private-storage.example/384?signature=$signedRevision',
+                      'bytes': 3840,
+                    },
+                    {
+                      'w': 768,
+                      'url': 'https://private-storage.example/768?signature=$signedRevision',
+                      'bytes': 7680,
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          200,
+        );
+      },
+    );
+
+    final firstRequest = api.fetchDay(
+      DateTime(2026, 9, 24),
+      utcOffsetMinutes: -420,
+      authorityRevision: 7,
+      contentRevision: 11,
+    );
+    final coalescedRequest = api.fetchDay(
+      DateTime(2026, 9, 24),
+      utcOffsetMinutes: -420,
+      authorityRevision: 7,
+      contentRevision: 11,
+    );
+    expect(coalescedRequest, same(firstRequest));
+
+    final first = (await firstRequest)!.items['memory-a']!.forPhysicalWidth(500);
+    final renewed = (await api.fetchDay(
+      DateTime(2026, 9, 24),
+      utcOffsetMinutes: -420,
+      authorityRevision: 7,
+      contentRevision: 12,
+    ))!
+        .items['memory-a']!
+        .forPhysicalWidth(500);
+
+    expect(requestedUrls, [
+      'https://api.example/v1/ella/memory-artwork/day/2026-09-24?utc_offset_minutes=-420',
+      'https://api.example/v1/ella/memory-artwork/day/2026-09-24?utc_offset_minutes=-420',
+    ]);
+    expect(first.selectedVariantWidth, 768);
+    expect(first.url, Uri.parse('https://private-storage.example/768?signature=1'));
+    expect(renewed.url, Uri.parse('https://private-storage.example/768?signature=2'));
+    expect(renewed.cacheKey, first.cacheKey, reason: 'signed URL renewal must not invalidate saved artwork');
+  });
+
   test('recent recovery accepts only the bounded authenticated server contract', () async {
     final authority = _Authority('owner-a');
     late String requestedUrl;
