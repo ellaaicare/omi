@@ -307,6 +307,11 @@ def _load_delete_account_route():
 
     artwork_prepare = Mock(side_effect=prepare_artwork)
 
+    def prepare_dream_media(uid):
+        lifecycle.append(("dream_media_prepare", uid))
+
+    dream_media_prepare = Mock(side_effect=prepare_dream_media)
+
     class ArtworkLock:
         async def __aenter__(self):
             lifecycle.append(("artwork_lock", "uid-a"))
@@ -339,6 +344,11 @@ def _load_delete_account_route():
     class MemoryArtworkCleanupError(RuntimeError):
         pass
 
+    class DreamMediaCleanupError(RuntimeError):
+        def __init__(self, code):
+            super().__init__(code)
+            self.code = code
+
     auth = types.SimpleNamespace(get_current_user_uid=authenticated_uid, delete_account=firebase_delete)
     namespace = {
         "Depends": Depends,
@@ -352,6 +362,8 @@ def _load_delete_account_route():
         "MemoryArtworkStorageError": MemoryArtworkCleanupError,
         "acquire_memory_artwork_publication_lock": artwork_lock,
         "prepare_account_artwork_deletion": artwork_prepare,
+        "prepare_account_dream_media_deletion": dream_media_prepare,
+        "DreamMediaError": DreamMediaCleanupError,
         "run_in_threadpool": run_in_threadpool,
         "ManagedCloudAuthorityUnavailable": RuntimeError,
     }
@@ -364,8 +376,10 @@ def _load_delete_account_route():
         imessage_cleanup,
         artwork_lock,
         artwork_prepare,
+        dream_media_prepare,
         lifecycle,
         MemoryArtworkCleanupError,
+        DreamMediaCleanupError,
     )
 
 
@@ -384,8 +398,10 @@ def test_account_deletion_completes_unlink_receipt_without_destructive_removal()
         imessage_cleanup,
         artwork_lock,
         artwork_prepare,
+        dream_media_prepare,
         lifecycle,
         _memory_artwork_error,
+        _dream_media_error,
     ) = _load_delete_account_route()
     app = FastAPI()
     app.add_api_route("/v1/users/delete-account", route, methods=["DELETE"])
@@ -408,10 +424,12 @@ def test_account_deletion_completes_unlink_receipt_without_destructive_removal()
     imessage_cleanup.assert_awaited_once_with(uid="uid-a")
     artwork_lock.assert_called_once_with("uid-a")
     artwork_prepare.assert_called_once_with("uid-a", lock_proof="artwork-lock-proof")
+    dream_media_prepare.assert_called_once_with("uid-a")
     unlink.assert_called_once_with(uid="uid-a")
     assert lifecycle == [
         ("artwork_lock", "uid-a"),
         ("artwork_prepare", "uid-a", "artwork-lock-proof"),
+        ("dream_media_prepare", "uid-a"),
         ("imessage_cleanup", "uid-a"),
         ("unlink", "uid-a"),
     ]
@@ -428,8 +446,10 @@ def test_account_deletion_refuses_before_unlink_when_imessage_absence_is_unprove
         imessage_cleanup,
         artwork_lock,
         artwork_prepare,
+        dream_media_prepare,
         lifecycle,
         _memory_artwork_error,
+        _dream_media_error,
     ) = _load_delete_account_route()
 
     async def cleanup_unproven(*, uid):
@@ -456,10 +476,12 @@ def test_account_deletion_refuses_before_unlink_when_imessage_absence_is_unprove
     }
     artwork_lock.assert_called_once_with("uid-a")
     artwork_prepare.assert_called_once_with("uid-a", lock_proof="artwork-lock-proof")
+    dream_media_prepare.assert_called_once_with("uid-a")
     unlink.assert_not_awaited()
     assert lifecycle == [
         ("artwork_lock", "uid-a"),
         ("artwork_prepare", "uid-a", "artwork-lock-proof"),
+        ("dream_media_prepare", "uid-a"),
         ("imessage_cleanup", "uid-a"),
     ]
     firestore_delete.assert_not_called()
@@ -475,8 +497,10 @@ def test_account_deletion_refuses_before_imessage_cleanup_when_artwork_cleanup_f
         imessage_cleanup,
         artwork_lock,
         artwork_prepare,
+        dream_media_prepare,
         lifecycle,
         memory_artwork_error,
+        _dream_media_error,
     ) = _load_delete_account_route()
     artwork_prepare.side_effect = memory_artwork_error("memory_artwork_cleanup_unavailable")
     app = FastAPI()
@@ -494,6 +518,7 @@ def test_account_deletion_refuses_before_imessage_cleanup_when_artwork_cleanup_f
     }
     artwork_lock.assert_called_once_with("uid-a")
     artwork_prepare.assert_called_once_with("uid-a", lock_proof="artwork-lock-proof")
+    dream_media_prepare.assert_not_called()
     imessage_cleanup.assert_not_awaited()
     unlink.assert_not_awaited()
     assert lifecycle == [("artwork_lock", "uid-a")]
