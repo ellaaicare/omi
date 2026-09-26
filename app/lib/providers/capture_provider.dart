@@ -196,8 +196,11 @@ class PhoneCaptureStartProof {
   final Completer<void> _nativeRecorderStarted = Completer<void>();
 
   bool acceptFrame(List<int> bytes) {
-    if (!pcm16FrameHasSignal(bytes)) return false;
-    if (!_firstAudioFrame.isCompleted) _firstAudioFrame.complete();
+    if (bytes.isEmpty) return false;
+    if (!_firstAudioFrame.isCompleted) {
+      if (!pcm16FrameHasSignal(bytes)) return false;
+      _firstAudioFrame.complete();
+    }
     return true;
   }
 
