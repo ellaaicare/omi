@@ -1487,11 +1487,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
 
     final source = _homeCaptureSource;
     bool? transportFinalized;
-    PhoneCaptureStopResult? phoneStopResult;
     switch (source) {
       case _HomeCaptureSource.phone:
-        phoneStopResult = await capture.stopPhoneCaptureForVoiceTakeover();
-        transportFinalized = phoneStopResult != PhoneCaptureStopResult.failed;
+        transportFinalized = await capture.stopStreamRecordingAndFinalize();
         break;
       case _HomeCaptureSource.necklaceOwned:
         transportFinalized = await capture.stopStreamDeviceRecordingAndFinalize();
@@ -1538,9 +1536,6 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
             _homeCaptureFinalizationPending = false;
             _homeCaptureSource = null;
           });
-          if (phoneStopResult == PhoneCaptureStopResult.empty) {
-            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayNoWordsCaptured)));
-          }
         }
         return true;
       }
@@ -2028,9 +2023,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                     child: _TodayHeader(
                       now: now,
                       onGreetingLongPress: () {
-                        Navigator.of(
-                          context,
-                        ).push(MaterialPageRoute(builder: (_) => const EllaRuntimeDiagnosticsPage()));
+                        Navigator.of(context).push(
+                          MaterialPageRoute(builder: (_) => const EllaRuntimeDiagnosticsPage()),
+                        );
                       },
                     ),
                   ),

@@ -17,8 +17,6 @@ class _AudioTransport extends DeviceTransport {
   final StreamController<DeviceTransportState> states = StreamController<DeviceTransportState>.broadcast();
   int readyRequests = 0;
   int legacyStreamRequests = 0;
-  int pingRequests = 0;
-  int readRequests = 0;
 
   @override
   String get deviceId => 'necklace-1';
@@ -48,16 +46,10 @@ class _AudioTransport extends DeviceTransport {
   Future<bool> isConnected() async => true;
 
   @override
-  Future<bool> ping() async {
-    pingRequests++;
-    return true;
-  }
+  Future<bool> ping() async => true;
 
   @override
-  Future<List<int>> readCharacteristic(String serviceUuid, String characteristicUuid) async {
-    readRequests++;
-    return const [];
-  }
+  Future<List<int>> readCharacteristic(String serviceUuid, String characteristicUuid) async => const [];
 
   @override
   Future<void> writeCharacteristic(String serviceUuid, String characteristicUuid, List<int> data) async {}
@@ -235,17 +227,6 @@ void main() {
     await expectLater(transport.connect(), throwsStateError);
 
     expect(disconnectCalls, 1);
-  });
-
-  test('device connection success does not wait for optional metadata reads', () async {
-    final transport = _AudioTransport(ready: true);
-    final connection = OmiDeviceConnection(necklace(), transport);
-    addTearDown(transport.dispose);
-
-    await connection.connect();
-
-    expect(transport.pingRequests, 0);
-    expect(transport.readRequests, 0);
   });
 
   test('production BLE transport retries one transient CCCD failure and forwards only fresh audio', () async {
@@ -459,10 +440,8 @@ void main() {
     connectionStates.add(BluetoothConnectionState.connected);
     await pumpEventQueue();
 
-    final secondStream = await transport.getReadyCharacteristicStream(
-      omiServiceUuid,
-      audioDataStreamCharacteristicUuid,
-    );
+    final secondStream =
+        await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
     final secondSubscription = secondStream?.listen((_) {});
     addTearDown(() => secondSubscription?.cancel());
 
@@ -588,14 +567,15 @@ void main() {
     final resetBarrier = Completer<void>();
     endpoint.notifyCallBarriers[2] = resetBarrier;
     final clock = _ManualLivenessClock();
-    final transport = _testBleTransport(endpoint, recovery: BleAudioLivenessRecovery(timerFactory: clock.createTimer));
+    final transport = _testBleTransport(
+      endpoint,
+      recovery: BleAudioLivenessRecovery(timerFactory: clock.createTimer),
+    );
     addTearDown(endpoint.dispose);
     addTearDown(transport.dispose);
 
-    final initialStream = await transport.getReadyCharacteristicStream(
-      omiServiceUuid,
-      audioDataStreamCharacteristicUuid,
-    );
+    final initialStream =
+        await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
     expect(initialStream, isNotNull);
     final initialSubscription = initialStream?.listen((_) {});
     addTearDown(() => initialSubscription?.cancel());
@@ -705,10 +685,8 @@ void main() {
     endpoint.fresh.add([2]);
     await pumpEventQueue();
 
-    final secondStream = await transport.getReadyCharacteristicStream(
-      omiServiceUuid,
-      audioDataStreamCharacteristicUuid,
-    );
+    final secondStream =
+        await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
     final secondReceived = <List<int>>[];
     final secondSubscription = secondStream?.listen(secondReceived.add);
     addTearDown(() => secondSubscription?.cancel());
@@ -729,7 +707,10 @@ void main() {
   test('cancelled silent capture cannot consume the next capture recovery budget', () async {
     final endpoint = _FakeBleNotificationEndpoint();
     final clock = _ManualLivenessClock();
-    final transport = _testBleTransport(endpoint, recovery: BleAudioLivenessRecovery(timerFactory: clock.createTimer));
+    final transport = _testBleTransport(
+      endpoint,
+      recovery: BleAudioLivenessRecovery(timerFactory: clock.createTimer),
+    );
     addTearDown(endpoint.dispose);
     addTearDown(transport.dispose);
 
@@ -742,10 +723,8 @@ void main() {
 
     expect(endpoint.notifyCalls, [(true, bleNotificationEnableTimeoutSeconds)]);
 
-    final secondStream = await transport.getReadyCharacteristicStream(
-      omiServiceUuid,
-      audioDataStreamCharacteristicUuid,
-    );
+    final secondStream =
+        await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
     final secondSubscription = secondStream?.listen((_) {});
     addTearDown(() => secondSubscription?.cancel());
     expect(clock.activeCount, 1);
@@ -764,7 +743,10 @@ void main() {
     final resetBarrier = Completer<void>();
     endpoint.notifyCallBarriers[2] = resetBarrier;
     final clock = _ManualLivenessClock();
-    final transport = _testBleTransport(endpoint, recovery: BleAudioLivenessRecovery(timerFactory: clock.createTimer));
+    final transport = _testBleTransport(
+      endpoint,
+      recovery: BleAudioLivenessRecovery(timerFactory: clock.createTimer),
+    );
     addTearDown(endpoint.dispose);
     addTearDown(transport.dispose);
 
@@ -785,10 +767,8 @@ void main() {
       (false, bleNotificationResetTimeoutSeconds),
     ]);
 
-    final secondStream = await transport.getReadyCharacteristicStream(
-      omiServiceUuid,
-      audioDataStreamCharacteristicUuid,
-    );
+    final secondStream =
+        await transport.getReadyCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
     final secondSubscription = secondStream?.listen((_) {});
     addTearDown(() => secondSubscription?.cancel());
     expect(clock.activeCount, 1);

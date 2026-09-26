@@ -64,7 +64,9 @@ class _FlutterBlueNotificationEndpoint implements BleNotificationEndpoint {
 
 @visibleForTesting
 typedef BleNotificationEndpointResolver = Future<BleNotificationEndpoint?> Function(
-    String serviceUuid, String characteristicUuid);
+  String serviceUuid,
+  String characteristicUuid,
+);
 
 @visibleForTesting
 typedef BleServiceRefresher = Future<void> Function();
@@ -81,8 +83,10 @@ bool bleCharacteristicUsesFreshNotifications(String characteristicUuid) =>
 
 @visibleForTesting
 class BleAudioLivenessRecovery {
-  BleAudioLivenessRecovery({this.window = bleAudioLivenessWindow, BleLivenessTimerFactory? timerFactory})
-      : _timerFactory = timerFactory ?? ((duration, callback) => Timer(duration, callback));
+  BleAudioLivenessRecovery({
+    this.window = bleAudioLivenessWindow,
+    BleLivenessTimerFactory? timerFactory,
+  }) : _timerFactory = timerFactory ?? ((duration, callback) => Timer(duration, callback));
 
   final Duration window;
   final BleLivenessTimerFactory _timerFactory;
@@ -106,13 +110,11 @@ class BleAudioLivenessRecovery {
       if (generation != _generation || _recoveryUsed || _recovering) return;
       _recoveryUsed = true;
       _recovering = true;
-      unawaited(
-        Future<void>.sync(recover).whenComplete(() {
-          if (generation != _generation) return;
-          _recovering = false;
-          _armWindow();
-        }),
-      );
+      unawaited(Future<void>.sync(recover).whenComplete(() {
+        if (generation != _generation) return;
+        _recovering = false;
+        _armWindow();
+      }));
     });
   }
 
@@ -194,9 +196,7 @@ class BleTransport extends DeviceTransport {
           _updateState(DeviceTransportState.connecting);
           break;
         case BluetoothConnectionState.connected:
-          // CoreBluetooth reports the link before service discovery has made
-          // characteristics usable. Publish connected only after connect()
-          // completes that readiness boundary.
+          // The native link is not usable until service discovery completes.
           if (_gattReady) _updateState(DeviceTransportState.connected);
           break;
         case BluetoothConnectionState.disconnecting:
@@ -360,7 +360,12 @@ class BleTransport extends DeviceTransport {
           final consumerGeneration = ++_audioConsumerGeneration;
           _audioLivenessRecovery.reset();
           _audioLivenessRecovery.arm(
-            () => _recoverSilentAudioSubscription(serviceUuid, characteristicUuid, key, consumerGeneration),
+            () => _recoverSilentAudioSubscription(
+              serviceUuid,
+              characteristicUuid,
+              key,
+              consumerGeneration,
+            ),
           );
         }
         _flushPendingCharacteristicValues(key, characteristicUuid, controller);
@@ -380,7 +385,11 @@ class BleTransport extends DeviceTransport {
     return controller;
   }
 
-  void _endReadyCharacteristicHandoff(String key, {int? generation, StreamController<List<int>>? controller}) {
+  void _endReadyCharacteristicHandoff(
+    String key, {
+    int? generation,
+    StreamController<List<int>>? controller,
+  }) {
     if (generation != null && _readyCharacteristicHandoffGenerations[key] != generation) return;
     if (controller != null && !identical(_streamControllers[key], controller)) return;
     _readyCharacteristicHandoffGenerations.remove(key);
@@ -406,7 +415,12 @@ class BleTransport extends DeviceTransport {
     }
   }
 
-  void _deliverCharacteristicValue(String key, String characteristicUuid, int setupGeneration, List<int> value) {
+  void _deliverCharacteristicValue(
+    String key,
+    String characteristicUuid,
+    int setupGeneration,
+    List<int> value,
+  ) {
     if (!_isSetupCurrent(setupGeneration)) return;
     final controller = _streamControllers[key];
     if (controller == null || controller.isClosed) return;

@@ -695,11 +695,6 @@ void main() {
     expect(provider.captureDiagnostics.physicalFrames, 1);
     expect(provider.captureDiagnostics.physicalBytes, 3);
     expect(provider.captureDiagnostics.transmittedFrames, 0);
-
-    mic.emit(List<int>.filled(640, 0));
-    expect(transmittedFrames, 2, reason: 'post-start silence must retain PCM timing and endpointing');
-    expect(provider.captureDiagnostics.physicalFrames, 2);
-    expect(provider.captureDiagnostics.physicalBytes, 643);
   });
 
   test('production phone path clears one stale recorder owner and retries once', () async {

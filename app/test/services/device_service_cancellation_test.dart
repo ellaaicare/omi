@@ -5,12 +5,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/devices/discovery/device_discoverer.dart';
-import 'package:omi/services/devices/omi_connection.dart';
-import 'package:omi/services/devices/transports/device_transport.dart';
 
 class _BlockingDiscoverer extends DeviceDiscoverer {
   final Completer<void> started = Completer<void>();
   final Completer<DeviceDiscoveryResult> result = Completer<DeviceDiscoveryResult>();
+  var stopCalls = 0;
 
   @override
   bool get isSupported => true;
@@ -25,81 +24,9 @@ class _BlockingDiscoverer extends DeviceDiscoverer {
   }
 
   @override
-  Future<void> stop() async {}
-}
-
-class _ImmediateDiscoverer extends DeviceDiscoverer {
-  _ImmediateDiscoverer(this.device);
-
-  final BtDevice device;
-
-  @override
-  bool get isSupported => true;
-
-  @override
-  String get name => 'immediate';
-
-  @override
-  Future<DeviceDiscoveryResult> discover({int timeout = 5}) async => DeviceDiscoveryResult(devices: [device]);
-
-  @override
-  Future<void> stop() async {}
-}
-
-class _ConnectAfterCancelTransport implements DeviceTransport {
-  _ConnectAfterCancelTransport(this.deviceId, {bool connectImmediately = false}) {
-    if (connectImmediately) releaseConnect.complete();
+  Future<void> stop() async {
+    stopCalls++;
   }
-
-  @override
-  final String deviceId;
-
-  final Completer<void> connectStarted = Completer<void>();
-  final Completer<void> releaseConnect = Completer<void>();
-  final StreamController<DeviceTransportState> _states = StreamController<DeviceTransportState>.broadcast(sync: true);
-  bool connected = false;
-  int disconnectCalls = 0;
-
-  @override
-  Stream<DeviceTransportState> get connectionStateStream => _states.stream;
-
-  @override
-  Future<void> connect() async {
-    connectStarted.complete();
-    await releaseConnect.future;
-    connected = true;
-    _states.add(DeviceTransportState.connected);
-  }
-
-  @override
-  Future<void> disconnect() async {
-    disconnectCalls++;
-    connected = false;
-    _states.add(DeviceTransportState.disconnected);
-  }
-
-  @override
-  Future<void> dispose() async => _states.close();
-
-  @override
-  Stream<List<int>> getCharacteristicStream(String serviceUuid, String characteristicUuid) => const Stream.empty();
-
-  @override
-  Future<Stream<List<int>>?> getReadyCharacteristicStream(String serviceUuid, String characteristicUuid) async {
-    return getCharacteristicStream(serviceUuid, characteristicUuid);
-  }
-
-  @override
-  Future<bool> isConnected() async => connected;
-
-  @override
-  Future<bool> ping() async => connected;
-
-  @override
-  Future<List<int>> readCharacteristic(String serviceUuid, String characteristicUuid) async => const [];
-
-  @override
-  Future<void> writeCharacteristic(String serviceUuid, String characteristicUuid, List<int> data) async {}
 }
 
 void main() {
@@ -118,6 +45,7 @@ void main() {
     await discoverer.started.future;
 
     await service.cancelPendingConnection();
+    expect(discoverer.stopCalls, 1);
     discoverer.result.complete(
       DeviceDiscoveryResult(
         devices: [BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30)],
@@ -127,41 +55,7 @@ void main() {
 
     expect(service.status, DeviceServiceStatus.ready);
     expect(connectionCreations, 0);
-  });
 
-  test('explicit cancellation disconnects again when native startup settles late', () async {
-    final device = BtDevice(name: 'Friend', id: 'necklace-late-connect', type: DeviceType.omi, rssi: -30);
-    final canceledTransport = _ConnectAfterCancelTransport(device.id);
-    final explicitTransport = _ConnectAfterCancelTransport(device.id, connectImmediately: true);
-    final connections = <OmiDeviceConnection>[
-      OmiDeviceConnection(device, canceledTransport),
-      OmiDeviceConnection(device, explicitTransport),
-    ];
-    final service = DeviceService(
-      discoverers: [_ImmediateDiscoverer(device)],
-      connectionCreator: (_) => connections.removeAt(0),
-    )..start();
-
-    await service.discover();
-    final connection = service.ensureConnection(device.id, force: true);
-    await canceledTransport.connectStarted.future;
-
-    await service.cancelPendingConnection();
-    expect(canceledTransport.disconnectCalls, 1);
-
-    canceledTransport.releaseConnect.complete();
-    expect(await connection, isNull);
-    expect(canceledTransport.connected, isFalse);
-    expect(canceledTransport.disconnectCalls, 2, reason: 'late native startup must be torn down after it settles');
-
-    final explicitConnection = await service.ensureConnection(device.id, force: true);
-    expect(explicitConnection, isNotNull);
-    expect(explicitTransport.connected, isTrue, reason: 'explicit selection must connect after stale cleanup');
-
-    await service.disconnectDevice();
-    expect(explicitTransport.connected, isFalse);
-
-    await canceledTransport.dispose();
-    await explicitTransport.dispose();
+    await service.stop();
   });
 }

@@ -153,7 +153,7 @@ class _FoundDevicesState extends State<FoundDevices> {
 
     // Check if user has already acknowledged this device type
     final prefKey = 'firmware_warning_acknowledged_${device.type.toString()}';
-    final alreadyAcknowledged = SharedPreferencesUtil().getBool(prefKey);
+    final alreadyAcknowledged = SharedPreferencesUtil().getBool(prefKey) ?? false;
 
     if (alreadyAcknowledged) {
       return; // User already acknowledged this warning

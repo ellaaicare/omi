@@ -756,21 +756,12 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       if (pairedDevice?.firmwareRevision != null && pairedDevice?.firmwareRevision != 'Unknown') {
         return;
       }
-      final sourceDevice = connectedDevice!;
-      final expectedDeviceId = sourceDevice.id;
-      final connection = await _deviceService.ensureConnection(expectedDeviceId);
+      var connection = await _deviceService.ensureConnection(connectedDevice!.id);
       if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
-      if (connectedDevice?.id != expectedDeviceId) return;
-      final info = await sourceDevice.getDeviceInfo(connection);
+      final info = await connectedDevice?.getDeviceInfo(connection);
       if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
-      if (connectedDevice?.id != expectedDeviceId || info.id != expectedDeviceId) return;
       pairedDevice = info;
-      if (connection?.device.id == expectedDeviceId) {
-        connection!.device = info;
-        connectedDevice = info;
-        captureProvider?.updateRecordingDevice(info);
-      }
-      await _persistRememberedDevice(info, operationGeneration: operationGeneration);
+      await _persistRememberedDevice(pairedDevice!, operationGeneration: operationGeneration);
       if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
     } else {
       final rememberedDevice = _rememberedDeviceForCurrentAuthority();
@@ -918,12 +909,17 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     final generation = operationGeneration ?? _deviceOperationGeneration;
     if (!_isDeviceOperationCurrent(generation)) return;
     _reconnectionTimer?.cancel();
+    if (captureProvider?.phoneCaptureOwnsMobileAudio == true) return;
     if (_hasPendingFreshBleSessionRequirement()) return;
     _automaticReconnectAttempts = 0;
     _automaticReconnectExhausted = false;
     _automaticReconnectCooldownUntil = null;
     scan(t) async {
       if (!_isDeviceOperationCurrent(generation)) {
+        t.cancel();
+        return;
+      }
+      if (captureProvider?.phoneCaptureOwnsMobileAudio == true) {
         t.cancel();
         return;
       }
@@ -1263,11 +1259,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     ServiceManager.instance().wal.getSyncs().sdcard.setDevice(null);
     ServiceManager.instance().wal.getSyncs().flashPage.setDevice(null);
 
-    try {
-      PlatformManager.instance.crashReporter.logInfo('Omi Device Disconnected');
-    } catch (error) {
-      Logger.debug('Could not log device disconnect telemetry: $error');
-    }
+    PlatformManager.instance.crashReporter.logInfo('Omi Device Disconnected');
     _disconnectNotificationTimer?.cancel();
     _disconnectNotificationTimer = Timer(const Duration(seconds: 30), () {
       final ctx = MyApp.navigatorKey.currentContext;
@@ -1391,19 +1383,16 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       }
     }
 
-    if (!_isDeviceOperationCurrent(operationGeneration) || connectedDevice?.id != device.id) return;
-    final activeDevice = connectedDevice!;
-
     // Wals
-    ServiceManager.instance().wal.getSyncs().sdcard.setDevice(activeDevice);
-    ServiceManager.instance().wal.getSyncs().flashPage.setDevice(activeDevice);
+    ServiceManager.instance().wal.getSyncs().sdcard.setDevice(device);
+    ServiceManager.instance().wal.getSyncs().flashPage.setDevice(device);
 
     notifyListeners();
 
     // Check firmware updates
     _checkFirmwareUpdates(operationGeneration: operationGeneration);
 
-    onDeviceConnected?.call(activeDevice);
+    onDeviceConnected?.call(device);
   }
 
   Future<void> _runConnectedSetupStep(String name, int operationGeneration, Future<void> Function() step) async {

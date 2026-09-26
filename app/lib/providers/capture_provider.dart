@@ -179,17 +179,6 @@ class CaptureDiagnostics {
 }
 
 @visibleForTesting
-bool pcm16FrameHasSignal(List<int> bytes) {
-  if (bytes.length < 2) return false;
-  for (var index = 0; index + 1 < bytes.length; index += 2) {
-    var sample = bytes[index] | (bytes[index + 1] << 8);
-    if (sample >= 0x8000) sample -= 0x10000;
-    if (sample.abs() > 8) return true;
-  }
-  return false;
-}
-
-@visibleForTesting
 class PhoneCaptureStartProof {
   final Completer<void> _firstAudioFrame = Completer<void>();
   final Completer<void> _firstTransmittedAudioFrame = Completer<void>();
@@ -197,10 +186,7 @@ class PhoneCaptureStartProof {
 
   bool acceptFrame(List<int> bytes) {
     if (bytes.isEmpty) return false;
-    if (!_firstAudioFrame.isCompleted) {
-      if (!pcm16FrameHasSignal(bytes)) return false;
-      _firstAudioFrame.complete();
-    }
+    if (!_firstAudioFrame.isCompleted) _firstAudioFrame.complete();
     return true;
   }
 
@@ -284,11 +270,8 @@ Future<bool> ensureCaptureConsentAuthority({
   if (authority != null) {
     unawaited(() async {
       try {
-        await refreshAuthority(
-          authority.uid,
-          authority.receiptId,
-          authority.serverDecidedAt,
-        ).timeout(const Duration(seconds: 8));
+        await refreshAuthority(authority.uid, authority.receiptId, authority.serverDecidedAt)
+            .timeout(const Duration(seconds: 8));
       } catch (error) {
         Logger.debug('Capture consent background refresh failed: ${error.runtimeType}');
       }
@@ -1285,7 +1268,10 @@ class CaptureProvider extends ChangeNotifier
     bool force = false,
     String? source,
   }) async {
-    if (AiConsentActiveSessionLease.authorityForSessionStart(expectedUid: WalOwnerAuthority.authenticatedUid) == null) {
+    if (AiConsentActiveSessionLease.authorityForSessionStart(
+          expectedUid: WalOwnerAuthority.authenticatedUid,
+        ) ==
+        null) {
       _transcriptServiceReady = false;
       return;
     }
@@ -2216,7 +2202,9 @@ class CaptureProvider extends ChangeNotifier
       _captureConsentAuthorityEnsurer?.call() ??
       ensureCaptureConsentAuthority(
         hasCurrentConsent: () => SharedPreferencesUtil().aiConsentAccepted,
-        persistedAuthority: () => AiConsentAuthoritySnapshot.capture(expectedUid: WalOwnerAuthority.authenticatedUid),
+        persistedAuthority: () => AiConsentAuthoritySnapshot.capture(
+          expectedUid: WalOwnerAuthority.authenticatedUid,
+        ),
         lastServerConfirmationAge: () => SharedPreferencesUtil().aiConsentLastServerConfirmationAge,
         refreshAuthority: (uid, receiptId, serverDecidedAt) => EllaAiConsentService().refreshActiveSessionAuthority(
           uid: uid,
@@ -2326,7 +2314,7 @@ class CaptureProvider extends ChangeNotifier
       return PhoneCaptureStartResult.transcriptionUnavailable;
     }
 
-    // Native start plus a non-silent microphone frame prove physical capture.
+    // Native start plus a nonempty microphone frame prove physical capture.
     // Transcription delivery remains separate so network delay cannot make a
     // running recorder appear stopped.
     final mic = _phoneMicRecorder ?? ServiceManager.instance().mic;

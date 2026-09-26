@@ -43,27 +43,6 @@ void main() {
     await expectLater(proof.waitForAudio(timeout: const Duration(milliseconds: 1)), throwsA(isA<TimeoutException>()));
   });
 
-  test('digital silence cannot prove phone capture started', () async {
-    final proof = PhoneCaptureStartProof();
-
-    expect(proof.acceptFrame(List<int>.filled(640, 0)), isFalse);
-    await expectLater(proof.waitForAudio(timeout: const Duration(milliseconds: 1)), throwsA(isA<TimeoutException>()));
-  });
-
-  test('PCM16 signal proves phone capture started', () async {
-    final proof = PhoneCaptureStartProof();
-
-    expect(proof.acceptFrame(const [0, 0, 32, 0]), isTrue);
-    await proof.waitForAudio(timeout: const Duration(milliseconds: 50));
-  });
-
-  test('digital silence is forwarded after physical capture startup is proven', () async {
-    final proof = PhoneCaptureStartProof();
-
-    expect(proof.acceptFrame(const [0, 0, 32, 0]), isTrue);
-    expect(proof.acceptFrame(List<int>.filled(640, 0)), isTrue);
-  });
-
   test('native recorder receipt does not replace physical phone audio proof', () async {
     final proof = PhoneCaptureStartProof();
 
