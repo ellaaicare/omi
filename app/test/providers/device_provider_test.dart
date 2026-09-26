@@ -35,6 +35,8 @@ class _FakeDeviceService implements IDeviceService {
   bool nativeSessionRetained = false;
   Completer<DeviceConnection?>? ensureConnectionGate;
   Completer<void>? disconnectGate;
+  Future<void> Function()? cancelPendingConnectionHook;
+  int cancelPendingConnectionCalls = 0;
   final Map<Object, IDeviceServiceSubsciption> _subscriptions = {};
 
   void publish(DeviceServiceStatus next) {
@@ -81,6 +83,12 @@ class _FakeDeviceService implements IDeviceService {
 
   @override
   void setWifiSyncInProgress(bool value) {}
+
+  @override
+  Future<void> cancelPendingConnection() async {
+    cancelPendingConnectionCalls++;
+    await cancelPendingConnectionHook?.call();
+  }
 
   @override
   Future<void> disconnectDevice() async {
@@ -1566,6 +1574,41 @@ void main() {
     expect(provider.presentationConnectedDevice?.id, necklace.id);
     expect(provider.isConnecting, isFalse);
     expect(provider.connectionAttemptFailed, isFalse);
+  });
+
+  test('explicit selection cancels an in-flight automatic reconnect before connecting', () async {
+    final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final automaticScan = Completer<BtDevice?>();
+    var scans = 0;
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () {
+        scans++;
+        return scans == 1 ? automaticScan.future : Future.value(necklace);
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      reconnectionInterval: const Duration(hours: 1),
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+    service.cancelPendingConnectionHook = () async {
+      if (!automaticScan.isCompleted) automaticScan.complete(null);
+    };
+
+    unawaited(provider.periodicConnect('test automatic reconnect', boundDeviceOnly: true));
+    await pumpEventQueue();
+    expect(provider.isConnecting, isTrue);
+
+    expect(await provider.connectDeviceForCurrentUser(necklace), isTrue);
+
+    expect(service.cancelPendingConnectionCalls, 1);
+    expect(provider.presentationConnectedDevice?.id, necklace.id);
+    expect(provider.isConnecting, isFalse);
   });
 
   test('failed explicit replacement restores the remembered necklace', () async {

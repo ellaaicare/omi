@@ -38,7 +38,7 @@ class _FoundDevicesState extends State<FoundDevices> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (mounted) {
-        context.read<DeviceProvider>().periodicConnect('coming from FoundDevices');
+        await context.read<DeviceProvider>().prepareForExplicitDeviceSelection();
       }
     });
   }
@@ -164,7 +164,7 @@ class _FoundDevicesState extends State<FoundDevices> {
 
     // Check if user has already acknowledged this device type
     final prefKey = 'firmware_warning_acknowledged_${device.type.toString()}';
-    final alreadyAcknowledged = SharedPreferencesUtil().getBool(prefKey) ?? false;
+    final alreadyAcknowledged = SharedPreferencesUtil().getBool(prefKey);
 
     if (alreadyAcknowledged) {
       return; // User already acknowledged this warning

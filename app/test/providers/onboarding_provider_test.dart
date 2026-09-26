@@ -35,6 +35,9 @@ class _NoopDeviceService implements IDeviceService {
   void setWifiSyncInProgress(bool value) {}
 
   @override
+  Future<void> cancelPendingConnection() async {}
+
+  @override
   Future<void> disconnectDevice() async {}
 }
 
