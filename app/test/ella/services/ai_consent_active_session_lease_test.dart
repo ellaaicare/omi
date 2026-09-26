@@ -220,6 +220,12 @@ void main() {
   });
 
   test('verified deploy drift schedules a normal refresh interval instead of spinning at zero delay', () async {
+    final durableConfirmation = DateTime.utc(2026, 7, 27, 0, 0);
+    preferences.markAiConsentLastServerConfirmed(
+      uid: 'uid-a',
+      receiptId: 'aicr_receipt-a',
+      confirmedAt: durableConfirmation,
+    );
     final lease = AiConsentActiveSessionLease(
       uid: 'uid-a',
       preferences: preferences,
@@ -234,6 +240,7 @@ void main() {
 
     expect(lease.isActive, isTrue);
     expect(preferences.aiConsentServerVerificationRemaining, isNull);
+    expect(preferences.aiConsentLastServerConfirmedAt, durableConfirmation);
     expect(lease.scheduledRefreshDelay, AiConsentActiveSessionLease.refreshInterval);
     lease.stop();
   });

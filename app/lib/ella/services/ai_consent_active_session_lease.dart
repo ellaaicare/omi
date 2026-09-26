@@ -306,11 +306,13 @@ class AiConsentActiveSessionLease {
         _lastServerDecidedAt = status.serverDecidedAt;
       }
       _lastConfirmedAt = _now();
-      _preferences.markAiConsentLastServerConfirmed(
-        uid: uid,
-        receiptId: authority.receiptId,
-        confirmedAt: _lastConfirmedAt,
-      );
+      if (result.renewsStartupGrace) {
+        _preferences.markAiConsentLastServerConfirmed(
+          uid: uid,
+          receiptId: statusReceiptWasPersisted ? status.receiptId : authority.receiptId,
+          confirmedAt: _lastConfirmedAt,
+        );
+      }
       _retryableFailures = 0;
       _publishDiagnostics(AiConsentLeasePhase.active);
       unawaited(DebugLogManager.logEvent('ai_consent_active_session_refreshed', {'uid_matches': true}));

@@ -188,11 +188,17 @@ enum AiConsentAuthorityRefreshDisposition {
 }
 
 class AiConsentAuthorityRefreshResult {
-  const AiConsentAuthorityRefreshResult(this.disposition, {this.status, this.supportCode = ''});
+  const AiConsentAuthorityRefreshResult(
+    this.disposition, {
+    this.status,
+    this.supportCode = '',
+    this.renewsStartupGrace = false,
+  });
 
   final AiConsentAuthorityRefreshDisposition disposition;
   final AiConsentStatus? status;
   final String supportCode;
+  final bool renewsStartupGrace;
 
   bool get verified => disposition == AiConsentAuthorityRefreshDisposition.verified;
   bool get retryable => disposition == AiConsentAuthorityRefreshDisposition.retryable;
@@ -485,7 +491,11 @@ class EllaAiConsentService {
         receiptId: status.receiptId,
       );
     }
-    return AiConsentAuthorityRefreshResult(AiConsentAuthorityRefreshDisposition.verified, status: status);
+    return AiConsentAuthorityRefreshResult(
+      AiConsentAuthorityRefreshDisposition.verified,
+      status: status,
+      renewsStartupGrace: persistedVerifiedGrant,
+    );
   }
 
   static AiConsentAuthorityRefreshDisposition? _terminalRefreshDisposition(String value) {

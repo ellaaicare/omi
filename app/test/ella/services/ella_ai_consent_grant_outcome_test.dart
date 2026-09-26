@@ -224,6 +224,7 @@ void main() {
     );
 
     expect(result.disposition, AiConsentAuthorityRefreshDisposition.verified);
+    expect(result.renewsStartupGrace, isTrue);
     expect(preferences.aiConsentAccepted, isTrue);
   });
 
@@ -269,6 +270,7 @@ void main() {
     );
 
     expect(result.disposition, AiConsentAuthorityRefreshDisposition.verified);
+    expect(result.renewsStartupGrace, isFalse);
     expect(preferences.aiConsentLastServerConfirmedAt, previousConfirmation);
   });
 
