@@ -108,8 +108,8 @@ class WalOwnerAuthority {
     final owner = WalOwner(
       uid: firebaseUid,
       profileBindingId: profileBindingId,
-      bindingRevision: bindingRevision is int ? bindingRevision : 0,
-      consentReceiptId: prefs.aiConsentReceiptId,
+      bindingRevision: bindingRevision,
+      consentReceiptId: consentReceiptId,
       authorityGenerationAtCapture: prefs.aiConsentAuthorityGeneration,
     );
     return owner.hasValidAuthorityIdentity ? owner : null;

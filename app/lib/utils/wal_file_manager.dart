@@ -71,6 +71,7 @@ class WalFileManager {
     await _accountsDirectory.create(recursive: true);
     await _quarantineDirectory.create(recursive: true);
     if (_activeDirectory != null) await _activeDirectory!.create(recursive: true);
+    await _migrateSameUidNamespaces();
     await _quarantineLegacyRootManifest();
     await _quarantineLegacyRootAudioFiles();
   }
@@ -313,7 +314,7 @@ class WalFileManager {
     await init(activeOwner: _activeOwner);
     final capturedOwner = capturedAuthority.owner;
     final adoption = _activeOwnerAdoption;
-    final sourceFollowsCapturedAuthority = capturedOwner.matches(sourceOwner) ||
+    final sourceFollowsCapturedAuthority = capturedOwner.durablyMatches(sourceOwner) ||
         (adoption != null &&
             adoption.adoptedOwner.matches(sourceOwner) &&
             adoption.capturedAuthority.hasEquivalentCaptureFence(capturedAuthority));
@@ -539,20 +540,15 @@ class WalFileManager {
     final quarantine = await _readWals(_quarantineWalFile);
     await SharedPreferencesUtil().saveInt('ellaWalQuarantineCount', quarantine.length);
     final valid = <Wal>[];
-    var reboundDurableOwner = false;
     for (final wal in active) {
-      if (_activeOwner != null && wal.owner?.durablyMatches(_activeOwner!) == true) {
-        if (wal.owner?.matches(_activeOwner!) != true) {
-          wal.owner = _activeOwner;
-          reboundDurableOwner = true;
-        }
+      if (_activeOwner != null && wal.owner?.matches(_activeOwner!) == true) {
         valid.add(wal);
       } else {
         await quarantineWal(wal, reason: 'owner_manifest_mismatch', persist: false);
         quarantine.add(wal);
       }
     }
-    if (valid.length != active.length || reboundDurableOwner) {
+    if (valid.length != active.length) {
       await _writeWals(_activeWalFile, _activeWalBackupFile, valid);
       if (valid.length != active.length) await _writeWals(_quarantineWalFile, null, quarantine);
     }
@@ -661,6 +657,68 @@ class WalFileManager {
     await init(activeOwner: _activeOwner);
     await _quarantineLegacyRootManifest();
     return migrateLegacyLimitlessFiles(await loadWals(activeOwner: _activeOwner));
+  }
+
+  /// Older builds stored audio under a hash of uid, profile, and binding
+  /// revision. Pending files for this uid are moved into the uid directory so
+  /// a same-account rollover plus a restart can still retry them.
+  static Future<void> _migrateSameUidNamespaces() async {
+    final owner = _activeOwner;
+    final target = _activeDirectory;
+    if (owner == null || target == null || !await _accountsDirectory.exists()) return;
+
+    final entries = await _accountsDirectory.list(followLinks: false).toList();
+    final incoming = <Wal>[];
+    for (final entry in entries) {
+      if (entry is! Directory || p.normalize(entry.path) == p.normalize(target.path)) continue;
+      final manifest = File(p.join(entry.path, _walFileName));
+      final backup = File(p.join(entry.path, _walBackupFileName));
+      final wals = await _readWals(manifest);
+      if (wals.isEmpty) continue;
+      final keep = <Wal>[];
+      var moved = false;
+      for (final wal in wals) {
+        final walOwner = wal.owner;
+        if (wal.status == WalStatus.quarantined || walOwner == null || !walOwner.matches(owner)) {
+          keep.add(wal);
+          continue;
+        }
+        final filename = wal.filePath == null || wal.filePath!.isEmpty ? null : p.basename(wal.filePath!);
+        if (filename != null) {
+          final source = File(p.join(entry.path, filename));
+          final absolute = wal.filePath != null && p.isAbsolute(wal.filePath!) ? File(wal.filePath!) : null;
+          final actual = await source.exists()
+              ? source
+              : absolute != null && await absolute.exists()
+                  ? absolute
+                  : null;
+          if (actual != null) {
+            final destination = File(p.join(target.path, filename));
+            if (actual.path != destination.path) {
+              await destination.parent.create(recursive: true);
+              if (await destination.exists()) {
+                final unique = File(p.join(target.path, '${wal.timerStart}_$filename'));
+                await actual.rename(unique.path);
+                wal.filePath = unique.path;
+              } else {
+                await actual.rename(destination.path);
+                wal.filePath = destination.path;
+              }
+            }
+          }
+        }
+        incoming.add(wal);
+        moved = true;
+      }
+      if (moved) await _writeWals(manifest, backup, keep);
+    }
+    if (incoming.isEmpty) return;
+    final current = await _readWals(_activeWalFile);
+    final seen = current.map((wal) => '${wal.device}\n${wal.timerStart}\n${wal.filePath ?? ''}').toSet();
+    for (final wal in incoming) {
+      if (seen.add('${wal.device}\n${wal.timerStart}\n${wal.filePath ?? ''}')) current.add(wal);
+    }
+    await _writeWals(_activeWalFile, _activeWalBackupFile, current);
   }
 
   static Future<void> _quarantineLegacyRootManifest() async {

@@ -2093,6 +2093,35 @@ void main() {
     }
   });
 
+  test('listen close 1013 keeps phone capture running', () {
+    final provider = CaptureProvider()..updateRecordingState(RecordingState.record);
+    addTearDown(provider.dispose);
+
+    provider.onClosed(aiConsentAuthorityUnavailableListenCloseCode);
+
+    expect(provider.recordingState, RecordingState.record);
+    expect(provider.captureDiagnostics.failure, isNot(CaptureDiagnosticFailure.consentUnavailable));
+  });
+
+  test('listen close 4403 stops phone capture for an explicit consent rejection', () async {
+    final preferences = SharedPreferencesUtil()..uid = 'uid-a';
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-a',
+      uid: 'uid-a',
+      profileBindingId: 'profile-a',
+      serverDecidedAt: '2026-09-26T00:00:00Z',
+    );
+    final provider = CaptureProvider()..updateRecordingState(RecordingState.record);
+    addTearDown(provider.dispose);
+
+    provider.onClosed(aiConsentRequiredListenCloseCode);
+    await pumpEventQueue();
+
+    expect(provider.recordingState, RecordingState.error);
+    expect(provider.captureDiagnostics.failure, CaptureDiagnosticFailure.consentUnavailable);
+    expect(preferences.aiConsentAccepted, isFalse);
+  });
+
   test('phone capture becomes visibly unavailable when transcription closes', () async {
     final mic = _FakeMicRecorder();
     final provider = CaptureProvider(phoneMicRecorder: mic)..updateRecordingState(RecordingState.record);

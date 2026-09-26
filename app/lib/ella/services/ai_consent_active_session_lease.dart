@@ -258,7 +258,9 @@ class AiConsentActiveSessionLease {
     _scheduledRefreshDelay = null;
 
     final authority = _authority;
-    if (_preferences.uid != uid || !_preferences.getBool('aiConsentAccepted', defaultValue: false)) {
+    if (_preferences.uid != uid ||
+        !_preferences.getBool('aiConsentAccepted', defaultValue: false) ||
+        (authority != null && !authority.isCurrent(preferences: _preferences))) {
       _refreshing = false;
       await _loseAuthority('explicit_local_revoke');
       return;
@@ -278,9 +280,17 @@ class AiConsentActiveSessionLease {
     }
 
     if (!_active) return;
-    if (!result.verified && !result.retryable) {
+    if (_explicitServerConsentRejection(result.disposition)) {
       if (_preferences.uid == uid) _preferences.declineAiConsent();
       await _loseAuthority('explicit_${result.disposition.name}');
+      return;
+    }
+    if (result.disposition == AiConsentAuthorityRefreshDisposition.accountChanged) {
+      _publishDiagnostics(
+        AiConsentLeasePhase.retrying,
+        supportCode: result.supportCode.isEmpty ? 'same_uid_rollover' : result.supportCode,
+      );
+      _scheduleRefresh(refreshInterval);
       return;
     }
     if (_preferences.uid != uid || !_preferences.getBool('aiConsentAccepted', defaultValue: false)) {
@@ -296,10 +306,11 @@ class AiConsentActiveSessionLease {
           persistedServerDecidedAt != null &&
           status.serverDecidedAt != null &&
           persistedServerDecidedAt.isAtSameMomentAs(status.serverDecidedAt!);
-      if (statusReceiptWasPersisted) {
-        final authorityRotated = _preferences.aiConsentAuthorityGeneration != authority.generation ||
-            status.receiptId != authority.receiptId ||
-            status.profileBindingId != authority.profileBindingId;
+      final capturedAuthority = authority;
+      if (statusReceiptWasPersisted && capturedAuthority != null) {
+        final authorityRotated = _preferences.aiConsentAuthorityGeneration != capturedAuthority.generation ||
+            status.receiptId != capturedAuthority.receiptId ||
+            status.profileBindingId != capturedAuthority.profileBindingId;
         if (authorityRotated) {
           var revalidationStarted = false;
           try {
@@ -360,6 +371,14 @@ class AiConsentActiveSessionLease {
       _refreshTimer = Timer(retryDelay, () => unawaited(_refresh()));
       return;
     }
+  }
+
+  bool _explicitServerConsentRejection(AiConsentAuthorityRefreshDisposition disposition) {
+    return disposition == AiConsentAuthorityRefreshDisposition.revoked ||
+        disposition == AiConsentAuthorityRefreshDisposition.declined ||
+        disposition == AiConsentAuthorityRefreshDisposition.reconsentRequired ||
+        disposition == AiConsentAuthorityRefreshDisposition.deleted ||
+        disposition == AiConsentAuthorityRefreshDisposition.notAccepted;
   }
 
   Future<void> _loseAuthority(String reason) async {

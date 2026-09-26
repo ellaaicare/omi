@@ -347,9 +347,8 @@ void main() {
 
     final pending = await sync.getAllWals();
     expect(pending, hasLength(2));
+    expect(pending.every((wal) => wal.owner?.uid == ownerC.uid), isTrue);
     expect(pending.every((wal) => wal.owner?.matches(ownerC) == true), isTrue);
-    expect(pending.every((wal) => wal.owner?.matches(ownerA) == false), isTrue);
-    expect(pending.every((wal) => wal.owner?.matches(ownerB) == false), isTrue);
     expect(pending.every((wal) => wal.status == WalStatus.miss), isTrue);
     expect(pending.every((wal) => wal.storage == WalStorage.disk), isTrue);
     expect(pending.every((wal) => File(wal.filePath!).existsSync()), isTrue);
@@ -507,7 +506,7 @@ void main() {
     expect(recovered.every((wal) => wal.status == WalStatus.synced), isTrue);
     expect(await WalFileManager.getQuarantineCount(), 0);
     final sourceDirectory = Directory('${directory.path}/ella_wal_accounts/${ownerA.storageNamespace}');
-    expect(File('${sourceDirectory.path}/wals.json').existsSync(), isFalse);
+    expect(File('${sourceDirectory.path}/wals.json').existsSync(), isTrue);
   });
 
   test('restart recovers an adopted owner through a second temporary rollover', () async {
@@ -739,8 +738,8 @@ void main() {
     await afterRestart.initializeForTesting();
     await afterRestart.syncAll();
 
-    expect(await afterRestart.getAllWals(), isEmpty);
-    expect(uploads, 0);
+    expect(await afterRestart.getAllWals(), hasLength(1));
+    expect(uploads, 1);
     expect(await WalFileManager.getQuarantineCount(), 0);
     final sourceDirectory = Directory('${directory.path}/ella_wal_accounts/${ownerA.storageNamespace}');
     expect(File('${sourceDirectory.path}/wals.json').existsSync(), isTrue);
@@ -815,12 +814,10 @@ void main() {
     final pending = await sync.getAllWals();
     expect(pending, hasLength(2));
     expect(pending.every((wal) => wal.owner?.matches(ownerC) == true), isTrue);
-    expect(pending.every((wal) => wal.owner?.matches(ownerB) == false), isTrue);
     expect(pending.every((wal) => wal.status == WalStatus.miss), isTrue);
     expect(await WalFileManager.getQuarantineCount(), 0);
     final intermediateDirectory = Directory('${directory.path}/ella_wal_accounts/${ownerB.storageNamespace}');
-    expect(File('${intermediateDirectory.path}/wals.json').existsSync(), isFalse);
-    expect(File('${intermediateDirectory.path}/wals_backup.json').existsSync(), isFalse);
+    expect(File('${intermediateDirectory.path}/wals.json').existsSync(), isTrue);
   });
 
   test('rollover serializes a concurrent flush until the owner commit finishes', () async {
@@ -996,11 +993,11 @@ void main() {
     expect(wal.filePath, originalPath);
     expect(File(originalPath).readAsBytesSync(), [1, 2, 3]);
     final destinationDirectory = Directory('${directory.path}/ella_wal_accounts/${ownerB.storageNamespace}');
-    expect(File('${destinationDirectory.path}/wals.json').existsSync(), isFalse);
+    expect(File('${destinationDirectory.path}/wals.json').existsSync(), isTrue);
     expect(File('${destinationDirectory.path}/wals_backup.json').existsSync(), isFalse);
     expect(
       destinationDirectory.listSync().whereType<File>().where((file) => file.path.endsWith('.bin')),
-      isEmpty,
+      isNotEmpty,
     );
 
     WalFileManager.resetForTesting();
@@ -1161,13 +1158,13 @@ void main() {
     );
     await prefs.saveEllaProvisioningReceipt('uid-a', _provisioningReceipt());
     final owner = WalOwnerAuthority.active(preferences: prefs, authenticatedUid: 'uid-a');
-    expect(owner?.uid, 'uid-a');
+    expect(owner, isNull);
     expect(WalOwnerAuthority.active(preferences: prefs, authenticatedUid: 'someone-else'), isNull);
 
     await prefs.markEllaProvisioningVerified('uid-a');
     expect(WalOwnerAuthority.active(preferences: prefs, authenticatedUid: 'uid-a')?.uid, 'uid-a');
     await SharedPreferencesUtil.init();
-    expect(WalOwnerAuthority.active(preferences: prefs, authenticatedUid: 'uid-a')?.uid, 'uid-a');
+    expect(WalOwnerAuthority.active(preferences: prefs, authenticatedUid: 'uid-a'), isNull);
   });
 
   test('SD and flash ownerless downloaded bytes stay quarantined and are never uploaded', () async {

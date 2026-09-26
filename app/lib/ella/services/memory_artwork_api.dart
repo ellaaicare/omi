@@ -1100,7 +1100,7 @@ class MemoryArtworkApi {
     required String enrichmentRevision,
   }) {
     final ownerNamespace = authority is ActiveWalAuthority
-        ? authority.owner.storageNamespace
+        ? authority.owner.legacyStorageNamespace
         : sha256.convert(utf8.encode(authority.uid)).toString().substring(0, 24);
     return sha256
         .convert(

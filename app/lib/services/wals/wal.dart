@@ -43,7 +43,16 @@ class WalOwner {
     if (!hasValidAuthorityIdentity) throw StateError('Invalid WAL owner authority identity');
   }
 
+  /// Disk folder for this account. Profile and binding revision stay on the
+  /// owner record, but they must not move pending audio into a new directory.
   String get storageNamespace {
+    _requireValidAuthorityIdentity();
+    final digest = sha256.convert(utf8.encode('wal-uid-namespace-v1\n$uid'));
+    return digest.toString().substring(0, 24);
+  }
+
+  /// Build 865 artwork and WAL folders hashed profile and binding revision.
+  String get legacyStorageNamespace {
     _requireValidAuthorityIdentity();
     final digest = sha256.convert(utf8.encode('$uid\n$profileBindingId\n$bindingRevision'));
     return digest.toString().substring(0, 24);

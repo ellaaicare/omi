@@ -250,6 +250,9 @@ List<int> physicalDeviceAudioPayload(DeviceType deviceType, List<int> frame) {
 /// WebSocket close used when `/v4/listen` rejects a uid with no current acceptance.
 const int aiConsentRequiredListenCloseCode = 4403;
 
+/// WebSocket close used when consent authority cannot be read. Capture stays up.
+const int aiConsentAuthorityUnavailableListenCloseCode = 1013;
+
 @visibleForTesting
 Future<bool> ensureCaptureConsentAuthority({
   required bool Function() hasCurrentConsent,
@@ -3323,6 +3326,22 @@ class CaptureProvider extends ChangeNotifier
     if (closeCode == aiConsentRequiredListenCloseCode) {
       SharedPreferencesUtil().declineAiConsent();
       onError(const AiConsentAuthorityLostException());
+      return;
+    }
+
+    if (closeCode == aiConsentAuthorityUnavailableListenCloseCode) {
+      Logger.debug('Listen closed 1013; consent authority is temporarily unavailable');
+      final deviceSession = _deviceCaptureSession;
+      if (deviceSession != null &&
+          _recoverDeviceCaptureSocket(
+            deviceSession,
+            null,
+            reason: 'transcription socket closed because consent authority is temporarily unavailable',
+            failure: CaptureDiagnosticFailure.socketClosed,
+          )) {
+        return;
+      }
+      notifyListeners();
       return;
     }
 
