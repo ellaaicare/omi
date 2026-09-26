@@ -49,6 +49,12 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
 
   String _time(DateTime? value) => value?.toLocal().toIso8601String() ?? context.l10n.unknown;
 
+  String _transcriptionSocketState(String state) => switch (state) {
+        'connected' => context.l10n.connected,
+        'disconnected' => context.l10n.disconnected,
+        _ => context.l10n.unknown,
+      };
+
   @override
   Widget build(BuildContext context) {
     final connectivity = ConnectivityService();
@@ -106,7 +112,8 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
               ),
               _DiagnosticRow(
                 label: context.l10n.diagnosticsWsRate,
-                value: '${capture.transcriptionSocketState} · ${capture.wsSendRateKbps.toStringAsFixed(2)} kbps',
+                value:
+                    '${_transcriptionSocketState(capture.transcriptionSocketState)} · ${capture.wsSendRateKbps.toStringAsFixed(2)} kbps',
               ),
             ],
           );
