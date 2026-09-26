@@ -161,12 +161,16 @@ class AiConsentActiveSessionLease {
   final int _diagnosticId = ++_nextDiagnosticOwner;
 
   Timer? _refreshTimer;
+  Duration? _scheduledRefreshDelay;
   bool _active = false;
   bool _refreshing = false;
   bool _authorityLossReported = false;
 
   bool get isActive => _active;
   bool get hasCurrentAuthority => _active && _authority?.isCurrent(preferences: _preferences) == true;
+
+  @visibleForTesting
+  Duration? get scheduledRefreshDelay => _scheduledRefreshDelay;
 
   static AiConsentAuthoritySnapshot? authorityForSessionStart({
     SharedPreferencesUtil? preferences,
@@ -209,6 +213,7 @@ class AiConsentActiveSessionLease {
     _active = false;
     _refreshTimer?.cancel();
     _refreshTimer = null;
+    _scheduledRefreshDelay = null;
     if (_diagnosticOwner == _diagnosticId && diagnostics.value.phase != AiConsentLeasePhase.terminal) {
       diagnostics.value = const AiConsentLeaseDiagnostics();
       _diagnosticOwner = 0;
@@ -234,11 +239,13 @@ class AiConsentActiveSessionLease {
     return delay > maximumRetryDelay ? maximumRetryDelay : delay;
   }
 
-  void _scheduleRefresh() {
+  void _scheduleRefresh([Duration? confirmedDelay]) {
     if (!_active) return;
     _refreshTimer?.cancel();
-    final delay = refreshDelayFor(_preferences.aiConsentServerVerificationRemaining);
+    final delay = confirmedDelay ?? refreshDelayFor(_preferences.aiConsentServerVerificationRemaining);
+    _scheduledRefreshDelay = delay;
     _refreshTimer = Timer(delay, () {
+      _scheduledRefreshDelay = null;
       unawaited(_refresh());
     });
   }
@@ -248,6 +255,7 @@ class AiConsentActiveSessionLease {
     _refreshing = true;
     _refreshTimer?.cancel();
     _refreshTimer = null;
+    _scheduledRefreshDelay = null;
 
     final authority = _authority;
     if (authority == null || !authority.isCurrent(preferences: _preferences)) {
@@ -293,7 +301,7 @@ class AiConsentActiveSessionLease {
       _retryableFailures = 0;
       _publishDiagnostics(AiConsentLeasePhase.active);
       unawaited(DebugLogManager.logEvent('ai_consent_active_session_refreshed', {'uid_matches': true}));
-      _scheduleRefresh();
+      _scheduleRefresh(refreshInterval);
       return;
     }
 

@@ -397,6 +397,16 @@ class EllaAiConsentService {
       response.authorityState.isNotEmpty ? response.authorityState : response.errorCode,
     );
     if (terminalFromCode != null) {
+      if (!_isExpectedRefreshAuthorityCurrent(
+        persistenceAuthority,
+        expectedReceiptId: expectedReceiptId,
+        expectedServerDecidedAt: expectedServerDecidedAt,
+      )) {
+        return const AiConsentAuthorityRefreshResult(
+          AiConsentAuthorityRefreshDisposition.retryable,
+          supportCode: 'authority_superseded',
+        );
+      }
       _applyTerminalRefreshDisposition(terminalFromCode);
       return AiConsentAuthorityRefreshResult(terminalFromCode, supportCode: response.errorCode);
     }
@@ -418,6 +428,16 @@ class EllaAiConsentService {
       status.authorityState.isNotEmpty ? status.authorityState : status.decision,
     );
     if (terminalFromStatus != null) {
+      if (!_isExpectedRefreshAuthorityCurrent(
+        persistenceAuthority,
+        expectedReceiptId: expectedReceiptId,
+        expectedServerDecidedAt: expectedServerDecidedAt,
+      )) {
+        return const AiConsentAuthorityRefreshResult(
+          AiConsentAuthorityRefreshDisposition.retryable,
+          supportCode: 'authority_superseded',
+        );
+      }
       _applyTerminalRefreshDisposition(terminalFromStatus);
       return AiConsentAuthorityRefreshResult(terminalFromStatus, status: status);
     }
@@ -477,6 +497,19 @@ class EllaAiConsentService {
     } else {
       _preferences.declineAiConsent();
     }
+  }
+
+  bool _isExpectedRefreshAuthorityCurrent(
+    _AiConsentAuthority? authority, {
+    required String expectedReceiptId,
+    required DateTime? expectedServerDecidedAt,
+  }) {
+    if (authority == null || !_isCurrentAuthority(authority) || _preferences.aiConsentReceiptId != expectedReceiptId) {
+      return false;
+    }
+    if (expectedServerDecidedAt == null) return true;
+    final currentServerDecidedAt = DateTime.tryParse(_preferences.aiConsentServerDecidedAt);
+    return currentServerDecidedAt?.isAtSameMomentAs(expectedServerDecidedAt) == true;
   }
 
   Future<bool> refreshServerAuthority({required String uid}) async {

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -6,11 +8,12 @@ import 'package:omi/ella/services/ai_consent_policy.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 
 class _FakeTransport extends EllaAiConsentTransport {
-  _FakeTransport({this.policy, this.submitResult, this.fetchResult});
+  _FakeTransport({this.policy, this.submitResult, this.fetchResult, this.fetchCompleter});
 
   AiConsentPolicy? policy;
   AiConsentSubmitResult? submitResult;
   AiConsentFetchResult? fetchResult;
+  Completer<AiConsentFetchResult>? fetchCompleter;
   int submitCalls = 0;
 
   @override
@@ -20,7 +23,13 @@ class _FakeTransport extends EllaAiConsentTransport {
   Future<AiConsentStatus?> fetchStatus() async => null;
 
   @override
-  Future<AiConsentFetchResult> fetchStatusWithDetails() async => fetchResult ?? const AiConsentFetchResult();
+  Future<AiConsentFetchResult> fetchStatusWithDetails() async {
+    final completer = fetchCompleter;
+    if (completer != null) {
+      return completer.future;
+    }
+    return fetchResult ?? const AiConsentFetchResult();
+  }
 
   @override
   Future<AiConsentStatus?> submit(AiConsentSubmission submission) async => (await submitWithDetails(submission)).status;
@@ -232,5 +241,48 @@ void main() {
 
     expect(result.disposition, AiConsentAuthorityRefreshDisposition.revoked);
     expect(preferences.aiConsentAccepted, isFalse);
+  });
+
+  test('stale terminal refresh cannot erase a newer same-account grant', () async {
+    final preferences = SharedPreferencesUtil();
+    const firstReceipt = '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1';
+    const replacementReceipt = '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-2';
+    preferences.acceptAiConsent(
+      receiptId: firstReceipt,
+      uid: uid,
+      profileBindingId: 'binding-1',
+      serverDecidedAt: '2026-08-07T00:00:00Z',
+    );
+    final fetchCompleter = Completer<AiConsentFetchResult>();
+    final transport = _FakeTransport(fetchCompleter: fetchCompleter);
+
+    final refresh = _service(transport).refreshActiveSessionAuthority(
+      uid: uid,
+      expectedReceiptId: firstReceipt,
+      expectedServerDecidedAt: DateTime.utc(2026, 8, 7),
+    );
+    await Future<void>.delayed(Duration.zero);
+    preferences.acceptAiConsent(
+      receiptId: replacementReceipt,
+      uid: uid,
+      profileBindingId: 'binding-1',
+      serverDecidedAt: '2026-08-07T00:01:00Z',
+    );
+    preferences.markAiConsentServerVerified(
+      uid: uid,
+      receiptId: replacementReceipt,
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'binding-1',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+    fetchCompleter.complete(const AiConsentFetchResult(httpStatus: 200, authorityState: 'revoked'));
+
+    final result = await refresh;
+    expect(result.disposition, AiConsentAuthorityRefreshDisposition.retryable);
+    expect(result.supportCode, 'authority_superseded');
+    expect(preferences.aiConsentAccepted, isTrue);
+    expect(preferences.aiConsentReceiptId, replacementReceipt);
   });
 }

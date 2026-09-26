@@ -180,6 +180,25 @@ void main() {
     lease.stop();
   });
 
+  test('verified deploy drift schedules a normal refresh interval instead of spinning at zero delay', () async {
+    final lease = AiConsentActiveSessionLease(
+      uid: 'uid-a',
+      preferences: preferences,
+      refreshAuthority: (_, __, ___) async => const AiConsentAuthorityRefreshResult(
+        AiConsentAuthorityRefreshDisposition.verified,
+      ),
+      onAuthorityLost: () {},
+    )..start();
+
+    SharedPreferencesUtil.clearAiConsentServerVerification();
+    await lease.refreshNow();
+
+    expect(lease.isActive, isTrue);
+    expect(preferences.aiConsentServerVerificationRemaining, isNull);
+    expect(lease.scheduledRefreshDelay, AiConsentActiveSessionLease.refreshInterval);
+    lease.stop();
+  });
+
   test('retryable failures stop only after the thirty-minute grace expires', () async {
     var now = DateTime(2026, 7, 27, 0, 4);
     preferences.markAiConsentLastServerConfirmed(

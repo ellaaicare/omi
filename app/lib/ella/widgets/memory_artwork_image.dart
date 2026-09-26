@@ -3,6 +3,7 @@ import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
@@ -14,6 +15,7 @@ import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 typedef MemoryArtworkCachedFileLookup = Future<File?> Function(String cacheKey);
+typedef MemoryArtworkCachedFileValidator = Future<bool> Function(File file);
 typedef MemoryArtworkCacheEvictor = Future<void> Function(String cacheKey);
 
 enum _MemoryArtworkFallbackKind { preparing, unavailable }
@@ -35,6 +37,7 @@ class MemoryArtworkImage extends StatefulWidget {
     required this.conversation,
     this.api,
     this.cachedFileLookup,
+    this.cachedFileValidator,
     this.cacheEvictor,
     this.fit = BoxFit.cover,
     this.retryDelay = const Duration(seconds: 5),
@@ -54,6 +57,7 @@ class MemoryArtworkImage extends StatefulWidget {
   final ServerConversation conversation;
   final MemoryArtworkApi? api;
   final MemoryArtworkCachedFileLookup? cachedFileLookup;
+  final MemoryArtworkCachedFileValidator? cachedFileValidator;
   final MemoryArtworkCacheEvictor? cacheEvictor;
   final BoxFit fit;
   final Duration retryDelay;
@@ -592,6 +596,8 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     String cacheKey,
   ) async {
     if (!mounted || generation != _requestGeneration) return;
+    await _discardProviderCacheFileIfCorrupted(cacheKey, generation);
+    if (!mounted || generation != _requestGeneration) return;
     setState(() {
       _remoteResult = null;
     });
@@ -602,6 +608,51 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       _imageRetryScheduled = false;
       unawaited(_loadRemoteResult(api, artwork, generation));
     });
+  }
+
+  Future<void> _discardProviderCacheFileIfCorrupted(String cacheKey, int generation) async {
+    if (cacheKey.isEmpty || MemoryArtworkCache.isNetworkOnlyDisplayCacheKey(cacheKey)) return;
+    File? file;
+    try {
+      final lookup = widget.cachedFileLookup ?? _defaultCachedFileLookup;
+      file = await lookup(cacheKey);
+    } catch (_) {
+      return;
+    }
+    if (file == null || !file.existsSync()) return;
+    bool isValid;
+    try {
+      final validator = widget.cachedFileValidator ?? _defaultCachedFileValidator;
+      isValid = await validator(file);
+    } catch (_) {
+      return;
+    }
+    // CachedNetworkImage reports transport and decode failures through the
+    // same callback. Remove bytes only after the local codec proves that an
+    // existing persisted file is unreadable; network/runtime failures keep it.
+    if (isValid) return;
+    if (!mounted || generation != _requestGeneration || cacheKey != _cacheKey) return;
+    await _discardCorruptedCachedFile(cacheKey, generation);
+  }
+
+  Future<bool> _defaultCachedFileValidator(File file) async {
+    Uint8List bytes;
+    try {
+      bytes = await file.readAsBytes();
+    } catch (_) {
+      return true;
+    }
+    ui.Codec? codec;
+    try {
+      codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      frame.image.dispose();
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      codec?.dispose();
+    }
   }
 
   bool _shouldRetry(MemoryArtworkResult result) {

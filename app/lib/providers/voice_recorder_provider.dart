@@ -19,6 +19,14 @@ import 'package:omi/utils/l10n_extensions.dart';
 enum VoiceRecorderState { idle, recording, transcribing, transcribeSuccess, transcribeFailed }
 
 class VoiceRecorderProvider extends ChangeNotifier {
+  VoiceRecorderProvider({
+    IMicRecorderService? microphone,
+    Future<void> Function()? requestMicrophonePermission,
+  })  : _microphone = microphone,
+        _requestMicrophonePermission = requestMicrophonePermission;
+
+  final IMicRecorderService? _microphone;
+  final Future<void> Function()? _requestMicrophonePermission;
   VoiceRecorderState _state = VoiceRecorderState.idle;
   List<List<int>> _audioChunks = [];
   String _transcript = '';
@@ -42,6 +50,13 @@ class VoiceRecorderProvider extends ChangeNotifier {
   bool get isRecording => _state == VoiceRecorderState.recording;
   bool get isActive => _state != VoiceRecorderState.idle;
   bool get consentReviewRequired => _consentReviewRequired;
+  IMicRecorderService get _mic => _microphone ?? ServiceManager.instance().mic;
+
+  @visibleForTesting
+  bool get hasActiveConsentLease => _aiConsentLease?.isActive == true;
+
+  @visibleForTesting
+  bool get hasActiveWaveformTimer => _waveformTimer?.isActive == true;
 
   void setCallbacks({Function(String transcript)? onTranscriptReady, VoidCallback? onClose}) {
     _onTranscriptReady = onTranscriptReady;
@@ -77,7 +92,12 @@ class VoiceRecorderProvider extends ChangeNotifier {
     }
     notifyListeners();
 
-    await Permission.microphone.request();
+    final requestMicrophonePermission = _requestMicrophonePermission;
+    if (requestMicrophonePermission != null) {
+      await requestMicrophonePermission();
+    } else {
+      await Permission.microphone.request();
+    }
 
     // Setup timer to update the wave visualization every second
     _waveformTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -94,7 +114,7 @@ class VoiceRecorderProvider extends ChangeNotifier {
     )..start();
 
     try {
-      await ServiceManager.instance().mic.start(
+      await _mic.start(
         onByteReceived: (bytes) {
           if (_state == VoiceRecorderState.recording && _aiConsentLease?.hasCurrentAuthority == true) {
             _audioChunks.add(bytes.toList());
@@ -166,16 +186,20 @@ class VoiceRecorderProvider extends ChangeNotifier {
     }
   }
 
-  void stopRecording() {
+  Future<void> stopRecording() async {
     _aiConsentLease?.stop();
     _aiConsentLease = null;
     _waveformTimer?.cancel();
-    ServiceManager.instance().mic.stop();
+    _waveformTimer = null;
+    await _mic.stop();
   }
 
   Future<void> _handleConsentAuthorityLost() async {
-    stopRecording();
-    _markConsentReviewRequired();
+    try {
+      await stopRecording();
+    } finally {
+      _markConsentReviewRequired();
+    }
   }
 
   void _markConsentReviewRequired() {
@@ -189,7 +213,11 @@ class VoiceRecorderProvider extends ChangeNotifier {
   Future<void> processRecording() async {
     final authority = _activeConsentAuthority;
     if (authority == null || !authority.isCurrent()) {
-      _markConsentReviewRequired();
+      try {
+        await stopRecording();
+      } finally {
+        _markConsentReviewRequired();
+      }
       return;
     }
     if (_isProcessing) return;
@@ -203,7 +231,7 @@ class VoiceRecorderProvider extends ChangeNotifier {
     _isProcessing = true;
     notifyListeners();
 
-    stopRecording();
+    await stopRecording();
 
     // Flatten audio chunks into a single list
     List<int> flattenedBytes = [];
@@ -269,7 +297,7 @@ class VoiceRecorderProvider extends ChangeNotifier {
     }
 
     if (_state == VoiceRecorderState.recording) {
-      stopRecording();
+      unawaited(stopRecording());
     }
     _waveformTimer?.cancel();
     _state = VoiceRecorderState.idle;
@@ -294,7 +322,7 @@ class VoiceRecorderProvider extends ChangeNotifier {
     _aiConsentLease = null;
     _waveformTimer?.cancel();
     if (_state == VoiceRecorderState.recording) {
-      ServiceManager.instance().mic.stop();
+      unawaited(_mic.stop());
     }
     super.dispose();
   }

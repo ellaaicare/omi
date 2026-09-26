@@ -1107,7 +1107,7 @@ void main() {
     const bindingRevision = 7;
     const memoryId = 'memory-upgraded-from-865';
     const enrichmentRevision = 'summary-revision-865';
-    final owner = WalOwner(
+    const owner = WalOwner(
       uid: uid,
       profileBindingId: profileBindingId,
       bindingRevision: bindingRevision,
@@ -2579,6 +2579,8 @@ void main() {
   testWidgets('failed signed image load preserves cache and refreshes the signed URL', (tester) async {
     final api = _RefreshingArtworkApi();
     final evictedKeys = <String>[];
+    final cachedFile = File('assets/images/onboarding-bg-1.webp');
+    var providerFailed = false;
     final conversation = ServerConversation(
       id: 'memory-expired-signed-url',
       createdAt: DateTime(2026, 8, 26),
@@ -2593,7 +2595,8 @@ void main() {
         home: MemoryArtworkImage(
           conversation: conversation,
           api: api,
-          cachedFileLookup: (_) async => null,
+          cachedFileLookup: (_) async => providerFailed ? cachedFile : null,
+          cachedFileValidator: (_) async => throw const FileSystemException('temporary cache read unavailable'),
           cacheEvictor: (cacheKey) async => evictedKeys.add(cacheKey),
           retryDelay: const Duration(milliseconds: 10),
         ),
@@ -2606,6 +2609,7 @@ void main() {
     final image = tester.widget<CachedNetworkImage>(
       find.byKey(const Key('memory-generated-artwork-network-memory-expired-signed-url-0')),
     );
+    providerFailed = true;
     image.errorListener!(Exception('expired signed URL'));
     await tester.pump();
 
@@ -2616,6 +2620,55 @@ void main() {
     await tester.pump();
 
     expect(api.loadCalls, 3, reason: 'a failed image download must obtain a fresh signed URL');
+  });
+
+  testWidgets('provider decode failure removes only proven-corrupt persisted bytes before retry', (tester) async {
+    final api = _RefreshingArtworkApi();
+    final evictedKeys = <String>[];
+    final cachedFile = File('assets/images/onboarding-bg-1.webp');
+    var providerFailed = false;
+    final conversation = ServerConversation(
+      id: 'memory-corrupt-provider-cache',
+      createdAt: DateTime(2026, 8, 26),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(status: MemoryArtworkStatus.generating),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async {
+            if (!providerFailed) return null;
+            providerFailed = false;
+            return cachedFile;
+          },
+          cachedFileValidator: (_) async => false,
+          cacheEvictor: (cacheKey) async => evictedKeys.add(cacheKey),
+          retryDelay: const Duration(milliseconds: 10),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+
+    final image = tester.widget<CachedNetworkImage>(
+      find.byKey(const Key('memory-generated-artwork-network-memory-corrupt-provider-cache-0')),
+    );
+    providerFailed = true;
+    image.errorListener!(Exception('Invalid image data'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(evictedKeys, ['ready-artwork-cache-key']);
+
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+    expect(api.loadCalls, 3, reason: 'the stable key must be able to download fresh bytes after corruption');
   });
 
   testWidgets('bounds repeated signed image recovery without enqueuing artwork work', (tester) async {
