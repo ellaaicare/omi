@@ -174,6 +174,12 @@ class DeviceService implements IDeviceService {
           onDeviceConnectionStateChanged(deviceId, state, connectionGeneration: connectionGeneration);
         },
       );
+      if (connectionGeneration != _connectionGeneration || !identical(connection, _connection)) {
+        // Cancellation can disconnect before native startup settles. If that
+        // startup later succeeds, disconnect the local attempt again so it
+        // cannot survive after the service has cleared its shared reference.
+        await connection.disconnect();
+      }
     } else {
       Logger.debug("Failed to create device connection for ${device.id}");
     }
