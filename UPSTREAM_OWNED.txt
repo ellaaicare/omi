@@ -1,0 +1,20 @@
+# BasedHardware/omi
+# pin: 3219f05ced7fb518619abe92df856175b0a96985
+# replay: git archive <pin> <path> | tar -x -C upstream-owned
+# do not three-way merge; the fork root is not upstream's root
+#
+# P1 keeps these bytes under upstream-owned/ and off the Flutter/Xcode compile
+# graph. Build 865 still ships the legacy capture path. ELLA_UPSTREAM_CAPTURE
+# defaults off. Promoting a path into app/lib or the Runner target is a later
+# sync commit, not an in-place edit.
+
+upstream-owned/app/lib/phone_mic_interface.dart
+upstream-owned/app/lib/gen/phone_mic_pigeon.g.dart
+upstream-owned/app/ios/Runner/PhoneMic/
+upstream-owned/app/android/app/src/main/kotlin/com/friend/ios/phonemic/PhoneMicPigeon.g.kt
+upstream-owned/app/ios/Runner/Ble/
+upstream-owned/app/lib/services/devices/
+upstream-owned/app/lib/services/mic/
+upstream-owned/app/lib/services/capture/
+upstream-owned/app/lib/providers/device_provider.dart
+upstream-owned/app/lib/providers/capture_provider.dart
