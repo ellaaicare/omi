@@ -391,6 +391,132 @@ void main() {
     expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
   });
 
+  test('terminal responses fence active authority before receipt persistence and exactly once', () async {
+    final terminalResponses = <({String name, EllaProvisioningResponse response})>[
+      for (final statusCode in const [401, 403, 409, 426])
+        (
+          name: 'HTTP $statusCode',
+          response: EllaProvisioningResponse(
+            statusCode: statusCode,
+            receipt: const EllaProvisioningReceipt(
+              state: EllaProvisioningState.provisioning,
+              retryable: true,
+            ),
+          ),
+        ),
+      (
+        name: 'non-retryable blocked receipt',
+        response: const EllaProvisioningResponse(
+          statusCode: 200,
+          receipt: EllaProvisioningReceipt(
+            state: EllaProvisioningState.blocked,
+            retryable: false,
+            errorCode: 'blocked',
+          ),
+        ),
+      ),
+      (
+        name: 'unknown blocked receipt',
+        response: const EllaProvisioningResponse(
+          statusCode: 200,
+          receipt: EllaProvisioningReceipt(
+            state: EllaProvisioningState.blocked,
+            errorCode: 'blocked',
+          ),
+        ),
+      ),
+      (
+        name: 'incomplete ready receipt',
+        response: const EllaProvisioningResponse(
+          statusCode: 200,
+          receipt: EllaProvisioningReceipt(state: EllaProvisioningState.ready),
+        ),
+      ),
+    ];
+
+    for (final testCase in terminalResponses) {
+      SharedPreferences.setMockInitialValues({});
+      SharedPreferencesUtil.resetProcessLocalAuthorityStateForTesting();
+      await SharedPreferencesUtil.init();
+      final preferences = await _prepareOperationalConsent();
+      final receiptStore = _DeferredSecondReceiptStore(preferences);
+      final provider = EllaProvisioningProvider(
+        transport: _ReadyThenRevalidationTransport(response: testCase.response),
+        preferences: preferences,
+        receiptSaver: receiptStore.save,
+        scheduler: _discardedPollScheduler,
+      );
+
+      await provider.start(uid: 'uid-a', requestContext: _requestContext);
+      final activeAuthority = WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a');
+      final initialTerminalGeneration = preferences.ellaProvisioningTerminalAuthorityGeneration;
+      expect(activeAuthority, isNotNull, reason: testCase.name);
+
+      final revalidation = provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
+      await receiptStore.secondWriteStarted.future;
+
+      expect(receiptStore.writes, 2, reason: testCase.name);
+      expect(
+        preferences.ellaProvisioningTerminalAuthorityGeneration,
+        initialTerminalGeneration + 1,
+        reason: testCase.name,
+      );
+      expect(
+        activeAuthority!.isCurrent(preferences: preferences, authenticatedUid: 'uid-a'),
+        isFalse,
+        reason: testCase.name,
+      );
+
+      receiptStore.releaseSecondWrite();
+      await revalidation;
+
+      expect(
+        preferences.ellaProvisioningTerminalAuthorityGeneration,
+        initialTerminalGeneration + 1,
+        reason: testCase.name,
+      );
+      provider.dispose();
+    }
+  });
+
+  test('retryable response preserves active authority while receipt persistence is suspended', () async {
+    final preferences = await _prepareOperationalConsent();
+    final receiptStore = _DeferredSecondReceiptStore(preferences);
+    final provider = EllaProvisioningProvider(
+      transport: _ReadyThenRevalidationTransport(
+        response: const EllaProvisioningResponse(
+          statusCode: 202,
+          receipt: EllaProvisioningReceipt(
+            state: EllaProvisioningState.provisioning,
+            retryable: true,
+          ),
+        ),
+      ),
+      preferences: preferences,
+      receiptSaver: receiptStore.save,
+      scheduler: _discardedPollScheduler,
+    );
+
+    await provider.start(uid: 'uid-a', requestContext: _requestContext);
+    final activeAuthority = WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a');
+    final initialTerminalGeneration = preferences.ellaProvisioningTerminalAuthorityGeneration;
+    expect(activeAuthority, isNotNull);
+
+    final revalidation = provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
+    await receiptStore.secondWriteStarted.future;
+
+    expect(receiptStore.writes, 2);
+    expect(preferences.ellaProvisioningTerminalAuthorityGeneration, initialTerminalGeneration);
+    expect(activeAuthority!.isCurrent(preferences: preferences, authenticatedUid: 'uid-a'), isTrue);
+
+    receiptStore.releaseSecondWrite();
+    await revalidation;
+
+    expect(preferences.ellaProvisioningTerminalAuthorityGeneration, initialTerminalGeneration);
+    expect(activeAuthority.isCurrent(preferences: preferences, authenticatedUid: 'uid-a'), isTrue);
+    provider.dispose();
+  });
+
   test('hard auth and update failures close operational authority', () async {
     for (final statusCode in const [401, 403, 409, 426]) {
       SharedPreferences.setMockInitialValues({});
@@ -1295,6 +1421,26 @@ class _ReadyThenRevalidationTransport implements EllaProvisioningTransport {
 
   @override
   Future<EllaProvisioningResponse> status() => throw StateError('status should not be called');
+}
+
+class _DeferredSecondReceiptStore {
+  _DeferredSecondReceiptStore(this.preferences);
+
+  final SharedPreferencesUtil preferences;
+  final Completer<void> secondWriteStarted = Completer<void>();
+  final Completer<void> _releaseSecondWrite = Completer<void>();
+  int writes = 0;
+
+  Future<void> save(String uid, Map<String, dynamic> receipt) async {
+    writes++;
+    if (writes == 2) {
+      secondWriteStarted.complete();
+      await _releaseSecondWrite.future;
+    }
+    await preferences.saveEllaProvisioningReceipt(uid, receipt);
+  }
+
+  void releaseSecondWrite() => _releaseSecondWrite.complete();
 }
 
 class _AlwaysFailingProvisioningTransport implements EllaProvisioningTransport {

@@ -21,20 +21,24 @@ class _TimerPollHandle implements EllaProvisioningPollHandle {
 }
 
 typedef EllaProvisioningScheduler = EllaProvisioningPollHandle Function(Duration delay, VoidCallback callback);
+typedef EllaProvisioningReceiptSaver = Future<void> Function(String uid, Map<String, dynamic> receipt);
 
 class EllaProvisioningProvider extends ChangeNotifier {
   EllaProvisioningProvider({
     EllaProvisioningTransport? transport,
     SharedPreferencesUtil? preferences,
     EllaProvisioningScheduler? scheduler,
+    EllaProvisioningReceiptSaver? receiptSaver,
     this.maxPollAttempts = 30,
   })  : _transport = transport ?? const EllaProvisioningHttpTransport(),
         _preferences = preferences ?? SharedPreferencesUtil(),
-        _scheduler = scheduler ?? ((delay, callback) => _TimerPollHandle(delay, callback));
+        _scheduler = scheduler ?? ((delay, callback) => _TimerPollHandle(delay, callback)),
+        _receiptSaver = receiptSaver;
 
   final EllaProvisioningTransport _transport;
   final SharedPreferencesUtil _preferences;
   final EllaProvisioningScheduler _scheduler;
+  final EllaProvisioningReceiptSaver? _receiptSaver;
   final int maxPollAttempts;
 
   EllaProvisioningState state = EllaProvisioningState.idle;
@@ -250,7 +254,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     }
     if (!response.isAccepted || nextReceipt == null) {
       if (nextReceipt != null) {
-        await _preferences.saveEllaProvisioningReceipt(_activeUid, nextReceipt.toCacheJson());
+        await _saveReceipt(nextReceipt);
         if (!_isCurrentRequest(generation, requestContextEpoch)) return;
         receipt = nextReceipt;
       }
@@ -279,7 +283,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
       return;
     }
 
-    await _preferences.saveEllaProvisioningReceipt(_activeUid, nextReceipt.toCacheJson());
+    await _saveReceipt(nextReceipt);
     if (!_isCurrentRequest(generation, requestContextEpoch)) return;
     receipt = nextReceipt;
     errorCode = nextReceipt.errorCode;
@@ -317,6 +321,11 @@ class EllaProvisioningProvider extends ChangeNotifier {
     } else {
       _cancelPoll();
     }
+  }
+
+  Future<void> _saveReceipt(EllaProvisioningReceipt nextReceipt) async {
+    final saver = _receiptSaver ?? _preferences.saveEllaProvisioningReceipt;
+    await saver(_activeUid, nextReceipt.toCacheJson());
   }
 
   void _setFailure(
