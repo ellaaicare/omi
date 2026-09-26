@@ -142,6 +142,10 @@ def _load_ownership_redis_module():
 
 
 def test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing():
+    async def send_with_consent(consent_guard, provider_send, payload):
+        await consent_guard()
+        await provider_send(payload)
+
     class PusherSocket:
         def __init__(self):
             self.sent = []
@@ -176,6 +180,8 @@ def test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing(
             "List": List,
             "ConnectionClosed": ConnectionError,
             "PusherTranscriptBatch": object,
+            "AiConsentWebSocketRejected": RuntimeError,
+            "_send_pusher_payload_with_current_consent": send_with_consent,
             "connect_to_trigger_pusher": connect_to_pusher,
             "deliver_all_pusher_transcript_batches": deliver_all,
             "get_audio_bytes_webhook_seconds": lambda _uid: 0,
@@ -195,7 +201,8 @@ def test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing(
         },
         argdefs=(None,),
     )
-    connect, close, *_unused, request_processing, _receive, _connected, _speaker = handler()
+    consent_guard = lambda **_kwargs: asyncio.sleep(0)
+    connect, close, *_unused, request_processing, _receive, _connected, _speaker = handler(consent_guard)
     fallback_calls = []
 
     async def fallback(conversation):
@@ -280,7 +287,181 @@ def test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing(
     assert fallback_calls == ["conversation-a"]
 
 
+def test_consent_rejection_defers_both_conversation_processing_callers_without_fallback():
+    class ConsentRejected(RuntimeError):
+        def __init__(self, *, retryable: bool):
+            self.retryable = retryable
+
+    class PusherSocket:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, payload):
+            self.sent.append(bytes(payload))
+
+    socket = PusherSocket()
+    rejection = {"retryable": True}
+
+    async def consent_rejected_send(_payload):
+        raise ConsentRejected(retryable=rejection["retryable"])
+
+    request_processing = _nested_function(
+        "routers/transcribe.py",
+        "request_conversation_processing",
+        {
+            "AiConsentWebSocketRejected": ConsentRejected,
+            "asyncio": asyncio,
+            "bytes": bytes,
+            "json": json,
+            "PUSHER_PROCESSING_RESPONSE_TIMEOUT_SECONDS": 1.0,
+            "struct": struct,
+        },
+        {
+            "language": "en",
+            "pending_conversation_requests": {},
+            "pending_request_event": asyncio.Event(),
+            "pusher_connected": True,
+            "pusher_ws": socket,
+            "send_pusher_payload": consent_rejected_send,
+            "session_id": "socket-a",
+            "uid": "uid-a",
+            "websocket_active": True,
+        },
+    )
+    conversation = {
+        "id": "conversation-a",
+        "status": "processing",
+        "transcript_segments": [{"id": "segment-a", "text": "captured"}],
+        "photos": [],
+    }
+    fallback_calls = []
+
+    async def fallback(value):
+        fallback_calls.append(value["id"])
+
+    cleanup = _nested_function(
+        "routers/transcribe.py",
+        "cleanup_processing_conversations",
+        {
+            "conversations_db": SimpleNamespace(get_processing_conversations=lambda _uid: [conversation]),
+            "PUSHER_ENABLED": True,
+        },
+        {
+            "_create_conversation_fallback": fallback,
+            "request_conversation_processing": request_processing,
+            "session_id": "socket-a",
+            "uid": "uid-a",
+        },
+    )
+    process = _nested_function(
+        "routers/transcribe.py",
+        "_process_conversation",
+        {
+            "complete_rotated_capture": lambda *_args: True,
+            "conversations_db": SimpleNamespace(
+                get_conversation=lambda *_args: conversation,
+                delete_conversation=lambda *_args, **_kwargs: None,
+            ),
+            "PUSHER_ENABLED": True,
+        },
+        {
+            "_create_conversation_fallback": fallback,
+            "_latency_log": lambda *_args, **_kwargs: None,
+            "_wait_for_capture_buffers_to_drain": lambda _conversation_id: asyncio.sleep(0, result=True),
+            "generation_id": "generation-a",
+            "on_conversation_processing_started": lambda _conversation_id: None,
+            "owner_token": "socket-a",
+            "request_conversation_processing": request_processing,
+            "session_id": "socket-a",
+            "uid": "uid-a",
+        },
+    )
+
+    async def scenario():
+        assert await request_processing("conversation-a") == "consent_deferred"
+        await cleanup()
+        assert await process("conversation-a", wait_for_buffers=True) is True
+        rejection["retryable"] = False
+        assert await request_processing("conversation-a") == "consent_required"
+        await cleanup()
+        assert await process("conversation-a", wait_for_buffers=True) is True
+
+    asyncio.run(scenario())
+
+    assert socket.sent == []
+    assert fallback_calls == []
+    assert conversation["status"] == "processing"
+
+
+def test_pusher_processing_request_settles_every_coalesced_waiter():
+    class ConsentRejected(RuntimeError):
+        def __init__(self, *, retryable: bool):
+            self.retryable = retryable
+
+    async def exercise(mode: str, expected: str, *, retryable: bool = False):
+        queued = asyncio.Event()
+        release = asyncio.Event()
+        pending = {}
+        provider_calls = []
+
+        async def send_pusher_payload(_payload):
+            queued.set()
+            await release.wait()
+            if mode == "consent":
+                raise ConsentRejected(retryable=retryable)
+            provider_calls.append(mode)
+            if mode == "transport_error":
+                raise ConnectionError("pusher unavailable")
+
+        request_processing = _nested_function(
+            "routers/transcribe.py",
+            "request_conversation_processing",
+            {
+                "AiConsentWebSocketRejected": ConsentRejected,
+                "asyncio": asyncio,
+                "bytes": bytes,
+                "json": json,
+                "PUSHER_PROCESSING_RESPONSE_TIMEOUT_SECONDS": 0.01,
+                "struct": struct,
+            },
+            {
+                "language": "en",
+                "pending_conversation_requests": pending,
+                "pending_request_event": asyncio.Event(),
+                "pusher_connected": True,
+                "pusher_ws": object(),
+                "send_pusher_payload": send_pusher_payload,
+                "session_id": "socket-a",
+                "uid": "uid-a",
+                "websocket_active": False,
+            },
+        )
+        leader = asyncio.create_task(request_processing("conversation-a"))
+        await queued.wait()
+        follower = asyncio.create_task(request_processing("conversation-a"))
+        await asyncio.sleep(0)
+        release.set()
+        results = await asyncio.wait_for(asyncio.gather(leader, follower), timeout=1.0)
+
+        assert results == [expected, expected]
+        assert pending == {}
+        if mode == "consent":
+            assert provider_calls == []
+
+    async def scenario():
+        await exercise("consent", "consent_deferred", retryable=True)
+        await exercise("consent", "consent_required", retryable=False)
+        await exercise("transport_error", "unavailable")
+        await exercise("timeout", "unavailable")
+
+    asyncio.run(scenario())
+
+
 def test_pusher_processing_request_waits_for_terminal_response():
+    async def send_with_consent(consent_guard, provider_send, payload):
+        await consent_guard()
+        await provider_send(payload)
+
     class PusherSocket:
         def __init__(self):
             self.sent = []
@@ -312,6 +493,8 @@ def test_pusher_processing_request_waits_for_terminal_response():
             "List": List,
             "ConnectionClosed": ConnectionError,
             "PusherTranscriptBatch": object,
+            "AiConsentWebSocketRejected": RuntimeError,
+            "_send_pusher_payload_with_current_consent": send_with_consent,
             "connect_to_trigger_pusher": connect_to_pusher,
             "deliver_all_pusher_transcript_batches": lambda *_args: asyncio.sleep(0, result=0),
             "get_audio_bytes_webhook_seconds": lambda _uid: 0,
@@ -331,7 +514,8 @@ def test_pusher_processing_request_waits_for_terminal_response():
         },
         argdefs=(None,),
     )
-    connect, _close, *_unused, request_processing, receive, _connected, _speaker = handler()
+    consent_guard = lambda **_kwargs: asyncio.sleep(0)
+    connect, _close, *_unused, request_processing, receive, _connected, _speaker = handler(consent_guard)
 
     async def scenario():
         await connect()
