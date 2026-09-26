@@ -155,6 +155,8 @@ class MemoryArtworkImage extends StatefulWidget {
 }
 
 class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
+  static const _maxResponsiveVariantPublishRetries = 3;
+
   MemoryArtworkResult? _remoteResult;
   File? _cachedFile;
   String _displayCacheKey = '';
@@ -178,6 +180,8 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   bool _manualGenerationInFlight = false;
   double _physicalTargetWidth = 1536;
   String? _pendingResponsiveVariantCacheKey;
+  Timer? _responsiveVariantRetryTimer;
+  int _responsiveVariantPublishRetries = 0;
 
   @override
   void initState() {
@@ -208,12 +212,13 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   @override
   void dispose() {
     _retryTimer?.cancel();
+    _responsiveVariantRetryTimer?.cancel();
     super.dispose();
   }
 
   void _refreshRequest() {
     _manualGenerationInFlight = false;
-    _pendingResponsiveVariantCacheKey = null;
+    _resetResponsiveVariantPublication();
     _resetAuthorityRetryBudgetIfNeeded();
     _resetTransientRetryBudgetIfNeeded();
     _resetImageRetryBudgetIfNeeded();
@@ -551,16 +556,46 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
 
     final selected = current.forPhysicalWidth(physicalTargetWidth);
     if (selected.cacheKey == current.cacheKey && selected.selectedVariantWidth == current.selectedVariantWidth) {
-      _pendingResponsiveVariantCacheKey = null;
+      _resetResponsiveVariantPublication();
       return;
     }
-    if (selected.cacheKey.isEmpty || _pendingResponsiveVariantCacheKey == selected.cacheKey) return;
+    if (selected.cacheKey.isEmpty) {
+      _resetResponsiveVariantPublication();
+      return;
+    }
+    if (_pendingResponsiveVariantCacheKey == selected.cacheKey) return;
 
     final generation = _requestGeneration;
+    _responsiveVariantRetryTimer?.cancel();
+    _responsiveVariantRetryTimer = null;
+    _responsiveVariantPublishRetries = 0;
     _pendingResponsiveVariantCacheKey = selected.cacheKey;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || generation != _requestGeneration) return;
       unawaited(_publishResponsiveVariant(generation, selected.cacheKey));
+    });
+  }
+
+  void _resetResponsiveVariantPublication() {
+    _responsiveVariantRetryTimer?.cancel();
+    _responsiveVariantRetryTimer = null;
+    _responsiveVariantPublishRetries = 0;
+    _pendingResponsiveVariantCacheKey = null;
+  }
+
+  void _retryResponsiveVariantPublication(int generation, String expectedCacheKey) {
+    if (_responsiveVariantPublishRetries >= _maxResponsiveVariantPublishRetries) {
+      _resetResponsiveVariantPublication();
+      return;
+    }
+    _responsiveVariantPublishRetries += 1;
+    _responsiveVariantRetryTimer?.cancel();
+    _responsiveVariantRetryTimer = Timer(widget.retryDelay, () {
+      _responsiveVariantRetryTimer = null;
+      if (!mounted || generation != _requestGeneration || _pendingResponsiveVariantCacheKey != expectedCacheKey) {
+        return;
+      }
+      unawaited(_publishResponsiveVariant(generation, expectedCacheKey));
     });
   }
 
@@ -588,15 +623,19 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     if (!mounted || generation != _requestGeneration || _pendingResponsiveVariantCacheKey != expectedCacheKey) {
       return;
     }
-    if (publishedCacheKey == null || !selected.isAuthorityCurrent) {
-      _pendingResponsiveVariantCacheKey = null;
+    if (!selected.isAuthorityCurrent) {
+      _resetResponsiveVariantPublication();
+      return;
+    }
+    if (publishedCacheKey == null) {
+      _retryResponsiveVariantPublication(generation, expectedCacheKey);
       return;
     }
 
     setState(() {
       _remoteResult = selected;
       _cacheKey = publishedCacheKey;
-      _pendingResponsiveVariantCacheKey = null;
+      _resetResponsiveVariantPublication();
     });
     if (!MemoryArtworkCache.isNetworkOnlyDisplayCacheKey(publishedCacheKey)) {
       unawaited(_loadCachedFile(publishedCacheKey, generation));

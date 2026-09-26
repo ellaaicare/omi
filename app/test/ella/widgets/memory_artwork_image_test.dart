@@ -2734,6 +2734,79 @@ void main() {
     expect(api.loadCalls, 1, reason: 'layout-only changes must reuse the retained variant metadata');
   });
 
+  testWidgets('responsive variant retries after a pending cache eviction finishes', (tester) async {
+    final api = _ResponsiveArtworkApi();
+    final evictionRelease = Completer<void>();
+    final conversation = ServerConversation(
+      id: 'memory-responsive-eviction-retry',
+      createdAt: DateTime(2026, 9, 26),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(status: MemoryArtworkStatus.ready),
+    );
+
+    Widget buildArtwork(double width) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MediaQuery(
+            data: const MediaQueryData(devicePixelRatio: 2),
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: SizedBox(
+                width: width,
+                height: 180,
+                child: MemoryArtworkImage(
+                  conversation: conversation,
+                  api: api,
+                  cachedFileLookup: (_) async => null,
+                  retryDelay: const Duration(milliseconds: 10),
+                ),
+              ),
+            ),
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(150));
+    await tester.pump();
+    await tester.pump();
+
+    MemoryArtworkCache.suppressDisplayCacheKeys({'responsive-768-cache-key'});
+    unawaited(
+      MemoryArtworkCache.evictSuppressedDisplayCacheKeys(
+        {'responsive-768-cache-key'},
+        (_) => evictionRelease.future,
+        waitTimeout: Duration.zero,
+      ),
+    );
+    await tester.pump();
+
+    await tester.pumpWidget(buildArtwork(300));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump();
+
+    var image = tester.widget<CachedNetworkImage>(
+      find.byKey(const Key('memory-generated-artwork-network-memory-responsive-eviction-retry-0')),
+    );
+    expect(image.imageUrl, 'https://private-storage.example/384.png');
+
+    evictionRelease.complete();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+
+    image = tester.widget<CachedNetworkImage>(
+      find.byKey(const Key('memory-generated-artwork-network-memory-responsive-eviction-retry-0')),
+    );
+    expect(image.imageUrl, 'https://private-storage.example/768.png');
+    expect(image.cacheKey, startsWith('responsive-768-cache-key-recovery-'));
+    expect(image.memCacheWidth, 768);
+    expect(
+      MemoryArtworkCache.resolveDisplayCacheKey('responsive-provisional-cache-key'),
+      startsWith('responsive-768-cache-key-recovery-'),
+    );
+    expect(api.loadCalls, 1, reason: 'cache publication retry must reuse retained variant metadata');
+  });
+
   testWidgets('provider decode failure removes only proven-corrupt persisted bytes before retry', (tester) async {
     final api = _RefreshingArtworkApi();
     final evictedKeys = <String>[];
