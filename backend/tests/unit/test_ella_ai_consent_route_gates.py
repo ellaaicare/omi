@@ -1,5 +1,9 @@
 import ast
+import asyncio
+import types
 from pathlib import Path
+
+from fastapi import HTTPException
 
 BACKEND = Path(__file__).resolve().parents[2]
 
@@ -40,6 +44,19 @@ def _function_source(source_path: Path, function_name: str) -> str:
     return ast.get_source_segment(source, function)
 
 
+def _function_code(source_path: Path, function_name: str):
+    pending = [compile(source_path.read_text(), str(source_path), "exec")]
+    while pending:
+        code = pending.pop()
+        for constant in code.co_consts:
+            if not isinstance(constant, types.CodeType):
+                continue
+            if constant.co_name == function_name:
+                return constant
+            pending.append(constant)
+    raise AssertionError(f"function code not found: {function_name}")
+
+
 def test_authenticated_ai_egress_routes_share_the_consent_gate():
     assert "/chat/stream" in _gated_route_paths(
         BACKEND / "ella" / "routers" / "chat.py",
@@ -55,7 +72,7 @@ def test_authenticated_ai_egress_routes_share_the_consent_gate():
     )
     assert "/v4/listen" in _gated_route_paths(
         BACKEND / "routers" / "transcribe.py",
-        "require_current_ai_consent",
+        "get_exact_firebase_uid",
     )
 
 
@@ -63,11 +80,129 @@ def test_first_message_websocket_auth_checks_consent_before_streaming():
     source = (BACKEND / "routers" / "transcribe.py").read_text()
 
     auth_position = source.index("uid = auth.get_current_user_uid_from_ws_message(first_message)")
-    consent_position = source.index("assert_current_ai_consent(uid)", auth_position)
+    consent_position = source.index("_require_current_ai_consent_for_websocket(", auth_position)
     stream_position = source.index("await _stream_handler(", consent_position)
 
     assert auth_position < consent_position < stream_position
-    assert '"error": detail.get("code", "ai_consent_required")' in source
+    assert "AI_CONSENT_WEBSOCKET_CLOSE_CODE" in source
+    assert "AI_CONSENT_WEBSOCKET_RETRY_CLOSE_CODE" in source
+
+
+def test_native_websocket_consent_check_precedes_runtime_and_stt_provider_work():
+    source = _function_source(BACKEND / "routers" / "transcribe.py", "listen_handler")
+
+    consent_position = source.index("_require_current_ai_consent_for_websocket(")
+    runtime_position = source.index("listen_runtime_gate(")
+    stream_position = source.index("await _listen(")
+
+    assert consent_position < runtime_position < stream_position
+    helper_source = _function_source(
+        BACKEND / "routers" / "transcribe.py",
+        "_require_current_ai_consent_for_websocket",
+    )
+    assert "AI_CONSENT_WEBSOCKET_CLOSE_CODE" in helper_source
+    assert "AI_CONSENT_REQUIRED_CODE" in helper_source
+
+
+def test_websocket_consent_rejection_and_authority_outage_have_distinct_close_contracts():
+    globals_ = {
+        "__builtins__": __builtins__,
+        "HTTPException": HTTPException,
+        "AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE": "ai_consent_authority_unavailable",
+        "AI_CONSENT_REQUIRED_CODE": "ai_consent_required",
+        "AI_CONSENT_WEBSOCKET_CLOSE_CODE": 4403,
+        "AI_CONSENT_WEBSOCKET_RETRY_CLOSE_CODE": 1013,
+    }
+    helper = types.FunctionType(
+        _function_code(
+            BACKEND / "routers" / "transcribe.py",
+            "_require_current_ai_consent_for_websocket",
+        ),
+        globals_,
+    )
+
+    class Socket:
+        def __init__(self):
+            self.accepted = False
+            self.sent = []
+            self.closed = None
+
+        async def accept(self):
+            self.accepted = True
+
+        async def send_json(self, payload):
+            self.sent.append(payload)
+
+        async def close(self, *, code, reason):
+            self.closed = (code, reason)
+
+    terminal = Socket()
+
+    def reject_terminal(_uid):
+        raise HTTPException(status_code=403, detail={"code": "ai_consent_required"})
+
+    globals_["assert_current_ai_consent"] = reject_terminal
+    assert (
+        asyncio.run(
+            helper(
+                terminal,
+                "uid-a",
+                accepted=False,
+                send_auth_response=False,
+            )
+        )
+        is False
+    )
+    assert terminal.accepted is True
+    assert terminal.sent == []
+    assert terminal.closed == (4403, "ai_consent_required")
+
+    retryable = Socket()
+
+    def reject_retryable(_uid):
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "ai_consent_authority_unavailable", "retryable": True},
+        )
+
+    globals_["assert_current_ai_consent"] = reject_retryable
+    assert (
+        asyncio.run(
+            helper(
+                retryable,
+                "uid-a",
+                accepted=True,
+                send_auth_response=True,
+            )
+        )
+        is False
+    )
+    assert retryable.accepted is False
+    assert retryable.sent == [
+        {
+            "type": "auth_response",
+            "success": False,
+            "error": "ai_consent_authority_unavailable",
+            "retryable": True,
+        }
+    ]
+    assert retryable.closed == (1013, "ai_consent_authority_unavailable")
+
+
+def test_memory_artwork_provider_routes_share_the_consent_gate():
+    protected_paths = {
+        "/memory-artwork/libraries",
+        "/memories/{memory_id}/artwork",
+        "/memory-artwork/day/{day}",
+        "/memory-artwork/backfill",
+        "/memory-artwork/recovery/recent",
+        "/memory-artwork/recovery/permanent",
+    }
+
+    assert protected_paths <= _gated_route_paths(
+        BACKEND / "ella" / "routers" / "memory_artwork.py",
+        "require_current_ai_consent",
+    )
 
 
 def test_tts_route_uses_authenticated_or_internal_service_gate():
@@ -136,6 +271,31 @@ def test_shared_conversation_processor_gates_target_uid_before_model_work():
     for caller in ("integration.py", "workflow.py", "developer.py"):
         caller_source = (BACKEND / "routers" / caller).read_text()
         assert "process_conversation(" in caller_source or "process_conversation_with_outcome(" in caller_source
+
+
+def test_background_ai_and_honcho_boundaries_recheck_consent_before_network_egress():
+    chat_source = _function_source(BACKEND / "ella" / "routers" / "chat.py", "_produce_hermes_chat_events")
+    voice_source = _function_source(
+        BACKEND / "ella" / "services" / "voice_honcho.py",
+        "fetch_voice_honcho_context",
+    )
+    recovery_source = _function_source(
+        BACKEND / "ella" / "services" / "summary_recovery.py",
+        "invoke_hermes_recovery",
+    )
+    observer_source = _function_source(
+        BACKEND / "ella" / "services" / "observer_extractor.py",
+        "build_extraction_result",
+    )
+
+    assert chat_source.index("assert_current_ai_consent(uid)") < chat_source.index("httpx.AsyncClient(")
+    assert voice_source.index("assert_current_ai_consent(") < voice_source.index("httpx.AsyncClient(")
+    assert recovery_source.index("assert_current_ai_consent(uid)") < recovery_source.index(
+        "generate_summary_from_prompt("
+    )
+    assert observer_source.index("assert_current_ai_consent(uid)") < observer_source.index(
+        "hermes_candidate_extraction("
+    )
 
 
 def test_stored_sync_gates_target_uid_before_deepgram_and_processing():

@@ -1,6 +1,13 @@
 import asyncio
 
+import pytest
+
 from ella.routers import chat
+
+
+@pytest.fixture(autouse=True)
+def _current_ai_consent(monkeypatch):
+    monkeypatch.setattr(chat, "assert_current_ai_consent", lambda uid: uid)
 
 
 def test_reconnecting_subscriber_shares_inflight_hermes_turn(monkeypatch):

@@ -9,6 +9,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from ella.services.ai_consent import assert_current_ai_consent, require_current_ai_consent
 from ella.services.memory_artwork import (
     ARTWORK_CONSENT_VERSION,
     DEFAULT_STYLE_VERSION,
@@ -100,7 +101,7 @@ async def get_memory_artwork_preferences(uid: str = Depends(get_exact_firebase_u
 
 
 @router.get("/memory-artwork/libraries")
-async def get_memory_artwork_libraries(uid: str = Depends(get_exact_firebase_uid)):
+async def get_memory_artwork_libraries(uid: str = Depends(require_current_ai_consent)):
     try:
         return await MemoryArtworkService().libraries(uid)
     except MemoryArtworkError as exc:
@@ -124,7 +125,7 @@ async def put_memory_artwork_preferences(
 
 
 @router.get("/memories/{memory_id}/artwork")
-async def get_memory_artwork(memory_id: str, uid: str = Depends(get_exact_firebase_uid)):
+async def get_memory_artwork(memory_id: str, uid: str = Depends(require_current_ai_consent)):
     try:
         return await MemoryArtworkService().signed_url(uid, memory_id)
     except MemoryArtworkError as exc:
@@ -135,7 +136,7 @@ async def get_memory_artwork(memory_id: str, uid: str = Depends(get_exact_fireba
 async def get_memory_artwork_day(
     day: str,
     utc_offset_minutes: int = Query(default=0, ge=-840, le=840),
-    uid: str = Depends(get_exact_firebase_uid),
+    uid: str = Depends(require_current_ai_consent),
 ):
     try:
         return await MemoryArtworkService().day_artwork(
@@ -152,7 +153,7 @@ async def retry_memory_artwork(
     memory_id: str,
     background_tasks: BackgroundTasks,
     payload: Optional[MemoryArtworkGenerationRequest] = None,
-    uid: str = Depends(get_exact_firebase_uid),
+    uid: str = Depends(require_current_ai_consent),
 ):
     service = MemoryArtworkService()
     try:
@@ -185,7 +186,7 @@ async def retry_memory_artwork(
 async def backfill_memory_artwork(
     background_tasks: BackgroundTasks,
     payload: Optional[MemoryArtworkBackfillRequest] = None,
-    uid: str = Depends(get_exact_firebase_uid),
+    uid: str = Depends(require_current_ai_consent),
 ):
     try:
         service = MemoryArtworkService()
@@ -252,7 +253,7 @@ async def backfill_memory_artwork(
 
 
 @router.post("/memory-artwork/reconciliation", status_code=202)
-async def start_memory_artwork_reconciliation(uid: str = Depends(get_exact_firebase_uid)):
+async def start_memory_artwork_reconciliation(uid: str = Depends(require_current_ai_consent)):
     try:
         return await MemoryArtworkService().start_reconciliation(uid)
     except MemoryArtworkError as exc:
@@ -260,7 +261,7 @@ async def start_memory_artwork_reconciliation(uid: str = Depends(get_exact_fireb
 
 
 @router.get("/memory-artwork/reconciliation")
-async def get_memory_artwork_reconciliation(uid: str = Depends(get_exact_firebase_uid)):
+async def get_memory_artwork_reconciliation(uid: str = Depends(require_current_ai_consent)):
     try:
         return await MemoryArtworkService().reconciliation_status(uid)
     except MemoryArtworkError as exc:
@@ -268,7 +269,7 @@ async def get_memory_artwork_reconciliation(uid: str = Depends(get_exact_firebas
 
 
 @router.get("/memory-artwork/queue")
-async def get_memory_artwork_queue(uid: str = Depends(get_exact_firebase_uid)):
+async def get_memory_artwork_queue(uid: str = Depends(require_current_ai_consent)):
     try:
         return await MemoryArtworkService().queue_status(uid)
     except MemoryArtworkError as exc:
@@ -276,7 +277,7 @@ async def get_memory_artwork_queue(uid: str = Depends(get_exact_firebase_uid)):
 
 
 @router.post("/memory-artwork/recovery/recent", status_code=202)
-async def recover_recent_memory_artwork(uid: str = Depends(get_exact_firebase_uid)):
+async def recover_recent_memory_artwork(uid: str = Depends(require_current_ai_consent)):
     try:
         return await MemoryArtworkService().recover_recent(uid)
     except MemoryArtworkError as exc:
@@ -286,7 +287,7 @@ async def recover_recent_memory_artwork(uid: str = Depends(get_exact_firebase_ui
 @router.post("/memory-artwork/recovery/permanent", status_code=202)
 async def recover_permanent_memory_artwork(
     payload: Optional[MemoryArtworkPermanentRecoveryRequest] = None,
-    uid: str = Depends(get_exact_firebase_uid),
+    uid: str = Depends(require_current_ai_consent),
 ):
     try:
         request = payload or MemoryArtworkPermanentRecoveryRequest()
@@ -302,7 +303,7 @@ async def recover_permanent_memory_artwork(
 @router.post("/memory-artwork/queue/control")
 async def control_memory_artwork_queue(
     payload: MemoryArtworkQueueControlRequest,
-    uid: str = Depends(get_exact_firebase_uid),
+    uid: str = Depends(require_current_ai_consent),
 ):
     try:
         return await MemoryArtworkService().set_queue_control(
@@ -322,6 +323,7 @@ async def process_memory_artwork(
     service: EllaRequestAuthority = Depends(require_memory_artwork_service),
 ):
     bound_uid = service.require_uid(uid, feature="Memory artwork worker")
+    assert_current_ai_consent(bound_uid)
     try:
         worker = MemoryArtworkWorker()
         conversation = worker.repository.get_conversation(bound_uid, memory_id) or {}

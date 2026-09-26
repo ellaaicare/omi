@@ -31,6 +31,7 @@ from ella.services.summary_writeback import (
 from models.conversation import CategoryEnum, Conversation, ConversationStatus
 from models.conversation_integrity import transcript_grounding_hash
 from utils.conversations.generic_summary import generate_stock_conversation_summary
+from ella.services.ai_consent import assert_current_ai_consent
 from utils.conversations.vector import refresh_structured_summary_vector
 
 logger = logging.getLogger(__name__)
@@ -495,6 +496,8 @@ async def invoke_hermes_recovery(
 ) -> dict[str, Any]:
     """Generate and strictly apply enrichment through the canonical Hermes API session."""
 
+    assert_current_ai_consent(uid)
+
     config = config or default_summary_provider_config()
     if config.provider != 'hermes-api':
         raise RuntimeError('Hermes API is required for historical enrichment recovery')
@@ -730,6 +733,7 @@ async def recover_failed_conversation_summary(
     attempt_count: Optional[int] = None,
     config: Optional[SummaryProviderConfig] = None,
 ) -> str:
+    assert_current_ai_consent(uid)
     conversation = await asyncio.to_thread(conversations_db.get_conversation, uid, conversation_id)
     if not _is_current_retry(conversation, request_id, attempt_count):
         return 'superseded'

@@ -12,6 +12,7 @@ from urllib.parse import quote
 import httpx
 
 from database.honcho_attestation import authority_credential
+from ella.services.ai_consent import assert_current_ai_consent
 from ella.services.correction_honcho_contract import resolve_companion_honcho_target
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,7 @@ async def fetch_voice_honcho_context(
     if target is None:
         return {"available": False, "reason": "runtime_honcho_binding_missing", "context": ""}
 
+    assert_current_ai_consent(str(getattr(runtime, "uid", "") or ""))
     workspace, observer, observed = target
     started = time.monotonic()
     try:
@@ -191,6 +193,7 @@ async def search_voice_honcho(runtime: Any, query: str, limit: int) -> list[dict
     if target is None:
         return []
 
+    assert_current_ai_consent(str(getattr(runtime, "uid", "") or ""))
     workspace, observer, observed = target
     started = time.monotonic()
     try:

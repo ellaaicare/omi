@@ -16,6 +16,7 @@ from models.hermes_cloud_enrichment_contract import (
     HERMES_CLOUD_ENRICHMENT_POLICY_VERSION,
     build_enrichment_identity,
 )
+from ella.services.ai_consent import assert_current_ai_consent
 
 from .config import ELLA_CONFIG
 
@@ -90,6 +91,10 @@ def fire_postprocess_webhook(
         conversation: Conversation object (already saved to Firestore)
     """
     cloud_selected = uid in HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS
+    if not cloud_selected and not POSTPROCESS_ENABLED:
+        print(f"[FLOW:POSTPROCESS] DISABLED uid={uid} conv={conversation.id[:8]}...", flush=True)
+        return
+    assert_current_ai_consent(uid)
     if cloud_selected:
         try:
             queued = enqueue_cloud_enrichment(uid, conversation)
@@ -109,10 +114,6 @@ def fire_postprocess_webhook(
         )
         # The durable cloud outbox exclusively owns selected conversations.
         # Return before deriving or sending any legacy n8n/Mini payload.
-        return
-
-    if not POSTPROCESS_ENABLED:
-        print(f"[FLOW:POSTPROCESS] DISABLED uid={uid} conv={conversation.id[:8]}...", flush=True)
         return
 
     _start = time.time()

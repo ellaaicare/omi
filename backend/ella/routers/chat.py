@@ -44,7 +44,7 @@ from ella.services.hermes_cloud_runtime import (
     HermesCloudRuntimeService,
     HermesCloudTurnRequest,
 )
-from ella.services.ai_consent import require_current_ai_consent
+from ella.services.ai_consent import assert_current_ai_consent, require_current_ai_consent
 from ella.services.provisioning import ProvisioningError
 from ella.services.runtime_resolver import (
     IsolatedRuntime,
@@ -430,7 +430,7 @@ async def _stream_level_1_ack(user_message: str):
     yield "data: [DONE]\n\n"
 
 
-async def _stream_level_2_grok(user_message: str):
+async def _stream_level_2_grok(user_message: str, uid: str):
     """Level 2: Direct Grok API call via xAI."""
     _start = _time.time()
 
@@ -438,6 +438,13 @@ async def _stream_level_2_grok(user_message: str):
         print(f"[FLOW:CHAT-L2] ERROR provider=xai key_missing=true", flush=True)
         error_data = json.dumps({"error": "XAI_API_KEY not configured"})
         yield f"data: {error_data}\n\n"
+        return
+
+    try:
+        assert_current_ai_consent(uid)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        yield f"data: Error: {detail.get('code', 'ai_consent_authority_unavailable')}\n\n"
         return
 
     print(f"[FLOW:CHAT-L2] provider=xai model={XAI_CHAT_MODEL} streaming=true", flush=True)
@@ -512,6 +519,13 @@ async def _stream_level_3_n8n(user_message: str, uid: str, conversation_id: str)
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "source": "ella-chat-debug-3",
     }
+
+    try:
+        assert_current_ai_consent(uid)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        yield f"data: Error: {detail.get('code', 'ai_consent_authority_unavailable')}\n\n"
+        return
 
     async with httpx.AsyncClient() as client:
         try:
@@ -630,6 +644,13 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
             }
         )
     messages.append({"role": "user", "content": user_message})
+
+    try:
+        assert_current_ai_consent(uid)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        yield f"data: Error: {detail.get('code', 'ai_consent_authority_unavailable')}\n\n"
+        return
 
     # Use asyncio.Task so we can yield keep-alives while waiting
     async def _call_openclaw():
@@ -817,6 +838,7 @@ async def _produce_hermes_chat_events(
         agent_id = send_runtime.agent_id if send_runtime else HERMES_MODEL
         if not gateway_token:
             raise ProvisioningError("hermes_runtime_credential_missing", retryable=False)
+        assert_current_ai_consent(uid)
         async with httpx.AsyncClient(timeout=HERMES_CHAT_REQUEST_TIMEOUT_SECONDS) as client:
             async with client.stream(
                 "POST",
@@ -1244,7 +1266,7 @@ async def ella_chat_stream(
         trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
         record_trace(trace)
         return StreamingResponse(
-            _stream_level_2_grok(request.message),
+            _stream_level_2_grok(request.message, uid),
             media_type="text/event-stream",
         )
 
@@ -1272,7 +1294,7 @@ async def ella_chat_stream(
     trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
     record_trace(trace)
     return StreamingResponse(
-        _stream_level_2_grok(request.message),
+        _stream_level_2_grok(request.message, uid),
         media_type="text/event-stream",
     )
 

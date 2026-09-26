@@ -2,8 +2,15 @@ import asyncio
 from types import SimpleNamespace
 
 import httpx
+import pytest
+from fastapi import HTTPException
 
 from ella.services import voice_honcho
+
+
+@pytest.fixture(autouse=True)
+def _current_ai_consent(monkeypatch):
+    monkeypatch.setattr(voice_honcho, "assert_current_ai_consent", lambda uid: uid)
 
 
 def _runtime():
@@ -13,6 +20,26 @@ def _runtime():
         observer_peer="ella-a",
         observed_peer="user-a",
     )
+
+
+def test_consent_rejection_precedes_honcho_network_call(monkeypatch):
+    calls = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            calls.append("constructed")
+
+    def reject(_uid):
+        raise HTTPException(status_code=403, detail={"code": "ai_consent_required"})
+
+    monkeypatch.setattr(voice_honcho, "assert_current_ai_consent", reject)
+    monkeypatch.setattr(voice_honcho.httpx, "AsyncClient", Client)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(voice_honcho.fetch_voice_honcho_context(_runtime(), query="synthetic"))
+
+    assert error.value.detail == {"code": "ai_consent_required"}
+    assert calls == []
 
 
 def test_isolated_target_uses_runtime_receipt_without_profile_fallback(monkeypatch):

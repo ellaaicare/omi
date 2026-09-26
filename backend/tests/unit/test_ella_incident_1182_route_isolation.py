@@ -34,6 +34,11 @@ from utils.ella import exact_firebase_auth
 _BACKEND = Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture(autouse=True)
+def _current_ai_consent(monkeypatch):
+    monkeypatch.setattr(chat, "assert_current_ai_consent", lambda uid: uid)
+
+
 class RecordingCanonicalStore(canonical_events.CanonicalEventStore):
     def __init__(self):
         self.writes = []

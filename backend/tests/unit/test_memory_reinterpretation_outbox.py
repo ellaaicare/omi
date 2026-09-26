@@ -61,6 +61,12 @@ from ella.services.memory_reinterpretation import (
     _validate_rows,
 )
 
+
+@pytest.fixture(autouse=True)
+def _current_ai_consent(monkeypatch):
+    monkeypatch.setattr(reinterpretation_service, "assert_current_ai_consent", lambda uid: uid)
+
+
 UID = "CaseSensitiveUserA"
 SESSION_ID = "signed-jti-1"
 CONVERSATION_ID = "memory-1"

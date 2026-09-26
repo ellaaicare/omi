@@ -9,6 +9,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ella.services.runtime_errors import ProvisioningError
+from ella.services import ai_consent
+
+
+@pytest.fixture(autouse=True)
+def _current_ai_consent(monkeypatch):
+    monkeypatch.setattr(ai_consent, "assert_current_ai_consent", lambda uid: uid)
 
 
 def _install_proposal_stubs():

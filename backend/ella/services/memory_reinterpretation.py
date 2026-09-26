@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal, Optional
 
 import httpx
+from ella.services.ai_consent import assert_current_ai_consent
 from pydantic import BaseModel, Field, field_validator
 
 import database.conversations as conversations_db
@@ -497,6 +498,7 @@ class MemoryReinterpretationWorker:
                     if not finished:
                         raise ReinterpretationWorkerError("lease_lost", retryable=True)
                     return {"job_id": job["id"], "status": "conflict"}
+                assert_current_ai_consent(str(job["uid"]))
                 plan = await self.hermes_client.propose(
                     job=job,
                     transcript=_ordered_transcript(rows),

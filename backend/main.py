@@ -47,7 +47,11 @@ from routers import (
 from utils.other.timeout import TimeoutMiddleware
 from utils.observability import log_langsmith_status
 from ella.routers import ai_consent
-from ella.services.ai_consent import configure_firestore_db as configure_ai_consent_firestore_db
+from ella.services.ai_consent import (
+    AiConsentHTTPException,
+    ai_consent_http_exception_handler,
+    configure_firestore_db as configure_ai_consent_firestore_db,
+)
 
 # Log LangSmith tracing status at startup
 log_langsmith_status()
@@ -60,6 +64,7 @@ else:
     firebase_admin.initialize_app()
 
 app = FastAPI()
+app.add_exception_handler(AiConsentHTTPException, ai_consent_http_exception_handler)
 
 # CORS — allow admin dashboard + localhost dev
 app.add_middleware(

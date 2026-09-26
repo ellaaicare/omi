@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Literal, Optional, Protocol
 
 from fastapi import Depends, Header, HTTPException
+from fastapi.responses import JSONResponse
 from google.cloud.firestore_v1 import transactional
 
 from utils.ella.exact_firebase_auth import get_exact_firebase_uid
@@ -1053,21 +1054,31 @@ def _status_payload(
 
 _repository: ConsentRepository = FirestoreConsentRepository()
 
+AI_CONSENT_REQUIRED_CODE = "ai_consent_required"
+AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE = "ai_consent_authority_unavailable"
+AI_CONSENT_WEBSOCKET_CLOSE_CODE = 4403
+AI_CONSENT_WEBSOCKET_RETRY_CLOSE_CODE = 1013
+
+
+class AiConsentHTTPException(HTTPException):
+    """Consent rejection rendered without FastAPI's nested detail envelope."""
+
+
+async def ai_consent_http_exception_handler(_request: Any, exc: AiConsentHTTPException) -> JSONResponse:
+    detail = exc.detail if isinstance(exc.detail, dict) else {"code": str(exc.detail)}
+    return JSONResponse(status_code=exc.status_code, content=detail, headers=exc.headers)
+
 
 def get_ai_consent_service() -> AiConsentService:
     return AiConsentService(_repository)
 
 
-def _uid_allowlist() -> set[str]:
-    return {uid.strip() for uid in os.getenv("ELLA_AI_CONSENT_ENFORCEMENT_UIDS", "").split(",") if uid.strip()}
-
-
-def ai_consent_enforcement_required(uid: str) -> bool:
-    return os.getenv("ELLA_AI_CONSENT_ENFORCEMENT_ENABLED", "false").lower() == "true" or uid in _uid_allowlist()
+def ai_consent_enforcement_required(_uid: str) -> bool:
+    return True
 
 
 def ai_consent_global_enforcement_enabled() -> bool:
-    return os.getenv("ELLA_AI_CONSENT_ENFORCEMENT_ENABLED", "false").lower() == "true"
+    return True
 
 
 def managed_cloud_real_data_enabled(uid: str) -> bool:
@@ -1121,34 +1132,21 @@ def assert_managed_cloud_consent(
 
 
 def assert_current_ai_consent(uid: str) -> str:
-    if not ai_consent_enforcement_required(uid):
-        return uid
     status = get_ai_consent_service().status(uid)
     if status["authorized"]:
         return uid
     authority_state = str(status.get("authority_state") or "unavailable")
     if authority_state == "unavailable":
-        raise HTTPException(
+        raise AiConsentHTTPException(
             status_code=503,
             detail={
-                "code": "ai_consent_authority_unavailable",
-                "authority_state": authority_state,
+                "code": AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE,
                 "retryable": True,
             },
         )
-    consent = status["consent"]
-    raise HTTPException(
+    raise AiConsentHTTPException(
         status_code=403,
-        detail={
-            "code": (
-                "ai_consent_reconsent_required" if authority_state == "reconsent_required" else "ai_consent_required"
-            ),
-            "authority_state": authority_state,
-            "retryable": False,
-            "decision": consent.get("decision", "not_recorded"),
-            "required_policy_version": MINIMUM_REQUIRED_POLICY_VERSION,
-            "required_processor_set_hash": CURRENT_PROCESSOR_SET_HASH,
-        },
+        detail={"code": AI_CONSENT_REQUIRED_CODE},
     )
 
 

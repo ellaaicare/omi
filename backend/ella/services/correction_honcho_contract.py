@@ -18,6 +18,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import httpx
+from ella.services.ai_consent import assert_current_ai_consent
 from pydantic import BaseModel, Field
 
 from database.honcho_attestation import authority_credential
@@ -1017,6 +1018,7 @@ async def write_honcho_fact_candidate(
 
     selected_transport = (transport or HONCHO_FACT_WRITE_TRANSPORT or "hermes").strip().lower()
     if selected_transport in {"honcho", "honcho_conclusions", "native_honcho"}:
+        assert_current_ai_consent(candidate.uid)
         return await _write_honcho_fact_candidate_via_native_honcho(
             candidate,
             honcho_base_url=honcho_base_url,
@@ -1051,6 +1053,7 @@ async def write_honcho_fact_candidate(
             session_key=candidate.session_key,
         )
 
+    assert_current_ai_consent(candidate.uid)
     url = (gateway_url or HERMES_GATEWAY_URL).rstrip("/")
     started = time.monotonic()
     session_id = (

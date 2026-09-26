@@ -112,6 +112,7 @@ def voice_auth(monkeypatch):
     monkeypatch.setattr(voice, "HERMES_PROVISION_API_URL", "http://hermes-8210")
     monkeypatch.setattr(voice, "HERMES_PROVISION_API_TOKEN", "test-hermes-secret")
     monkeypatch.setattr(voice, "ALLOW_LEGACY_VOICE_SESSION_TOKENS", True)
+    monkeypatch.setattr(voice, "assert_current_ai_consent", lambda uid: uid)
     monkeypatch.setattr(
         voice,
         "runtime_authority_identity",

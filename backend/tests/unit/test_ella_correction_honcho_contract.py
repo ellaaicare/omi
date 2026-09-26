@@ -7,9 +7,16 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import MagicMock
 
+import pytest
+
 sys.modules.setdefault("database._client", MagicMock(db=MagicMock()))
 
 from ella.services import correction_honcho_contract as contract
+
+
+@pytest.fixture(autouse=True)
+def _current_ai_consent(monkeypatch):
+    monkeypatch.setattr(contract, "assert_current_ai_consent", lambda uid: uid)
 
 
 def _conversation(conversation_id="conv-1", uid="user-123", version="v1"):
@@ -573,9 +580,7 @@ def test_companion_profile_config_checks_local_exact_uid_before_remote_source(mo
     monkeypatch.setattr(
         contract,
         "_safe_json_url",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("remote map must stay lazy")
-        ),
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("remote map must stay lazy")),
     )
 
     target, reason = contract.resolve_companion_honcho_target("UserA")

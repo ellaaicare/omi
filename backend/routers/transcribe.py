@@ -18,7 +18,7 @@ import opuslib  # type: ignore
 
 import lc3  # lc3py
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from starlette.concurrency import run_in_threadpool
 from fastapi.websockets import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
@@ -131,7 +131,15 @@ from ella.routers.auto_provision import (
     get_agent_cluster,
     listen_runtime_gate,
 )
-from ella.services.ai_consent import assert_current_ai_consent, require_current_ai_consent, resolve_processor
+from ella.services.ai_consent import (
+    AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE,
+    AI_CONSENT_REQUIRED_CODE,
+    AI_CONSENT_WEBSOCKET_CLOSE_CODE,
+    AI_CONSENT_WEBSOCKET_RETRY_CLOSE_CODE,
+    assert_current_ai_consent,
+    resolve_processor,
+)
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 
 from utils.aac import AACDecoder
 from utils.audio import AudioRingBuffer
@@ -147,6 +155,40 @@ router = APIRouter()
 
 PUSHER_ENABLED = bool(os.getenv('HOSTED_PUSHER_API_URL'))
 CAPTURE_CONVERSATION_ID_KEY = "_capture_conversation_id"
+
+
+async def _require_current_ai_consent_for_websocket(
+    websocket: WebSocket,
+    uid: str,
+    *,
+    accepted: bool,
+    send_auth_response: bool = False,
+) -> bool:
+    try:
+        assert_current_ai_consent(uid)
+        return True
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        retryable = exc.status_code >= 500
+        error_code = (
+            AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE if retryable else detail.get("code", AI_CONSENT_REQUIRED_CODE)
+        )
+        if not accepted:
+            await websocket.accept()
+        if send_auth_response:
+            await websocket.send_json(
+                {
+                    "type": "auth_response",
+                    "success": False,
+                    "error": error_code,
+                    "retryable": retryable,
+                }
+            )
+        await websocket.close(
+            code=(AI_CONSENT_WEBSOCKET_RETRY_CLOSE_CODE if retryable else AI_CONSENT_WEBSOCKET_CLOSE_CODE),
+            reason=error_code,
+        )
+        return False
 
 
 def drain_capture_persistence_batches(
@@ -3416,7 +3458,7 @@ async def _listen(
 @router.websocket("/v4/listen")
 async def listen_handler(
     websocket: WebSocket,
-    uid: str = Depends(require_current_ai_consent),
+    uid: str = Depends(get_exact_firebase_uid),
     language: str = 'en',
     sample_rate: int = 8000,
     codec: str = 'pcm8',
@@ -3430,6 +3472,9 @@ async def listen_handler(
     speaker_auto_assign: str = 'disabled',
     capture_protocol: int = 0,
 ):
+    if not await _require_current_ai_consent_for_websocket(websocket, uid, accepted=False):
+        return
+
     custom_stt_mode = CustomSttMode.enabled if custom_stt == 'enabled' else CustomSttMode.disabled
     onboarding_mode = onboarding == 'enabled'
     speaker_auto_assign_enabled = speaker_auto_assign == 'enabled'
@@ -3535,18 +3580,12 @@ async def web_listen_handler(
         await websocket.close(code=1008, reason="Auth error")
         return
 
-    try:
-        assert_current_ai_consent(uid)
-    except HTTPException as exc:
-        detail = exc.detail if isinstance(exc.detail, dict) else {}
-        await websocket.send_json(
-            {
-                "type": "auth_response",
-                "success": False,
-                "error": detail.get("code", "ai_consent_required"),
-            }
-        )
-        await websocket.close(code=1008, reason="AI consent required")
+    if not await _require_current_ai_consent_for_websocket(
+        websocket,
+        uid,
+        accepted=True,
+        send_auth_response=True,
+    ):
         return
 
     runtime_gate = await listen_runtime_gate(uid, user_db.is_exists_user)
