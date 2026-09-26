@@ -629,7 +629,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   void _reconcileResponsiveVariantAfterStalePublication(int generation) {
     if (!mounted || generation != _requestGeneration) return;
     final current = _remoteResult;
-    if (current == null || !current.isReady || current.variants.isEmpty || !current.isAuthorityCurrent) return;
+    if (current == null || !current.isReady || !current.isAuthorityCurrent) return;
 
     final selected = current.forPhysicalWidth(_physicalTargetWidth);
     if (selected.cacheKey.isEmpty || !selected.isAuthorityCurrent) return;
@@ -664,12 +664,8 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     }
 
     final latestResult = _remoteResult;
-    final source = latestResult != null &&
-            latestResult.isReady &&
-            latestResult.variants.isNotEmpty &&
-            latestResult.isAuthorityCurrent
-        ? latestResult
-        : retainedResult;
+    final source =
+        latestResult != null && latestResult.isReady && latestResult.isAuthorityCurrent ? latestResult : retainedResult;
     final selected = source.forPhysicalWidth(_physicalTargetWidth);
     if (selected.cacheKey.isEmpty || !selected.isAuthorityCurrent) return;
 
@@ -763,6 +759,20 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         authorityEpoch: publicationAuthorityEpoch,
       );
       return;
+    }
+    if (_mustSuppressCachedArtwork(_remoteResult)) {
+      _resetResponsiveVariantPublication();
+      return;
+    }
+    if (!updateRenderedResult) {
+      final replacementResult = _remoteResult;
+      if (replacementResult != null && replacementResult.isReady && replacementResult.isAuthorityCurrent) {
+        final replacementSelected = replacementResult.forPhysicalWidth(_physicalTargetWidth);
+        if (replacementSelected.cacheKey.isNotEmpty && replacementSelected.cacheKey != selected.cacheKey) {
+          _reconcileResponsiveVariantAfterStalePublication(generation);
+          return;
+        }
+      }
     }
     if (_pendingResponsiveVariantCacheKey != expectedCacheKey) {
       _reconcileResponsiveVariantAfterStalePublication(generation);

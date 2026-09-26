@@ -2967,6 +2967,120 @@ void main() {
     );
   });
 
+  testWidgets('replacement ready artwork supersedes retained alias publication after refresh', (tester) async {
+    final delayedRefresh = Completer<MemoryArtworkResult>();
+    final api = _ResponsiveArtworkApi(delayedRefresh: delayedRefresh);
+    final obsoletePublicationRelease = Completer<void>();
+    final obsoletePublicationStarted = Completer<void>();
+    final retainedPublicationRelease = Completer<void>();
+    final retainedPublicationStarted = Completer<void>();
+    final conversation = ServerConversation(
+      id: 'memory-responsive-replacement-wins',
+      createdAt: DateTime(2026, 9, 26),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(status: MemoryArtworkStatus.ready),
+    );
+
+    Future<String?> rememberDisplayCacheKey({
+      required String provisionalCacheKey,
+      required String authoritativeCacheKey,
+      required bool Function() isAuthorityCurrent,
+    }) async {
+      final remembered = await MemoryArtworkCache.rememberDisplayCacheKey(
+        provisionalCacheKey: provisionalCacheKey,
+        authoritativeCacheKey: authoritativeCacheKey,
+        isAuthorityCurrent: isAuthorityCurrent,
+      );
+      if (authoritativeCacheKey == 'responsive-384-cache-key' && !obsoletePublicationStarted.isCompleted) {
+        obsoletePublicationStarted.complete();
+        await obsoletePublicationRelease.future;
+      } else if (authoritativeCacheKey == 'responsive-768-cache-key' &&
+          obsoletePublicationStarted.isCompleted &&
+          !retainedPublicationStarted.isCompleted) {
+        retainedPublicationStarted.complete();
+        await retainedPublicationRelease.future;
+      }
+      return remembered;
+    }
+
+    Widget buildArtwork(double width, int refreshEpoch) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MediaQuery(
+            data: const MediaQueryData(devicePixelRatio: 2),
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: SizedBox(
+                width: width,
+                height: 180,
+                child: MemoryArtworkImage(
+                  conversation: conversation,
+                  api: api,
+                  cachedFileLookup: (_) async => null,
+                  displayCacheKeyRememberer: rememberDisplayCacheKey,
+                  refreshEpoch: refreshEpoch,
+                ),
+              ),
+            ),
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(300, 0));
+    await tester.pump();
+    await tester.pump();
+    await tester.pumpWidget(buildArtwork(150, 0));
+    await tester.pump();
+    await tester.pump();
+    expect(obsoletePublicationStarted.isCompleted, isTrue);
+
+    await tester.pumpWidget(buildArtwork(300, 1));
+    await tester.pump();
+    obsoletePublicationRelease.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(retainedPublicationStarted.isCompleted, isTrue);
+
+    delayedRefresh.complete(
+      MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.ready,
+        url: Uri.parse('https://private-storage.example/replacement-original.png'),
+        cacheKey: 'responsive-replacement-original-cache-key',
+        variants: [
+          MemoryArtworkVariant(
+            width: 384,
+            url: Uri.parse('https://private-storage.example/replacement-384.png'),
+            cacheKey: 'responsive-replacement-384-cache-key',
+            bytes: 1024,
+          ),
+          MemoryArtworkVariant(
+            width: 768,
+            url: Uri.parse('https://private-storage.example/replacement-768.png'),
+            cacheKey: 'responsive-replacement-768-cache-key',
+            bytes: 2048,
+          ),
+        ],
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    retainedPublicationRelease.complete();
+    await tester.pump();
+    await tester.pump();
+
+    final image = tester.widget<CachedNetworkImage>(
+      find.byKey(const Key('memory-generated-artwork-network-memory-responsive-replacement-wins-0')),
+    );
+    expect(image.imageUrl, 'https://private-storage.example/replacement-768.png');
+    expect(image.cacheKey, 'responsive-replacement-768-cache-key');
+    expect(image.memCacheWidth, 768);
+    expect(
+      MemoryArtworkCache.resolveDisplayCacheKey('responsive-provisional-cache-key'),
+      'responsive-replacement-768-cache-key',
+    );
+    expect(api.loadCalls, 2);
+  });
+
   testWidgets('provider decode failure removes only proven-corrupt persisted bytes before retry', (tester) async {
     final api = _RefreshingArtworkApi();
     final evictedKeys = <String>[];
