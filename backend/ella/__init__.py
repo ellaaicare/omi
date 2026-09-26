@@ -21,6 +21,8 @@ See ella/README.md for full documentation.
 import os
 from typing import Optional, Callable, Dict
 
+from database import conversations as conversations_db
+from database import memories as memories_db
 from ella.routers.canonical_events import _get_pool
 from ella.routers.invites import router as invite_router
 
@@ -61,6 +63,28 @@ except ModuleNotFoundError as exc:
     start_memory_artwork_worker = None
     stop_memory_artwork_worker = None
     _MEMORY_ARTWORK_IMPORT_ERROR = exc
+
+_DREAM_MEDIA_IMPORT_ERROR = None
+try:
+    from ella.routers.dream_media import router as dream_media_router
+    from ella.services.dream_media import (
+        prepare_source_memory_dream_deletion,
+        start_dream_media_sweeper,
+        stop_dream_media_sweeper,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name not in {
+        "ella.routers.dream_media",
+        "ella.services.dream_media",
+        "database.dream_media",
+        "utils.ella.private_media_storage",
+    }:
+        raise
+    dream_media_router = None
+    prepare_source_memory_dream_deletion = None
+    start_dream_media_sweeper = None
+    stop_dream_media_sweeper = None
+    _DREAM_MEDIA_IMPORT_ERROR = exc
 
 try:
     from ella.routers.imessage_enrollment import router as imessage_enrollment_router
@@ -506,6 +530,16 @@ def _register_routers(app) -> None:
         print("  🌐 /v1/ella/memory-artwork/* - Private generated memory artwork", flush=True)
     else:
         print(f"  ⚠️ Ella memory artwork not available: {_MEMORY_ARTWORK_IMPORT_ERROR}", flush=True)
+
+    if dream_media_router is not None:
+        conversations_db.register_conversation_pre_delete_hook(prepare_source_memory_dream_deletion)
+        memories_db.register_memory_pre_delete_hook(prepare_source_memory_dream_deletion)
+        app.include_router(dream_media_router, tags=["Ella Dream Media"])
+        app.add_event_handler("startup", start_dream_media_sweeper)
+        app.add_event_handler("shutdown", stop_dream_media_sweeper)
+        print("  🌐 /v1/ella/dreams/* - Private authenticated dream media", flush=True)
+    else:
+        print(f"  ⚠️ Ella dream media not available: {_DREAM_MEDIA_IMPORT_ERROR}", flush=True)
 
     # Token-authenticated first-party adapter for the persistent Photon sidecar.
     try:
