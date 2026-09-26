@@ -85,7 +85,7 @@ def assert_cloud_identity_gate(
             photon_scope=str(photon_scope or ""),
         )
     except ai_consent.ManagedCloudConsentError as exc:
-        raise ProvisioningError(exc.code, retryable=False) from exc
+        raise ProvisioningError(exc.code, retryable=exc.retryable) from exc
 
 
 def current_cloud_authority(
@@ -128,13 +128,11 @@ def current_cloud_authority(
         scope_version=str(consent.get("scope_version") or ""),
         scope_hash=str(consent.get("scope_hash") or ""),
     )
+    if status.get("authority_state") == "unavailable":
+        raise ProvisioningError("managed_cloud_consent_authority_unavailable", retryable=True)
     if (
         status.get("authorized") is not True
         or consent.get("decision") != "granted"
-        or lineage.policy_version != ai_consent.CURRENT_POLICY_VERSION
-        or lineage.processor_set_hash != ai_consent.CURRENT_PROCESSOR_SET_HASH
-        or lineage.scope_version != ai_consent.CURRENT_SCOPE_VERSION
-        or lineage.scope_hash != ai_consent.CURRENT_SCOPE_HASH
         or consent.get("profile_binding_id") != expected_profile_binding
         or not consent.get("receipt_id")
     ):

@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import threading
 from datetime import datetime, timezone
 
 import pytest
@@ -25,6 +26,8 @@ def _submission(
     processor_set_hash=consent.CURRENT_PROCESSOR_SET_HASH,
     scope_version=consent.CURRENT_SCOPE_VERSION,
     scope_hash=consent.CURRENT_SCOPE_HASH,
+    account_epoch_token="",
+    account_epoch_auth_time=0,
 ):
     return consent.ConsentSubmission(
         decision=decision,
@@ -36,6 +39,8 @@ def _submission(
         locale="en-US",
         scope_version=scope_version,
         scope_hash=scope_hash,
+        account_epoch_token=account_epoch_token,
+        account_epoch_auth_time=account_epoch_auth_time,
     )
 
 
@@ -50,6 +55,7 @@ def test_policy_matches_exact_managed_cloud_v10_artwork_contract():
     policy = consent.AiConsentService.policy()
 
     assert policy["version"] == "ai-data-processors-v10"
+    assert policy["minimum_required_version"] == "ai-data-processors-v10"
     assert policy["processor_set_hash"] == consent.CURRENT_PROCESSOR_SET_HASH
     assert policy["scope_version"] == "managed-cloud-internal-pilot-v4"
     assert policy["scope_hash"] == consent.CURRENT_SCOPE_HASH
@@ -377,6 +383,66 @@ def test_firestore_transaction_replay_does_not_rewrite_current_state():
     assert state == current_state
 
 
+def test_firestore_account_deletion_completion_updates_receipt_and_state_atomically():
+    class Snapshot:
+        def __init__(self, data):
+            self.exists = data is not None
+            self._data = data or {}
+
+        def to_dict(self):
+            return dict(self._data)
+
+    class Ref:
+        def __init__(self, data):
+            self.snapshot = Snapshot(data)
+
+        def get(self, transaction):
+            assert transaction is transaction_instance
+            return self.snapshot
+
+    class Transaction:
+        def __init__(self):
+            self.writes = []
+
+        def set(self, ref, data, merge=False):
+            self.writes.append((ref, data, merge))
+
+    receipt = {
+        "receipt_id": "aicr_delete",
+        "decision": "deleted",
+        "request_id": "request-delete",
+        "deletion_phase": "pending",
+    }
+    state = {
+        "receipt_id": "aicr_delete",
+        "decision": "deleted",
+        "deletion_phase": "pending",
+    }
+    transaction_instance = Transaction()
+    user_ref = Ref({"ai_consent": state})
+    receipt_ref = Ref(receipt)
+
+    completed_receipt, completed_state, created = consent._complete_firestore_account_deletion.to_wrap(
+        transaction_instance,
+        user_ref,
+        receipt_ref,
+        "request-delete",
+        "2026-09-26T04:30:00+00:00",
+        "post-deletion-account-epoch-token",
+    )
+
+    assert created is True
+    assert completed_receipt["deletion_phase"] == "completed"
+    assert completed_state["deletion_completed_at"] == "2026-09-26T04:30:00+00:00"
+    assert "account_epoch_token" not in completed_state
+    assert completed_receipt["account_epoch_token"] == "post-deletion-account-epoch-token"
+    assert completed_state["account_epoch_hash"] == completed_receipt["account_epoch_hash"]
+    assert transaction_instance.writes == [
+        (receipt_ref, completed_receipt, False),
+        (user_ref, {"ai_consent": completed_state}, True),
+    ]
+
+
 def test_firestore_current_pointer_and_receipt_are_read_in_one_transaction():
     class Snapshot:
         def __init__(self, data):
@@ -483,6 +549,80 @@ def test_v6_grant_is_rejected_and_cannot_pass_protected_route_gate(
     assert error.value.detail["required_policy_version"] == ("ai-data-processors-v10")
 
 
+def test_nonmaterial_policy_metadata_drift_keeps_explicit_grant_current(monkeypatch):
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    result = service.submit("user-a", _submission())
+    receipt_id = result["receipt"]["receipt_id"]
+
+    archived_metadata = {
+        "processor_set_hash": "sha256:accepted-descriptor",
+        "processor_ids": ["accepted-processor"],
+        "scope_version": "accepted-scope-descriptor",
+        "scope_hash": "sha256:accepted-scope-descriptor",
+    }
+    repository.states["user-a"].update(archived_metadata)
+    repository.receipts[("user-a", receipt_id)].update(archived_metadata)
+    monkeypatch.setattr(consent, "CURRENT_POLICY_VERSION", "ai-data-processors-v11")
+    monkeypatch.setattr(consent, "CURRENT_PROCESSOR_SET_HASH", "sha256:deployed-descriptor")
+    monkeypatch.setattr(consent, "CURRENT_SCOPE_VERSION", "deployed-scope-descriptor")
+    monkeypatch.setattr(consent, "CURRENT_SCOPE_HASH", "sha256:deployed-scope-descriptor")
+    monkeypatch.setattr(consent, "_repository", repository)
+    _enable_managed_cloud(monkeypatch)
+
+    status = service.status("user-a")
+
+    assert status["authorized"] is True
+    assert status["authority_state"] == "authorized"
+    assert status["retryable"] is False
+    assert _assert_exact_managed_cloud_consent() == receipt_id
+
+
+def test_future_explicit_grant_remains_current_after_server_rollback():
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    result = service.submit("user-a", _submission())
+    receipt_id = result["receipt"]["receipt_id"]
+    repository.states["user-a"]["policy_version"] = "ai-data-processors-v11"
+    repository.receipts[("user-a", receipt_id)]["policy_version"] = "ai-data-processors-v11"
+
+    status = service.status("user-a")
+
+    assert status["authorized"] is True
+    assert status["authority_state"] == "authorized"
+
+
+def test_human_bumped_minimum_policy_requires_reconsent(monkeypatch):
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    service.submit("user-a", _submission())
+    monkeypatch.setattr(
+        consent,
+        "CONSENT_POLICY_VERSION_ORDER",
+        (*consent.CONSENT_POLICY_VERSION_ORDER, "ai-data-processors-v11"),
+    )
+    monkeypatch.setattr(consent, "MINIMUM_REQUIRED_POLICY_VERSION", "ai-data-processors-v11")
+    monkeypatch.setattr(consent, "_repository", repository)
+    monkeypatch.setenv("ELLA_AI_CONSENT_ENFORCEMENT_UIDS", "user-a")
+
+    status = service.status("user-a")
+    assert status["authorized"] is False
+    assert status["authority_state"] == "reconsent_required"
+    assert status["retryable"] is False
+
+    with pytest.raises(HTTPException) as error:
+        consent.assert_current_ai_consent("user-a")
+    assert error.value.status_code == 403
+    assert error.value.detail == {
+        "code": "ai_consent_reconsent_required",
+        "authority_state": "reconsent_required",
+        "retryable": False,
+        "decision": "granted",
+        "required_policy_version": "ai-data-processors-v11",
+        "required_processor_set_hash": consent.CURRENT_PROCESSOR_SET_HASH,
+    }
+
+
 def test_revoke_supersedes_prior_grant():
     service = _service()
     service.submit("user-a", _submission())
@@ -493,6 +633,8 @@ def test_revoke_supersedes_prior_grant():
     )
 
     assert revoked["authorized"] is False
+    assert revoked["authority_state"] == "revoked"
+    assert revoked["retryable"] is False
     assert revoked["consent"]["decision"] == "revoked"
     assert revoked["account_deletion"]["path"] == "/v1/users/delete-account"
 
@@ -660,7 +802,8 @@ def test_missing_or_mutated_immutable_receipt_fails_closed(monkeypatch):
     repository.receipts.pop(("user-a", receipt_id))
     with pytest.raises(consent.ManagedCloudConsentError) as missing:
         _assert_exact_managed_cloud_consent()
-    assert missing.value.code == "managed_cloud_consent_required"
+    assert missing.value.code == "managed_cloud_consent_authority_unavailable"
+    assert missing.value.retryable is True
 
     repository.receipts[("user-a", receipt_id)] = {
         **result["receipt"],
@@ -668,7 +811,8 @@ def test_missing_or_mutated_immutable_receipt_fails_closed(monkeypatch):
     }
     with pytest.raises(consent.ManagedCloudConsentError) as mutated:
         _assert_exact_managed_cloud_consent()
-    assert mutated.value.code == "managed_cloud_consent_required"
+    assert mutated.value.code == "managed_cloud_consent_authority_unavailable"
+    assert mutated.value.retryable is True
 
 
 def test_v6_or_malformed_server_receipt_cannot_authorize_managed_cloud(monkeypatch):
@@ -716,6 +860,133 @@ def test_account_deletion_receipt_is_opaque_and_completed():
     assert receipt["scope"] == "account_and_user_data"
     assert receipt["server_completed_at"] == "2026-07-26T20:15:00+00:00"
     assert "uid" not in receipt
+
+
+def test_account_deletion_records_server_only_terminal_consent_state():
+    service = _service()
+    service.submit("user-a", _submission())
+
+    result = service.record_account_deletion("user-a", request_id="aidel_account_delete_0001")
+
+    assert result["authorized"] is False
+    assert result["authority_state"] == "deleted"
+    assert result["retryable"] is False
+    assert result["consent"]["decision"] == "deleted"
+    assert result["consent"]["deletion_phase"] == "pending"
+    assert result["receipt"]["decision"] == "deleted"
+
+
+def test_completed_account_deletion_allows_only_a_fresh_explicit_grant():
+    service = _service()
+    original = service.submit("user-a", _submission(request_id="request-before-delete"))
+    service.record_account_deletion("user-a", request_id="request-delete-account")
+
+    with pytest.raises(consent.ConsentAccountDeleted):
+        service.submit("user-a", _submission(request_id="request-during-delete"))
+
+    completed = service.complete_account_deletion("user-a", request_id="request-delete-account")
+    assert completed["deletion_completed"] is True
+    assert completed["consent"]["deletion_phase"] == "completed"
+
+    with pytest.raises(consent.ConsentAccountDeleted):
+        service.submit("user-a", _submission(request_id="request-before-delete"))
+
+    assert "account_epoch_token" not in service.status("user-a")
+    deleted_status = service.status("user-a", account_epoch_auth_time=1785110000)
+    assert "account_epoch_token" not in deleted_status["consent"]
+    assert "account_epoch_hash" not in deleted_status["consent"]
+    assert deleted_status["account_epoch_token"]
+
+    fresh = service.submit(
+        "user-a",
+        _submission(
+            request_id="request-after-delete",
+            account_epoch_token=deleted_status["account_epoch_token"],
+            account_epoch_auth_time=1785110000,
+        ),
+    )
+    assert fresh["authorized"] is True
+    assert fresh["receipt"]["receipt_id"] != original["receipt"]["receipt_id"]
+    assert fresh["consent"].get("deletion_phase") is None
+    with pytest.raises(consent.ConsentAccountDeleted):
+        service.submit(
+            "user-a",
+            _submission(
+                request_id="request-reusing-consumed-epoch",
+                account_epoch_token=deleted_status["account_epoch_token"],
+                account_epoch_auth_time=1785110000,
+            ),
+        )
+
+
+def test_account_deletion_completion_is_exact_and_idempotent():
+    service = _service()
+    service.record_account_deletion("user-a", request_id="request-delete-account")
+
+    first = service.complete_account_deletion("user-a", request_id="request-delete-account")
+    second = service.complete_account_deletion("user-a", request_id="request-delete-account")
+
+    assert first["deletion_completed"] is True
+    assert second["deletion_completed"] is False
+    assert second["deletion_completed_at"] == first["deletion_completed_at"]
+    assert "account_epoch_token" not in service.status("user-a")
+    assert service.status("user-a", account_epoch_auth_time=1785110000)["account_epoch_token"]
+    with pytest.raises(consent.ConsentAuthorityUnavailable):
+        service.complete_account_deletion("user-a", request_id="request-other-delete")
+
+
+def test_predeletion_grant_paused_before_firestore_write_cannot_reopen_completed_epoch():
+    underlying = consent.InMemoryConsentRepository()
+    grant_ready = threading.Event()
+    resume_grant = threading.Event()
+
+    class PausingRepository:
+        def __getattr__(self, name):
+            return getattr(underlying, name)
+
+        def record(self, uid, receipt_id, receipt, request_fingerprint):
+            if receipt.get("request_id") == "request-paused-before-delete":
+                grant_ready.set()
+                assert resume_grant.wait(timeout=5)
+            return underlying.record(uid, receipt_id, receipt, request_fingerprint)
+
+    service = _service(PausingRepository())
+    result = {}
+
+    def submit_paused_grant():
+        try:
+            result["payload"] = service.submit(
+                "user-a",
+                _submission(request_id="request-paused-before-delete"),
+            )
+        except Exception as exc:
+            result["error"] = exc
+
+    grant_thread = threading.Thread(target=submit_paused_grant)
+    grant_thread.start()
+    assert grant_ready.wait(timeout=5)
+
+    service.record_account_deletion("user-a", request_id="request-delete-account")
+    service.complete_account_deletion("user-a", request_id="request-delete-account")
+    deleted_status = service.status("user-a", account_epoch_auth_time=1785110000)
+
+    resume_grant.set()
+    grant_thread.join(timeout=5)
+    assert not grant_thread.is_alive()
+    assert isinstance(result.get("error"), consent.ConsentAccountDeleted)
+    assert "payload" not in result
+    assert service.status("user-a")["authority_state"] == "deleted"
+
+    fresh = service.submit(
+        "user-a",
+        _submission(
+            request_id="request-fresh-after-delete",
+            account_epoch_token=deleted_status["account_epoch_token"],
+            account_epoch_auth_time=1785110000,
+        ),
+    )
+    assert fresh["authority_state"] == "authorized"
+    assert "account_epoch_token" not in fresh
 
 
 def test_receipts_are_user_scoped():
@@ -884,6 +1155,7 @@ def test_managed_cloud_consent_orders_denial_before_firestore_and_grant_after(
         return {"decision": kwargs["decision"]}
 
     async def grant(**kwargs):
+        assert await kwargs["grant_is_current"]() is True
         events.append("postgres:granted")
         return {"decision": "granted"}
 
@@ -929,6 +1201,44 @@ def test_managed_cloud_consent_orders_denial_before_firestore_and_grant_after(
         "firestore:revoked",
         "artwork:erased",
     ]
+
+
+def test_pending_account_deletion_tombstone_cannot_be_overwritten_by_new_or_replayed_grant():
+    service = _service()
+    original = service.submit("user-a", _submission(request_id="request-before-delete"))
+    service.record_account_deletion("user-a", request_id="request-delete-account")
+
+    for request_id in ("request-after-delete", "request-before-delete"):
+        with pytest.raises(consent.ConsentAccountDeleted):
+            service.submit("user-a", _submission(request_id=request_id))
+
+    status = service.status("user-a")
+    assert status["authority_state"] == "deleted"
+    assert status["consent"]["receipt_id"] != original["receipt"]["receipt_id"]
+
+
+def test_managed_grant_revalidation_rejects_deletion_that_wins_before_publication(monkeypatch):
+    uid = "user-a"
+    service = _service()
+
+    async def grant(**kwargs):
+        service.record_account_deletion(uid, request_id="request-delete-during-publication")
+        assert await kwargs["grant_is_current"]() is False
+        raise managed_cloud_consent.ManagedCloudAuthorityUnavailable("managed_cloud_authority_grant_superseded")
+
+    monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", uid)
+    monkeypatch.setattr(consent_authority.managed_cloud_consent, "synchronize_grant", grant)
+
+    with pytest.raises(managed_cloud_consent.ManagedCloudAuthorityUnavailable):
+        asyncio.run(
+            consent_authority.submit_with_managed_cloud_authority(
+                uid=uid,
+                submission=_submission(request_id="request-racing-grant"),
+                service=service,
+            )
+        )
+
+    assert service.status(uid)["authority_state"] == "deleted"
 
 
 def test_consent_revocation_stays_denied_when_artwork_erasure_is_unavailable(monkeypatch):
@@ -1103,6 +1413,19 @@ def test_submission_rejects_device_identifiers_and_unknown_metadata():
             device_id="do-not-store-this",
         )
 
+    with pytest.raises(ValidationError):
+        ai_consent.AiConsentSubmissionRequest(
+            decision="deleted",
+            policy_version=consent.CURRENT_POLICY_VERSION,
+            processor_set_hash=consent.CURRENT_PROCESSOR_SET_HASH,
+            request_id="request-public-delete",
+            app_version="1.0.0",
+            build_number="804",
+            locale="en-US",
+            scope_version=consent.CURRENT_SCOPE_VERSION,
+            scope_hash=consent.CURRENT_SCOPE_HASH,
+        )
+
 
 def test_policy_is_public_but_status_and_receipts_require_firebase_auth(monkeypatch):
     service = _service()
@@ -1119,9 +1442,59 @@ def test_policy_is_public_but_status_and_receipts_require_firebase_auth(monkeypa
     assert client.get("/v1/users/ai-consent/receipts/aicr_unknown").status_code == 401
 
     app.dependency_overrides[get_exact_firebase_uid] = lambda: "user-a"
+    app.dependency_overrides[get_firebase_token_identity] = lambda: FirebaseTokenIdentity(uid="user-a")
     status_response = client.get("/v1/users/ai-consent")
     assert status_response.status_code == 200
     assert status_response.json()["subject_uid"] == "user-a"
+
+
+def test_status_route_reports_repository_failure_as_retryable_unavailable(monkeypatch):
+    class UnavailableRepository(consent.InMemoryConsentRepository):
+        def get_current(self, uid):
+            raise RuntimeError("synthetic datastore outage")
+
+    service = _service(UnavailableRepository())
+    monkeypatch.setattr(ai_consent, "get_ai_consent_service", lambda: service)
+    app = FastAPI()
+    app.include_router(ai_consent.router)
+    app.dependency_overrides[get_firebase_token_identity] = lambda: FirebaseTokenIdentity(uid="user-a")
+
+    response = TestClient(app).get("/v1/users/ai-consent")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": {
+            "code": "ai_consent_authority_unavailable",
+            "authority_state": "unavailable",
+            "retryable": True,
+        }
+    }
+
+
+def test_protected_route_reports_integrity_failure_as_retryable_unavailable(monkeypatch):
+    repository = consent.InMemoryConsentRepository()
+    result = _service(repository).submit("user-a", _submission())
+    repository.receipts.pop(("user-a", result["receipt"]["receipt_id"]))
+    monkeypatch.setattr(consent, "_repository", repository)
+    monkeypatch.setenv("ELLA_AI_CONSENT_ENFORCEMENT_UIDS", "user-a")
+
+    with pytest.raises(HTTPException) as error:
+        consent.assert_current_ai_consent("user-a")
+
+    assert error.value.status_code == 503
+    assert error.value.detail == {
+        "code": "ai_consent_authority_unavailable",
+        "authority_state": "unavailable",
+        "retryable": True,
+    }
+
+
+def test_account_deletion_absence_is_terminal_not_retryable():
+    status = _service().status("user-a")
+
+    assert status["authorized"] is False
+    assert status["authority_state"] == "not_accepted"
+    assert status["retryable"] is False
 
 
 def test_authenticated_api_records_exact_v7_profile_bound_receipt(monkeypatch):

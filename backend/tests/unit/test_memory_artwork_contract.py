@@ -23,7 +23,12 @@ from PIL import Image
 
 @pytest.fixture(autouse=True)
 def _current_global_ai_consent(monkeypatch):
-    monkeypatch.setattr(artwork, "has_current_global_ai_consent", lambda uid: True)
+    class AuthorizedConsentService:
+        @staticmethod
+        def status(uid):
+            return {"authorized": True, "authority_state": "authorized", "retryable": False}
+
+    monkeypatch.setattr(artwork, "get_ai_consent_service", lambda: AuthorizedConsentService())
 
     @asynccontextmanager
     async def publication_lock(uid):
@@ -3340,6 +3345,84 @@ def test_global_consent_revocation_blocks_signed_url():
     assert store.signed == []
 
 
+def test_global_consent_adapter_raises_typed_retryable_uncertainty(monkeypatch):
+    class UnavailableConsentService:
+        @staticmethod
+        def status(uid):
+            return {"authorized": False, "authority_state": "unavailable", "retryable": True}
+
+    monkeypatch.setattr(artwork, "get_ai_consent_service", lambda: UnavailableConsentService())
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        artwork.has_current_global_ai_consent("owner-a")
+
+    assert failure.value.code == "memory_artwork_consent_authority_unavailable"
+    assert failure.value.retryable is True
+
+
+def test_retryable_global_consent_uncertainty_preserves_saved_artwork():
+    repository = FakeRepository()
+    memory = _terminal_memory("memory-1")
+    memory["artwork"] = {
+        "status": "ready",
+        "style_version": artwork.DEFAULT_STYLE_VERSION,
+        "enrichment_revision": "summary-memory-1",
+        "authority_digest": "digest-a",
+        "binding_id": "binding-owner-a",
+        "profile_id": "profile-owner-a",
+        "object_key": "private/object/key",
+    }
+    repository.conversations[("owner-a", "memory-1")] = memory
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    store = FakeStore()
+
+    def unavailable(_uid):
+        raise artwork.MemoryArtworkError("memory_artwork_consent_authority_unavailable", retryable=True)
+
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        store_factory=lambda: store,
+        global_consent_checker=unavailable,
+        config=_enabled_config(),
+    )
+
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        asyncio.run(service.signed_url("owner-a", "memory-1"))
+
+    assert failure.value.code == "memory_artwork_consent_authority_unavailable"
+    assert failure.value.retryable is True
+    assert repository.conversations[("owner-a", "memory-1")]["artwork"]["status"] == "ready"
+    assert store.signed == []
+
+
+def test_retryable_global_consent_uncertainty_preserves_inflight_generation():
+    repository = FakeRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    provider = FakeProvider()
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        provider_factory=lambda: provider,
+        store_factory=FakeStore,
+        config=_enabled_config(),
+    )
+    asyncio.run(service.enqueue("owner-a", "memory-1"))
+
+    def unavailable(_uid):
+        raise artwork.MemoryArtworkError("memory_artwork_consent_authority_unavailable", retryable=True)
+
+    service.global_consent_checker = unavailable
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        _run_claimed_process(service, repository)
+
+    assert failure.value.code == "memory_artwork_consent_authority_unavailable"
+    assert failure.value.retryable is True
+    assert repository.conversations[("owner-a", "memory-1")]["artwork"]["status"] == "generating"
+    assert provider.calls == 0
+
+
 def test_provider_failure_is_typed_and_does_not_write_object():
     repository = FakeRepository()
     repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
@@ -6587,6 +6670,9 @@ def test_storage_owner_validation_and_production_deletion_hooks(monkeypatch):
     assert account_route_source.index(
         "prepare_account_artwork_deletion", account_delete_start
     ) < account_route_source.index("unlink_self_owner_account_on_deletion(uid=uid)", account_delete_start)
+    assert account_route_source.index(
+        "unlink_self_owner_account_on_deletion(uid=uid)", account_delete_start
+    ) < account_route_source.index("complete_account_deletion(", account_delete_start)
     user_database_source = (BACKEND_ROOT / "database" / "users.py").read_text(encoding="utf-8")
     user_delete_start = user_database_source.index("def delete_user_data(uid: str")
     assert user_database_source.index(

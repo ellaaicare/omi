@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from fastapi.concurrency import run_in_threadpool
+
 from database import managed_cloud_consent
 from ella.services.ai_consent import (
     AiConsentService,
@@ -77,6 +79,18 @@ async def submit_with_managed_cloud_authority(
     if submission.decision in {"declined", "revoked"}:
         await _erase_artwork_for_denial(uid)
     if managed and submission.decision == "granted":
+        receipt_id = str((payload.get("receipt") or {}).get("receipt_id") or "")
+
+        async def grant_is_current() -> bool:
+            status = await run_in_threadpool(service.status, uid)
+            current = dict(status.get("consent") or {})
+            return bool(
+                status.get("authority_state") == "authorized"
+                and current.get("decision") == "granted"
+                and receipt_id
+                and current.get("receipt_id") == receipt_id
+            )
+
         await managed_cloud_consent.synchronize_grant(
             grant=managed_cloud_consent.ManagedCloudGrant.from_mapping(
                 uid,
@@ -84,5 +98,6 @@ async def submit_with_managed_cloud_authority(
             ),
             allow_fresh_uid_bootstrap=self_hosted_fresh_uid_relax_enabled(),
             bootstrap_email=verified_email,
+            grant_is_current=grant_is_current,
         )
     return payload

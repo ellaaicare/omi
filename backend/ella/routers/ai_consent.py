@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ella.services.ai_consent import (
     AiConsentService,
+    ConsentAccountDeleted,
+    ConsentAuthorityUnavailable,
     ConsentIdempotencyConflict,
     ConsentPolicyMismatch,
     ConsentSubmission,
@@ -35,6 +37,7 @@ class AiConsentSubmissionRequest(BaseModel):
     locale: str = Field(min_length=2, max_length=40)
     scope_version: str = Field(default="", max_length=100)
     scope_hash: str = Field(default="", max_length=100)
+    account_epoch_token: str = Field(default="", max_length=128)
 
 
 @router.get("/v1/users/ai-consent/policy")
@@ -44,13 +47,36 @@ def get_ai_consent_policy():
 
 
 @router.get("/v1/users/ai-consent")
-def get_ai_consent_status(uid: str = Depends(get_exact_firebase_uid)):
-    return get_ai_consent_service().status(uid)
+def get_ai_consent_status(identity: FirebaseTokenIdentity = Depends(get_firebase_token_identity)):
+    status = get_ai_consent_service().status(
+        identity.uid,
+        account_epoch_auth_time=identity.auth_time,
+    )
+    if status.get("authority_state") == "unavailable":
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "ai_consent_authority_unavailable",
+                "authority_state": "unavailable",
+                "retryable": True,
+            },
+        )
+    return status
 
 
 @router.get("/v1/users/ai-consent/receipts/{receipt_id}")
 def get_ai_consent_receipt(receipt_id: str, uid: str = Depends(get_exact_firebase_uid)):
-    receipt = get_ai_consent_service().receipt(uid, receipt_id)
+    try:
+        receipt = get_ai_consent_service().receipt(uid, receipt_id)
+    except ConsentAuthorityUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "ai_consent_authority_unavailable",
+                "authority_state": "unavailable",
+                "retryable": True,
+            },
+        ) from exc
     if receipt is None:
         raise HTTPException(status_code=404, detail={"code": "ai_consent_receipt_not_found"})
     return {"receipt": receipt}
@@ -76,6 +102,8 @@ async def submit_ai_consent(
                 locale=request.locale,
                 scope_version=request.scope_version,
                 scope_hash=request.scope_hash,
+                account_epoch_token=request.account_epoch_token,
+                account_epoch_auth_time=identity.auth_time,
             ),
         )
     except ConsentPolicyMismatch as exc:
@@ -88,6 +116,24 @@ async def submit_ai_consent(
         ) from exc
     except ConsentIdempotencyConflict as exc:
         raise HTTPException(status_code=409, detail={"code": "ai_consent_idempotency_conflict"}) from exc
+    except ConsentAccountDeleted as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "ai_consent_account_deleted",
+                "authority_state": "deleted",
+                "retryable": False,
+            },
+        ) from exc
+    except ConsentAuthorityUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "ai_consent_authority_unavailable",
+                "authority_state": "unavailable",
+                "retryable": True,
+            },
+        ) from exc
     except ManagedCloudAuthorityUnavailable as exc:
         raise HTTPException(
             status_code=503,

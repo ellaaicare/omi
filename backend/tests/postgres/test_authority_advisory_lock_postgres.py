@@ -431,6 +431,33 @@ async def _wait_for_advisory_waiter(
     pytest.fail("production writer never waited on the shared v1 authority lock")
 
 
+async def _wait_for_runtime_authority_waiter(pool: asyncpg.Pool) -> None:
+    key = voice_canary._authority_lock_key("global", "*")
+    class_id, object_id = authority_advisory_lock._advisory_lock_parts(key)
+    for _attempt in range(100):
+        async with pool.acquire() as observer:
+            waiting = await observer.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_locks
+                    WHERE locktype = 'advisory'
+                      AND classid::bigint = $1
+                      AND objid::bigint = $2
+                      AND objsubid = 1
+                      AND mode = 'ExclusiveLock'
+                      AND NOT granted
+                )
+                """,
+                class_id,
+                object_id,
+            )
+        if waiting:
+            return
+        await asyncio.sleep(0.02)
+    pytest.fail("production writer never waited on the runtime authority lock")
+
+
 @dataclass
 class _WriterCase:
     owner: authority_advisory_lock.AuthorityOwner
@@ -3537,6 +3564,124 @@ def test_delete_unlinks_users_row_and_consent_authority_freeing_uid():
                 await observer.fetchval(
                     "SELECT COUNT(*) FROM users WHERE omi_uid = $1",
                     uid,
+                )
+                == 0
+            )
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_delete_absent_uid_serializes_on_provisional_bootstrap_lock():
+    async def scenario(pool):
+        uid = "synthetic-delete-absent-lock"
+        owner = authority_advisory_lock.provisional_identity_owner(uid)
+        async with pool.acquire() as broker:
+            transaction = broker.transaction()
+            await transaction.start()
+            await authority_advisory_lock.acquire_authority_lock(broker, owner=owner)
+
+            deletion = asyncio.create_task(managed_cloud_consent.unlink_self_owner_account_on_deletion(uid=uid))
+            await _wait_for_advisory_waiter(pool, owner)
+            assert not deletion.done()
+            await transaction.commit()
+
+        await asyncio.wait_for(deletion, timeout=5)
+        async with pool.acquire() as observer:
+            assert await observer.fetchval("SELECT COUNT(*) FROM users WHERE omi_uid = $1", uid) == 0
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_delete_waits_for_inflight_fresh_bootstrap_then_removes_it():
+    async def scenario(pool):
+        uid = "synthetic-delete-bootstrap-race"
+        owner = authority_advisory_lock.provisional_identity_owner(uid)
+        grant_holds_lock = asyncio.Event()
+        release_grant = asyncio.Event()
+
+        async def grant_is_current():
+            grant_holds_lock.set()
+            await release_grant.wait()
+            return True
+
+        grant = asyncio.create_task(
+            managed_cloud_consent.synchronize_grant(
+                grant=_managed_cloud_grant(uid, revision="racing"),
+                allow_fresh_uid_bootstrap=True,
+                bootstrap_email="delete-bootstrap-race@example.invalid",
+                grant_is_current=grant_is_current,
+            )
+        )
+        await asyncio.wait_for(grant_holds_lock.wait(), timeout=5)
+
+        deletion = asyncio.create_task(managed_cloud_consent.unlink_self_owner_account_on_deletion(uid=uid))
+        await _wait_for_advisory_waiter(pool, owner)
+        assert not deletion.done()
+
+        release_grant.set()
+        await asyncio.wait_for(grant, timeout=5)
+        await asyncio.wait_for(deletion, timeout=5)
+
+        async with pool.acquire() as observer:
+            assert await observer.fetchval("SELECT COUNT(*) FROM users WHERE omi_uid = $1", uid) == 0
+            assert (
+                await observer.fetchval(
+                    "SELECT COUNT(*) FROM ella_managed_cloud_consent_authority WHERE user_id = $1",
+                    owner.account_id,
+                )
+                == 0
+            )
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_delete_re_resolves_email_owner_created_while_waiting_on_uid_lock():
+    async def scenario(pool):
+        uid = "synthetic-delete-email-owner-race"
+        email = "delete-email-owner-race@example.invalid"
+        async with pool.acquire() as conn:
+            legacy_owner_id = await conn.fetchval(
+                """
+                INSERT INTO users (email, name, status, profile_class)
+                VALUES ($1, 'Legacy Email Owner', 'PENDING', 'real')
+                RETURNING id
+                """,
+                email,
+            )
+
+        grant_holds_runtime_lock = asyncio.Event()
+        release_grant = asyncio.Event()
+
+        async def grant_is_current():
+            grant_holds_runtime_lock.set()
+            await release_grant.wait()
+            return True
+
+        grant = asyncio.create_task(
+            managed_cloud_consent.synchronize_grant(
+                grant=_managed_cloud_grant(uid, revision="email-racing"),
+                allow_fresh_uid_bootstrap=True,
+                bootstrap_email=email,
+                grant_is_current=grant_is_current,
+            )
+        )
+        await asyncio.wait_for(grant_holds_runtime_lock.wait(), timeout=5)
+
+        deletion = asyncio.create_task(managed_cloud_consent.unlink_self_owner_account_on_deletion(uid=uid))
+        await _wait_for_runtime_authority_waiter(pool)
+        assert not deletion.done()
+
+        release_grant.set()
+        grant_result = await asyncio.wait_for(grant, timeout=5)
+        assert grant_result["user_id"] == legacy_owner_id
+        await asyncio.wait_for(deletion, timeout=5)
+
+        async with pool.acquire() as observer:
+            assert await observer.fetchval("SELECT COUNT(*) FROM users WHERE id = $1", legacy_owner_id) == 0
+            assert (
+                await observer.fetchval(
+                    "SELECT COUNT(*) FROM ella_managed_cloud_consent_authority WHERE user_id = $1",
+                    legacy_owner_id,
                 )
                 == 0
             )
