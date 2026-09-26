@@ -12,12 +12,17 @@ class MemoryArtworkCache {
   MemoryArtworkCache._();
 
   static const int _maxDisplayAliases = 1000;
+  static const int _maxPublishedVariantScopes = 1000;
+  static const int _maxPublishedVariantKeysPerScope = 16;
   static const int _maxTrustedDisplayKeys = 1000;
   static const int _maxSuppressedDisplayKeys = 4096;
   static const Duration _evictionTimeout = Duration(seconds: 5);
   static const String _displayAliasesPreferenceKey = 'ellaMemoryArtworkDisplayAliasesV2';
+  static const String _publishedVariantKeysPreferenceKey = 'ellaMemoryArtworkPublishedVariantKeysV1';
   static CacheManager? _manager;
   static final LinkedHashMap<String, String> _displayAliases = LinkedHashMap();
+  static final LinkedHashMap<String, Set<String>> _publishedVariantKeys = LinkedHashMap();
+  static final Map<String, String> _publishedVariantDisplayKeys = {};
   static final LinkedHashSet<String> _trustedDisplayKeys = LinkedHashSet();
   static final LinkedHashSet<String> _suppressedDisplayKeys = LinkedHashSet();
   static final Map<String, int> _suppressionGenerations = {};
@@ -130,6 +135,60 @@ class MemoryArtworkCache {
     return publishedCacheKey;
   }
 
+  static Set<String> publishedVariantCacheKeys({required String scopeKey, required String displayCacheKey}) {
+    _loadPersistentAliases();
+    if (scopeKey.isEmpty || _publishedVariantDisplayKeys[scopeKey] != displayCacheKey) return const <String>{};
+    final keys = _publishedVariantKeys.remove(scopeKey);
+    if (keys == null) return const <String>{};
+    _publishedVariantKeys[scopeKey] = keys;
+    return Set<String>.unmodifiable(keys);
+  }
+
+  static Future<void> rememberPublishedVariantCacheKeys({
+    required String scopeKey,
+    required String displayCacheKey,
+    required Iterable<String> cacheKeys,
+  }) async {
+    _loadPersistentAliases();
+    if (!_isPersistentVariantScope(scopeKey) || !_isPersistentPublishedCacheKey(displayCacheKey)) return;
+    final keys = cacheKeys.where(_isPersistentPublishedCacheKey).toSet();
+    if (keys.isEmpty) return;
+
+    final staleScopes = _publishedVariantDisplayKeys.entries
+        .where((entry) => entry.value == displayCacheKey && entry.key != scopeKey)
+        .map((entry) => entry.key)
+        .toList(growable: false);
+    for (final staleScope in staleScopes) {
+      _publishedVariantKeys.remove(staleScope);
+      _publishedVariantDisplayKeys.remove(staleScope);
+    }
+
+    final published = _publishedVariantKeys.remove(scopeKey) ?? <String>{};
+    for (final cacheKey in keys) {
+      published.remove(cacheKey);
+      published.add(cacheKey);
+    }
+    while (published.length > _maxPublishedVariantKeysPerScope) {
+      published.remove(published.first);
+    }
+    _publishedVariantKeys[scopeKey] = published;
+    _publishedVariantDisplayKeys[scopeKey] = displayCacheKey;
+    while (_publishedVariantKeys.length > _maxPublishedVariantScopes) {
+      final oldestScope = _publishedVariantKeys.keys.first;
+      _publishedVariantKeys.remove(oldestScope);
+      _publishedVariantDisplayKeys.remove(oldestScope);
+    }
+    await _persistPublishedVariantKeys();
+  }
+
+  static void forgetPublishedVariantCacheKeys(String scopeKey) {
+    _loadPersistentAliases();
+    if (scopeKey.isNotEmpty && _publishedVariantKeys.remove(scopeKey) != null) {
+      _publishedVariantDisplayKeys.remove(scopeKey);
+      unawaited(_persistPublishedVariantKeys());
+    }
+  }
+
   static void forgetDisplayCacheKey(String provisionalCacheKey) {
     _loadPersistentAliases();
     if (provisionalCacheKey.isNotEmpty && _displayAliases.remove(provisionalCacheKey) != null) {
@@ -148,6 +207,14 @@ class MemoryArtworkCache {
     _displayAliases.removeWhere(
       (provisional, authoritative) => keys.contains(provisional) || keys.contains(authoritative),
     );
+    final suppressedScopes = _publishedVariantKeys.entries
+        .where((entry) => entry.value.any(keys.contains))
+        .map((entry) => entry.key)
+        .toList(growable: false);
+    for (final scopeKey in suppressedScopes) {
+      _publishedVariantKeys.remove(scopeKey);
+      _publishedVariantDisplayKeys.remove(scopeKey);
+    }
     for (final cacheKey in keys) {
       _trustedDisplayKeys.remove(cacheKey);
       _suppressedDisplayKeys.remove(cacheKey);
@@ -159,6 +226,7 @@ class MemoryArtworkCache {
       _enterFailClosedDiskMode();
     }
     unawaited(_persistDisplayAliases());
+    unawaited(_persistPublishedVariantKeys());
   }
 
   static Future<void> evictSuppressedDisplayCacheKeys(
@@ -240,6 +308,8 @@ class MemoryArtworkCache {
   @visibleForTesting
   static void resetRuntimeTrustForTesting() {
     _displayAliases.clear();
+    _publishedVariantKeys.clear();
+    _publishedVariantDisplayKeys.clear();
     _trustedDisplayKeys.clear();
     _suppressedDisplayKeys.clear();
     _suppressionGenerations.clear();
@@ -256,11 +326,14 @@ class MemoryArtworkCache {
     _loadPersistentAliases();
     if (!preserveDisplayAliases) {
       _displayAliases.clear();
+      _publishedVariantKeys.clear();
+      _publishedVariantDisplayKeys.clear();
       _suppressedDisplayKeys.clear();
       _suppressionGenerations.clear();
       _completedEvictionGenerations.clear();
       _diskReadsDisabled = false;
       unawaited(SharedPreferencesUtil().remove(_displayAliasesPreferenceKey));
+      unawaited(SharedPreferencesUtil().remove(_publishedVariantKeysPreferenceKey));
     }
     _trustedDisplayKeys.clear();
     // A detached terminal eviction can still delete its key after authority
@@ -270,16 +343,21 @@ class MemoryArtworkCache {
   static void _enterFailClosedDiskMode() {
     _diskReadsDisabled = true;
     _displayAliases.clear();
+    _publishedVariantKeys.clear();
+    _publishedVariantDisplayKeys.clear();
     _trustedDisplayKeys.clear();
     _suppressedDisplayKeys.clear();
     _suppressionGenerations.clear();
     _completedEvictionGenerations.clear();
     _pendingEvictions.clear();
     unawaited(_persistDisplayAliases());
+    unawaited(_persistPublishedVariantKeys());
   }
 
   static Future<void> clear() async {
     _displayAliases.clear();
+    _publishedVariantKeys.clear();
+    _publishedVariantDisplayKeys.clear();
     _trustedDisplayKeys.clear();
     _suppressedDisplayKeys.clear();
     _suppressionGenerations.clear();
@@ -289,6 +367,7 @@ class MemoryArtworkCache {
     _persistentAliasesLoaded = true;
     _nextRecoveryCacheGeneration = 0;
     await SharedPreferencesUtil().remove(_displayAliasesPreferenceKey);
+    await SharedPreferencesUtil().remove(_publishedVariantKeysPreferenceKey);
     final activeManager = _manager;
     if (activeManager == null) return;
     await activeManager.emptyCache();
@@ -298,21 +377,56 @@ class MemoryArtworkCache {
     if (_persistentAliasesLoaded) return;
     _persistentAliasesLoaded = true;
     final encoded = SharedPreferencesUtil().getString(_displayAliasesPreferenceKey);
-    if (encoded.isEmpty) return;
     try {
-      final decoded = jsonDecode(encoded);
-      if (decoded is! Map) return;
-      for (final entry in decoded.entries) {
-        final provisional = entry.key.toString();
-        final authoritative = entry.value?.toString() ?? '';
-        if (!_persistentCacheKey.hasMatch(provisional) || !_persistentCacheKey.hasMatch(authoritative)) continue;
-        _displayAliases[provisional] = authoritative;
+      if (encoded.isNotEmpty) {
+        final decoded = jsonDecode(encoded);
+        if (decoded is Map) {
+          for (final entry in decoded.entries) {
+            final provisional = entry.key.toString();
+            final authoritative = entry.value?.toString() ?? '';
+            if (!_persistentCacheKey.hasMatch(provisional) || !_persistentCacheKey.hasMatch(authoritative)) continue;
+            _displayAliases[provisional] = authoritative;
+          }
+        }
       }
       while (_displayAliases.length > _maxDisplayAliases) {
         _displayAliases.remove(_displayAliases.keys.first);
       }
     } catch (_) {
       _displayAliases.clear();
+    }
+
+    final encodedVariantKeys = SharedPreferencesUtil().getString(_publishedVariantKeysPreferenceKey);
+    try {
+      if (encodedVariantKeys.isEmpty) return;
+      final decoded = jsonDecode(encodedVariantKeys);
+      if (decoded is! Map) return;
+      for (final entry in decoded.entries) {
+        final scopeKey = entry.key.toString();
+        final value = entry.value;
+        if (!_isPersistentVariantScope(scopeKey) || value is! Map) continue;
+        final displayCacheKey = value['display_cache_key']?.toString() ?? '';
+        final values = value['cache_keys'];
+        if (!_isPersistentPublishedCacheKey(displayCacheKey) || values is! List) continue;
+        final keys = LinkedHashSet<String>.from(
+          values.map((value) => value.toString()).where(_isPersistentPublishedCacheKey),
+        );
+        while (keys.length > _maxPublishedVariantKeysPerScope) {
+          keys.remove(keys.first);
+        }
+        if (keys.isNotEmpty) {
+          _publishedVariantKeys[scopeKey] = keys;
+          _publishedVariantDisplayKeys[scopeKey] = displayCacheKey;
+        }
+      }
+      while (_publishedVariantKeys.length > _maxPublishedVariantScopes) {
+        final oldestScope = _publishedVariantKeys.keys.first;
+        _publishedVariantKeys.remove(oldestScope);
+        _publishedVariantDisplayKeys.remove(oldestScope);
+      }
+    } catch (_) {
+      _publishedVariantKeys.clear();
+      _publishedVariantDisplayKeys.clear();
     }
   }
 
@@ -326,5 +440,28 @@ class MemoryArtworkCache {
     await SharedPreferencesUtil().saveString(_displayAliasesPreferenceKey, jsonEncode(aliases));
   }
 
+  static Future<void> _persistPublishedVariantKeys() async {
+    if (!_persistentAliasesLoaded) return;
+    final publishedVariantKeys = <String, Map<String, Object>>{
+      for (final entry in _publishedVariantKeys.entries)
+        if (_isPersistentVariantScope(entry.key) &&
+            _isPersistentPublishedCacheKey(_publishedVariantDisplayKeys[entry.key] ?? ''))
+          entry.key: {
+            'display_cache_key': _publishedVariantDisplayKeys[entry.key]!,
+            'cache_keys': entry.value.where(_isPersistentPublishedCacheKey).toList(growable: false),
+          },
+    };
+    await SharedPreferencesUtil().saveString(
+      _publishedVariantKeysPreferenceKey,
+      jsonEncode(publishedVariantKeys),
+    );
+  }
+
   static final RegExp _persistentCacheKey = RegExp(r'^[a-f0-9]{64}$');
+  static final RegExp _persistentPublishedCacheKey = RegExp(r'^[A-Za-z0-9._:-]{1,512}$');
+
+  static bool _isPersistentPublishedCacheKey(String cacheKey) => _persistentPublishedCacheKey.hasMatch(cacheKey);
+
+  static bool _isPersistentVariantScope(String scopeKey) =>
+      scopeKey.isNotEmpty && scopeKey.length <= 2048 && !scopeKey.contains(RegExp(r'[\x00-\x1F]'));
 }

@@ -79,4 +79,50 @@ void main() {
     );
     expect(MemoryArtworkCache.resolveDisplayCacheKey(provisional), largeVariant);
   });
+
+  test('published responsive variants survive restart and reset when their authority scope changes', () async {
+    final provisional = '4' * 64;
+    final compactVariant = '5' * 64;
+    final largeVariant = '6' * 64;
+    final replacementVariant = '7' * 64;
+    const firstScope = 'memory-a:authority-1:artwork-1';
+    const secondScope = 'memory-a:authority-2:artwork-1';
+
+    await MemoryArtworkCache.rememberPublishedVariantCacheKeys(
+      scopeKey: firstScope,
+      displayCacheKey: provisional,
+      cacheKeys: {compactVariant},
+    );
+    await MemoryArtworkCache.rememberPublishedVariantCacheKeys(
+      scopeKey: firstScope,
+      displayCacheKey: provisional,
+      cacheKeys: {largeVariant},
+    );
+
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+
+    expect(
+      MemoryArtworkCache.publishedVariantCacheKeys(scopeKey: firstScope, displayCacheKey: provisional),
+      {compactVariant, largeVariant},
+    );
+    expect(
+      MemoryArtworkCache.publishedVariantCacheKeys(scopeKey: firstScope, displayCacheKey: '8' * 64),
+      isEmpty,
+    );
+
+    await MemoryArtworkCache.rememberPublishedVariantCacheKeys(
+      scopeKey: secondScope,
+      displayCacheKey: provisional,
+      cacheKeys: {replacementVariant},
+    );
+
+    expect(
+      MemoryArtworkCache.publishedVariantCacheKeys(scopeKey: firstScope, displayCacheKey: provisional),
+      isEmpty,
+    );
+    expect(
+      MemoryArtworkCache.publishedVariantCacheKeys(scopeKey: secondScope, displayCacheKey: provisional),
+      {replacementVariant},
+    );
+  });
 }
