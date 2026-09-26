@@ -520,16 +520,11 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       return;
     }
     if (_mustSuppressCachedArtwork(result)) {
-      final publishedVariantScopeKey = _publishedVariantScopeKey(_displayCacheKey);
       final suppressedCacheKeys = {
         _displayCacheKey,
         _cacheKey,
-        ...MemoryArtworkCache.publishedVariantCacheKeys(
-          scopeKey: publishedVariantScopeKey,
-          displayCacheKey: _displayCacheKey,
-        ),
+        ...MemoryArtworkCache.takePublishedVariantCacheKeys(displayCacheKey: _displayCacheKey),
       }..removeWhere((cacheKey) => cacheKey.isEmpty);
-      MemoryArtworkCache.forgetPublishedVariantCacheKeys(publishedVariantScopeKey);
       MemoryArtworkCache.suppressDisplayCacheKeys(suppressedCacheKeys);
       setState(() {
         _remoteResult = result;

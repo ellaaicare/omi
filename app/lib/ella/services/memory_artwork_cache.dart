@@ -144,6 +144,26 @@ class MemoryArtworkCache {
     return Set<String>.unmodifiable(keys);
   }
 
+  /// Atomically drains every ledger for one owner-scoped memory identity.
+  /// The display key stays stable across authority epochs and artwork revisions.
+  static Set<String> takePublishedVariantCacheKeys({required String displayCacheKey}) {
+    _loadPersistentAliases();
+    if (!_isPersistentPublishedCacheKey(displayCacheKey)) return const <String>{};
+    final matchingScopes = _publishedVariantDisplayKeys.entries
+        .where((entry) => entry.value == displayCacheKey)
+        .map((entry) => entry.key)
+        .toList(growable: false);
+    if (matchingScopes.isEmpty) return const <String>{};
+
+    final published = <String>{};
+    for (final scopeKey in matchingScopes) {
+      published.addAll(_publishedVariantKeys.remove(scopeKey) ?? const <String>{});
+      _publishedVariantDisplayKeys.remove(scopeKey);
+    }
+    unawaited(_persistPublishedVariantKeys());
+    return Set<String>.unmodifiable(published);
+  }
+
   static Future<void> rememberPublishedVariantCacheKeys({
     required String scopeKey,
     required String displayCacheKey,
@@ -158,12 +178,12 @@ class MemoryArtworkCache {
         .where((entry) => entry.value == displayCacheKey && entry.key != scopeKey)
         .map((entry) => entry.key)
         .toList(growable: false);
+    final published = _publishedVariantKeys.remove(scopeKey) ?? <String>{};
     for (final staleScope in staleScopes) {
-      _publishedVariantKeys.remove(staleScope);
+      published.addAll(_publishedVariantKeys.remove(staleScope) ?? const <String>{});
       _publishedVariantDisplayKeys.remove(staleScope);
     }
 
-    final published = _publishedVariantKeys.remove(scopeKey) ?? <String>{};
     for (final cacheKey in keys) {
       published.remove(cacheKey);
       published.add(cacheKey);
@@ -179,14 +199,6 @@ class MemoryArtworkCache {
       _publishedVariantDisplayKeys.remove(oldestScope);
     }
     await _persistPublishedVariantKeys();
-  }
-
-  static void forgetPublishedVariantCacheKeys(String scopeKey) {
-    _loadPersistentAliases();
-    if (scopeKey.isNotEmpty && _publishedVariantKeys.remove(scopeKey) != null) {
-      _publishedVariantDisplayKeys.remove(scopeKey);
-      unawaited(_persistPublishedVariantKeys());
-    }
   }
 
   static void forgetDisplayCacheKey(String provisionalCacheKey) {

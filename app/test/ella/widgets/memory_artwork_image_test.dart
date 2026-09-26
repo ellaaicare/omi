@@ -2779,7 +2779,7 @@ void main() {
       ),
     );
 
-    Widget buildArtwork(double width, int refreshEpoch) => MaterialApp(
+    Widget buildArtwork(double width, int refreshEpoch, {int authorityEpoch = 0}) => MaterialApp(
           localizationsDelegates: AppLocalizations.localizationsDelegates,
           supportedLocales: AppLocalizations.supportedLocales,
           home: MediaQuery(
@@ -2792,6 +2792,7 @@ void main() {
                 child: MemoryArtworkImage(
                   conversation: conversation,
                   api: api,
+                  authorityEpoch: authorityEpoch,
                   refreshEpoch: refreshEpoch,
                   cachedFileLookup: (_) async => null,
                   cacheEvictor: (cacheKey) async => evictedKeys.add(cacheKey),
@@ -2837,7 +2838,7 @@ void main() {
     MemoryArtworkCache.resetRuntimeTrustForTesting();
 
     api.terminal = true;
-    await tester.pumpWidget(buildArtwork(300, 1));
+    await tester.pumpWidget(buildArtwork(300, 1, authorityEpoch: 1));
     await tester.pump();
     await tester.pump();
 

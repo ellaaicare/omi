@@ -122,7 +122,17 @@ void main() {
     );
     expect(
       MemoryArtworkCache.publishedVariantCacheKeys(scopeKey: secondScope, displayCacheKey: provisional),
-      {replacementVariant},
+      {compactVariant, largeVariant, replacementVariant},
+    );
+
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+    expect(
+      MemoryArtworkCache.takePublishedVariantCacheKeys(displayCacheKey: provisional),
+      {compactVariant, largeVariant, replacementVariant},
+    );
+    expect(
+      MemoryArtworkCache.publishedVariantCacheKeys(scopeKey: secondScope, displayCacheKey: provisional),
+      isEmpty,
     );
   });
 }
