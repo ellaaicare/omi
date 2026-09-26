@@ -785,7 +785,9 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   Future<void> _startV2V(String provider, {required int startupGeneration, bool allowScopeRefresh = true}) async {
-    final authority = AiConsentAuthoritySnapshot.capture(expectedUid: SharedPreferencesUtil().uid);
+    final authority = AiConsentActiveSessionLease.authorityForSessionStart(
+      expectedUid: SharedPreferencesUtil().uid,
+    );
     bool hasCurrentStartupAuthority() => _isCurrentV2VStartup(startupGeneration) && authority?.isCurrent() == true;
     if (!hasCurrentStartupAuthority()) return;
     provider = V2VClient.normalizeProvider(provider);
