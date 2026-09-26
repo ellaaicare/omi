@@ -288,6 +288,31 @@ void main() {
     expect(capture.recordingDevice, same(provider.presentationConnectedDevice));
   });
 
+  test('connected callback announces the hydrated active device', () async {
+    final necklace = BtDevice(name: 'Friend', id: 'announced-necklace', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final connection = OmiDeviceConnection(necklace, _MetadataTransport(necklace.id));
+    final capture = _RecordingCaptureProvider();
+    final announced = Completer<BtDevice>();
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready, connection),
+      storageListResolver: (_) async => const [],
+      automaticallyReconnectOnReady: false,
+    )
+      ..setProviders(capture)
+      ..onDeviceConnected = announced.complete;
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.onDeviceConnectionStateChanged(necklace.id, DeviceConnectionState.connected, connectionGeneration: 1);
+    final hydrated = await announced.future.timeout(const Duration(seconds: 1));
+
+    expect(hydrated.modelNumber, 'Omi v1');
+    expect(hydrated.firmwareRevision, '3.0.8');
+    expect(hydrated, same(provider.presentationConnectedDevice));
+    expect(hydrated, same(connection.device));
+  });
+
   test('a legacy UID plus consent-profile binding migrates to UID-only ownership', () async {
     final necklace = BtDevice(name: 'Ella necklace', id: 'migrated-necklace', type: DeviceType.omi, rssi: -30);
     final preferences = SharedPreferencesUtil()..uid = 'same-user';

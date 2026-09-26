@@ -1387,16 +1387,19 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       }
     }
 
+    if (!_isDeviceOperationCurrent(operationGeneration) || connectedDevice?.id != device.id) return;
+    final activeDevice = connectedDevice!;
+
     // Wals
-    ServiceManager.instance().wal.getSyncs().sdcard.setDevice(device);
-    ServiceManager.instance().wal.getSyncs().flashPage.setDevice(device);
+    ServiceManager.instance().wal.getSyncs().sdcard.setDevice(activeDevice);
+    ServiceManager.instance().wal.getSyncs().flashPage.setDevice(activeDevice);
 
     notifyListeners();
 
     // Check firmware updates
     _checkFirmwareUpdates(operationGeneration: operationGeneration);
 
-    onDeviceConnected?.call(device);
+    onDeviceConnected?.call(activeDevice);
   }
 
   Future<void> _runConnectedSetupStep(String name, int operationGeneration, Future<void> Function() step) async {
