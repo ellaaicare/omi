@@ -58,6 +58,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
   bool _requestInFlight = false;
   bool _retryEnsureAfterCurrentRequest = false;
   bool _revalidatingOperationalReceipt = false;
+  Object? _authorityCoordinatorOwner;
 
   bool get isOperational => state == EllaProvisioningState.ready && receipt?.isOperational == true;
 
@@ -78,6 +79,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
       return;
     }
     if (_activeUid == uid) {
+      _bindAuthorityCoordinator(uid);
       final consentReceiptId = requestContext.consentReceiptId;
       if (consentReceiptId.isNotEmpty && consentReceiptId != _requestContext?.consentReceiptId) {
         setConsentReceiptId(consentReceiptId);
@@ -102,6 +104,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     final generation = ++_generation;
     _cancelPoll();
     _activeUid = uid;
+    _bindAuthorityCoordinator(uid);
     _requestContext = requestContext;
     _requestContextEpoch++;
     _pollAttempts = 0;
@@ -153,11 +156,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
   }
 
   void setConsentReceiptId(String receiptId) {
-    final context = _requestContext;
-    if (receiptId.isEmpty || context == null || context.consentReceiptId == receiptId) return;
-    _requestContext = context.copyWithConsentReceiptId(receiptId);
-    _requestContextEpoch++;
-    unawaited(retry(preserveOperationalReceipt: false));
+    unawaited(_revalidateConsentReceipt(_activeUid, receiptId).then<void>((_) {}));
   }
 
   void setForeground(bool value) {
@@ -177,6 +176,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _generation++;
     _requestContextEpoch++;
     _cancelPoll();
+    _unbindAuthorityCoordinator();
     _endProvisioningOwnership();
     _activeUid = '';
     _requestContext = null;
@@ -393,6 +393,41 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _preferences.invalidateEllaProvisioningTerminalAuthority();
   }
 
+  void _bindAuthorityCoordinator(String uid) {
+    _unbindAuthorityCoordinator();
+    _authorityCoordinatorOwner = EllaProvisioningAuthorityCoordinator.register(
+      uid: uid,
+      revalidator: _revalidateConsentReceipt,
+    );
+  }
+
+  void _unbindAuthorityCoordinator() {
+    final owner = _authorityCoordinatorOwner;
+    if (owner == null) return;
+    EllaProvisioningAuthorityCoordinator.unregister(owner);
+    _authorityCoordinatorOwner = null;
+  }
+
+  Future<bool> _revalidateConsentReceipt(String uid, String receiptId) async {
+    final context = _requestContext;
+    if (uid.isEmpty || uid != _activeUid || uid != _preferences.uid || receiptId.isEmpty || context == null) {
+      return false;
+    }
+    final bindingRevision = receipt?.bindingRevision ?? 0;
+    if (context.consentReceiptId == receiptId &&
+        bindingRevision > 0 &&
+        _preferences.hasCurrentEllaProvisioningAuthority(uid: uid, bindingRevision: bindingRevision)) {
+      return true;
+    }
+    if (context.consentReceiptId == receiptId && (_requestInFlight || _pollHandle != null || _shouldPoll)) {
+      return true;
+    }
+    _requestContext = context.copyWithConsentReceiptId(receiptId);
+    _requestContextEpoch++;
+    await retry(preserveOperationalReceipt: false);
+    return uid == _activeUid && uid == _preferences.uid;
+  }
+
   bool _isCurrentRequest(int generation, int requestContextEpoch) =>
       generation == _generation && requestContextEpoch == _requestContextEpoch;
 
@@ -410,6 +445,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _generation++;
     _requestContextEpoch++;
     _cancelPoll();
+    _unbindAuthorityCoordinator();
     _endProvisioningOwnership();
     _activeUid = '';
     _preferences.invalidateEllaProvisioningServerVerification();

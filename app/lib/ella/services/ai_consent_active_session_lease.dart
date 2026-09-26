@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
+import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
 
@@ -115,6 +116,7 @@ typedef AiConsentActiveSessionRefresher = Future<AiConsentAuthorityRefreshResult
   String expectedReceiptId,
   DateTime? expectedServerDecidedAt,
 );
+typedef AiConsentProvisioningRevalidator = FutureOr<bool> Function(String uid, String consentReceiptId);
 
 /// Keeps server-authoritative AI consent fresh while personal data is actively
 /// being streamed. Refreshing one minute before the five-minute TTL leaves room
@@ -125,6 +127,7 @@ class AiConsentActiveSessionLease {
     required FutureOr<void> Function() onAuthorityLost,
     AiConsentAuthoritySnapshot? authority,
     AiConsentActiveSessionRefresher? refreshAuthority,
+    AiConsentProvisioningRevalidator? revalidateProvisioning,
     SharedPreferencesUtil? preferences,
     DateTime Function()? now,
     Duration gracePeriod = verificationGracePeriod,
@@ -135,6 +138,11 @@ class AiConsentActiveSessionLease {
                   uid: uid,
                   expectedReceiptId: receiptId,
                   expectedServerDecidedAt: decidedAt,
+                )),
+        _revalidateProvisioning = revalidateProvisioning ??
+            ((uid, receiptId) => EllaProvisioningAuthorityCoordinator.revalidate(
+                  uid: uid,
+                  consentReceiptId: receiptId,
                 )),
         _preferences = preferences ?? SharedPreferencesUtil(),
         _now = now ?? DateTime.now,
@@ -154,6 +162,7 @@ class AiConsentActiveSessionLease {
   final String uid;
   final FutureOr<void> Function() _onAuthorityLost;
   final AiConsentActiveSessionRefresher _refreshAuthority;
+  final AiConsentProvisioningRevalidator _revalidateProvisioning;
   final SharedPreferencesUtil _preferences;
   final DateTime Function() _now;
   final Duration _gracePeriod;
@@ -303,6 +312,33 @@ class AiConsentActiveSessionLease {
           status.serverDecidedAt != null &&
           persistedServerDecidedAt.isAtSameMomentAs(status.serverDecidedAt!);
       if (statusReceiptWasPersisted) {
+        final authorityRotated = _preferences.aiConsentAuthorityGeneration != authority.generation ||
+            status.receiptId != authority.receiptId ||
+            status.profileBindingId != authority.profileBindingId;
+        if (authorityRotated) {
+          var revalidationStarted = false;
+          try {
+            revalidationStarted = await _revalidateProvisioning(uid, status.receiptId);
+          } catch (error) {
+            Logger.debug('[AIConsent] Provisioning revalidation trigger failed: ${error.runtimeType}');
+          }
+          if (!revalidationStarted) {
+            unawaited(
+              DebugLogManager.logWarning('ai_consent_provisioning_revalidation_unavailable', {
+                'uid_matches': _preferences.uid == uid,
+              }),
+            );
+          }
+          final refreshedAuthority = AiConsentAuthoritySnapshot.capture(
+            preferences: _preferences,
+            expectedUid: uid,
+          );
+          if (refreshedAuthority == null || !refreshedAuthority.isCurrent(preferences: _preferences)) {
+            await _loseAuthority('persisted_authority_invalid');
+            return;
+          }
+          _authority = refreshedAuthority;
+        }
         _lastServerReceiptId = status.receiptId;
         _lastServerDecidedAt = status.serverDecidedAt;
       }

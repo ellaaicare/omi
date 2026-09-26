@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
+import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ai_consent_policy.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
@@ -17,9 +18,12 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {
+    EllaProvisioningAuthorityCoordinator.resetForTesting();
     SharedPreferences.setMockInitialValues({});
     await SharedPreferencesUtil.init();
   });
+
+  tearDown(EllaProvisioningAuthorityCoordinator.resetForTesting);
 
   test('authenticated provisioning gate is enabled by default', () {
     expect(isHermesProvisioningGateEnabled, isTrue);
@@ -741,6 +745,7 @@ void main() {
   });
 
   test('provider retries pending ensure with a newly acknowledged consent receipt', () async {
+    SharedPreferencesUtil().uid = 'uid-a';
     final scheduled = <_FakePollHandle>[];
     final transport = _FakeTransport(
       ensureResponses: const [
@@ -771,6 +776,142 @@ void main() {
     expect(transport.ensureCalls, 2);
     expect(transport.ensureContexts.last.consentReceiptId, 'consent-2');
     provider.dispose();
+  });
+
+  test('active consent receipt rotation recaptures production provisioning and WAL authority', () async {
+    final preferences = SharedPreferencesUtil()
+      ..uid = 'uid-a'
+      ..verifiedPersonaId = 'persona-a';
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-a',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
+    );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: 'aicr_receipt-a',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile-binding-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+    final provisioningTransport = _FakeTransport(
+      ensureResponses: [
+        _readyProvisioningResponse(bindingRevision: 1),
+        _readyProvisioningResponse(bindingRevision: 2),
+      ],
+    );
+    final provider = EllaProvisioningProvider(
+      transport: provisioningTransport,
+      preferences: preferences,
+    );
+    await provider.start(
+      uid: 'uid-a',
+      requestContext: EllaProvisioningRequestContext(
+        appVersion: '1.0.572+866',
+        locale: 'en-US',
+        timezone: 'America/Los_Angeles',
+        clientRequestId: 'active-refresh-a',
+        consentReceiptId: 'aicr_receipt-a',
+      ),
+    );
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-a',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
+    );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: 'aicr_receipt-a',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile-binding-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+    await preferences.markEllaProvisioningVerified('uid-a');
+    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+
+    final consentTransport = _FakeConsentTransport(
+      policy: AiConsentPolicy.bundled,
+      statusResponse: AiConsentStatus(
+        subjectUid: 'uid-a',
+        authorized: true,
+        policy: AiConsentPolicy.bundled,
+        decision: AiConsentDecision.granted.wireValue,
+        receiptId: 'aicr_receipt-b',
+        policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+        processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+        appVersion: '1.0.572',
+        buildNumber: '866',
+        locale: 'en-US',
+        profileBindingId: 'profile-binding-b',
+        scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+        scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+        serverDecidedAt: DateTime.utc(2026, 7, 27, 0, 1),
+      ),
+    );
+    final consentService = EllaAiConsentService(
+      transport: consentTransport,
+      preferences: preferences,
+      pilotLocaleRestricted: false,
+    );
+    final lease = AiConsentActiveSessionLease(
+      uid: 'uid-a',
+      preferences: preferences,
+      refreshAuthority: (uid, receiptId, decidedAt) => consentService.refreshActiveSessionAuthority(
+        uid: uid,
+        expectedReceiptId: receiptId,
+        expectedServerDecidedAt: decidedAt,
+      ),
+      onAuthorityLost: () {},
+    )..start();
+
+    await lease.refreshNow();
+
+    final owner = WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a');
+    expect(consentTransport.statusCalls, 1);
+    expect(provisioningTransport.ensureCalls, 2);
+    expect(provisioningTransport.ensureContexts.last.consentReceiptId, 'aicr_receipt-b');
+    expect(owner, isNotNull);
+    expect(owner!.owner.consentReceiptId, 'aicr_receipt-b');
+    expect(owner.owner.bindingRevision, 2);
+    expect(lease.hasCurrentAuthority, isTrue);
+
+    lease.stop();
+    provider.dispose();
+    expect(
+      await EllaProvisioningAuthorityCoordinator.revalidate(
+        uid: 'uid-a',
+        consentReceiptId: 'aicr_receipt-b',
+      ),
+      isFalse,
+    );
+  });
+
+  test('provisioning revalidation coordinator ignores a callback from another account', () async {
+    final calls = <String>[];
+    final owner = EllaProvisioningAuthorityCoordinator.register(
+      uid: 'uid-b',
+      revalidator: (uid, receiptId) {
+        calls.add('$uid:$receiptId');
+        return true;
+      },
+    );
+
+    expect(
+      await EllaProvisioningAuthorityCoordinator.revalidate(
+        uid: 'uid-a',
+        consentReceiptId: 'aicr_receipt-a',
+      ),
+      isFalse,
+    );
+    expect(calls, isEmpty);
+
+    EllaProvisioningAuthorityCoordinator.unregister(owner);
   });
 
   test('same-account replacement consent receipt fails closed before provisioning recaptures authority', () async {
@@ -1569,6 +1710,15 @@ class _FakeConsentTransport extends EllaAiConsentTransport {
   Future<AiConsentStatus?> fetchStatus() async {
     statusCalls++;
     return statusResponse;
+  }
+
+  @override
+  Future<AiConsentFetchResult> fetchStatusWithDetails() async {
+    statusCalls++;
+    return AiConsentFetchResult(
+      status: statusResponse,
+      httpStatus: statusResponse == null ? 503 : 200,
+    );
   }
 
   @override
