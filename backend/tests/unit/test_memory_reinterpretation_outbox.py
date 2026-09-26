@@ -50,6 +50,7 @@ from ella.routers.canonical_events import (
 )
 from ella.routers import canonical_events
 from ella.services import memory_reinterpretation as reinterpretation_service
+from ella.services.ai_consent import AiConsentHTTPException
 from ella.services.memory_reinterpretation import (
     ApplyResult,
     MemoryReinterpretationWorker,
@@ -919,6 +920,53 @@ def test_retry_backoff_reaches_dead_letter_at_attempt_limit():
         assert job["attempt_count"] == 2
         assert job["last_error_code"] == "hermes_unavailable"
         assert job["outcome"] == "failed"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("status_code", "code", "expected_status"),
+    [
+        (403, "ai_consent_required", "dead_letter"),
+        (503, "ai_consent_authority_unavailable", "retry"),
+    ],
+)
+def test_worker_classifies_consent_failure_before_hermes(
+    monkeypatch,
+    status_code,
+    code,
+    expected_status,
+):
+    def reject_consent(_uid):
+        raise AiConsentHTTPException(
+            status_code=status_code,
+            detail={"code": code},
+        )
+
+    monkeypatch.setattr(reinterpretation_service, "assert_current_ai_consent", reject_consent)
+
+    async def run():
+        repository = InMemoryMemoryReinterpretationRepository(debounce_seconds=0)
+        await _seed_job(repository)
+        repository.now += timedelta(seconds=1)
+        hermes = _Hermes({"outcome": "no_change", "proposals": []})
+        worker = MemoryReinterpretationWorker(
+            repository,
+            hermes_client=hermes,
+            conversation_loader=_loader,
+        )
+
+        result = await worker.run_once("worker-a")
+        job = next(iter(repository.jobs.values()))
+
+        assert result == {
+            "job_id": job["id"],
+            "status": expected_status,
+            "error_code": code,
+        }
+        assert job["status"] == expected_status
+        assert job["last_error_code"] == code
+        assert hermes.calls == 0
 
     asyncio.run(run())
 

@@ -105,6 +105,12 @@ def test_native_websocket_consent_check_precedes_runtime_and_stt_provider_work()
 
 
 def test_websocket_consent_rejection_and_authority_outage_have_distinct_close_contracts():
+    threadpool_calls = []
+
+    async def run_in_threadpool(function, *args):
+        threadpool_calls.append((function, args))
+        return function(*args)
+
     globals_ = {
         "__builtins__": __builtins__,
         "HTTPException": HTTPException,
@@ -112,6 +118,7 @@ def test_websocket_consent_rejection_and_authority_outage_have_distinct_close_co
         "AI_CONSENT_REQUIRED_CODE": "ai_consent_required",
         "AI_CONSENT_WEBSOCKET_CLOSE_CODE": 4403,
         "AI_CONSENT_WEBSOCKET_RETRY_CLOSE_CODE": 1013,
+        "run_in_threadpool": run_in_threadpool,
     }
     helper = types.FunctionType(
         _function_code(
@@ -156,6 +163,7 @@ def test_websocket_consent_rejection_and_authority_outage_have_distinct_close_co
     assert terminal.accepted is True
     assert terminal.sent == []
     assert terminal.closed == (4403, "ai_consent_required")
+    assert threadpool_calls == [(reject_terminal, ("uid-a",))]
 
     retryable = Socket()
 
@@ -187,6 +195,7 @@ def test_websocket_consent_rejection_and_authority_outage_have_distinct_close_co
         }
     ]
     assert retryable.closed == (1013, "ai_consent_authority_unavailable")
+    assert threadpool_calls[-1] == (reject_retryable, ("uid-a",))
 
 
 def test_memory_artwork_provider_routes_share_the_consent_gate():

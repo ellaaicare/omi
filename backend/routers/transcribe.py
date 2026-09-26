@@ -165,7 +165,7 @@ async def _require_current_ai_consent_for_websocket(
     send_auth_response: bool = False,
 ) -> bool:
     try:
-        assert_current_ai_consent(uid)
+        await run_in_threadpool(assert_current_ai_consent, uid)
         return True
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, dict) else {}
