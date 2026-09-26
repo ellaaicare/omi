@@ -771,11 +771,11 @@ class EllaProvisioningRepository:
                     """
                     INSERT INTO users (
                         id, email, name, timezone, omi_uid, status,
-                        identities, settings, tags, updated_at
+                        guardian_mode, identities, settings, tags, updated_at
                     )
                     VALUES (
                         $1, $2, $3, $4, $5, 'PENDING',
-                        jsonb_build_object('omi_uid', $5::text, 'email', $2::text),
+                        'OFF', jsonb_build_object('omi_uid', $5::text, 'email', $2::text),
                         '{}'::jsonb, ARRAY[]::text[], CURRENT_TIMESTAMP
                     )
                     RETURNING id, omi_uid, email, name, timezone, status
@@ -1411,7 +1411,9 @@ class EllaProvisioningRepository:
                 await connection.execute(
                     """
                     UPDATE users
-                    SET status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP
+                    SET status = 'ACTIVE',
+                        guardian_mode = COALESCE(guardian_mode, 'OFF'),
+                        updated_at = CURRENT_TIMESTAMP
                     WHERE id = $1
                     """,
                     selected["user_id"],
@@ -3204,7 +3206,7 @@ class EllaProvisioningRepository:
                          AND binding.role = 'user'
                          AND binding.template_version = job.target_schema_version
                         WHERE account.omi_uid = $1
-                          AND account.status = 'PENDING'
+                          AND account.status IN ('PENDING', 'ACTIVE')
                           AND job.state = 'provisioning'
                           AND job.stage = 'smoke_passed'
                           AND job.retryable = TRUE
@@ -4218,7 +4220,9 @@ class EllaProvisioningRepository:
                 await connection.execute(
                     """
                     UPDATE users
-                    SET status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP
+                    SET status = 'ACTIVE',
+                        guardian_mode = COALESCE(guardian_mode, 'OFF'),
+                        updated_at = CURRENT_TIMESTAMP
                     WHERE id = $1
                     """,
                     selected["user_id"],
@@ -4245,7 +4249,9 @@ class EllaProvisioningRepository:
                 result = await connection.execute(
                     """
                     UPDATE users
-                    SET status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP
+                    SET status = 'ACTIVE',
+                        guardian_mode = COALESCE(guardian_mode, 'OFF'),
+                        updated_at = CURRENT_TIMESTAMP
                     WHERE omi_uid = $1
                     """,
                     uid,
@@ -4254,7 +4260,7 @@ class EllaProvisioningRepository:
             raise LookupError("user_not_found")
 
     async def update_guardian_mode(self, uid: str, guardian_mode: Optional[str]) -> Optional[str]:
-        """Update one active user's Guardian preference under owner authority."""
+        """Update one active or consented-onboarding user's Guardian preference."""
         async with self.pool.acquire() as connection:
             owner = await authority_advisory_lock.resolve_self_owner_unlocked(
                 connection,
@@ -4273,17 +4279,40 @@ class EllaProvisioningRepository:
                 )
                 row = await connection.fetchrow(
                     """
-                    UPDATE users
-                    SET guardian_mode = $2, updated_at = CURRENT_TIMESTAMP
-                    WHERE omi_uid = $1
-                      AND status = 'ACTIVE'
-                    RETURNING guardian_mode
+                    UPDATE users account
+                    SET guardian_mode = CASE
+                            WHEN LOWER(COALESCE(NULLIF(BTRIM($2), ''), 'off'))
+                                IN ('off', 'none', 'disabled', 'null', 'guardian_off')
+                            THEN 'OFF'
+                            ELSE $2
+                        END,
+                        status = CASE
+                            WHEN LOWER(COALESCE(NULLIF(BTRIM($2), ''), 'off'))
+                                IN ('off', 'none', 'disabled', 'null', 'guardian_off')
+                            THEN account.status
+                            ELSE 'ACTIVE'
+                        END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE account.omi_uid = $1
+                      AND account.status IN ('PENDING', 'ACTIVE')
+                      AND (
+                          LOWER(COALESCE(NULLIF(BTRIM($2), ''), 'off'))
+                              IN ('off', 'none', 'disabled', 'null', 'guardian_off')
+                          OR EXISTS (
+                              SELECT 1
+                              FROM ella_managed_cloud_consent_authority authority
+                              WHERE authority.user_id = account.id
+                                AND authority.decision = 'granted'
+                                AND authority.consent_receipt_ref IS NOT NULL
+                          )
+                      )
+                    RETURNING account.guardian_mode
                     """,
                     uid,
                     guardian_mode,
                 )
         if row is None:
-            raise LookupError("active_user_not_found")
+            raise LookupError("active_or_currently_consented_user_not_found")
         return row["guardian_mode"]
 
     async def has_active_retained_runtime(self, uid: str) -> bool:

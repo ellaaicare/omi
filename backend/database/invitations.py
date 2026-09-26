@@ -616,10 +616,10 @@ async def _bind_verified_identity_on_connection(
         """
         INSERT INTO users (
             id, email, name, timezone, omi_uid, status,
-            profile_class, identities, settings, tags, updated_at
+            guardian_mode, profile_class, identities, settings, tags, updated_at
         ) VALUES (
             $1, $2, $3, 'UTC', $4, 'PENDING',
-            'real', jsonb_build_object('omi_uid', $4::text, 'email', $2::text),
+            'OFF', 'real', jsonb_build_object('omi_uid', $4::text, 'email', $2::text),
             '{}'::jsonb, ARRAY[]::text[], CURRENT_TIMESTAMP
         )
         RETURNING id, omi_uid, email, status, profile_class

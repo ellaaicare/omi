@@ -109,6 +109,7 @@ CREATE TABLE users (
     identities JSONB NOT NULL DEFAULT '{}'::jsonb,
     settings JSONB NOT NULL DEFAULT '{}'::jsonb,
     tags TEXT[] NOT NULL DEFAULT ARRAY[]::text[],
+    guardian_mode TEXT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -589,6 +590,7 @@ def test_self_hosted_redemption_binds_verified_email_identity_and_target_atomica
                 """
                 SELECT
                     app_user.omi_uid, app_user.email, app_user.profile_class,
+                    app_user.guardian_mode,
                     entitlement.invitation_consent_pending,
                     entitlement.consent_authority_epoch,
                     entitlement.revision AS entitlement_revision,
@@ -619,6 +621,7 @@ def test_self_hosted_redemption_binds_verified_email_identity_and_target_atomica
         assert row["omi_uid"] == uid
         assert row["email"] == email
         assert row["profile_class"] == "real"
+        assert row["guardian_mode"] == "OFF"
         assert row["invitation_consent_pending"] is True
         assert row["consent_authority_epoch"] is None
         assert row["redemption_user_id"] is not None
