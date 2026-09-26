@@ -17,6 +17,11 @@ import 'package:omi/utils/l10n_extensions.dart';
 typedef MemoryArtworkCachedFileLookup = Future<File?> Function(String cacheKey);
 typedef MemoryArtworkCachedFileValidator = Future<bool> Function(File file);
 typedef MemoryArtworkCacheEvictor = Future<void> Function(String cacheKey);
+typedef MemoryArtworkDisplayCacheKeyRememberer = Future<String?> Function({
+  required String provisionalCacheKey,
+  required String authoritativeCacheKey,
+  required bool Function() isAuthorityCurrent,
+});
 
 enum _MemoryArtworkFallbackKind { preparing, unavailable }
 
@@ -39,6 +44,7 @@ class MemoryArtworkImage extends StatefulWidget {
     this.cachedFileLookup,
     this.cachedFileValidator,
     this.cacheEvictor,
+    this.displayCacheKeyRememberer,
     this.fit = BoxFit.cover,
     this.retryDelay = const Duration(seconds: 5),
     this.maxAuthorityUnavailableRetries = 3,
@@ -59,6 +65,7 @@ class MemoryArtworkImage extends StatefulWidget {
   final MemoryArtworkCachedFileLookup? cachedFileLookup;
   final MemoryArtworkCachedFileValidator? cachedFileValidator;
   final MemoryArtworkCacheEvictor? cacheEvictor;
+  final MemoryArtworkDisplayCacheKeyRememberer? displayCacheKeyRememberer;
   final BoxFit fit;
   final Duration retryDelay;
 
@@ -155,6 +162,8 @@ class MemoryArtworkImage extends StatefulWidget {
 }
 
 class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
+  static const _maxResponsiveVariantPublishRetries = 3;
+
   MemoryArtworkResult? _remoteResult;
   File? _cachedFile;
   String _displayCacheKey = '';
@@ -177,6 +186,9 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   String? _imageRetryBudgetMemoryId;
   bool _manualGenerationInFlight = false;
   double _physicalTargetWidth = 1536;
+  String? _pendingResponsiveVariantCacheKey;
+  Timer? _responsiveVariantRetryTimer;
+  int _responsiveVariantPublishRetries = 0;
 
   @override
   void initState() {
@@ -207,11 +219,13 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   @override
   void dispose() {
     _retryTimer?.cancel();
+    _responsiveVariantRetryTimer?.cancel();
     super.dispose();
   }
 
   void _refreshRequest() {
     _manualGenerationInFlight = false;
+    _resetResponsiveVariantPublication();
     _resetAuthorityRetryBudgetIfNeeded();
     _resetTransientRetryBudgetIfNeeded();
     _resetImageRetryBudgetIfNeeded();
@@ -542,6 +556,256 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     }
   }
 
+  void _updatePhysicalTargetWidth(double physicalTargetWidth) {
+    _physicalTargetWidth = physicalTargetWidth;
+    final current = _remoteResult;
+    if (current == null || !current.isReady || current.variants.isEmpty || !current.isAuthorityCurrent) return;
+
+    final selected = current.forPhysicalWidth(physicalTargetWidth);
+    if (selected.cacheKey == current.cacheKey && selected.selectedVariantWidth == current.selectedVariantWidth) {
+      _resetResponsiveVariantPublication();
+      return;
+    }
+    if (selected.cacheKey.isEmpty) {
+      _resetResponsiveVariantPublication();
+      return;
+    }
+    if (_pendingResponsiveVariantCacheKey == selected.cacheKey) return;
+
+    final generation = _requestGeneration;
+    _responsiveVariantRetryTimer?.cancel();
+    _responsiveVariantRetryTimer = null;
+    _responsiveVariantPublishRetries = 0;
+    _pendingResponsiveVariantCacheKey = selected.cacheKey;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || generation != _requestGeneration) return;
+      unawaited(_publishResponsiveVariant(generation, selected.cacheKey));
+    });
+  }
+
+  void _resetResponsiveVariantPublication() {
+    _responsiveVariantRetryTimer?.cancel();
+    _responsiveVariantRetryTimer = null;
+    _responsiveVariantPublishRetries = 0;
+    _pendingResponsiveVariantCacheKey = null;
+  }
+
+  void _retryResponsiveVariantPublication(
+    int generation,
+    String expectedCacheKey, {
+    bool publishCurrentAlias = false,
+    MemoryArtworkResult? sourceResult,
+    String? displayCacheKey,
+    String? memoryId,
+    int? authorityEpoch,
+    bool updateRenderedResult = true,
+  }) {
+    if (_responsiveVariantPublishRetries >= _maxResponsiveVariantPublishRetries) {
+      _resetResponsiveVariantPublication();
+      return;
+    }
+    _responsiveVariantPublishRetries += 1;
+    _responsiveVariantRetryTimer?.cancel();
+    _responsiveVariantRetryTimer = Timer(widget.retryDelay, () {
+      _responsiveVariantRetryTimer = null;
+      if (!mounted || generation != _requestGeneration || _pendingResponsiveVariantCacheKey != expectedCacheKey) {
+        return;
+      }
+      unawaited(
+        _publishResponsiveVariant(
+          generation,
+          expectedCacheKey,
+          publishCurrentAlias: publishCurrentAlias,
+          sourceResult: sourceResult,
+          displayCacheKey: displayCacheKey,
+          memoryId: memoryId,
+          authorityEpoch: authorityEpoch,
+          updateRenderedResult: updateRenderedResult,
+        ),
+      );
+    });
+  }
+
+  void _reconcileResponsiveVariantAfterStalePublication(int generation) {
+    if (!mounted || generation != _requestGeneration) return;
+    final current = _remoteResult;
+    if (current == null || !current.isReady || !current.isAuthorityCurrent) return;
+
+    final selected = current.forPhysicalWidth(_physicalTargetWidth);
+    if (selected.cacheKey.isEmpty || !selected.isAuthorityCurrent) return;
+    if (_pendingResponsiveVariantCacheKey == selected.cacheKey) return;
+
+    _responsiveVariantRetryTimer?.cancel();
+    _responsiveVariantRetryTimer = null;
+    _responsiveVariantPublishRetries = 0;
+    _pendingResponsiveVariantCacheKey = selected.cacheKey;
+    unawaited(
+      _publishResponsiveVariant(
+        generation,
+        selected.cacheKey,
+        publishCurrentAlias: true,
+      ),
+    );
+  }
+
+  void _reconcileResponsiveVariantAfterGenerationChange({
+    required MemoryArtworkResult retainedResult,
+    required String displayCacheKey,
+    required String memoryId,
+    required int authorityEpoch,
+  }) {
+    if (!mounted ||
+        widget.conversation.id != memoryId ||
+        widget.authorityEpoch != authorityEpoch ||
+        _displayCacheKey != displayCacheKey ||
+        !retainedResult.isAuthorityCurrent ||
+        _mustSuppressCachedArtwork(_remoteResult)) {
+      return;
+    }
+
+    final latestResult = _remoteResult;
+    final source =
+        latestResult != null && latestResult.isReady && latestResult.isAuthorityCurrent ? latestResult : retainedResult;
+    final selected = source.forPhysicalWidth(_physicalTargetWidth);
+    if (selected.cacheKey.isEmpty || !selected.isAuthorityCurrent) return;
+
+    final generation = _requestGeneration;
+    _responsiveVariantRetryTimer?.cancel();
+    _responsiveVariantRetryTimer = null;
+    _responsiveVariantPublishRetries = 0;
+    _pendingResponsiveVariantCacheKey = selected.cacheKey;
+    unawaited(
+      _publishResponsiveVariant(
+        generation,
+        selected.cacheKey,
+        publishCurrentAlias: true,
+        sourceResult: source,
+        displayCacheKey: displayCacheKey,
+        memoryId: memoryId,
+        authorityEpoch: authorityEpoch,
+        updateRenderedResult: false,
+      ),
+    );
+  }
+
+  Future<String?> _rememberResponsiveDisplayCacheKey({
+    required String provisionalCacheKey,
+    required String authoritativeCacheKey,
+    required bool Function() isAuthorityCurrent,
+  }) {
+    final rememberer = widget.displayCacheKeyRememberer;
+    if (rememberer != null) {
+      return rememberer(
+        provisionalCacheKey: provisionalCacheKey,
+        authoritativeCacheKey: authoritativeCacheKey,
+        isAuthorityCurrent: isAuthorityCurrent,
+      );
+    }
+    return MemoryArtworkCache.rememberDisplayCacheKey(
+      provisionalCacheKey: provisionalCacheKey,
+      authoritativeCacheKey: authoritativeCacheKey,
+      isAuthorityCurrent: isAuthorityCurrent,
+    );
+  }
+
+  Future<void> _publishResponsiveVariant(
+    int generation,
+    String expectedCacheKey, {
+    bool publishCurrentAlias = false,
+    MemoryArtworkResult? sourceResult,
+    String? displayCacheKey,
+    String? memoryId,
+    int? authorityEpoch,
+    bool updateRenderedResult = true,
+  }) async {
+    if (!mounted || generation != _requestGeneration || _pendingResponsiveVariantCacheKey != expectedCacheKey) return;
+    final current = sourceResult ?? _remoteResult;
+    if (current == null || !current.isReady || !current.isAuthorityCurrent) return;
+
+    final publicationDisplayCacheKey = displayCacheKey ?? _displayCacheKey;
+    final publicationMemoryId = memoryId ?? widget.conversation.id;
+    final publicationAuthorityEpoch = authorityEpoch ?? widget.authorityEpoch;
+
+    final selected = current.forPhysicalWidth(_physicalTargetWidth);
+    if (selected.cacheKey != expectedCacheKey || !selected.isAuthorityCurrent) return;
+    if (!publishCurrentAlias &&
+        selected.cacheKey == current.cacheKey &&
+        selected.selectedVariantWidth == current.selectedVariantWidth) {
+      _pendingResponsiveVariantCacheKey = null;
+      return;
+    }
+
+    final publishedCacheKey = await _rememberResponsiveDisplayCacheKey(
+      provisionalCacheKey: publicationDisplayCacheKey,
+      authoritativeCacheKey: selected.cacheKey,
+      isAuthorityCurrent: () =>
+          mounted &&
+          generation == _requestGeneration &&
+          _pendingResponsiveVariantCacheKey == expectedCacheKey &&
+          widget.conversation.id == publicationMemoryId &&
+          widget.authorityEpoch == publicationAuthorityEpoch &&
+          _displayCacheKey == publicationDisplayCacheKey &&
+          !_mustSuppressCachedArtwork(_remoteResult) &&
+          selected.isAuthorityCurrent,
+    );
+    if (!mounted) {
+      return;
+    }
+    if (generation != _requestGeneration) {
+      _reconcileResponsiveVariantAfterGenerationChange(
+        retainedResult: current,
+        displayCacheKey: publicationDisplayCacheKey,
+        memoryId: publicationMemoryId,
+        authorityEpoch: publicationAuthorityEpoch,
+      );
+      return;
+    }
+    if (_mustSuppressCachedArtwork(_remoteResult)) {
+      _resetResponsiveVariantPublication();
+      return;
+    }
+    if (!updateRenderedResult) {
+      final replacementResult = _remoteResult;
+      if (replacementResult != null && replacementResult.isReady && replacementResult.isAuthorityCurrent) {
+        final replacementSelected = replacementResult.forPhysicalWidth(_physicalTargetWidth);
+        if (replacementSelected.cacheKey.isNotEmpty && replacementSelected.cacheKey != selected.cacheKey) {
+          _reconcileResponsiveVariantAfterStalePublication(generation);
+          return;
+        }
+      }
+    }
+    if (_pendingResponsiveVariantCacheKey != expectedCacheKey) {
+      _reconcileResponsiveVariantAfterStalePublication(generation);
+      return;
+    }
+    if (!selected.isAuthorityCurrent) {
+      _resetResponsiveVariantPublication();
+      return;
+    }
+    if (publishedCacheKey == null) {
+      _retryResponsiveVariantPublication(
+        generation,
+        expectedCacheKey,
+        publishCurrentAlias: publishCurrentAlias,
+        sourceResult: current,
+        displayCacheKey: publicationDisplayCacheKey,
+        memoryId: publicationMemoryId,
+        authorityEpoch: publicationAuthorityEpoch,
+        updateRenderedResult: updateRenderedResult,
+      );
+      return;
+    }
+
+    setState(() {
+      if (updateRenderedResult) _remoteResult = selected;
+      _cacheKey = publishedCacheKey;
+      _resetResponsiveVariantPublication();
+    });
+    if (!MemoryArtworkCache.isNetworkOnlyDisplayCacheKey(publishedCacheKey)) {
+      unawaited(_loadCachedFile(publishedCacheKey, generation));
+    }
+  }
+
   String _automaticGenerationKey(MemoryArtworkApi api) {
     final sourceRevision = widget.conversation.activeSummaryVersionId?.trim() ?? '';
     return api.automaticGenerationKey(memoryId: widget.conversation.id, sourceRevision: sourceRevision);
@@ -726,7 +990,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final logicalWidth = constraints.maxWidth.isFinite && constraints.maxWidth > 0 ? constraints.maxWidth : 512.0;
-        _physicalTargetWidth = logicalWidth * MediaQuery.devicePixelRatioOf(context);
+        _updatePhysicalTargetWidth(logicalWidth * MediaQuery.devicePixelRatioOf(context));
         return _buildArtwork(context);
       },
     );
