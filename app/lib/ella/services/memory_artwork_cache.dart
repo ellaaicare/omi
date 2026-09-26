@@ -17,6 +17,8 @@ class MemoryArtworkCache {
   static const int _maxTrustedDisplayKeys = 1000;
   static const int _maxSuppressedDisplayKeys = 4096;
   static const Duration _evictionTimeout = Duration(seconds: 5);
+  static const Duration _publishedVariantPersistenceInitialRetryDelay = Duration(seconds: 1);
+  static const Duration _publishedVariantPersistenceMaxRetryDelay = Duration(seconds: 30);
   static const String _displayAliasesPreferenceKey = 'ellaMemoryArtworkDisplayAliasesV2';
   static const String _publishedVariantKeysPreferenceKey = 'ellaMemoryArtworkPublishedVariantKeysV1';
   static CacheManager? _manager;
@@ -33,6 +35,10 @@ class MemoryArtworkCache {
   static final String _networkOnlyCacheNamespace = _createNetworkOnlyCacheNamespace();
   static bool _diskReadsDisabled = false;
   static bool _persistentAliasesLoaded = false;
+  static String? _pendingPublishedVariantSnapshot;
+  static Future<void>? _publishedVariantPersistenceWorker;
+  static Future<bool> Function(String key, String value)? _publishedVariantWriterForTesting;
+  static Duration? _publishedVariantRetryDelayForTesting;
 
   static CacheManager get manager => _manager ??= CacheManager(
         Config('ellaMemoryArtworkCacheV1', stalePeriod: const Duration(days: 30), maxNrOfCacheObjects: 1000),
@@ -160,7 +166,7 @@ class MemoryArtworkCache {
       published.addAll(_publishedVariantKeys.remove(scopeKey) ?? const <String>{});
       _publishedVariantDisplayKeys.remove(scopeKey);
     }
-    unawaited(_persistPublishedVariantKeys());
+    _schedulePublishedVariantPersistence();
     return Set<String>.unmodifiable(published);
   }
 
@@ -198,7 +204,7 @@ class MemoryArtworkCache {
       _publishedVariantKeys.remove(oldestScope);
       _publishedVariantDisplayKeys.remove(oldestScope);
     }
-    unawaited(_persistPublishedVariantKeys().catchError((_) {}));
+    _schedulePublishedVariantPersistence();
   }
 
   static void forgetDisplayCacheKey(String provisionalCacheKey) {
@@ -238,7 +244,7 @@ class MemoryArtworkCache {
       _enterFailClosedDiskMode();
     }
     unawaited(_persistDisplayAliases());
-    unawaited(_persistPublishedVariantKeys());
+    _schedulePublishedVariantPersistence();
   }
 
   static Future<void> evictSuppressedDisplayCacheKeys(
@@ -331,6 +337,27 @@ class MemoryArtworkCache {
     _persistentAliasesLoaded = false;
   }
 
+  @visibleForTesting
+  static void configurePublishedVariantPersistenceForTesting({
+    Future<bool> Function(String key, String value)? writer,
+    Duration? retryDelay,
+  }) {
+    assert(_publishedVariantPersistenceWorker == null);
+    _publishedVariantWriterForTesting = writer;
+    _publishedVariantRetryDelayForTesting = retryDelay;
+  }
+
+  @visibleForTesting
+  static Future<void> waitForPublishedVariantPersistenceForTesting() => _waitForPublishedVariantPersistence();
+
+  static Future<void> _waitForPublishedVariantPersistence() async {
+    while (_pendingPublishedVariantSnapshot != null || _publishedVariantPersistenceWorker != null) {
+      _startPublishedVariantPersistenceWorker();
+      final worker = _publishedVariantPersistenceWorker;
+      if (worker != null) await worker;
+    }
+  }
+
   /// Revokes every in-memory artwork capability without deleting owner-scoped
   /// files. A freshly authenticated authority must validate each key before a
   /// persistent file can be read again.
@@ -345,7 +372,7 @@ class MemoryArtworkCache {
       _completedEvictionGenerations.clear();
       _diskReadsDisabled = false;
       unawaited(SharedPreferencesUtil().remove(_displayAliasesPreferenceKey));
-      unawaited(SharedPreferencesUtil().remove(_publishedVariantKeysPreferenceKey));
+      _schedulePublishedVariantPersistence();
     }
     _trustedDisplayKeys.clear();
     // A detached terminal eviction can still delete its key after authority
@@ -363,7 +390,7 @@ class MemoryArtworkCache {
     _completedEvictionGenerations.clear();
     _pendingEvictions.clear();
     unawaited(_persistDisplayAliases());
-    unawaited(_persistPublishedVariantKeys());
+    _schedulePublishedVariantPersistence();
   }
 
   static Future<void> clear() async {
@@ -378,6 +405,8 @@ class MemoryArtworkCache {
     _diskReadsDisabled = false;
     _persistentAliasesLoaded = true;
     _nextRecoveryCacheGeneration = 0;
+    _schedulePublishedVariantPersistence();
+    await _waitForPublishedVariantPersistence();
     await SharedPreferencesUtil().remove(_displayAliasesPreferenceKey);
     await SharedPreferencesUtil().remove(_publishedVariantKeysPreferenceKey);
     final activeManager = _manager;
@@ -452,8 +481,7 @@ class MemoryArtworkCache {
     await SharedPreferencesUtil().saveString(_displayAliasesPreferenceKey, jsonEncode(aliases));
   }
 
-  static Future<void> _persistPublishedVariantKeys() async {
-    if (!_persistentAliasesLoaded) return;
+  static String _encodePublishedVariantKeys() {
     final publishedVariantKeys = <String, Map<String, Object>>{
       for (final entry in _publishedVariantKeys.entries)
         if (_isPersistentVariantScope(entry.key) &&
@@ -463,10 +491,59 @@ class MemoryArtworkCache {
             'cache_keys': entry.value.where(_isPersistentPublishedCacheKey).toList(growable: false),
           },
     };
-    await SharedPreferencesUtil().saveString(
-      _publishedVariantKeysPreferenceKey,
-      jsonEncode(publishedVariantKeys),
-    );
+    return jsonEncode(publishedVariantKeys);
+  }
+
+  static void _schedulePublishedVariantPersistence() {
+    if (!_persistentAliasesLoaded) return;
+    _pendingPublishedVariantSnapshot = _encodePublishedVariantKeys();
+    _startPublishedVariantPersistenceWorker();
+  }
+
+  static void _startPublishedVariantPersistenceWorker() {
+    if (_pendingPublishedVariantSnapshot == null || _publishedVariantPersistenceWorker != null) return;
+    late final Future<void> worker;
+    worker = _runPublishedVariantPersistenceWorker().whenComplete(() {
+      if (!identical(_publishedVariantPersistenceWorker, worker)) return;
+      _publishedVariantPersistenceWorker = null;
+      if (_pendingPublishedVariantSnapshot != null) _startPublishedVariantPersistenceWorker();
+    });
+    _publishedVariantPersistenceWorker = worker;
+  }
+
+  static Future<void> _runPublishedVariantPersistenceWorker() async {
+    var retryDelay = _publishedVariantRetryDelayForTesting ?? _publishedVariantPersistenceInitialRetryDelay;
+    while (_pendingPublishedVariantSnapshot != null) {
+      final snapshot = _pendingPublishedVariantSnapshot!;
+      _pendingPublishedVariantSnapshot = null;
+      var saved = false;
+      try {
+        final writer = _publishedVariantWriterForTesting;
+        saved = writer != null
+            ? await writer(_publishedVariantKeysPreferenceKey, snapshot)
+            : await SharedPreferencesUtil().saveString(_publishedVariantKeysPreferenceKey, snapshot);
+      } catch (_) {
+        saved = false;
+      }
+      if (saved) {
+        retryDelay = _publishedVariantRetryDelayForTesting ?? _publishedVariantPersistenceInitialRetryDelay;
+        continue;
+      }
+
+      // A newer snapshot subsumes the failed one. Otherwise retain this exact
+      // state so a transient write cannot orphan a private cached variant.
+      _pendingPublishedVariantSnapshot ??= snapshot;
+      debugPrint('Memory artwork variant ledger persistence failed; retrying.');
+      await Future<void>.delayed(retryDelay);
+      if (_publishedVariantRetryDelayForTesting == null) {
+        retryDelay = Duration(
+          milliseconds: min(
+            retryDelay.inMilliseconds * 2,
+            _publishedVariantPersistenceMaxRetryDelay.inMilliseconds,
+          ),
+        );
+      }
+    }
   }
 
   static final RegExp _persistentCacheKey = RegExp(r'^[a-f0-9]{64}$');

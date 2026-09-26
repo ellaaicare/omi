@@ -14,6 +14,8 @@ void main() {
   });
 
   tearDown(() async {
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
+    MemoryArtworkCache.configurePublishedVariantPersistenceForTesting();
     await MemoryArtworkCache.clear();
     MemoryArtworkCache.resetRuntimeTrustForTesting();
   });
@@ -98,6 +100,7 @@ void main() {
       displayCacheKey: provisional,
       cacheKeys: {largeVariant},
     );
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
 
     MemoryArtworkCache.resetRuntimeTrustForTesting();
 
@@ -125,6 +128,7 @@ void main() {
       {compactVariant, largeVariant, replacementVariant},
     );
 
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
     MemoryArtworkCache.resetRuntimeTrustForTesting();
     expect(
       MemoryArtworkCache.takePublishedVariantCacheKeys(displayCacheKey: provisional),
@@ -134,5 +138,31 @@ void main() {
       MemoryArtworkCache.publishedVariantCacheKeys(scopeKey: secondScope, displayCacheKey: provisional),
       isEmpty,
     );
+  });
+
+  test('transient variant ledger write failure retries and survives restart', () async {
+    final provisional = '8' * 64;
+    final variant = '9' * 64;
+    var attempts = 0;
+    MemoryArtworkCache.configurePublishedVariantPersistenceForTesting(
+      retryDelay: Duration.zero,
+      writer: (key, value) async {
+        attempts++;
+        if (attempts == 1) throw StateError('transient write failure');
+        return SharedPreferencesUtil().saveString(key, value);
+      },
+    );
+
+    MemoryArtworkCache.rememberPublishedVariantCacheKeys(
+      scopeKey: 'memory-a:authority-1:artwork-1',
+      displayCacheKey: provisional,
+      cacheKeys: {variant},
+    );
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
+
+    expect(attempts, 2);
+    MemoryArtworkCache.configurePublishedVariantPersistenceForTesting();
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+    expect(MemoryArtworkCache.takePublishedVariantCacheKeys(displayCacheKey: provisional), {variant});
   });
 }

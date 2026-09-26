@@ -725,11 +725,14 @@ class _AuthoritySettlesAfterFinalRetryArtworkApi extends MemoryArtworkApi {
 }
 
 void main() {
-  setUp(() {
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    await SharedPreferencesUtil.init();
     MemoryArtworkCache.resetRuntimeTrustForTesting();
     MemoryArtworkImage.resetAutomaticGenerationBudgetForTesting();
   });
-  tearDown(() {
+  tearDown(() async {
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
     MemoryArtworkCache.resetRuntimeTrustForTesting();
     MemoryArtworkImage.resetAutomaticGenerationBudgetForTesting();
   });
@@ -2835,6 +2838,7 @@ void main() {
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
     MemoryArtworkCache.resetRuntimeTrustForTesting();
 
     api.terminal = true;
