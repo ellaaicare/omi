@@ -136,7 +136,6 @@ from ella.services.ai_consent import (
     AI_CONSENT_REQUIRED_CODE,
     AI_CONSENT_WEBSOCKET_CLOSE_CODE,
     AI_CONSENT_WEBSOCKET_RETRY_CLOSE_CODE,
-    AiConsentHTTPException,
     assert_current_ai_consent,
     resolve_processor,
 )
@@ -193,7 +192,7 @@ class AiConsentSessionAuthority:
                 self._initialized = True
                 raise
             except Exception as exc:
-                failure = AiConsentHTTPException(
+                failure = HTTPException(
                     status_code=503,
                     detail={
                         "code": AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE,

@@ -314,7 +314,6 @@ def test_stt_session_authority_avoids_transaction_per_audio_fragment_and_caches_
             "Awaitable": Awaitable,
             "Callable": Callable,
             "HTTPException": HTTPException,
-            "AiConsentHTTPException": HTTPException,
             "AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE": "ai_consent_authority_unavailable",
             "AI_CONSENT_SESSION_REFRESH_SECONDS": 1.0,
             "assert_current_ai_consent": checker,
