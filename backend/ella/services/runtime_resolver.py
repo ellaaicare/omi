@@ -43,6 +43,7 @@ from ella.services.hermes_cloud import (
 )
 from ella.services.hermes_cloud_policy import current_cloud_authority
 from ella.services.provisioning import (
+    DEFAULT_TARGET_SCHEMA_VERSION,
     PROFILE_NAME_RE,
     ProvisioningError,
     cloud_provisioning_enabled,
@@ -536,6 +537,19 @@ async def resolve_isolated_runtime(
                     retained_compatible = await repository.has_active_retained_runtime(uid)
                 except Exception as exc:
                     raise ProvisioningError("self_hosted_invitation_authority_unavailable", retryable=True) from exc
+                if retained_compatible:
+                    # A late legacy cluster marker must not hide an already-published exact-user binding.
+                    try:
+                        direct_binding = await repository.resolve_self_hosted_active_direct(uid=uid)
+                    except Exception as exc:
+                        if isinstance(exc, ProvisioningError):
+                            raise
+                        raise ProvisioningError(
+                            "self_hosted_runtime_authority_unavailable",
+                            retryable=True,
+                        ) from exc
+                    if direct_binding:
+                        return runtime_from_binding(direct_binding, uid)
     self_hosted_required = (
         self_hosted_provisioning_enabled(
             uid,
@@ -603,6 +617,24 @@ async def resolve_isolated_runtime(
     if cloud_required:
         raise ProvisioningError("hermes_cloud_not_provisioned", retryable=True)
     if self_hosted_required:
+        try:
+            job = await repository.get_job(uid, DEFAULT_TARGET_SCHEMA_VERSION)
+        except Exception as exc:
+            raise ProvisioningError("self_hosted_runtime_authority_unavailable", retryable=True) from exc
+        if (
+            job
+            and bool(job.get("retryable"))
+            and str(job.get("state") or "")
+            in {
+                "pending",
+                "queued",
+                "provisioning",
+                "retryable",
+                "rolling_back",
+                "degraded",
+            }
+        ):
+            raise ProvisioningError("runtime_provisioning", retryable=True)
         raise ProvisioningError("self_hosted_invitation_runtime_not_provisioned", retryable=False)
     if retained_required:
         raise ProvisioningError("hermes_not_provisioned", retryable=True)
