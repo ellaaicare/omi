@@ -15,6 +15,7 @@
 		426B89AD2C46919D00E24442 /* Config in Resources */ = {isa = PBXBuildFile; fileRef = 426B89AC2C46919D00E24442 /* Config */; };
 		42A7BA4C2E788F0100138969 /* WatchConnectivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 42A7BA4B2E788F0100138969 /* WatchConnectivity.framework */; };
 		5934827F2F4ADC6400888317 /* CallKitProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5934827E2F4ADC6400888317 /* CallKitProvider.swift */; };
+		ELLA1280P100000000000002 /* EllaUpstreamCaptureRegistration.swift in Sources */ = {isa = PBXBuildFile; fileRef = ELLA1280P100000000000001 /* EllaUpstreamCaptureRegistration.swift */; };
 		593482822F4ADC9300888317 /* TwilioVoiceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 593482812F4ADC9300888317 /* TwilioVoiceManager.swift */; };
 		593482832F4ADC9300888317 /* AccessTokenManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 593482802F4ADC9300888317 /* AccessTokenManager.swift */; };
 		593482852F4ADCAA00888317 /* VoIPPushHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 593482842F4ADCAA00888317 /* VoIPPushHandler.swift */; };
@@ -94,6 +95,7 @@
 		4B5B6E291EA70190D1771F2D /* Pods-Runner.release-dev.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.release-dev.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.release-dev.xcconfig"; sourceTree = "<group>"; };
 		556416C8748DD3DD2C06A9DB /* devProfile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = devProfile.xcconfig; path = Flutter/devProfile.xcconfig; sourceTree = "<group>"; };
 		5934827E2F4ADC6400888317 /* CallKitProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = CallKitProvider.swift; path = Runner/CallKit/CallKitProvider.swift; sourceTree = "<group>"; };
+		ELLA1280P100000000000001 /* EllaUpstreamCaptureRegistration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = EllaUpstreamCaptureRegistration.swift; path = Runner/EllaUpstreamCaptureRegistration.swift; sourceTree = "<group>"; };
 		593482802F4ADC9300888317 /* AccessTokenManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AccessTokenManager.swift; path = Runner/Twilio/AccessTokenManager.swift; sourceTree = "<group>"; };
 		593482812F4ADC9300888317 /* TwilioVoiceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = TwilioVoiceManager.swift; path = Runner/Twilio/TwilioVoiceManager.swift; sourceTree = "<group>"; };
 		593482842F4ADCAA00888317 /* VoIPPushHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VoIPPushHandler.swift; path = Runner/VoIP/VoIPPushHandler.swift; sourceTree = "<group>"; };
@@ -239,6 +241,7 @@
 				593482802F4ADC9300888317 /* AccessTokenManager.swift */,
 				593482812F4ADC9300888317 /* TwilioVoiceManager.swift */,
 				5934827E2F4ADC6400888317 /* CallKitProvider.swift */,
+				ELLA1280P100000000000001 /* EllaUpstreamCaptureRegistration.swift */,
 				426B89AC2C46919D00E24442 /* Config */,
 				9740EEB11CF90186004384FC /* Flutter */,
 				97C146F01CF9000F007C117D /* Runner */,
@@ -589,6 +592,7 @@
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				4255287D2E7C4B8300FD5CFB /* RecorderHostApiImpl.swift in Sources */,
 				5934827F2F4ADC6400888317 /* CallKitProvider.swift in Sources */,
+				ELLA1280P100000000000002 /* EllaUpstreamCaptureRegistration.swift in Sources */,
 				A6120CC9725B450B9E342698 /* GuardianModeManager.swift in Sources */,
 				GDNATIVE111111111111111 /* GuardianNativePolicy.swift in Sources */,
 				GDPOLL1111111111111111 /* GuardianModePollingService.swift in Sources */,
