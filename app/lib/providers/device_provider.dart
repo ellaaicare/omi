@@ -584,6 +584,9 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       return false;
     }
 
+    await prepareForExplicitDeviceSelection();
+    if (!_deviceServiceReady) return false;
+
     var freshSessionResetStarted = false;
     var connectionCommittedByAttempt = false;
     void markConnectionCommitted() => connectionCommittedByAttempt = true;
@@ -639,6 +642,19 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         if (freshSessionResetStarted) _showFreshSessionUnavailable(device);
       },
     );
+  }
+
+  Future<void> prepareForExplicitDeviceSelection() async {
+    _reconnectionTimer?.cancel();
+    _automaticReconnectCooldownUntil = null;
+    if (presentationIsConnected) return;
+
+    _deviceOperationGeneration++;
+    _activeConnectionAttemptToken = null;
+    _connectionAttemptStartedAt = null;
+    isConnecting = false;
+    await _deviceService.cancelPendingConnection();
+    if (!_disposed) notifyListeners();
   }
 
   void _showFreshSessionUnavailable(BtDevice device, {bool requireFreshSession = true}) {
@@ -893,12 +909,17 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     final generation = operationGeneration ?? _deviceOperationGeneration;
     if (!_isDeviceOperationCurrent(generation)) return;
     _reconnectionTimer?.cancel();
+    if (captureProvider?.phoneCaptureOwnsMobileAudio == true) return;
     if (_hasPendingFreshBleSessionRequirement()) return;
     _automaticReconnectAttempts = 0;
     _automaticReconnectExhausted = false;
     _automaticReconnectCooldownUntil = null;
     scan(t) async {
       if (!_isDeviceOperationCurrent(generation)) {
+        t.cancel();
+        return;
+      }
+      if (captureProvider?.phoneCaptureOwnsMobileAudio == true) {
         t.cancel();
         return;
       }

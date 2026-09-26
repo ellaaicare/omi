@@ -172,6 +172,63 @@ void main() {
     expect(bleCharacteristicUsesFreshNotifications('2A19'), isFalse, reason: 'battery may retain replay semantics');
   });
 
+  test('BLE connect budget completes before the dock attempt deadline', () {
+    expect(
+      bleAdapterReadyTimeout + bleConnectionTimeout + const Duration(seconds: bleInitialServiceDiscoveryTimeoutSeconds),
+      lessThan(const Duration(seconds: 20)),
+    );
+  });
+
+  test('BLE transport publishes connected only after GATT discovery is ready', () async {
+    final nativeStates = StreamController<BluetoothConnectionState>.broadcast();
+    final serviceDiscoveryStarted = Completer<void>();
+    final releaseServiceDiscovery = Completer<void>();
+    final transportStates = <DeviceTransportState>[];
+    final transport = BleTransport(
+      BluetoothDevice.fromId('00000000-0000-0000-0000-000000000002'),
+      adapterReadinessWaiter: () async {},
+      connectionStarter: () async => nativeStates.add(BluetoothConnectionState.connected),
+      connectionStopper: () async {},
+      serviceRefresher: () async {
+        serviceDiscoveryStarted.complete();
+        await releaseServiceDiscovery.future;
+      },
+      connectionStateStream: nativeStates.stream,
+    );
+    final subscription = transport.connectionStateStream.listen(transportStates.add);
+    addTearDown(subscription.cancel);
+    addTearDown(transport.dispose);
+    addTearDown(nativeStates.close);
+
+    final connecting = transport.connect();
+    await serviceDiscoveryStarted.future;
+    await pumpEventQueue();
+
+    expect(transportStates, isNot(contains(DeviceTransportState.connected)));
+
+    releaseServiceDiscovery.complete();
+    await connecting;
+    await pumpEventQueue();
+    expect(transportStates.last, DeviceTransportState.connected);
+  });
+
+  test('BLE transport cancels the native link when GATT discovery fails', () async {
+    var disconnectCalls = 0;
+    final transport = BleTransport(
+      BluetoothDevice.fromId('00000000-0000-0000-0000-000000000003'),
+      adapterReadinessWaiter: () async {},
+      connectionStarter: () async {},
+      connectionStopper: () async => disconnectCalls++,
+      serviceRefresher: () async => throw StateError('no GATT services'),
+      connectionStateStream: const Stream<BluetoothConnectionState>.empty(),
+    );
+    addTearDown(transport.dispose);
+
+    await expectLater(transport.connect(), throwsStateError);
+
+    expect(disconnectCalls, 1);
+  });
+
   test('production BLE transport retries one transient CCCD failure and forwards only fresh audio', () async {
     final endpoint = _FakeBleNotificationEndpoint()..failedEnableAttempts = 1;
     final transport = _testBleTransport(endpoint);

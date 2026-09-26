@@ -717,6 +717,8 @@ void main() {
     device.capture = harness.capture;
 
     expect(find.text('Necklace is recording · iPhone selected'), findsOneWidget);
+    expect(find.text('Transcript · Necklace'), findsOneWidget);
+    expect(find.text('Transcript · iPhone'), findsNothing);
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
 
@@ -724,6 +726,8 @@ void main() {
     expect(harness.capture.phoneStarts, 1);
     expect(harness.capture.recordingState, RecordingState.record);
     expect(find.text('Recording on this iPhone'), findsOneWidget);
+    expect(find.text('Transcript · iPhone'), findsOneWidget);
+    expect(find.text('Transcript · Necklace'), findsNothing);
 
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();

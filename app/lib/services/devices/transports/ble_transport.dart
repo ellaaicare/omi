@@ -27,6 +27,15 @@ const bleNotificationSetupRetryDelay = Duration(milliseconds: 100);
 @visibleForTesting
 const bleServiceRediscoveryTimeoutSeconds = 2;
 
+@visibleForTesting
+const bleAdapterReadyTimeout = Duration(seconds: 3);
+
+@visibleForTesting
+const bleConnectionTimeout = Duration(seconds: 12);
+
+@visibleForTesting
+const bleInitialServiceDiscoveryTimeoutSeconds = 4;
+
 const _maxPendingCharacteristicBytes = 256 * 1024;
 
 @visibleForTesting
@@ -61,6 +70,9 @@ typedef BleNotificationEndpointResolver = Future<BleNotificationEndpoint?> Funct
 
 @visibleForTesting
 typedef BleServiceRefresher = Future<void> Function();
+
+@visibleForTesting
+typedef BleConnectionOperation = Future<void> Function();
 
 @visibleForTesting
 typedef BleLivenessTimerFactory = Timer Function(Duration duration, void Function() callback);
@@ -137,6 +149,9 @@ class BleTransport extends DeviceTransport {
   final BleAudioLivenessRecovery _audioLivenessRecovery;
   final BleNotificationEndpointResolver? _notificationEndpointResolver;
   final BleServiceRefresher? _serviceRefresher;
+  final BleConnectionOperation? _adapterReadinessWaiter;
+  final BleConnectionOperation? _connectionStarter;
+  final BleConnectionOperation? _connectionStopper;
   final bool Function()? _connectionProbe;
   final void Function(StreamSubscription<List<int>>)? _disconnectRegistrar;
 
@@ -146,6 +161,7 @@ class BleTransport extends DeviceTransport {
   Future<void> _characteristicTeardownOperation = Future<void>.value();
   int _connectionGeneration = 0;
   int _audioConsumerGeneration = 0;
+  bool _gattReady = false;
   bool _disposed = false;
 
   BleTransport(
@@ -153,6 +169,9 @@ class BleTransport extends DeviceTransport {
     @visibleForTesting BleAudioLivenessRecovery? audioLivenessRecovery,
     @visibleForTesting BleNotificationEndpointResolver? notificationEndpointResolver,
     @visibleForTesting BleServiceRefresher? serviceRefresher,
+    @visibleForTesting BleConnectionOperation? adapterReadinessWaiter,
+    @visibleForTesting BleConnectionOperation? connectionStarter,
+    @visibleForTesting BleConnectionOperation? connectionStopper,
     @visibleForTesting bool Function()? connectionProbe,
     @visibleForTesting void Function(StreamSubscription<List<int>>)? disconnectRegistrar,
     @visibleForTesting Stream<BluetoothConnectionState>? connectionStateStream,
@@ -160,11 +179,16 @@ class BleTransport extends DeviceTransport {
         _audioLivenessRecovery = audioLivenessRecovery ?? BleAudioLivenessRecovery(),
         _notificationEndpointResolver = notificationEndpointResolver,
         _serviceRefresher = serviceRefresher,
+        _adapterReadinessWaiter = adapterReadinessWaiter,
+        _connectionStarter = connectionStarter,
+        _connectionStopper = connectionStopper,
         _connectionProbe = connectionProbe,
         _disconnectRegistrar = disconnectRegistrar {
     _bleConnectionSubscription = (connectionStateStream ?? _bleDevice.connectionState).listen((state) {
       switch (state) {
         case BluetoothConnectionState.disconnected:
+          _gattReady = false;
+          _services = [];
           _updateState(DeviceTransportState.disconnected);
           unawaited(_invalidateAndClearCharacteristicState());
           break;
@@ -172,7 +196,8 @@ class BleTransport extends DeviceTransport {
           _updateState(DeviceTransportState.connecting);
           break;
         case BluetoothConnectionState.connected:
-          _updateState(DeviceTransportState.connected);
+          // The native link is not usable until service discovery completes.
+          if (_gattReady) _updateState(DeviceTransportState.connected);
           break;
         case BluetoothConnectionState.disconnecting:
           _updateState(DeviceTransportState.disconnecting);
@@ -196,48 +221,51 @@ class BleTransport extends DeviceTransport {
 
   @override
   Future<void> connect() async {
-    if (_state == DeviceTransportState.connected) {
-      if (_services.isEmpty) await _refreshServices();
-      return;
-    }
+    if (_state == DeviceTransportState.connected && _gattReady) return;
 
     _updateState(DeviceTransportState.connecting);
 
     try {
-      // Wait for Bluetooth adapter to be ready
-      await BluetoothAdapter.adapterState.where((val) => val == BluetoothAdapterStateHelper.on).first;
+      await (_adapterReadinessWaiter?.call() ??
+          BluetoothAdapter.adapterState
+              .where((val) => val == BluetoothAdapterStateHelper.on)
+              .first
+              .timeout(bleAdapterReadyTimeout));
 
-      // Connect to device
-      await _bleDevice.connect(license: License.free);
-      await _bleDevice.connectionState.where((val) => val == BluetoothConnectionState.connected).first;
+      await (_connectionStarter?.call() ?? _bleDevice.connect(license: License.free, timeout: bleConnectionTimeout));
 
       // Request larger MTU for better performance on Android
       if (Platform.isAndroid && _bleDevice.mtuNow < 512) {
         await _bleDevice.requestMtu(512);
       }
 
-      // Discover services
       await _refreshServices();
 
+      _gattReady = true;
       _updateState(DeviceTransportState.connected);
-    } catch (e) {
+    } catch (error, stackTrace) {
+      _gattReady = false;
+      _services = [];
+      try {
+        await (_connectionStopper?.call() ?? _bleDevice.disconnect(queue: false, timeout: 5, androidDelay: 0));
+      } catch (disconnectError) {
+        Logger.debug('BLE Transport: Failed to cancel connection attempt: $disconnectError');
+      }
       _updateState(DeviceTransportState.disconnected);
-      rethrow;
+      Error.throwWithStackTrace(error, stackTrace);
     }
   }
 
   @override
   Future<void> disconnect() async {
-    if (_state == DeviceTransportState.disconnected) {
-      return;
-    }
-
     _updateState(DeviceTransportState.disconnecting);
 
     try {
+      _gattReady = false;
+      _services = [];
       await _invalidateAndClearCharacteristicState();
 
-      await _bleDevice.disconnect();
+      await (_connectionStopper?.call() ?? _bleDevice.disconnect(queue: false, timeout: 5, androidDelay: 0));
       await _characteristicTeardownOperation;
 
       _updateState(DeviceTransportState.disconnected);
@@ -617,7 +645,7 @@ class BleTransport extends DeviceTransport {
     if (_notificationEndpointResolver != null) return;
     _services = isRecovery
         ? await _bleDevice.discoverServices(timeout: bleServiceRediscoveryTimeoutSeconds)
-        : await _bleDevice.discoverServices();
+        : await _bleDevice.discoverServices(timeout: bleInitialServiceDiscoveryTimeoutSeconds);
   }
 
   Future<void> _closeCharacteristicState(

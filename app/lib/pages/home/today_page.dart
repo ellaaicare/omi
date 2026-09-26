@@ -3272,7 +3272,12 @@ class TodayRecordMomentControl extends StatelessWidget {
                     child: _TodayDockAction(
                       actionKey: const Key('today-view-live-transcript'),
                       icon: Icons.subject_rounded,
-                      label: (activeSource ?? selectedSource) == EllaCaptureSource.necklace
+                      label: (necklaceRecording
+                                  ? EllaCaptureSource.necklace
+                                  : phoneRecording
+                                      ? EllaCaptureSource.phone
+                                      : selectedSource) ==
+                              EllaCaptureSource.necklace
                           ? context.l10n.todayDockTranscriptNecklace
                           : context.l10n.todayDockTranscriptPhone,
                       onTap: onViewTranscript,

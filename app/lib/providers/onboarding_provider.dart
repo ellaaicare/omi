@@ -25,6 +25,11 @@ import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 
 class OnboardingProvider extends BaseProvider with MessageNotifierMixin implements IDeviceServiceSubsciption {
+  OnboardingProvider({IDeviceService? deviceService}) : _deviceServiceOverride = deviceService;
+
+  final IDeviceService? _deviceServiceOverride;
+  IDeviceService get _deviceService => _deviceServiceOverride ?? ServiceManager.instance().device;
+
   DeviceProvider? deviceProvider;
   bool isClicked = false;
   bool isConnected = false;
@@ -560,6 +565,8 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   }
 
   Future<void> scanDevices({required VoidCallback onShowDialog}) async {
+    await deviceProvider?.prepareForExplicitDeviceSelection();
+
     if (SharedPreferencesUtil().btDevice.id.isEmpty) {
       // it means the device has been unpaired
       deviceAlreadyUnpaired();
@@ -578,14 +585,14 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
       notifyListeners();
     });
 
-    ServiceManager.instance().device.subscribe(this, this);
+    _deviceService.subscribe(this, this);
     await deviceProvider?.periodicConnect("Come from Onboarding");
   }
 
   @override
   void dispose() {
     _didNotMakeItTimer.cancel();
-    ServiceManager.instance().device.unsubscribe(this);
+    _deviceService.unsubscribe(this);
     super.dispose();
   }
 

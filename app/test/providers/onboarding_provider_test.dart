@@ -35,6 +35,9 @@ class _NoopDeviceService implements IDeviceService {
   void setWifiSyncInProgress(bool value) {}
 
   @override
+  Future<void> cancelPendingConnection() async {}
+
+  @override
   Future<void> disconnectDevice() async {}
 }
 
@@ -48,6 +51,23 @@ class _FailedTargetConnectDeviceProvider extends DeviceProvider {
     bool requireFreshSession = false,
   }) async =>
       false;
+}
+
+class _OrderedScanDeviceProvider extends DeviceProvider {
+  _OrderedScanDeviceProvider(this.calls)
+      : super(deviceService: _NoopDeviceService(), automaticallyReconnectOnReady: false);
+
+  final List<String> calls;
+
+  @override
+  Future<void> prepareForExplicitDeviceSelection() async {
+    calls.add('prepare');
+  }
+
+  @override
+  Future<void> periodicConnect(String reason, {bool boundDeviceOnly = false, int? operationGeneration}) async {
+    calls.add('scan');
+  }
 }
 
 void main() {
@@ -78,5 +98,20 @@ void main() {
     expect(onboarding.isConnected, isTrue);
     expect(onboarding.deviceId, necklaceA.id);
     expect(onboarding.isClicked, isFalse);
+  });
+
+  test('device scan awaits explicit-selection preparation before reconnecting', () async {
+    final calls = <String>[];
+    final service = _NoopDeviceService();
+    final device = _OrderedScanDeviceProvider(calls);
+    final onboarding = OnboardingProvider(deviceService: service)
+      ..setDeviceProvider(device)
+      ..hasBluetoothPermission = true;
+    addTearDown(device.dispose);
+    addTearDown(onboarding.dispose);
+
+    await onboarding.scanDevices(onShowDialog: () {});
+
+    expect(calls, ['prepare', 'scan']);
   });
 }

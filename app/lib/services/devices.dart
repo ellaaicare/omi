@@ -27,6 +27,7 @@ abstract class IDeviceService {
 
   // WiFi sync support - pause BLE reconnection during WiFi transfer
   void setWifiSyncInProgress(bool value);
+  Future<void> cancelPendingConnection();
   Future<void> disconnectDevice();
 }
 
@@ -326,6 +327,37 @@ class DeviceService implements IDeviceService {
   void setWifiSyncInProgress(bool value) {
     _isWifiSyncInProgress = value;
     Logger.debug("DeviceService: WiFi sync in progress: $value");
+  }
+
+  @override
+  Future<void> cancelPendingConnection() async {
+    final connection = _connection;
+
+    // Explicit selection must supersede discovery or connection work that can
+    // otherwise retain the service mutex until the dock attempt times out.
+    _operationGeneration++;
+    _connectionGeneration++;
+    if (_status == DeviceServiceStatus.scanning) {
+      _status = DeviceServiceStatus.ready;
+      onStatusChanged(_status);
+    }
+
+    for (final discoverer in _discoverers.where((discoverer) => discoverer.isSupported)) {
+      try {
+        await discoverer.stop().timeout(const Duration(seconds: 1));
+      } catch (error) {
+        Logger.debug('DeviceService: Failed to stop ${discoverer.name} discovery: $error');
+      }
+    }
+
+    if (connection == null) return;
+
+    _connection = null;
+    try {
+      await connection.disconnect();
+    } catch (error) {
+      Logger.debug('DeviceService: Failed to cancel pending connection: $error');
+    }
   }
 
   @override
