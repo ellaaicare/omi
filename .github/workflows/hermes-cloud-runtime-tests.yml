@@ -1310,7 +1310,17 @@ jobs:
           pytest tests/unit/test_ella_observer.py -v
           test "$(pytest --collect-only -q tests/unit/test_invitation_redemption.py | grep -c '::')" -eq 19
           pytest tests/unit/test_invitation_redemption.py -v
-          test "$(pytest --collect-only -q tests/unit/test_memory_reinterpretation_outbox.py | grep -c '::')" -eq 28
+          memory_reinterpretation_ids="$(
+            pytest --collect-only -q tests/unit/test_memory_reinterpretation_outbox.py |
+              sed '/^$/d'
+          )"
+          grep -Fqx \
+            "tests/unit/test_memory_reinterpretation_outbox.py::test_worker_classifies_consent_failure_before_hermes[403-ai_consent_required-dead_letter]" \
+            <<<"$memory_reinterpretation_ids"
+          grep -Fqx \
+            "tests/unit/test_memory_reinterpretation_outbox.py::test_worker_classifies_consent_failure_before_hermes[503-ai_consent_authority_unavailable-retry]" \
+            <<<"$memory_reinterpretation_ids"
+          test "$(grep -c '::' <<<"$memory_reinterpretation_ids")" -eq 30
           pytest tests/unit/test_memory_reinterpretation_outbox.py -v
           test "$(pytest --collect-only -q tests/unit/test_scanner_keyterms.py | grep -c '::')" -eq 10
           pytest tests/unit/test_scanner_keyterms.py -v
