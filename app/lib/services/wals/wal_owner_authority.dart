@@ -80,7 +80,7 @@ class AccountGenerationAuthority implements AccountCommitAuthority {
 class WalOwnerAuthority {
   const WalOwnerAuthority._();
 
-  static WalOwner? currentOwner({SharedPreferencesUtil? preferences, String? authenticatedUid}) {
+  static WalOwner? pendingSameAccountOwner({SharedPreferencesUtil? preferences, String? authenticatedUid}) {
     final prefs = preferences ?? SharedPreferencesUtil();
     final firebaseUid = authenticatedUid ?? WalOwnerAuthority.authenticatedUid;
     if (firebaseUid.isEmpty || prefs.uid != firebaseUid) return null;
@@ -92,7 +92,6 @@ class WalOwnerAuthority {
     if (profileBindingId.isEmpty || consentReceiptId.isEmpty || bindingRevision is! int || bindingRevision <= 0) {
       return null;
     }
-    if (!prefs.hasCurrentEllaProvisioningAuthority(uid: firebaseUid, bindingRevision: bindingRevision)) return null;
 
     final owner = WalOwner(
       uid: firebaseUid,
@@ -102,6 +101,16 @@ class WalOwnerAuthority {
       authorityGenerationAtCapture: prefs.aiConsentAuthorityGeneration,
     );
     return owner.hasValidAuthorityIdentity ? owner : null;
+  }
+
+  static WalOwner? currentOwner({SharedPreferencesUtil? preferences, String? authenticatedUid}) {
+    final prefs = preferences ?? SharedPreferencesUtil();
+    final owner = pendingSameAccountOwner(preferences: prefs, authenticatedUid: authenticatedUid);
+    if (owner == null ||
+        !prefs.hasCurrentEllaProvisioningAuthority(uid: owner.uid, bindingRevision: owner.bindingRevision)) {
+      return null;
+    }
+    return owner;
   }
 
   static ActiveWalAuthority? active({SharedPreferencesUtil? preferences, String? authenticatedUid}) {

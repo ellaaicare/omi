@@ -15,6 +15,7 @@ import 'package:omi/utils/logger.dart';
 class WalFileManager {
   static const String _walFileName = 'wals.json';
   static const String _walBackupFileName = 'wals_backup.json';
+  static const String _ownerRecoveryFileName = 'owner_recovery.json';
   static const String _legacyPendingFilesKey = 'flash_page_pending_uploads';
   static const String _migrationCompletedPreference = 'limitless_wal_owner_quarantine_v2';
   static const String _accountsDirectoryName = 'ella_wal_accounts';
@@ -277,23 +278,263 @@ class WalFileManager {
     return true;
   }
 
+  static Future<bool> authorizeInterruptedSameAccountRecovery({
+    required WalOwner sourceOwner,
+    required WalOwner targetOwner,
+    required ActiveWalAuthority capturedAuthority,
+  }) =>
+      runExclusive(
+        () => _authorizeInterruptedSameAccountRecovery(
+          sourceOwner: sourceOwner,
+          targetOwner: targetOwner,
+          capturedAuthority: capturedAuthority,
+        ),
+      );
+
+  static Future<bool> _authorizeInterruptedSameAccountRecovery({
+    required WalOwner sourceOwner,
+    required WalOwner targetOwner,
+    required ActiveWalAuthority capturedAuthority,
+  }) async {
+    await init(activeOwner: _activeOwner);
+    if (_activeOwner?.matches(sourceOwner) != true ||
+        !sourceOwner.hasValidAuthorityIdentity ||
+        !targetOwner.hasValidAuthorityIdentity ||
+        sourceOwner.uid != targetOwner.uid ||
+        sourceOwner.durablyMatches(targetOwner) ||
+        !capturedAuthority.owner.matches(sourceOwner) ||
+        !capturedAuthority.isCurrent()) {
+      return false;
+    }
+
+    final bridgeFile = File(p.join(_accountsDirectory.path, sourceOwner.storageNamespace, _ownerRecoveryFileName));
+    await bridgeFile.parent.create(recursive: true);
+    await bridgeFile.writeAsString(
+      jsonEncode({
+        'version': 1,
+        'source_authority_fingerprint': sourceOwner.authorityFingerprint,
+        'target_owner': targetOwner.toJson(),
+      }),
+      flush: true,
+    );
+    if (capturedAuthority.isCurrent()) return true;
+    if (await bridgeFile.exists()) await bridgeFile.delete();
+    return false;
+  }
+
+  static Future<int> recoverInterruptedSameAccountWals({
+    required ActiveWalAuthority targetAuthority,
+    required ActiveWalAuthority? Function() readCurrentAuthority,
+  }) =>
+      runExclusive(
+        () => _recoverInterruptedSameAccountWals(
+          targetAuthority: targetAuthority,
+          readCurrentAuthority: readCurrentAuthority,
+        ),
+      );
+
+  static Future<int> _recoverInterruptedSameAccountWals({
+    required ActiveWalAuthority targetAuthority,
+    required ActiveWalAuthority? Function() readCurrentAuthority,
+  }) async {
+    await init(activeOwner: _activeOwner);
+    final targetOwner = targetAuthority.owner;
+    final activeOwner = _activeOwner;
+    bool targetIsExactCurrent() {
+      final current = readCurrentAuthority();
+      return targetAuthority.isCurrent() &&
+          current != null &&
+          current.isCurrent() &&
+          current.owner.matches(targetOwner);
+    }
+
+    if (activeOwner == null ||
+        !activeOwner.matches(targetOwner) ||
+        !targetOwner.hasValidAuthorityIdentity ||
+        !targetIsExactCurrent()) {
+      return 0;
+    }
+
+    final targetDirectory = _activeDirectory!;
+    final sourceDirectories = (await _accountsDirectory
+            .list(followLinks: false)
+            .where((entry) => entry is Directory)
+            .toList())
+        .cast<Directory>()
+      ..sort((left, right) => left.path.compareTo(right.path));
+    var recoveredCount = 0;
+    for (final sourceDirectory in sourceDirectories) {
+      if (!targetIsExactCurrent()) continue;
+      final sharesTargetDirectory = sourceDirectory.path == targetDirectory.path;
+      final sourceManifest = File(p.join(sourceDirectory.path, _walFileName));
+      final sourceBackup = File(p.join(sourceDirectory.path, _walBackupFileName));
+      final recoveryFile = File(p.join(sourceDirectory.path, _ownerRecoveryFileName));
+      final recoveryBridge = await _readRecoveryBridge(recoveryFile);
+      if (recoveryBridge == null ||
+          !recoveryBridge.targetOwner.sharesDurableConsentEpoch(targetOwner) ||
+          targetOwner.bindingRevision < recoveryBridge.targetOwner.bindingRevision) {
+        continue;
+      }
+      final sourceWals = await _readWals(sourceManifest);
+      if (sourceWals.isEmpty) continue;
+
+      final sourceOwner = sourceWals.first.owner;
+      if (sourceOwner == null ||
+          !sourceOwner.hasValidAuthorityIdentity ||
+          sourceOwner.storageNamespace != p.basename(sourceDirectory.path) ||
+          sourceOwner.uid != targetOwner.uid ||
+          sourceOwner.authorityFingerprint != recoveryBridge.sourceAuthorityFingerprint ||
+          sourceWals.any((wal) => wal.status == WalStatus.quarantined || wal.owner?.matches(sourceOwner) != true)) {
+        continue;
+      }
+
+      final targetWals = sharesTargetDirectory ? <Wal>[] : await _readWals(_activeWalFile);
+      if (targetWals
+          .any((wal) => wal.status == WalStatus.quarantined || wal.owner?.durablyMatches(targetOwner) != true)) {
+        continue;
+      }
+      for (final wal in targetWals) {
+        wal.owner = targetOwner;
+      }
+      final targetKeys = targetWals.map((wal) => '${wal.device}\n${wal.timerStart}').toSet();
+      if (sourceWals.any((wal) => targetKeys.contains('${wal.device}\n${wal.timerStart}'))) continue;
+
+      final manifestSnapshots = <_FileSnapshot>[
+        await _FileSnapshot.capture(_activeWalFile!),
+        await _FileSnapshot.capture(_activeWalBackupFile!),
+      ];
+      final rotations = <_WalOwnerRotation>[];
+      final copiedDestinations = <File>[];
+      try {
+        for (final wal in sourceWals) {
+          File? source;
+          File? destination;
+          var sourceMissing = false;
+          if (wal.storage == WalStorage.disk && wal.filePath?.isNotEmpty == true) {
+            source = File(p.join(sourceDirectory.path, p.basename(wal.filePath!)));
+            if (!await source.exists()) {
+              source = null;
+              sourceMissing = true;
+            } else {
+              destination = sharesTargetDirectory
+                  ? source
+                  : await _uniqueAccountDestination(targetDirectory, p.basename(wal.filePath!));
+              if (source.path != destination.path) {
+                await source.copy(destination.path);
+                copiedDestinations.add(destination);
+              }
+            }
+          }
+          rotations.add(
+            _WalOwnerRotation(
+              wal: wal,
+              previousOwner: wal.owner!,
+              previousPath: wal.filePath,
+              previousStatus: wal.status,
+              source: source,
+              destination: destination,
+              sourceMissing: sourceMissing,
+            ),
+          );
+          wal.owner = targetOwner;
+          if (destination != null) wal.filePath = destination.path;
+          if (sourceMissing) wal.status = WalStatus.corrupted;
+        }
+        if (!targetIsExactCurrent()) throw StateError('WAL recovery authority changed before commit');
+        await _writeWals(_activeWalFile, _activeWalBackupFile, [...targetWals, ...sourceWals]);
+        if (!targetIsExactCurrent()) throw StateError('WAL recovery authority changed during commit');
+      } catch (error) {
+        for (final rotation in rotations) {
+          rotation.wal.owner = rotation.previousOwner;
+          rotation.wal.filePath = rotation.previousPath;
+          rotation.wal.status = rotation.previousStatus;
+        }
+        for (final snapshot in manifestSnapshots.reversed) {
+          try {
+            await snapshot.restore();
+          } catch (_) {
+            // The source manifest remains authoritative and can be retried later.
+          }
+        }
+        for (final destination in copiedDestinations) {
+          try {
+            if (await destination.exists()) await destination.delete();
+          } catch (_) {
+            // A later isolated-storage cleanup can remove an unreferenced copy.
+          }
+        }
+        Logger.debug('WalFileManager: Interrupted WAL recovery failed (${error.runtimeType})');
+        continue;
+      }
+
+      for (final rotation in rotations) {
+        try {
+          if (rotation.source != null &&
+              rotation.destination != null &&
+              rotation.source!.path != rotation.destination!.path &&
+              await rotation.source!.exists()) {
+            await rotation.source!.delete();
+          }
+        } catch (_) {
+          // The committed target copy is authoritative.
+        }
+      }
+      final supersededFiles = sharesTargetDirectory ? [recoveryFile] : [sourceManifest, sourceBackup, recoveryFile];
+      for (final manifest in supersededFiles) {
+        try {
+          if (await manifest.exists()) await manifest.delete();
+        } catch (_) {
+          // Duplicate source metadata is ignored if the target already contains the WAL key.
+        }
+      }
+      recoveredCount += sourceWals.length;
+      Logger.debug('WalFileManager: Recovered interrupted same-account WALs');
+    }
+    return recoveredCount;
+  }
+
+  static Future<_WalOwnerRecoveryBridge?> _readRecoveryBridge(File file) async {
+    if (!await file.exists()) return null;
+    try {
+      final payload = jsonDecode(await file.readAsString());
+      if (payload is! Map<String, dynamic> || payload['version'] != 1) return null;
+      final sourceFingerprint = payload['source_authority_fingerprint'];
+      final targetOwnerJson = payload['target_owner'];
+      if (sourceFingerprint is! String || targetOwnerJson is! Map<String, dynamic>) return null;
+      final targetOwner = WalOwner.fromJson(targetOwnerJson);
+      if (!targetOwner.hasValidAuthorityIdentity || targetOwner.authorityFingerprint.isEmpty) return null;
+      return _WalOwnerRecoveryBridge(
+        sourceAuthorityFingerprint: sourceFingerprint,
+        targetOwner: targetOwner,
+      );
+    } catch (error) {
+      Logger.debug('WalFileManager: Could not read WAL owner recovery bridge (${error.runtimeType})');
+      return null;
+    }
+  }
+
   static Future<List<Wal>> loadWals({WalOwner? activeOwner}) async {
     await init(activeOwner: activeOwner);
     final active = await _readWals(_activeWalFile);
     final quarantine = await _readWals(_quarantineWalFile);
     await SharedPreferencesUtil().saveInt('ellaWalQuarantineCount', quarantine.length);
     final valid = <Wal>[];
+    var reboundDurableOwner = false;
     for (final wal in active) {
-      if (_activeOwner != null && wal.owner != null && wal.owner!.matches(_activeOwner!)) {
+      if (_activeOwner != null && wal.owner?.durablyMatches(_activeOwner!) == true) {
+        if (wal.owner?.matches(_activeOwner!) != true) {
+          wal.owner = _activeOwner;
+          reboundDurableOwner = true;
+        }
         valid.add(wal);
       } else {
         await quarantineWal(wal, reason: 'owner_manifest_mismatch', persist: false);
         quarantine.add(wal);
       }
     }
-    if (valid.length != active.length) {
+    if (valid.length != active.length || reboundDurableOwner) {
       await _writeWals(_activeWalFile, _activeWalBackupFile, valid);
-      await _writeWals(_quarantineWalFile, null, quarantine);
+      if (valid.length != active.length) await _writeWals(_quarantineWalFile, null, quarantine);
     }
     return valid;
   }
@@ -464,6 +705,19 @@ class WalFileManager {
     return destination;
   }
 
+  static Future<File> _uniqueAccountDestination(Directory directory, String filename) async {
+    var destination = File(p.join(directory.path, filename));
+    if (!await destination.exists()) return destination;
+    final stem = p.basenameWithoutExtension(filename);
+    final extension = p.extension(filename);
+    var suffix = 1;
+    do {
+      destination = File(p.join(directory.path, '${stem}_recovered_$suffix$extension'));
+      suffix++;
+    } while (await destination.exists());
+    return destination;
+  }
+
   static Future<List<Wal>> _readWals(File? file) async {
     if (file == null || !file.existsSync()) return [];
     try {
@@ -609,6 +863,16 @@ class _WalOwnerRotation {
   final File? source;
   final File? destination;
   final bool sourceMissing;
+}
+
+class _WalOwnerRecoveryBridge {
+  const _WalOwnerRecoveryBridge({
+    required this.sourceAuthorityFingerprint,
+    required this.targetOwner,
+  });
+
+  final String sourceAuthorityFingerprint;
+  final WalOwner targetOwner;
 }
 
 class _FileSnapshot {
