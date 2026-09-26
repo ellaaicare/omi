@@ -291,6 +291,23 @@ void main() {
     expect(authority.isCurrent(preferences: prefs, authenticatedUid: 'uid-b'), isFalse);
     prefs.declineAiConsent();
     expect(authority.isCurrent(preferences: prefs, authenticatedUid: 'uid-a'), isFalse);
+    await _grantOperationalAuthority(prefs, 'uid-a');
+    expect(authority.isCurrent(preferences: prefs, authenticatedUid: 'uid-a'), isFalse);
+  });
+
+  test('account transition fences active WAL authority before the UID changes and after re-grant', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await _grantOperationalAuthority(prefs, 'uid-a');
+    final authority = WalOwnerAuthority.active(preferences: prefs, authenticatedUid: 'uid-a');
+    expect(authority, isNotNull);
+
+    prefs.invalidateAccountAuthorityForTransition();
+    expect(prefs.uid, 'uid-a');
+    expect(authority!.isCurrent(preferences: prefs, authenticatedUid: 'uid-a'), isFalse);
+
+    await _grantOperationalAuthority(prefs, 'uid-a');
+    expect(authority.isCurrent(preferences: prefs, authenticatedUid: 'uid-a'), isFalse);
+    expect(WalOwnerAuthority.active(preferences: prefs, authenticatedUid: 'uid-a'), isNotNull);
   });
 
   test('terminal provisioning invalidation stops an active WAL authority', () async {

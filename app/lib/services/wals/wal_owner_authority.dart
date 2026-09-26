@@ -21,12 +21,14 @@ class ActiveWalAuthority implements AccountCommitAuthority {
   const ActiveWalAuthority({
     required this.owner,
     required this.consent,
+    this.accountConsentTerminalGeneration,
     this.provisioningTerminalGeneration,
     this.currentCheck,
   });
 
   final WalOwner owner;
   final AiConsentAuthoritySnapshot consent;
+  final int? accountConsentTerminalGeneration;
   final int? provisioningTerminalGeneration;
   final bool Function()? currentCheck;
 
@@ -42,6 +44,8 @@ class ActiveWalAuthority implements AccountCommitAuthority {
         consent.uid == owner.uid &&
         currentUid == owner.uid &&
         prefs.uid == owner.uid &&
+        (accountConsentTerminalGeneration == null ||
+            accountConsentTerminalGeneration == prefs.terminalAccountConsentAuthorityGeneration) &&
         (provisioningTerminalGeneration == null ||
             provisioningTerminalGeneration == prefs.ellaProvisioningTerminalAuthorityGeneration) &&
         consent.isCurrent(preferences: prefs);
@@ -112,6 +116,7 @@ class WalOwnerAuthority {
     return ActiveWalAuthority(
       owner: owner,
       consent: consent,
+      accountConsentTerminalGeneration: prefs.terminalAccountConsentAuthorityGeneration,
       provisioningTerminalGeneration: prefs.ellaProvisioningTerminalAuthorityGeneration,
     );
   }
