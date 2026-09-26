@@ -50,6 +50,7 @@ class EllaRequestAuthority:
 class FirebaseTokenIdentity:
     uid: str
     verified_email: str = ""
+    auth_time: int = 0
 
 
 def _version_tuple(value: str) -> tuple[int, ...]:
@@ -123,8 +124,10 @@ def get_firebase_token_identity(
         raise HTTPException(status_code=401, detail="Invalid Firebase bearer subject")
     email = str(decoded.get("email") or "").strip().lower() if isinstance(decoded, dict) else ""
     verified_email = email if decoded.get("email_verified") is True else ""
+    raw_auth_time = decoded.get("auth_time") if isinstance(decoded, dict) else None
+    auth_time = raw_auth_time if isinstance(raw_auth_time, int) and raw_auth_time > 0 else 0
     require_supported_ella_client(x_app_version, x_ella_app_build, x_ella_client_version)
-    return FirebaseTokenIdentity(uid=uid, verified_email=verified_email)
+    return FirebaseTokenIdentity(uid=uid, verified_email=verified_email, auth_time=auth_time)
 
 
 def get_exact_firebase_uid(

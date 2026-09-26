@@ -934,8 +934,10 @@ def _generation_claim_is_current(
 def has_current_global_ai_consent(uid: str) -> bool:
     try:
         status = get_ai_consent_service().status(uid)
-    except Exception:
-        return False
+    except Exception as exc:
+        raise MemoryArtworkError("memory_artwork_consent_authority_unavailable", retryable=True) from exc
+    if status.get("authority_state") == "unavailable" or status.get("retryable") is True:
+        raise MemoryArtworkError("memory_artwork_consent_authority_unavailable", retryable=True)
     return status.get("authorized") is True
 
 

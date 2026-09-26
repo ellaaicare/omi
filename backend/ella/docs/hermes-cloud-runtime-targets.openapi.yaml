@@ -671,3 +671,9 @@ components:
           type: string
         locale:
           type: string
+        account_epoch_token:
+          type: string
+          maxLength: 128
+          description: >
+            One-time server epoch returned only after completed account deletion
+            and fresh Firebase authentication. Omit for normal consent updates.

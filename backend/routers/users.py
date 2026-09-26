@@ -62,7 +62,12 @@ from database.managed_cloud_consent import (
     ManagedCloudAuthorityUnavailable,
     unlink_self_owner_account_on_deletion,
 )
-from ella.services.ai_consent import build_account_deletion_receipt
+from ella.services.ai_consent import (
+    ConsentAuthorityUnavailable,
+    build_account_deletion_request_id,
+    build_account_deletion_receipt,
+    get_ai_consent_service,
+)
 from utils.ella.memory_artwork_storage import (
     MemoryArtworkStorageError,
     acquire_memory_artwork_publication_lock,
@@ -118,6 +123,7 @@ async def delete_account(uid: str = Depends(auth.get_current_user_uid)):
     same Firebase UID bootstraps a fresh account and any orphaned
     Hermes/honcho data persists until the GC/retention pass.
     """
+    deletion_request_id = build_account_deletion_request_id()
     try:
         async with acquire_memory_artwork_publication_lock(uid) as artwork_lock_proof:
             await run_in_threadpool(
@@ -125,7 +131,16 @@ async def delete_account(uid: str = Depends(auth.get_current_user_uid)):
                 uid,
                 lock_proof=artwork_lock_proof,
             )
+        consent_service = get_ai_consent_service()
+        consent_service.record_account_deletion(
+            uid,
+            request_id=deletion_request_id,
+        )
         await unlink_self_owner_account_on_deletion(uid=uid)
+        deletion_completion = consent_service.complete_account_deletion(
+            uid,
+            request_id=deletion_request_id,
+        )
     except MemoryArtworkStorageError as exc:
         print('delete_account', str(exc))
         raise HTTPException(
@@ -144,13 +159,25 @@ async def delete_account(uid: str = Depends(auth.get_current_user_uid)):
                 'retryable': True,
             },
         )
+    except ConsentAuthorityUnavailable as exc:
+        print('delete_account', str(exc))
+        raise HTTPException(
+            status_code=503,
+            detail={
+                'code': 'account_deletion_consent_authority_unavailable',
+                'retryable': True,
+            },
+        )
     except Exception as e:
         print('delete_account', str(e))
         raise HTTPException(status_code=500, detail=str(e))
     return {
         'status': 'ok',
         'message': 'Account deleted successfully',
-        'deletion_receipt': build_account_deletion_receipt(),
+        'deletion_receipt': build_account_deletion_receipt(
+            request_id=deletion_request_id,
+            server_completed_at=deletion_completion['deletion_completed_at'],
+        ),
     }
 
 

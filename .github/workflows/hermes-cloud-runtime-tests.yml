@@ -992,7 +992,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 21
-          test "$collected" -eq 576
+          test "$collected" -eq 589
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
@@ -1199,7 +1199,16 @@ jobs:
           grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_retained_runtime_rearm_rejects_stale_authority_revision" \
             <<<"$authority_lock_ids"
-          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 80
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_delete_absent_uid_serializes_on_provisional_bootstrap_lock" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_delete_waits_for_inflight_fresh_bootstrap_then_removes_it" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_delete_re_resolves_email_owner_created_while_waiting_on_uid_lock" \
+            <<<"$authority_lock_ids"
+          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 83
           pytest \
             tests/unit/test_authority_advisory_lock.py \
             tests/unit/test_authority_writer_guard.py \

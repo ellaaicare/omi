@@ -298,6 +298,8 @@ def _load_delete_account_route():
     firebase_delete = Mock()
     prepare_artwork_deletion = Mock(return_value=0)
     unlink = AsyncMock()
+    consent_service = Mock()
+    consent_service.complete_account_deletion.return_value = {"deletion_completed_at": "2026-09-26T04:30:00+00:00"}
     auth = types.SimpleNamespace(get_current_user_uid=authenticated_uid, delete_account=firebase_delete)
 
     async def run_in_threadpool(function, *args, **kwargs):
@@ -314,15 +316,25 @@ def _load_delete_account_route():
         "auth": auth,
         "delete_user_data": firestore_delete,
         "build_account_deletion_receipt": build_account_deletion_receipt,
+        "build_account_deletion_request_id": Mock(return_value="aidel_test_request_000000000000"),
+        "get_ai_consent_service": Mock(return_value=consent_service),
         "unlink_self_owner_account_on_deletion": unlink,
         "prepare_account_artwork_deletion": prepare_artwork_deletion,
         "acquire_memory_artwork_publication_lock": acquire_publication_lock,
         "run_in_threadpool": run_in_threadpool,
         "MemoryArtworkStorageError": RuntimeError,
         "ManagedCloudAuthorityUnavailable": RuntimeError,
+        "ConsentAuthorityUnavailable": RuntimeError,
     }
     exec(compile(ast.Module(body=[function], type_ignores=[]), "backend/routers/users.py", "exec"), namespace)
-    return namespace["delete_account"], firestore_delete, firebase_delete, prepare_artwork_deletion, unlink
+    return (
+        namespace["delete_account"],
+        firestore_delete,
+        firebase_delete,
+        prepare_artwork_deletion,
+        unlink,
+        consent_service,
+    )
 
 
 def test_account_deletion_completes_unlink_receipt_without_destructive_removal():
@@ -332,7 +344,9 @@ def test_account_deletion_completes_unlink_receipt_without_destructive_removal()
     # (users row / consent authority freed under the advisory lock) — so the
     # receipt is truthful and a relogin creates a fresh account. The deep
     # Firestore/Firebase wipe is deferred to the GC/retention pipeline.
-    route, firestore_delete, firebase_delete, prepare_artwork_deletion, unlink = _load_delete_account_route()
+    route, firestore_delete, firebase_delete, prepare_artwork_deletion, unlink, consent_service = (
+        _load_delete_account_route()
+    )
     app = FastAPI()
     app.add_api_route("/v1/users/delete-account", route, methods=["DELETE"])
 
@@ -347,6 +361,15 @@ def test_account_deletion_completes_unlink_receipt_without_destructive_removal()
     assert re.match(r"^aidel_[A-Za-z0-9_-]{16,128}$", body["deletion_receipt"]["request_id"])
     assert "server_completed_at" in body["deletion_receipt"]
     prepare_artwork_deletion.assert_called_once_with("uid-a", lock_proof=ANY)
+    consent_service.record_account_deletion.assert_called_once_with(
+        "uid-a",
+        request_id=body["deletion_receipt"]["request_id"],
+    )
     unlink.assert_called_once_with(uid="uid-a")
+    consent_service.complete_account_deletion.assert_called_once_with(
+        "uid-a",
+        request_id=body["deletion_receipt"]["request_id"],
+    )
+    assert body["deletion_receipt"]["server_completed_at"] == "2026-09-26T04:30:00+00:00"
     firestore_delete.assert_not_called()
     firebase_delete.assert_not_called()

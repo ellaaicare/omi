@@ -7,7 +7,7 @@ import hmac
 import json
 import uuid
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Literal, Optional
 
 import asyncpg
 
@@ -382,6 +382,7 @@ async def synchronize_grant(
     grant: ManagedCloudGrant,
     allow_fresh_uid_bootstrap: bool = False,
     bootstrap_email: str = "",
+    grant_is_current: Optional[Callable[[], Awaitable[bool]]] = None,
 ) -> dict[str, Any]:
     """Publish a Firestore grant into the PostgreSQL ordering authority.
 
@@ -409,6 +410,8 @@ async def synchronize_grant(
                     conn,
                     uid=grant.account_uid,
                 )
+                if grant_is_current is not None and not await grant_is_current():
+                    raise ManagedCloudAuthorityUnavailable("managed_cloud_authority_grant_superseded")
                 user_id = await authority_advisory_lock.verify_self_owner_after_lock_or_bootstrap(
                     conn,
                     uid=grant.account_uid,
@@ -604,59 +607,96 @@ async def unlink_self_owner_account_on_deletion(*, uid: str) -> None:
     links) then deletes the ``users`` row so the same Firebase UID's next login
     bootstraps a *fresh* account (Plato's "fresh account on relogin" semantic),
     rather than resuming the old one. Idempotent and a no-op when no ``users``
-    row exists — so the deletion receipt is only issued when the server state
-    was actually unlinked.
+    row exists. The absent-owner path still takes the deterministic provisional
+    UID lock so a concurrent first bootstrap cannot escape the deletion epoch.
     """
     try:
         pool = await voice_canary.get_pool()
-        async with pool.acquire() as conn:
-            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
-                conn,
-                uid=uid,
-            )
-            async with conn.transaction():
-                owner_lock = await authority_advisory_lock.acquire_authority_lock(
-                    conn,
-                    owner=owner,
-                )
-                await voice_canary.lock_runtime_authority_on_connection(
-                    conn,
-                    uid=uid,
-                )
-                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
-                    conn,
-                    uid=uid,
-                    owner=owner,
-                    proof=owner_lock,
-                )
-                # Clear the FK dependents under the lock before freeing omi_uid.
-                await _quarantine_on_connection(
-                    conn,
-                    uid=uid,
-                    user_id=user_id,
-                    reason="account_deletion_confirmed",
-                    owner_lock=owner_lock,
-                )
-                # ella_invitation_redemptions.user_id is ON DELETE RESTRICT; detach it.
-                await conn.execute(
-                    """
-                    UPDATE ella_invitation_redemptions
-                    SET user_id = NULL
-                    WHERE user_id = $1
-                    """,
-                    user_id,
-                )
-                await conn.execute(
-                    """
-                    DELETE FROM users
-                    WHERE id = $1
-                    """,
-                    user_id,
-                )
+        for attempt in range(2):
+            async with pool.acquire() as conn:
+                try:
+                    owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                        conn,
+                        uid=uid,
+                    )
+                    resolution = authority_advisory_lock.IdentityOwnerResolution(
+                        owner=owner,
+                        allow_create=False,
+                    )
+                except authority_advisory_lock.AuthorityLockError as exc:
+                    if exc.code != "authority_lock_owner_missing":
+                        raise
+                    owner = authority_advisory_lock.provisional_identity_owner(uid)
+                    resolution = authority_advisory_lock.IdentityOwnerResolution(
+                        owner=owner,
+                        allow_create=True,
+                    )
+                try:
+                    async with conn.transaction():
+                        owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                            conn,
+                            owner=owner,
+                        )
+                        await voice_canary.lock_runtime_authority_on_connection(
+                            conn,
+                            uid=uid,
+                        )
+                        identity_rows = await authority_advisory_lock.verify_identity_owner_after_lock(
+                            conn,
+                            uid=uid,
+                            email="",
+                            resolution=resolution,
+                            proof=owner_lock,
+                        )
+                        user_row = next((row for row in identity_rows if row["omi_uid"] == uid), None)
+                        if user_row is None:
+                            await conn.execute(
+                                """
+                                UPDATE voice_entitlements
+                                SET status = 'revoked',
+                                    revision = revision + 1,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE uid = $1
+                                  AND status <> 'revoked'
+                                """,
+                                uid,
+                            )
+                            await conn.execute(
+                                "DELETE FROM voice_active_sessions WHERE uid = $1",
+                                uid,
+                            )
+                            return
+                        user_id = uuid.UUID(str(user_row["id"]))
+                        # Clear the FK dependents under the lock before freeing omi_uid.
+                        await _quarantine_on_connection(
+                            conn,
+                            uid=uid,
+                            user_id=user_id,
+                            reason="account_deletion_confirmed",
+                            owner_lock=owner_lock,
+                        )
+                        # ella_invitation_redemptions.user_id is ON DELETE RESTRICT; detach it.
+                        await conn.execute(
+                            """
+                            UPDATE ella_invitation_redemptions
+                            SET user_id = NULL
+                            WHERE user_id = $1
+                            """,
+                            user_id,
+                        )
+                        await conn.execute(
+                            """
+                            DELETE FROM users
+                            WHERE id = $1
+                            """,
+                            user_id,
+                        )
+                        return
+                except authority_advisory_lock.AuthorityLockError as exc:
+                    if exc.code == "authority_lock_owner_drift" and attempt == 0:
+                        continue
+                    raise
     except authority_advisory_lock.AuthorityLockError as exc:
-        if exc.code == "authority_lock_owner_missing":
-            # Nothing server-side to unlink; the receipt stays accurate.
-            return
         raise ManagedCloudAuthorityUnavailable("managed_cloud_authority_unavailable") from exc
     except ManagedCloudAuthorityUnavailable:
         raise
