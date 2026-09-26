@@ -523,7 +523,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       final suppressedCacheKeys = {
         _displayCacheKey,
         _cacheKey,
-        ...MemoryArtworkCache.takePublishedVariantCacheKeys(displayCacheKey: _displayCacheKey),
+        ...MemoryArtworkCache.publishedVariantCacheKeysForTerminalCleanup(displayCacheKey: _displayCacheKey),
       }..removeWhere((cacheKey) => cacheKey.isEmpty);
       MemoryArtworkCache.suppressDisplayCacheKeys(suppressedCacheKeys);
       setState(() {

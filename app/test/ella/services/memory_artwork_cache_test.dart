@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -130,14 +132,27 @@ void main() {
 
     await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
     MemoryArtworkCache.resetRuntimeTrustForTesting();
+    final terminalKeys = MemoryArtworkCache.publishedVariantCacheKeysForTerminalCleanup(
+      displayCacheKey: provisional,
+    );
     expect(
-      MemoryArtworkCache.takePublishedVariantCacheKeys(displayCacheKey: provisional),
+      terminalKeys,
       {compactVariant, largeVariant, replacementVariant},
     );
+    MemoryArtworkCache.suppressDisplayCacheKeys(terminalKeys);
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
+
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
     expect(
-      MemoryArtworkCache.publishedVariantCacheKeys(scopeKey: secondScope, displayCacheKey: provisional),
-      isEmpty,
+      MemoryArtworkCache.publishedVariantCacheKeysForTerminalCleanup(displayCacheKey: provisional),
+      {compactVariant, largeVariant, replacementVariant},
     );
+    MemoryArtworkCache.suppressDisplayCacheKeys(terminalKeys);
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(terminalKeys, (_) async {});
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
+
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+    expect(MemoryArtworkCache.publishedVariantCacheKeysForTerminalCleanup(displayCacheKey: provisional), isEmpty);
   });
 
   test('transient variant ledger write failure retries and survives restart', () async {
@@ -163,6 +178,36 @@ void main() {
     expect(attempts, 2);
     MemoryArtworkCache.configurePublishedVariantPersistenceForTesting();
     MemoryArtworkCache.resetRuntimeTrustForTesting();
-    expect(MemoryArtworkCache.takePublishedVariantCacheKeys(displayCacheKey: provisional), {variant});
+    expect(MemoryArtworkCache.publishedVariantCacheKeysForTerminalCleanup(displayCacheKey: provisional), {variant});
+  });
+
+  test('explicit clear is bounded and removes a late stale ledger write', () async {
+    final writerStarted = Completer<void>();
+    final releaseWriter = Completer<void>();
+    MemoryArtworkCache.configurePublishedVariantPersistenceForTesting(
+      cancellationTimeout: Duration.zero,
+      writer: (key, value) async {
+        if (!writerStarted.isCompleted) writerStarted.complete();
+        await releaseWriter.future;
+        return SharedPreferencesUtil().saveString(key, value);
+      },
+    );
+
+    MemoryArtworkCache.rememberPublishedVariantCacheKeys(
+      scopeKey: 'memory-a:authority-1:artwork-1',
+      displayCacheKey: 'a' * 64,
+      cacheKeys: {'b' * 64},
+    );
+    await writerStarted.future;
+
+    await MemoryArtworkCache.clear().timeout(const Duration(seconds: 1));
+    expect(SharedPreferencesUtil().getString('ellaMemoryArtworkPublishedVariantKeysV1'), isEmpty);
+
+    releaseWriter.complete();
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
+    expect(SharedPreferencesUtil().getString('ellaMemoryArtworkPublishedVariantKeysV1'), '{}');
+    MemoryArtworkCache.configurePublishedVariantPersistenceForTesting();
   });
 }

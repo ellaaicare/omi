@@ -19,6 +19,7 @@ class MemoryArtworkCache {
   static const Duration _evictionTimeout = Duration(seconds: 5);
   static const Duration _publishedVariantPersistenceInitialRetryDelay = Duration(seconds: 1);
   static const Duration _publishedVariantPersistenceMaxRetryDelay = Duration(seconds: 30);
+  static const Duration _publishedVariantPersistenceCancellationTimeout = Duration(seconds: 1);
   static const String _displayAliasesPreferenceKey = 'ellaMemoryArtworkDisplayAliasesV2';
   static const String _publishedVariantKeysPreferenceKey = 'ellaMemoryArtworkPublishedVariantKeysV1';
   static CacheManager? _manager;
@@ -39,6 +40,8 @@ class MemoryArtworkCache {
   static Future<void>? _publishedVariantPersistenceWorker;
   static Future<bool> Function(String key, String value)? _publishedVariantWriterForTesting;
   static Duration? _publishedVariantRetryDelayForTesting;
+  static Duration? _publishedVariantCancellationTimeoutForTesting;
+  static int _publishedVariantPersistenceGeneration = 0;
 
   static CacheManager get manager => _manager ??= CacheManager(
         Config('ellaMemoryArtworkCacheV1', stalePeriod: const Duration(days: 30), maxNrOfCacheObjects: 1000),
@@ -150,23 +153,19 @@ class MemoryArtworkCache {
     return Set<String>.unmodifiable(keys);
   }
 
-  /// Atomically drains every ledger for one owner-scoped memory identity.
-  /// The display key stays stable across authority epochs and artwork revisions.
-  static Set<String> takePublishedVariantCacheKeys({required String displayCacheKey}) {
+  /// Returns every durable variant for one owner-scoped memory identity.
+  /// Keys remain recorded until their physical cache eviction succeeds.
+  static Set<String> publishedVariantCacheKeysForTerminalCleanup({required String displayCacheKey}) {
     _loadPersistentAliases();
     if (!_isPersistentPublishedCacheKey(displayCacheKey)) return const <String>{};
     final matchingScopes = _publishedVariantDisplayKeys.entries
         .where((entry) => entry.value == displayCacheKey)
         .map((entry) => entry.key)
         .toList(growable: false);
-    if (matchingScopes.isEmpty) return const <String>{};
-
     final published = <String>{};
     for (final scopeKey in matchingScopes) {
-      published.addAll(_publishedVariantKeys.remove(scopeKey) ?? const <String>{});
-      _publishedVariantDisplayKeys.remove(scopeKey);
+      published.addAll(_publishedVariantKeys[scopeKey] ?? const <String>{});
     }
-    _schedulePublishedVariantPersistence();
     return Set<String>.unmodifiable(published);
   }
 
@@ -225,14 +224,6 @@ class MemoryArtworkCache {
     _displayAliases.removeWhere(
       (provisional, authoritative) => keys.contains(provisional) || keys.contains(authoritative),
     );
-    final suppressedScopes = _publishedVariantKeys.entries
-        .where((entry) => entry.value.any(keys.contains))
-        .map((entry) => entry.key)
-        .toList(growable: false);
-    for (final scopeKey in suppressedScopes) {
-      _publishedVariantKeys.remove(scopeKey);
-      _publishedVariantDisplayKeys.remove(scopeKey);
-    }
     for (final cacheKey in keys) {
       _trustedDisplayKeys.remove(cacheKey);
       _suppressedDisplayKeys.remove(cacheKey);
@@ -288,6 +279,7 @@ class MemoryArtworkCache {
         // publishes under a new cache generation instead of trusting it.
         _completedEvictionGenerations[cacheKey] = suppressionGeneration;
       }
+      _forgetEvictedPublishedVariantCacheKey(cacheKey);
       return true;
     }()
         .whenComplete(() {
@@ -295,6 +287,21 @@ class MemoryArtworkCache {
     });
     _pendingEvictions[cacheKey] = eviction;
     return _waitForEviction(eviction, waitTimeout);
+  }
+
+  static void _forgetEvictedPublishedVariantCacheKey(String cacheKey) {
+    var changed = false;
+    final emptyScopes = <String>[];
+    for (final entry in _publishedVariantKeys.entries) {
+      if (entry.value.remove(cacheKey)) changed = true;
+      if (entry.value.isEmpty) emptyScopes.add(entry.key);
+    }
+    for (final scopeKey in emptyScopes) {
+      _publishedVariantKeys.remove(scopeKey);
+      _publishedVariantDisplayKeys.remove(scopeKey);
+      changed = true;
+    }
+    if (changed) _schedulePublishedVariantPersistence();
   }
 
   static Future<bool> _waitForEviction(Future<bool> eviction, Duration timeout) async {
@@ -341,10 +348,12 @@ class MemoryArtworkCache {
   static void configurePublishedVariantPersistenceForTesting({
     Future<bool> Function(String key, String value)? writer,
     Duration? retryDelay,
+    Duration? cancellationTimeout,
   }) {
     assert(_publishedVariantPersistenceWorker == null);
     _publishedVariantWriterForTesting = writer;
     _publishedVariantRetryDelayForTesting = retryDelay;
+    _publishedVariantCancellationTimeoutForTesting = cancellationTimeout;
   }
 
   @visibleForTesting
@@ -372,7 +381,7 @@ class MemoryArtworkCache {
       _completedEvictionGenerations.clear();
       _diskReadsDisabled = false;
       unawaited(SharedPreferencesUtil().remove(_displayAliasesPreferenceKey));
-      _schedulePublishedVariantPersistence();
+      unawaited(_clearPublishedVariantPersistence());
     }
     _trustedDisplayKeys.clear();
     // A detached terminal eviction can still delete its key after authority
@@ -405,10 +414,8 @@ class MemoryArtworkCache {
     _diskReadsDisabled = false;
     _persistentAliasesLoaded = true;
     _nextRecoveryCacheGeneration = 0;
-    _schedulePublishedVariantPersistence();
-    await _waitForPublishedVariantPersistence();
+    await _clearPublishedVariantPersistence();
     await SharedPreferencesUtil().remove(_displayAliasesPreferenceKey);
-    await SharedPreferencesUtil().remove(_publishedVariantKeysPreferenceKey);
     final activeManager = _manager;
     if (activeManager == null) return;
     await activeManager.emptyCache();
@@ -502,8 +509,9 @@ class MemoryArtworkCache {
 
   static void _startPublishedVariantPersistenceWorker() {
     if (_pendingPublishedVariantSnapshot == null || _publishedVariantPersistenceWorker != null) return;
+    final generation = _publishedVariantPersistenceGeneration;
     late final Future<void> worker;
-    worker = _runPublishedVariantPersistenceWorker().whenComplete(() {
+    worker = _runPublishedVariantPersistenceWorker(generation).whenComplete(() {
       if (!identical(_publishedVariantPersistenceWorker, worker)) return;
       _publishedVariantPersistenceWorker = null;
       if (_pendingPublishedVariantSnapshot != null) _startPublishedVariantPersistenceWorker();
@@ -511,9 +519,9 @@ class MemoryArtworkCache {
     _publishedVariantPersistenceWorker = worker;
   }
 
-  static Future<void> _runPublishedVariantPersistenceWorker() async {
+  static Future<void> _runPublishedVariantPersistenceWorker(int generation) async {
     var retryDelay = _publishedVariantRetryDelayForTesting ?? _publishedVariantPersistenceInitialRetryDelay;
-    while (_pendingPublishedVariantSnapshot != null) {
+    while (generation == _publishedVariantPersistenceGeneration && _pendingPublishedVariantSnapshot != null) {
       final snapshot = _pendingPublishedVariantSnapshot!;
       _pendingPublishedVariantSnapshot = null;
       var saved = false;
@@ -525,6 +533,7 @@ class MemoryArtworkCache {
       } catch (_) {
         saved = false;
       }
+      if (generation != _publishedVariantPersistenceGeneration) return;
       if (saved) {
         retryDelay = _publishedVariantRetryDelayForTesting ?? _publishedVariantPersistenceInitialRetryDelay;
         continue;
@@ -543,6 +552,43 @@ class MemoryArtworkCache {
           ),
         );
       }
+    }
+  }
+
+  static Future<void>? _cancelPublishedVariantPersistence() {
+    _publishedVariantPersistenceGeneration++;
+    _pendingPublishedVariantSnapshot = null;
+    final worker = _publishedVariantPersistenceWorker;
+    _publishedVariantPersistenceWorker = null;
+    return worker;
+  }
+
+  static Future<void> _clearPublishedVariantPersistence() async {
+    final worker = _cancelPublishedVariantPersistence();
+    var needsLateCleanup = false;
+    if (worker != null) {
+      try {
+        await worker.timeout(
+          _publishedVariantCancellationTimeoutForTesting ?? _publishedVariantPersistenceCancellationTimeout,
+        );
+      } catch (_) {
+        needsLateCleanup = true;
+      }
+    }
+
+    await SharedPreferencesUtil().remove(_publishedVariantKeysPreferenceKey);
+    if (needsLateCleanup && worker != null) {
+      unawaited(() async {
+        try {
+          await worker;
+          // The stale in-flight write may have landed after the explicit
+          // removal. Replace it with the latest account state without deleting
+          // a newer account's ledger.
+          _schedulePublishedVariantPersistence();
+        } catch (_) {
+          // The current account transition already removed persisted authority.
+        }
+      }());
     }
   }
 
