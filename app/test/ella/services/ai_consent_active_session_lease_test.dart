@@ -76,6 +76,38 @@ void main() {
     );
   });
 
+  test('session-start authority accepts bounded grace and rejects an expired checkpoint', () {
+    expect(
+      AiConsentActiveSessionLease.authorityForSessionStart(
+        preferences: preferences,
+        expectedUid: 'uid-a',
+      ),
+      isNotNull,
+    );
+
+    SharedPreferencesUtil.clearAiConsentServerVerification();
+    expect(
+      AiConsentActiveSessionLease.authorityForSessionStart(
+        preferences: preferences,
+        expectedUid: 'uid-a',
+      ),
+      isNotNull,
+    );
+
+    preferences.markAiConsentLastServerConfirmed(
+      uid: 'uid-a',
+      receiptId: 'aicr_receipt-a',
+      confirmedAt: DateTime.now().subtract(const Duration(minutes: 31)),
+    );
+    expect(
+      AiConsentActiveSessionLease.authorityForSessionStart(
+        preferences: preferences,
+        expectedUid: 'uid-a',
+      ),
+      isNull,
+    );
+  });
+
   test('server revocation stops active session visibly and fails closed', () async {
     var authorityLossCalls = 0;
     final lease = AiConsentActiveSessionLease(

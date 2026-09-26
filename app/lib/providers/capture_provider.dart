@@ -1254,7 +1254,10 @@ class CaptureProvider extends ChangeNotifier
     bool force = false,
     String? source,
   }) async {
-    if (!SharedPreferencesUtil().aiConsentAccepted) {
+    if (AiConsentActiveSessionLease.authorityForSessionStart(
+          expectedUid: WalOwnerAuthority.authenticatedUid,
+        ) ==
+        null) {
       _transcriptServiceReady = false;
       return;
     }

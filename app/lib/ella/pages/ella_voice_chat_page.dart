@@ -480,7 +480,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       final startupGeneration = _beginV2VStartup(provider);
       await _startV2V(provider, startupGeneration: startupGeneration);
     } else {
-      _startStandardVoiceConsentLease();
+      if (!_startStandardVoiceConsentLease()) {
+        await _handleStandardVoiceConsentAuthorityLost();
+        return;
+      }
       setState(() {
         _voiceModeActive = true;
         _isV2VMode = false;
@@ -567,12 +570,20 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     });
   }
 
-  void _startStandardVoiceConsentLease() {
+  bool _startStandardVoiceConsentLease() {
+    final preferences = SharedPreferencesUtil();
+    final authority = AiConsentActiveSessionLease.authorityForSessionStart(
+      preferences: preferences,
+      expectedUid: preferences.uid,
+    );
+    if (authority == null) return false;
     _standardVoiceConsentLease?.stop();
     _standardVoiceConsentLease = AiConsentActiveSessionLease(
-      uid: SharedPreferencesUtil().uid,
+      uid: authority.uid,
+      authority: authority,
       onAuthorityLost: _handleStandardVoiceConsentAuthorityLost,
     )..start();
+    return true;
   }
 
   Future<void> _handleStandardVoiceConsentAuthorityLost() async {
@@ -595,7 +606,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   Future<void> _startListening() async {
-    if (!SharedPreferencesUtil().aiConsentAccepted) return;
+    if (_standardVoiceConsentLease?.hasCurrentAuthority != true) {
+      await _handleStandardVoiceConsentAuthorityLost();
+      return;
+    }
     debugPrint('[VoiceChat] _startListening called');
 
     if (_isRestarting) {
@@ -948,7 +962,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       case V2VFailureChoice.useElevenLabs:
         if (_sessionScope != null) break;
         _usingElevenLabsFallback = true;
-        _startStandardVoiceConsentLease();
+        if (!_startStandardVoiceConsentLease()) {
+          await _handleStandardVoiceConsentAuthorityLost();
+          break;
+        }
         setState(() {
           _voiceModeActive = true;
           _isV2VMode = false;

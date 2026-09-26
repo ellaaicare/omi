@@ -197,7 +197,12 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
   }
 
   Future start() async {
-    if (!SharedPreferencesUtil().aiConsentAccepted) return;
+    final preferences = SharedPreferencesUtil();
+    final authority = AiConsentActiveSessionLease.authorityForSessionStart(
+      preferences: preferences,
+      expectedUid: preferences.uid,
+    );
+    if (authority == null) return;
     if (_requiresCaptureProtocol) {
       _captureProtocolReady = false;
       _captureAuthority = null;
@@ -230,6 +235,7 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
     final uid = SharedPreferencesUtil().uid;
     _aiConsentLease = AiConsentActiveSessionLease(
       uid: uid,
+      authority: authority,
       onAuthorityLost: () async {
         final listeners = _listeners.values.toList(growable: false);
         for (final listener in listeners) {

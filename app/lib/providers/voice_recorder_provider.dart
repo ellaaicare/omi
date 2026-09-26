@@ -54,7 +54,11 @@ class VoiceRecorderProvider extends ChangeNotifier {
   }
 
   Future<void> startRecording() async {
-    final authority = AiConsentAuthoritySnapshot.capture(expectedUid: SharedPreferencesUtil().uid);
+    final preferences = SharedPreferencesUtil();
+    final authority = AiConsentActiveSessionLease.authorityForSessionStart(
+      preferences: preferences,
+      expectedUid: preferences.uid,
+    );
     if (authority == null) {
       _markConsentReviewRequired();
       return;

@@ -168,6 +168,22 @@ class AiConsentActiveSessionLease {
   bool get isActive => _active;
   bool get hasCurrentAuthority => _active && _authority?.isCurrent(preferences: _preferences) == true;
 
+  static AiConsentAuthoritySnapshot? authorityForSessionStart({
+    SharedPreferencesUtil? preferences,
+    String? expectedUid,
+    Duration gracePeriod = verificationGracePeriod,
+  }) {
+    final current = preferences ?? SharedPreferencesUtil();
+    final authority = AiConsentAuthoritySnapshot.capture(
+      preferences: current,
+      expectedUid: expectedUid,
+    );
+    if (authority == null || !authority.isCurrent(preferences: current)) return null;
+    if (current.aiConsentAccepted) return authority;
+    final age = current.aiConsentLastServerConfirmationAge;
+    return age != null && age <= gracePeriod ? authority : null;
+  }
+
   void start() {
     if (_active) return;
     _authority ??= AiConsentAuthoritySnapshot.capture(preferences: _preferences, expectedUid: uid);
