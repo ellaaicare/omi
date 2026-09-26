@@ -301,6 +301,25 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     return MemoryArtworkCache.manager.removeFile(cacheKey);
   }
 
+  void _handleCachedFileDecodeFailure(String cacheKey) {
+    if (cacheKey.isEmpty) return;
+    final generation = _requestGeneration;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || generation != _requestGeneration || cacheKey != _cacheKey) return;
+      unawaited(_discardCorruptedCachedFile(cacheKey, generation));
+    });
+  }
+
+  Future<void> _discardCorruptedCachedFile(String cacheKey, int generation) async {
+    try {
+      await _evictCachedFile(cacheKey);
+    } catch (_) {
+      return;
+    }
+    if (!mounted || generation != _requestGeneration || cacheKey != _cacheKey) return;
+    setState(() => _cachedFile = null);
+  }
+
   Future<void> _loadRemoteResult(
     MemoryArtworkApi api,
     MemoryArtworkState? artwork,
@@ -694,7 +713,10 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         fit: widget.fit,
         cacheWidth: _decodeWidth,
         gaplessPlayback: true,
-        errorBuilder: (_, __, ___) => _fallback(context, kind: kind),
+        errorBuilder: (_, __, ___) {
+          _handleCachedFileDecodeFailure(_cacheKey);
+          return _fallback(context, kind: kind);
+        },
       ),
     );
   }

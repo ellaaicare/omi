@@ -260,7 +260,15 @@ void main() {
     expect(coalescedRequest, same(firstRequest));
 
     final first = (await firstRequest)!.items['memory-a']!.forPhysicalWidth(500);
-    final renewed = (await api.fetchDay(
+    final renewedAtSameRevision = (await api.fetchDay(
+      DateTime(2026, 9, 24),
+      utcOffsetMinutes: -420,
+      authorityRevision: 7,
+      contentRevision: 11,
+    ))!
+        .items['memory-a']!
+        .forPhysicalWidth(500);
+    final renewedAtNextRevision = (await api.fetchDay(
       DateTime(2026, 9, 24),
       utcOffsetMinutes: -420,
       authorityRevision: 7,
@@ -272,11 +280,17 @@ void main() {
     expect(requestedUrls, [
       'https://api.example/v1/ella/memory-artwork/day/2026-09-24?utc_offset_minutes=-420',
       'https://api.example/v1/ella/memory-artwork/day/2026-09-24?utc_offset_minutes=-420',
+      'https://api.example/v1/ella/memory-artwork/day/2026-09-24?utc_offset_minutes=-420',
     ]);
     expect(first.selectedVariantWidth, 768);
     expect(first.url, Uri.parse('https://private-storage.example/768?signature=1'));
-    expect(renewed.url, Uri.parse('https://private-storage.example/768?signature=2'));
-    expect(renewed.cacheKey, first.cacheKey, reason: 'signed URL renewal must not invalidate saved artwork');
+    expect(renewedAtSameRevision.url, Uri.parse('https://private-storage.example/768?signature=2'));
+    expect(renewedAtNextRevision.url, Uri.parse('https://private-storage.example/768?signature=3'));
+    expect(
+      renewedAtNextRevision.cacheKey,
+      first.cacheKey,
+      reason: 'signed URL renewal must not invalidate saved artwork',
+    );
   });
 
   test('recent recovery accepts only the bounded authenticated server contract', () async {

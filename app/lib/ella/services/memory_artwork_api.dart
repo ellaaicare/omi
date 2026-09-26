@@ -498,11 +498,16 @@ class MemoryArtworkApi {
     final requestKey = '${authority.uid}\n$day\n$utcOffsetMinutes\n$authorityRevision\n$contentRevision';
     final existing = _dayRequests[requestKey];
     if (existing != null) return existing;
-    final request = _fetchDayWithAuthority(
+    late final Future<MemoryArtworkDay?> request;
+    request = _fetchDayWithAuthority(
       authority,
       day: day,
       utcOffsetMinutes: utcOffsetMinutes,
-    );
+    ).whenComplete(() {
+      if (identical(_dayRequests[requestKey], request)) {
+        _dayRequests.remove(requestKey);
+      }
+    });
     _dayRequests[requestKey] = request;
     while (_dayRequests.length > 64) {
       _dayRequests.remove(_dayRequests.keys.first);

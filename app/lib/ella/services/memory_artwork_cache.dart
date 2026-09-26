@@ -97,7 +97,10 @@ class MemoryArtworkCache {
     String? existingRecoveryCacheKey;
     for (final cacheKey in cacheKeys) {
       final candidate = _displayAliases[cacheKey];
-      if (candidate != null && !cacheKeys.contains(candidate) && !_suppressedDisplayKeys.contains(candidate)) {
+      if (candidate != null &&
+          !cacheKeys.contains(candidate) &&
+          candidate.startsWith('$authoritativeCacheKey-recovery-') &&
+          !_suppressedDisplayKeys.contains(candidate)) {
         existingRecoveryCacheKey = candidate;
         break;
       }

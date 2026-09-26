@@ -55,4 +55,28 @@ void main() {
     MemoryArtworkCache.revokeRuntimeTrust();
     expect(MemoryArtworkCache.resolveDisplayCacheKey(provisional), isEmpty);
   });
+
+  test('a newly selected responsive variant replaces the prior display alias', () async {
+    final provisional = '1' * 64;
+    final compactVariant = '2' * 64;
+    final largeVariant = '3' * 64;
+
+    expect(
+      await MemoryArtworkCache.rememberDisplayCacheKey(
+        provisionalCacheKey: provisional,
+        authoritativeCacheKey: compactVariant,
+        isAuthorityCurrent: () => true,
+      ),
+      compactVariant,
+    );
+    expect(
+      await MemoryArtworkCache.rememberDisplayCacheKey(
+        provisionalCacheKey: provisional,
+        authoritativeCacheKey: largeVariant,
+        isAuthorityCurrent: () => true,
+      ),
+      largeVariant,
+    );
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(provisional), largeVariant);
+  });
 }

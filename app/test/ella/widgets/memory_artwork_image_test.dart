@@ -1098,6 +1098,40 @@ void main() {
     expect(requestedKeys, hasLength(2));
   });
 
+  testWidgets('removes only corrupted saved bytes so the stable key can download again', (tester) async {
+    final api = _DelayedArtworkApi();
+    final cachedFile = File('assets/images/onboarding-bg-1.webp');
+    final evictedKeys = <String>[];
+    await trustDisplayKey('owner-profile-memory-revision-cache-key');
+    final conversation = ServerConversation(
+      id: 'memory-corrupted-cache',
+      createdAt: DateTime(2026, 8, 25),
+      structured: Structured('[Ella] A cached memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(status: MemoryArtworkStatus.ready),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => cachedFile,
+          cacheEvictor: (cacheKey) async => evictedKeys.add(cacheKey),
+        ),
+      ),
+    );
+    await tester.pump();
+    final cachedImage = tester.widget<Image>(find.byKey(const Key('memory-cached-artwork-memory-corrupted-cache')));
+    cachedImage.errorBuilder!(tester.element(find.byType(Image).first), Exception('corrupted bytes'), null);
+    await tester.pump();
+    await tester.pump();
+
+    expect(evictedKeys, ['owner-profile-memory-revision-cache-key']);
+    expect(find.byKey(const Key('memory-cached-artwork-memory-corrupted-cache')), findsNothing);
+  });
+
   testWidgets('keeps cached artwork visible through a transient refresh failure', (tester) async {
     final api = _DelayedArtworkApi();
     final cachedFile = File('assets/images/onboarding-bg-1.webp');
