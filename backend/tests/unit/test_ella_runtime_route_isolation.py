@@ -40,6 +40,11 @@ def voice_authority_defaults(monkeypatch):
         lambda _runtime: SimpleNamespace(digest=RUNTIME_AUTHORITY_DIGEST),
     )
 
+    async def current_ai_consent(_uid):
+        return "test-current-consent-receipt"
+
+    monkeypatch.setattr(chat, "_assert_current_ai_consent_async", current_ai_consent)
+
 
 def _request():
     return Request({"type": "http", "method": "POST", "path": "/v1/ella/chat/stream", "headers": []})
@@ -1307,7 +1312,9 @@ def test_cloud_chat_path_does_not_call_openclaw_or_mini(monkeypatch):
         def __init__(self, **kwargs):
             pass
 
-        async def run_turn(self, runtime, request):
+        async def run_turn(self, runtime, request, *, before_provider_call=None):
+            assert before_provider_call is not None
+            await before_provider_call()
             return SimpleNamespace(
                 text="Cloud response",
                 response_id="response-a",
@@ -1359,7 +1366,9 @@ def test_cloud_chat_failure_still_emits_one_terminal_marker(monkeypatch):
         def __init__(self, **kwargs):
             pass
 
-        async def run_turn(self, runtime, request):
+        async def run_turn(self, runtime, request, *, before_provider_call=None):
+            assert before_provider_call is not None
+            await before_provider_call()
             raise ProvisioningError(
                 "hermes_broker_prototype_auth_failed",
                 retryable=False,
