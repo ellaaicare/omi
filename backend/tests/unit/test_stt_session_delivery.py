@@ -52,6 +52,10 @@ class _STTService(str, Enum):
     speechmatics = "speechmatics"
 
 
+class _AiConsentWebSocketRejected(Exception):
+    pass
+
+
 class _Socket:
     def __init__(self, accepted):
         self.accepted = accepted
@@ -383,10 +387,12 @@ def test_production_route_wires_receipt_and_does_not_log_transcript_text():
     assert "delivery_receipt.record_ingress(len(data))" in source
     assert "delivery_receipt.record_decoded_pcm(bytes(data))" in source
     assert "sample_width=1 if codec == 'pcm8' else 2" not in source
-    assert "forward_deepgram_audio(dg_socket, chunk, delivery_receipt)" in source
-    assert "forward_deepgram_audio(deepgram_socket, data, delivery_receipt)" in source
-    assert "forward_async_provider_audio(soniox_sock.send, chunk, delivery_receipt)" in source
-    assert "forward_async_provider_audio(speechmatics_sock.send, chunk, delivery_receipt)" in source
+    assert "_forward_deepgram_audio_with_current_consent(" in source
+    assert "_forward_async_provider_audio_with_current_consent(" in source
+    assert "require_stt_egress_consent," in source
+    assert "dg_socket," in source
+    assert "soniox_sock.send," in source
+    assert "speechmatics_sock.send," in source
     assert 'terminal_reason="profile_provider_send_rejected"' in source
     assert '"[STT-DELIVERY]' in source
     assert 'text=event.get("text")' not in source
@@ -514,6 +520,7 @@ def test_soniox_partial_profile_start_closes_before_single_deepgram_fallback(cap
             "_latency_log": _cell(latency_log),
             "_provider_delivery_event_callback": _cell(lambda *_args, **_kwargs: None),
             "_stt_event_callback": _cell(lambda *_args, **_kwargs: None),
+            "require_stt_egress_consent": _cell(lambda: asyncio.sleep(0)),
             "codec": _cell("pcm16"),
             "deepgram_profile_socket": _cell(None),
             "deepgram_socket": _cell(None),
@@ -547,6 +554,7 @@ def test_soniox_partial_profile_start_closes_before_single_deepgram_fallback(cap
             "_process_stt",
             {
                 "Exception": Exception,
+                "AiConsentWebSocketRejected": _AiConsentWebSocketRejected,
                 "SPEECH_PROFILE_FIXED_DURATION": 12,
                 "SPEECH_PROFILE_PADDING_DURATION": 3,
                 "SPEECH_PROFILE_STABILIZE_DELAY": 0,
@@ -630,6 +638,7 @@ def test_disabled_grok_fallback_completes_profile_without_loader():
             "_latency_log": _cell(latency_log),
             "_provider_delivery_event_callback": _cell(lambda *_args, **_kwargs: None),
             "_stt_event_callback": _cell(lambda *_args, **_kwargs: None),
+            "require_stt_egress_consent": _cell(lambda: asyncio.sleep(0)),
             "codec": _cell("pcm16"),
             "deepgram_profile_socket": _cell(None),
             "deepgram_socket": _cell(None),
@@ -663,6 +672,7 @@ def test_disabled_grok_fallback_completes_profile_without_loader():
             "_process_stt",
             {
                 "Exception": Exception,
+                "AiConsentWebSocketRejected": _AiConsentWebSocketRejected,
                 "SPEECH_PROFILE_FIXED_DURATION": 12,
                 "SPEECH_PROFILE_PADDING_DURATION": 3,
                 "SPEECH_PROFILE_STABILIZE_DELAY": 0,
@@ -720,6 +730,7 @@ def test_fallback_connection_errors_report_effective_deepgram_provider():
             "_latency_log": _cell(latency_log),
             "_provider_delivery_event_callback": _cell(lambda *_args, **_kwargs: None),
             "_stt_event_callback": _cell(lambda *_args, **_kwargs: None),
+            "require_stt_egress_consent": _cell(lambda: asyncio.sleep(0)),
             "codec": _cell("pcm16"),
             "deepgram_profile_socket": _cell(None),
             "deepgram_socket": _cell(None),
@@ -753,6 +764,7 @@ def test_fallback_connection_errors_report_effective_deepgram_provider():
             "_process_stt",
             {
                 "Exception": Exception,
+                "AiConsentWebSocketRejected": _AiConsentWebSocketRejected,
                 "SPEECH_PROFILE_FIXED_DURATION": 12,
                 "SPEECH_PROFILE_PADDING_DURATION": 3,
                 "SPEECH_PROFILE_STABILIZE_DELAY": 0,
