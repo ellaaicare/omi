@@ -8,9 +8,13 @@ import re
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, Response, UploadFile
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from starlette.concurrency import run_in_threadpool
+from starlette.responses import JSONResponse
 
 from ella.services.dream_media import DreamMediaError, DreamMediaService, DreamUpload, get_dream_media_service
 from utils.ella.exact_firebase_auth import (
@@ -21,7 +25,43 @@ from utils.ella.exact_firebase_auth import (
 )
 from utils.ella.private_media_storage import MAX_DREAM_MEDIA_BYTES
 
-router = APIRouter(prefix="/v1/ella", tags=["Ella Dream Media"])
+PRIVATE_RESPONSE_HEADERS = {
+    "Cache-Control": "private, no-store",
+    "X-Robots-Tag": "noindex",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
+
+class DreamMediaPrivateRoute(APIRoute):
+    """Apply privacy policy after dependencies and validation have run."""
+
+    def get_route_handler(self):
+        original = super().get_route_handler()
+
+        async def private_route_handler(request: Request):
+            try:
+                response = await original(request)
+            except HTTPException as exc:
+                headers = {**(exc.headers or {}), **PRIVATE_RESPONSE_HEADERS}
+                return JSONResponse(
+                    status_code=exc.status_code,
+                    content={"detail": jsonable_encoder(exc.detail)},
+                    headers=headers,
+                )
+            except RequestValidationError as exc:
+                return JSONResponse(
+                    status_code=422,
+                    content={"detail": jsonable_encoder(exc.errors())},
+                    headers=PRIVATE_RESPONSE_HEADERS,
+                )
+            response.headers.update(PRIVATE_RESPONSE_HEADERS)
+            return response
+
+        return private_route_handler
+
+
+router = APIRouter(prefix="/v1/ella", tags=["Ella Dream Media"], route_class=DreamMediaPrivateRoute)
 _ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 DREAM_PIPELINE_HEADER = "X-Ella-Dream-Pipeline-Key"
 
@@ -75,10 +115,7 @@ def _validate_dream_id(dream_id: str) -> str:
 
 
 def _private_response_headers(response: Response) -> None:
-    response.headers["Cache-Control"] = "private, no-store"
-    response.headers["X-Robots-Tag"] = "noindex"
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers.update(PRIVATE_RESPONSE_HEADERS)
 
 
 def _raise_api_error(exc: DreamMediaError) -> None:

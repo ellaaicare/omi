@@ -28,7 +28,7 @@ sys.modules.setdefault("ella", ella_package)
 sys.modules.setdefault("ella.services", services_package)
 sys.modules.setdefault("ella.routers", routers_package)
 
-from database.dream_media import InMemoryDreamMediaRepository
+from database.dream_media import DREAM_MEDIA_DELETION_PENDING_FIELD, InMemoryDreamMediaRepository
 from ella.routers import dream_media as dream_router
 from ella.services.dream_media import DreamMediaError, DreamMediaService, DreamUpload
 from utils.ella.exact_firebase_auth import EllaRequestAuthority, get_exact_firebase_uid
@@ -83,6 +83,7 @@ class FakePrivateStore:
         self.signed_calls: list[str] = []
         self.deleted: list[str] = []
         self.fail_delete = False
+        self.on_upload = None
 
     def upload(self, *, object_key: str, content_type: str, payload: bytes) -> StoredPrivateMedia:
         sniffed = sniff_content_type(payload)
@@ -97,6 +98,8 @@ class FakePrivateStore:
             "cache_control": DREAM_MEDIA_CACHE_CONTROL,
             "sha256": digest,
         }
+        if self.on_upload is not None:
+            self.on_upload()
         return StoredPrivateMedia(object_key, content_type, len(payload), digest, "1")
 
     def sign_get(self, *, uid: str, object_key: str, pepper_config: DreamMediaPepperConfig) -> SignedPrivateMedia:
@@ -263,6 +266,77 @@ def test_missing_pepper_configuration_is_retryable_not_a_content_error(harness):
         _upload(service)
     assert exc.value.status_code == 503
     assert exc.value.retryable is True
+
+
+def test_account_deletion_with_empty_inventory_needs_no_media_configuration(monkeypatch):
+    for name in tuple(os.environ):
+        if name.startswith("DREAM_MEDIA_") or name == "BUCKET_DREAM_MEDIA":
+            monkeypatch.delenv(name, raising=False)
+
+    class FencedRepository(InMemoryDreamMediaRepository):
+        def list_dreams(self, uid):
+            assert self.users[uid][DREAM_MEDIA_DELETION_PENDING_FIELD] is True
+            return super().list_dreams(uid)
+
+    repository = FencedRepository()
+    repository.users[UID_A] = {}
+    service = DreamMediaService(repository, store=None, pepper_config=None, now=lambda: NOW)
+
+    assert service.delete_account(UID_A) == 0
+    assert repository.users[UID_A][DREAM_MEDIA_DELETION_PENDING_FIELD] is True
+    assert service._configured_store is None
+    assert service._configured_peppers is None
+
+
+def test_account_deletion_fence_rejects_commit_raced_after_upload(harness):
+    repository, store, clock, service = harness
+    store.on_upload = lambda: repository.begin_account_delete(UID_A, clock.now())
+
+    with pytest.raises(DreamMediaError, match="dream_media_deletion_pending") as exc:
+        _upload(service)
+
+    assert exc.value.status_code == 503
+    assert repository.users[UID_A][DREAM_MEDIA_DELETION_PENDING_FIELD] is True
+    assert store.objects == {}
+    pending = repository.dreams[(UID_A, "dream-1")]["media"]
+    assert len(pending) == 1 and pending[0]["state"] == "pending"
+    assert service.delete_account(UID_A) == 1
+    assert repository.dreams[(UID_A, "dream-1")]["tombstoned"] is True
+
+
+def test_dream_metadata_and_source_authority_cannot_be_replaced(harness):
+    repository, store, _clock, service = harness
+    repository.sources[(UID_A, "source-a")] = {"state": "active"}
+    repository.sources[(UID_A, "source-b")] = {"state": "active"}
+    _upload(service, source_memory_ids=("source-a",))
+    original = copy.deepcopy(repository.dreams[(UID_A, "dream-1")])
+
+    with pytest.raises(DreamMediaError, match="dream_media_metadata_conflict") as exc:
+        _upload(
+            service, request_id="request-0002", payload=JPEG, content_type="image/jpeg", source_memory_ids=("source-b",)
+        )
+    assert exc.value.status_code == 409
+    assert repository.dreams[(UID_A, "dream-1")]["source_memory_ids"] == ["source-a"]
+    assert repository.dreams[(UID_A, "dream-1")]["media"] == original["media"]
+    assert len(store.objects) == 1
+
+    changed_retry = DreamUpload(
+        request_id="request-0001",
+        title="Changed title",
+        narrative="Structured narrative",
+        captions=("A caption",),
+        source_memory_ids=("source-a",),
+        created_at=NOW,
+    )
+    with pytest.raises(DreamMediaError, match="dream_media_idempotency_conflict"):
+        service.upload(
+            uid=UID_A,
+            dream_id="dream-1",
+            upload=changed_retry,
+            payload=PNG,
+            claimed_content_type="image/png",
+        )
+    assert repository.dreams[(UID_A, "dream-1")]["title"] == "A private dream"
 
 
 class _Blob:
@@ -589,3 +663,42 @@ def test_user_routes_require_firebase_auth_by_default(harness):
     app.dependency_overrides[dream_router.get_dream_media_service] = lambda: service
     response = TestClient(app).get("/v1/ella/dreams")
     assert response.status_code == 401
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["x-robots-tag"] == "noindex"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "expected_status"),
+    [
+        ("get", "/v1/ella/dreams/missing/media", 404),
+        ("get", "/v1/ella/dreams/!/media", 404),
+    ],
+)
+def test_dream_media_failures_keep_private_response_policy(harness, method, path, expected_status):
+    _repository, _store, _clock, service = harness
+    response = getattr(_client(service), method)(path)
+    assert response.status_code == expected_status
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["x-robots-tag"] == "noindex"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
+
+
+def test_pipeline_validation_failure_keeps_private_response_policy(harness):
+    _repository, _store, _clock, service = harness
+    app = FastAPI()
+    app.include_router(dream_router.router)
+    app.dependency_overrides[dream_router.get_dream_media_service] = lambda: service
+    app.dependency_overrides[dream_router.require_dream_pipeline_authority] = lambda: EllaRequestAuthority(
+        service="dream_pipeline",
+        service_subject_uid=UID_A,
+    )
+    response = TestClient(app).post("/v1/ella/internal/dreams/dream-1/media")
+
+    assert response.status_code == 422
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["x-robots-tag"] == "noindex"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"

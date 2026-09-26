@@ -11,7 +11,9 @@ from google.cloud import firestore
 
 DREAMS_COLLECTION = "dreams"
 RECONCILIATION_COLLECTION = "ella_dream_media_reconciliation"
+DREAM_MEDIA_DELETION_PENDING_FIELD = "dream_media_deletion_pending"
 USER_DELETION_FIELDS = (
+    DREAM_MEDIA_DELETION_PENDING_FIELD,
     "memory_artwork_deletion_pending",
     "account_deletion_pending",
     "deletion_pending",
@@ -30,6 +32,8 @@ class DreamMediaRepository(Protocol):
     def list_dreams(self, uid: str) -> list[dict[str, Any]]: ...
 
     def get_source(self, uid: str, source_id: str) -> Optional[dict[str, Any]]: ...
+
+    def begin_account_delete(self, uid: str, deleted_at: datetime) -> bool: ...
 
     def reserve_upload(
         self,
@@ -93,6 +97,18 @@ def dream_is_tombstoned(dream: Optional[dict[str, Any]]) -> bool:
     return bool(not dream or dream.get("deletion_pending") or dream.get("deleted_at") or dream.get("tombstoned"))
 
 
+def dream_metadata_conflicts(existing: dict[str, Any], requested: dict[str, Any]) -> bool:
+    """Keep one dream's authority metadata immutable while assets are appended."""
+    if not existing.get("media"):
+        return False
+    scalar_fields = ("title", "narrative", "created_at")
+    if any(existing.get(field) != requested.get(field) for field in scalar_fields):
+        return True
+    if list(existing.get("captions") or []) != list(requested.get("captions") or []):
+        return True
+    return set(existing.get("source_memory_ids") or []) != set(requested.get("source_memory_ids") or [])
+
+
 class FirestoreDreamMediaRepository:
     def __init__(self, client=None):
         if client is None:
@@ -136,6 +152,30 @@ class FirestoreDreamMediaRepository:
                 return payload
         return None
 
+    def begin_account_delete(self, uid: str, deleted_at: datetime) -> bool:
+        transaction = self.db.transaction()
+        user_ref = self._user_ref(uid)
+
+        @firestore.transactional
+        def begin(txn):
+            snapshot = user_ref.get(transaction=txn)
+            if not snapshot.exists:
+                return False
+            user = snapshot.to_dict() or {}
+            if user.get(DREAM_MEDIA_DELETION_PENDING_FIELD):
+                return True
+            txn.set(
+                user_ref,
+                {
+                    DREAM_MEDIA_DELETION_PENDING_FIELD: True,
+                    "dream_media_deletion_started_at": deleted_at,
+                },
+                merge=True,
+            )
+            return True
+
+        return begin(transaction)
+
     def reserve_upload(
         self,
         *,
@@ -164,8 +204,10 @@ class FirestoreDreamMediaRepository:
             for existing in dream.get("media") or []:
                 if existing.get("request_id") == media_entry["request_id"]:
                     return copy.deepcopy(existing)
+            if dream_metadata_conflicts(dream, metadata):
+                raise DreamMediaRepositoryError("dream_media_metadata_conflict")
             next_dream = {
-                **metadata,
+                **({} if dream_snapshot.exists else metadata),
                 "dream_key": dream.get("dream_key") or dream_key,
                 "media": [*(dream.get("media") or []), media_entry],
                 "updated_at": media_entry["created_at"],
@@ -347,6 +389,15 @@ class InMemoryDreamMediaRepository:
             value = self.sources.get((uid, source_id))
             return copy.deepcopy(value) if value is not None else None
 
+    def begin_account_delete(self, uid: str, deleted_at: datetime) -> bool:
+        with self._lock:
+            user = self.users.get(uid)
+            if user is None:
+                return False
+            user[DREAM_MEDIA_DELETION_PENDING_FIELD] = True
+            user.setdefault("dream_media_deletion_started_at", deleted_at)
+            return True
+
     def reserve_upload(self, *, uid, dream_id, dream_key, metadata, media_entry):
         with self._lock:
             if user_deletion_pending(self.users.get(uid)):
@@ -360,9 +411,11 @@ class InMemoryDreamMediaRepository:
             for existing in dream.get("media") or []:
                 if existing.get("request_id") == media_entry["request_id"]:
                     return copy.deepcopy(existing)
+            if dream_metadata_conflicts(dream, metadata):
+                raise DreamMediaRepositoryError("dream_media_metadata_conflict")
             merged = {
                 **dream,
-                **copy.deepcopy(metadata),
+                **({} if key in self.dreams else copy.deepcopy(metadata)),
                 "dream_id": dream_id,
                 "dream_key": dream.get("dream_key") or dream_key,
                 "media": [*(dream.get("media") or []), copy.deepcopy(media_entry)],

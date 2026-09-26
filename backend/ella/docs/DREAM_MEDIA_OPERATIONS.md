@@ -48,7 +48,13 @@ header are not authoritative. MP4 requires `moov` before `mdat`. HTML, SVG,
 Markdown, JavaScript, PDF, and unknown bytes are rejected before inventory or
 upload.
 
-`request_id` is the idempotency key within a dream. The success response is:
+`request_id` is the idempotency key within a dream. Its digest binds the
+byte SHA-256, sniffed content type, and canonical metadata. Reusing a request
+ID with changed bytes or metadata returns `409`. After the first asset is
+reserved, dream title, narrative, captions, source-memory associations, and
+creation time are immutable; a later asset must repeat the same metadata or
+is rejected with `409`. This prevents a later upload from retaining old media
+while replacing its source authority. The success response is:
 
 ```json
 {
@@ -125,8 +131,13 @@ successful bucket-wide pass records zero remaining objects under its prefix,
 and the retirement receipt is recorded in the infrastructure registry.
 
 Dream, source-memory, and account deletion delete stored inventory keys and
-run the applicable orphan pass before acknowledging. Object deletion never
-recomputes a key from a pepper.
+run the applicable orphan pass before acknowledging. Account deletion first
+writes a durable user-level fence; upload reservation and commit read that
+same document transactionally, so a raced upload cannot survive the deletion
+snapshot. The fence remains set for safe retries. An account with a proven
+empty inventory can be deleted before dream-media secrets are rolled out;
+storage initialization is required as soon as any inventory exists. Object
+deletion never recomputes a key from a pepper.
 
 ## Composition With Memory Artwork
 

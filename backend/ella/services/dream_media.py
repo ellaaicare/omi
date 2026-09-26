@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import secrets
@@ -80,6 +81,21 @@ def _safe_log(dream_id: str, asset_key: str, status: str, expiry: int = 0) -> No
 
 def _inventory(dream: dict[str, Any]) -> list[dict[str, Any]]:
     return [entry for entry in (dream.get("media") or []) if isinstance(entry, dict)]
+
+
+def _request_digest(*, metadata: dict[str, Any], content_type: str, payload_digest: str) -> str:
+    created_at = _as_utc(metadata.get("created_at"))
+    canonical = {
+        "captions": list(metadata.get("captions") or []),
+        "content_type": content_type,
+        "created_at": created_at.astimezone(timezone.utc).isoformat() if created_at else None,
+        "narrative": str(metadata.get("narrative") or ""),
+        "payload_sha256": payload_digest,
+        "source_memory_ids": sorted({str(value) for value in (metadata.get("source_memory_ids") or [])}),
+        "title": str(metadata.get("title") or ""),
+    }
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _public_media_entry(entry: dict[str, Any]) -> dict[str, Any]:
@@ -225,6 +241,16 @@ class DreamMediaService:
             raise DreamMediaError("dream_media_deletion_pending", status_code=409, retryable=False)
 
         existing = self.repository.get_dream(uid, dream_id)
+        now = self.now()
+        created_at = upload.created_at or _as_utc((existing or {}).get("created_at")) or now
+        metadata = {
+            "title": upload.title,
+            "narrative": upload.narrative,
+            "captions": list(upload.captions),
+            "source_memory_ids": list(upload.source_memory_ids),
+            "created_at": created_at,
+        }
+        payload_digest = hashlib.sha256(payload).hexdigest()
         dream_key = str((existing or {}).get("dream_key") or secrets.token_hex(16))
         key = build_dream_media_object_key(
             uid=uid,
@@ -233,7 +259,6 @@ class DreamMediaService:
             content_type=content_type,
             dream_key=dream_key,
         )
-        now = self.now()
         pending = {
             "request_id": upload.request_id,
             "asset_key": key.asset_key,
@@ -242,14 +267,11 @@ class DreamMediaService:
             "content_type": content_type,
             "pepper_version": key.pepper_version,
             "created_at": now,
-            "request_digest": hashlib.sha256(payload).hexdigest(),
-        }
-        metadata = {
-            "title": upload.title,
-            "narrative": upload.narrative,
-            "captions": list(upload.captions),
-            "source_memory_ids": list(upload.source_memory_ids),
-            "created_at": upload.created_at or now,
+            "request_digest": _request_digest(
+                metadata=metadata,
+                content_type=content_type,
+                payload_digest=payload_digest,
+            ),
         }
         try:
             reserved = self.repository.reserve_upload(
@@ -347,19 +369,22 @@ class DreamMediaService:
         return deleted
 
     def delete_account(self, uid: str) -> int:
-        dreams = [
-            dream
-            for dream in self.repository.list_dreams(uid)
-            if not dream.get("deleted_at") and not dream.get("tombstoned")
-        ]
+        try:
+            self.repository.begin_account_delete(uid, self.now())
+        except DreamMediaRepositoryError as exc:
+            raise DreamMediaError(str(exc)) from exc
+        all_dreams = self.repository.list_dreams(uid)
+        has_inventory = any(_inventory(dream) for dream in all_dreams)
+        dreams = [dream for dream in all_dreams if not dream.get("deleted_at") and not dream.get("tombstoned")]
         deleted = 0
         for dream in dreams:
             if self.delete_dream(uid, str(dream.get("dream_id") or ""), run_orphan_sweep=False):
                 deleted += 1
-        try:
-            self.sweep_user_orphans(uid)
-        except PrivateMediaStorageError as exc:
-            raise DreamMediaError(str(exc)) from exc
+        if has_inventory:
+            try:
+                self.sweep_user_orphans(uid)
+            except PrivateMediaStorageError as exc:
+                raise DreamMediaError(str(exc)) from exc
         return deleted
 
     def sweep_stale_pending(self) -> int:
