@@ -36,6 +36,7 @@ class SharedPreferencesUtil {
   static int _verifiedEllaProvisioningBindingRevision = 0;
   static String _verifiedEllaProvisioningPolicyRevision = '';
   static int _verifiedEllaProvisioningAuthorityGeneration = -1;
+  static int _ellaProvisioningTerminalAuthorityGeneration = 0;
 
   static const bool isPublicBuild = bool.fromEnvironment('ELLA_PUBLIC_BUILD');
   static const bool isTodayDesignPreviewConfigured = bool.fromEnvironment('ELLA_TODAY_DESIGN_PREVIEW');
@@ -72,12 +73,15 @@ class SharedPreferencesUtil {
 
   int get aiConsentAuthorityGeneration => _aiConsentAuthorityGeneration;
 
+  int get ellaProvisioningTerminalAuthorityGeneration => _ellaProvisioningTerminalAuthorityGeneration;
+
   static ValueListenable<int> get aiConsentAuthorityChanges => _aiConsentAuthorityChanges;
 
   @visibleForTesting
   static void resetProcessLocalAuthorityStateForTesting() {
     _aiConsentAuthorityGeneration = 0;
     _aiConsentAuthorityChanges.value = 0;
+    _ellaProvisioningTerminalAuthorityGeneration = 0;
     clearAiConsentServerVerification();
     _clearEllaProvisioningServerVerification();
   }
@@ -997,6 +1001,14 @@ class SharedPreferencesUtil {
   /// Invalidates process-local provisioning authority without deleting the
   /// cached receipt used to render an already-established account shell.
   void invalidateEllaProvisioningServerVerification() => _clearEllaProvisioningServerVerification();
+
+  /// Fences sessions created before an authoritative terminal provisioning
+  /// response. Transient revalidation and consent metadata rotation only
+  /// clear verification; they must not invalidate an already-active session.
+  void invalidateEllaProvisioningTerminalAuthority() {
+    _ellaProvisioningTerminalAuthorityGeneration++;
+    _clearEllaProvisioningServerVerification();
+  }
 
   static void _clearEllaProvisioningServerVerification() {
     _verifiedEllaProvisioningUid = '';

@@ -349,7 +349,8 @@ void main() {
 
     await provider.start(uid: 'uid-a', requestContext: _requestContext);
     expect(provider.isOperational, isTrue);
-    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+    final activeAuthority = WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a');
+    expect(activeAuthority, isNotNull);
     expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
 
     await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
@@ -359,6 +360,7 @@ void main() {
     expect(provider.state, EllaProvisioningState.degraded);
     expect(provider.errorCode, 'network_unavailable');
     expect(provider.receipt?.isOperational, isTrue);
+    expect(activeAuthority!.isCurrent(preferences: preferences, authenticatedUid: 'uid-a'), isTrue);
     expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
     expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
     expect(scheduled, hasLength(1));
@@ -374,7 +376,8 @@ void main() {
     );
 
     await provider.start(uid: 'uid-a', requestContext: _requestContext);
-    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+    final activeAuthority = WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a');
+    expect(activeAuthority, isNotNull);
     expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
     await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
 
@@ -383,6 +386,7 @@ void main() {
     expect(provider.state, EllaProvisioningState.degraded);
     expect(provider.errorCode, 'provider_unavailable');
     expect(provider.receipt?.isOperational, isTrue);
+    expect(activeAuthority!.isCurrent(preferences: preferences, authenticatedUid: 'uid-a'), isTrue);
     expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
     expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
   });
@@ -398,13 +402,19 @@ void main() {
       final provider = EllaProvisioningProvider(transport: transport, preferences: preferences);
 
       await provider.start(uid: 'uid-a', requestContext: _requestContext);
-      expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+      final activeAuthority = WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a');
+      expect(activeAuthority, isNotNull);
       expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
       await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
 
       expect(provider.state, EllaProvisioningState.blocked, reason: 'HTTP $statusCode');
       expect(provider.isOperational, isFalse, reason: 'HTTP $statusCode');
       expect(provider.isRevalidatingOperational, isFalse, reason: 'HTTP $statusCode');
+      expect(
+        activeAuthority!.isCurrent(preferences: preferences, authenticatedUid: 'uid-a'),
+        isFalse,
+        reason: 'HTTP $statusCode',
+      );
       expect(
         WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'),
         isNull,
@@ -437,12 +447,14 @@ void main() {
     );
 
     await provider.start(uid: 'uid-a', requestContext: _requestContext);
-    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+    final activeAuthority = WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a');
+    expect(activeAuthority, isNotNull);
     expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
     await provider.start(uid: 'uid-a', requestContext: _requestContext, forceRevalidate: true);
 
     expect(provider.state, EllaProvisioningState.provisioning);
     expect(provider.isRevalidatingOperational, isFalse);
+    expect(activeAuthority!.isCurrent(preferences: preferences, authenticatedUid: 'uid-a'), isTrue);
     expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
     expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
   });

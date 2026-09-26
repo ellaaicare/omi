@@ -293,6 +293,19 @@ void main() {
     expect(authority.isCurrent(preferences: prefs, authenticatedUid: 'uid-a'), isFalse);
   });
 
+  test('terminal provisioning invalidation stops an active WAL authority', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await _grantOperationalAuthority(prefs, 'uid-a');
+    final authority = WalOwnerAuthority.active(preferences: prefs, authenticatedUid: 'uid-a');
+    expect(authority, isNotNull);
+
+    prefs.invalidateEllaProvisioningServerVerification();
+    expect(authority!.isCurrent(preferences: prefs, authenticatedUid: 'uid-a'), isTrue);
+
+    prefs.invalidateEllaProvisioningTerminalAuthority();
+    expect(authority.isCurrent(preferences: prefs, authenticatedUid: 'uid-a'), isFalse);
+  });
+
   test('authority fingerprint uses canonical fields and malformed identifiers fail closed', () async {
     final first = _owner('uid-a');
     final second = WalOwner(

@@ -18,10 +18,16 @@ abstract interface class AccountCommitAuthority implements ExactAccountAuthority
 }
 
 class ActiveWalAuthority implements AccountCommitAuthority {
-  const ActiveWalAuthority({required this.owner, required this.consent, this.currentCheck});
+  const ActiveWalAuthority({
+    required this.owner,
+    required this.consent,
+    this.provisioningTerminalGeneration,
+    this.currentCheck,
+  });
 
   final WalOwner owner;
   final AiConsentAuthoritySnapshot consent;
+  final int? provisioningTerminalGeneration;
   final bool Function()? currentCheck;
 
   @override
@@ -36,6 +42,8 @@ class ActiveWalAuthority implements AccountCommitAuthority {
         consent.uid == owner.uid &&
         currentUid == owner.uid &&
         prefs.uid == owner.uid &&
+        (provisioningTerminalGeneration == null ||
+            provisioningTerminalGeneration == prefs.ellaProvisioningTerminalAuthorityGeneration) &&
         consent.isCurrent(preferences: prefs);
   }
 
@@ -101,7 +109,11 @@ class WalOwnerAuthority {
       expectedUid: owner.uid,
     );
     if (consent == null) return null;
-    return ActiveWalAuthority(owner: owner, consent: consent);
+    return ActiveWalAuthority(
+      owner: owner,
+      consent: consent,
+      provisioningTerminalGeneration: prefs.ellaProvisioningTerminalAuthorityGeneration,
+    );
   }
 
   static AccountCommitAuthority? activeAccount({SharedPreferencesUtil? preferences, String? authenticatedUid}) {

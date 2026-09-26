@@ -265,8 +265,12 @@ class EllaProvisioningProvider extends ChangeNotifier {
     errorCode = nextReceipt.errorCode;
 
     if (nextReceipt.state == EllaProvisioningState.ready && !nextReceipt.isOperational) {
+      _preferences.invalidateEllaProvisioningTerminalAuthority();
       state = EllaProvisioningState.blocked;
       errorCode = 'incomplete_ready_receipt';
+    } else if (nextReceipt.state == EllaProvisioningState.blocked && nextReceipt.retryable != true) {
+      _preferences.invalidateEllaProvisioningTerminalAuthority();
+      state = EllaProvisioningState.blocked;
     } else if (_pollAttempts >= maxPollAttempts &&
         (nextReceipt.state == EllaProvisioningState.queued ||
             nextReceipt.state == EllaProvisioningState.provisioning ||
@@ -303,7 +307,11 @@ class EllaProvisioningProvider extends ChangeNotifier {
     // protected operations remain fail-closed until fresh authority succeeds.
     _revalidatingOperationalReceipt =
         !blocked && preserveOperationalReceipt && _revalidatingOperationalReceipt && receipt?.isOperational == true;
-    _preferences.invalidateEllaProvisioningServerVerification();
+    if (blocked) {
+      _preferences.invalidateEllaProvisioningTerminalAuthority();
+    } else {
+      _preferences.invalidateEllaProvisioningServerVerification();
+    }
     errorCode = code;
     state = blocked ? EllaProvisioningState.blocked : EllaProvisioningState.degraded;
     notifyListeners();
