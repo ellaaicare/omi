@@ -32,6 +32,7 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from ella.config import ELLA_CONFIG
 from database.ella_provisioning import EllaProvisioningRepository
@@ -66,6 +67,11 @@ from utils.ella.time_context import timezone_name
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/ella", tags=["ella-chat"])
+
+
+async def _assert_current_ai_consent_async(uid: str) -> str:
+    return await run_in_threadpool(assert_current_ai_consent, uid)
+
 
 XAI_API_KEY = authority_credential("XAI_API_KEY", strip=False)
 XAI_BASE_URL = "https://api.x.ai/v1"
@@ -441,7 +447,7 @@ async def _stream_level_2_grok(user_message: str, uid: str):
         return
 
     try:
-        assert_current_ai_consent(uid)
+        await _assert_current_ai_consent_async(uid)
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, dict) else {}
         yield f"data: Error: {detail.get('code', 'ai_consent_authority_unavailable')}\n\n"
@@ -521,7 +527,7 @@ async def _stream_level_3_n8n(user_message: str, uid: str, conversation_id: str)
     }
 
     try:
-        assert_current_ai_consent(uid)
+        await _assert_current_ai_consent_async(uid)
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, dict) else {}
         yield f"data: Error: {detail.get('code', 'ai_consent_authority_unavailable')}\n\n"
@@ -646,7 +652,7 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
     messages.append({"role": "user", "content": user_message})
 
     try:
-        assert_current_ai_consent(uid)
+        await _assert_current_ai_consent_async(uid)
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, dict) else {}
         yield f"data: Error: {detail.get('code', 'ai_consent_authority_unavailable')}\n\n"
@@ -838,7 +844,7 @@ async def _produce_hermes_chat_events(
         agent_id = send_runtime.agent_id if send_runtime else HERMES_MODEL
         if not gateway_token:
             raise ProvisioningError("hermes_runtime_credential_missing", retryable=False)
-        assert_current_ai_consent(uid)
+        await _assert_current_ai_consent_async(uid)
         async with httpx.AsyncClient(timeout=HERMES_CHAT_REQUEST_TIMEOUT_SECONDS) as client:
             async with client.stream(
                 "POST",
@@ -1123,6 +1129,7 @@ async def _stream_hermes_cloud_chat(
                 started_at=client_sent_at,
                 client_metadata=client_info or {},
             ),
+            before_provider_call=lambda: _assert_current_ai_consent_async(uid),
         )
         yield f"data: {result.text.replace(chr(10), '__CRLF__')}\n\n"
         message = {
@@ -1225,6 +1232,12 @@ async def ella_chat_stream(
     trace.debug_level = debug_level
     client_sent_at = _parse_client_sent_at(request.client_sent_at)
     turn_id = _canonical_turn_id(uid, request, client_sent_at)
+
+    # Recheck immediately before committing streaming response headers. The
+    # dependency check authenticates admission; this closes the route-to-provider
+    # race with an exact HTTP 403/503 contract while each provider path retains
+    # its own last-boundary check.
+    await _assert_current_ai_consent_async(uid)
 
     if CHAT_PLATFORM == "hermes" or runtime is not None:
         trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)

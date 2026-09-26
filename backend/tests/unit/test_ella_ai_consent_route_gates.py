@@ -3,6 +3,7 @@ import asyncio
 import types
 from pathlib import Path
 
+import pytest
 from fastapi import HTTPException
 
 BACKEND = Path(__file__).resolve().parents[2]
@@ -100,8 +101,7 @@ def test_native_websocket_consent_check_precedes_runtime_and_stt_provider_work()
         BACKEND / "routers" / "transcribe.py",
         "_require_current_ai_consent_for_websocket",
     )
-    assert "AI_CONSENT_WEBSOCKET_CLOSE_CODE" in helper_source
-    assert "AI_CONSENT_REQUIRED_CODE" in helper_source
+    assert "_ai_consent_websocket_contract" in helper_source
 
 
 def test_websocket_consent_rejection_and_authority_outage_have_distinct_close_contracts():
@@ -119,6 +119,11 @@ def test_websocket_consent_rejection_and_authority_outage_have_distinct_close_co
         "AI_CONSENT_WEBSOCKET_CLOSE_CODE": 4403,
         "AI_CONSENT_WEBSOCKET_RETRY_CLOSE_CODE": 1013,
         "run_in_threadpool": run_in_threadpool,
+        "_ai_consent_websocket_contract": lambda exc: (
+            (1013, "ai_consent_authority_unavailable", True)
+            if exc.status_code >= 500
+            else (4403, "ai_consent_required", False)
+        ),
     }
     helper = types.FunctionType(
         _function_code(
@@ -196,6 +201,71 @@ def test_websocket_consent_rejection_and_authority_outage_have_distinct_close_co
     ]
     assert retryable.closed == (1013, "ai_consent_authority_unavailable")
     assert threadpool_calls[-1] == (reject_retryable, ("uid-a",))
+
+
+def test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary():
+    provider_bytes = []
+
+    def forward_deepgram_audio(_socket, data, _receipt):
+        provider_bytes.append(data)
+
+    async def forward_async_provider_audio(provider_send, data, _receipt):
+        await provider_send(data)
+
+    deepgram_forward = types.FunctionType(
+        _function_code(
+            BACKEND / "routers" / "transcribe.py",
+            "_forward_deepgram_audio_with_current_consent",
+        ),
+        {"forward_deepgram_audio": forward_deepgram_audio},
+    )
+    async_forward = types.FunctionType(
+        _function_code(
+            BACKEND / "routers" / "transcribe.py",
+            "_forward_async_provider_audio_with_current_consent",
+        ),
+        {"forward_async_provider_audio": forward_async_provider_audio},
+    )
+
+    state = {"failure": None}
+
+    async def consent_guard():
+        if state["failure"] is not None:
+            raise state["failure"]
+
+    async def provider_send(data):
+        provider_bytes.append(data)
+
+    async def scenario():
+        await deepgram_forward(consent_guard, object(), b"accepted-deepgram", object())
+        await async_forward(consent_guard, provider_send, b"accepted-async", object())
+        assert provider_bytes == [b"accepted-deepgram", b"accepted-async"]
+
+        state["failure"] = HTTPException(
+            status_code=403,
+            detail={"code": "ai_consent_required"},
+        )
+        with pytest.raises(HTTPException) as terminal:
+            await deepgram_forward(consent_guard, object(), b"revoked", object())
+        assert terminal.value.status_code == 403
+        assert provider_bytes == [b"accepted-deepgram", b"accepted-async"]
+
+        state["failure"] = HTTPException(
+            status_code=503,
+            detail={"code": "ai_consent_authority_unavailable", "retryable": True},
+        )
+        with pytest.raises(HTTPException) as retryable:
+            await async_forward(consent_guard, provider_send, b"uncertain", object())
+        assert retryable.value.status_code == 503
+        assert provider_bytes == [b"accepted-deepgram", b"accepted-async"]
+
+    asyncio.run(scenario())
+
+    stream_source = _function_source(BACKEND / "routers" / "transcribe.py", "_stream_handler")
+    assert "_forward_deepgram_audio_with_current_consent(" in stream_source
+    assert "_forward_async_provider_audio_with_current_consent(" in stream_source
+    assert "except AiConsentWebSocketRejected" in stream_source
+    assert "not ai_consent_egress_rejected.is_set()" in stream_source
 
 
 def test_memory_artwork_provider_routes_share_the_consent_gate():
@@ -284,6 +354,10 @@ def test_shared_conversation_processor_gates_target_uid_before_model_work():
 
 def test_background_ai_and_honcho_boundaries_recheck_consent_before_network_egress():
     chat_source = _function_source(BACKEND / "ella" / "routers" / "chat.py", "_produce_hermes_chat_events")
+    cloud_chat_source = _function_source(
+        BACKEND / "ella" / "routers" / "chat.py",
+        "_stream_hermes_cloud_chat",
+    )
     voice_source = _function_source(
         BACKEND / "ella" / "services" / "voice_honcho.py",
         "fetch_voice_honcho_context",
@@ -297,7 +371,8 @@ def test_background_ai_and_honcho_boundaries_recheck_consent_before_network_egre
         "build_extraction_result",
     )
 
-    assert chat_source.index("assert_current_ai_consent(uid)") < chat_source.index("httpx.AsyncClient(")
+    assert chat_source.index("_assert_current_ai_consent_async(uid)") < chat_source.index("httpx.AsyncClient(")
+    assert "before_provider_call=lambda: _assert_current_ai_consent_async(uid)" in cloud_chat_source
     assert voice_source.index("assert_current_ai_consent(") < voice_source.index("httpx.AsyncClient(")
     assert recovery_source.index("assert_current_ai_consent(uid)") < recovery_source.index(
         "generate_summary_from_prompt("

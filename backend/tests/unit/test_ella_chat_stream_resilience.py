@@ -1,8 +1,11 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
+from fastapi import Request
 
 from ella.routers import chat
+from ella.services.ai_consent import AiConsentHTTPException
 
 
 @pytest.fixture(autouse=True)
@@ -150,3 +153,52 @@ def test_same_turn_id_with_different_payload_fails_closed(monkeypatch):
         assert chat._hermes_chat_turn_tasks == {}
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("status_code", "detail"),
+    [
+        (403, {"code": "ai_consent_required"}),
+        (503, {"code": "ai_consent_authority_unavailable", "retryable": True}),
+    ],
+)
+def test_chat_rechecks_consent_before_stream_headers(monkeypatch, status_code, detail):
+    effects = []
+
+    async def isolated_runtime(*_args, **_kwargs):
+        effects.append("runtime")
+        return SimpleNamespace(provider="hermes", agent_id="agent-a")
+
+    async def forbidden_stream(*_args, **_kwargs):
+        effects.append("provider")
+        yield "done: forbidden\n\n"
+
+    def reject_after_admission(_uid):
+        effects.append("consent-recheck")
+        raise AiConsentHTTPException(status_code=status_code, detail=detail)
+
+    monkeypatch.setattr(chat, "resolve_isolated_runtime", isolated_runtime)
+    monkeypatch.setattr(chat, "_stream_hermes_chat", forbidden_stream)
+    monkeypatch.setattr(chat, "assert_current_ai_consent", reject_after_admission)
+    monkeypatch.setattr(chat, "record_trace", lambda *_args, **_kwargs: effects.append("trace"))
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/ella/chat/stream",
+            "headers": [],
+        }
+    )
+
+    with pytest.raises(AiConsentHTTPException) as error:
+        asyncio.run(
+            chat.ella_chat_stream(
+                chat.EllaChatRequest(uid="uid-a", message="content-free"),
+                request,
+                authenticated_uid="uid-a",
+            )
+        )
+
+    assert error.value.status_code == status_code
+    assert error.value.detail == detail
+    assert effects == ["runtime", "consent-recheck"]
