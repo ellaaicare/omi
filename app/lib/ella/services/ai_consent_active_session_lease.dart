@@ -92,9 +92,12 @@ class AiConsentAuthoritySnapshot {
 
   bool isCurrent({SharedPreferencesUtil? preferences}) {
     final current = preferences ?? SharedPreferencesUtil();
+    final currentVerifiedPersonaId = current.verifiedPersonaId?.trim();
     if (!current.getBool('aiConsentAccepted', defaultValue: false) ||
         current.uid != uid ||
-        current.aiConsentReceiptUid != uid) {
+        current.aiConsentReceiptUid != uid ||
+        currentVerifiedPersonaId != verifiedPersonaId ||
+        current.aiConsentProfileBindingId != profileBindingId) {
       return false;
     }
     final currentReceiptId = current.aiConsentReceiptId;

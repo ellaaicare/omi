@@ -34,6 +34,7 @@ class VoiceRecorderProvider extends ChangeNotifier {
   AiConsentActiveSessionLease? _aiConsentLease;
   AiConsentAuthoritySnapshot? _activeConsentAuthority;
   bool _consentReviewRequired = false;
+  int _lifecycleGeneration = 0;
 
   // Audio visualization
   final List<double> _audioLevels = List.generate(20, (_) => 0.1);
@@ -80,6 +81,7 @@ class VoiceRecorderProvider extends ChangeNotifier {
     }
     if (_state == VoiceRecorderState.recording) return;
 
+    _lifecycleGeneration++;
     _activeConsentAuthority = authority;
     _consentReviewRequired = false;
     _state = VoiceRecorderState.recording;
@@ -195,10 +197,17 @@ class VoiceRecorderProvider extends ChangeNotifier {
   }
 
   Future<void> _handleConsentAuthorityLost() async {
+    await _stopRecordingForConsentReview();
+  }
+
+  Future<void> _stopRecordingForConsentReview() async {
+    final lifecycleGeneration = _lifecycleGeneration;
     try {
       await stopRecording();
     } finally {
-      _markConsentReviewRequired();
+      if (_lifecycleGeneration == lifecycleGeneration && _state != VoiceRecorderState.idle) {
+        _markConsentReviewRequired();
+      }
     }
   }
 
@@ -213,11 +222,7 @@ class VoiceRecorderProvider extends ChangeNotifier {
   Future<void> processRecording() async {
     final authority = _activeConsentAuthority;
     if (authority == null || !authority.isCurrent()) {
-      try {
-        await stopRecording();
-      } finally {
-        _markConsentReviewRequired();
-      }
+      await _stopRecordingForConsentReview();
       return;
     }
     if (_isProcessing) return;
@@ -296,6 +301,7 @@ class VoiceRecorderProvider extends ChangeNotifier {
       return;
     }
 
+    _lifecycleGeneration++;
     if (_state == VoiceRecorderState.recording) {
       unawaited(stopRecording());
     }

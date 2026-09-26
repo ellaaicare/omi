@@ -180,6 +180,31 @@ void main() {
     lease.stop();
   });
 
+  test('newer server receipt remains current only for the captured profile authority', () async {
+    final authority = AiConsentAuthoritySnapshot.capture(preferences: preferences, expectedUid: 'uid-a');
+    expect(authority, isNotNull);
+
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-b',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:01:00Z',
+    );
+    expect(authority!.isCurrent(preferences: preferences), isTrue);
+
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-binding-b');
+    expect(authority.isCurrent(preferences: preferences), isFalse);
+  });
+
+  test('same receipt cannot cross a verified persona transition', () async {
+    final authority = AiConsentAuthoritySnapshot.capture(preferences: preferences, expectedUid: 'uid-a');
+    expect(authority, isNotNull);
+
+    preferences.verifiedPersonaId = 'persona-b';
+
+    expect(authority!.isCurrent(preferences: preferences), isFalse);
+  });
+
   test('verified deploy drift schedules a normal refresh interval instead of spinning at zero delay', () async {
     final lease = AiConsentActiveSessionLease(
       uid: 'uid-a',

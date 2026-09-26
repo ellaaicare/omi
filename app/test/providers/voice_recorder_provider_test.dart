@@ -95,4 +95,28 @@ void main() {
     expect(provider.consentReviewRequired, isTrue);
     expect(provider.state, VoiceRecorderState.transcribeFailed);
   });
+
+  test('closing while consent teardown waits does not restore the dismissed failure UI', () async {
+    final mic = _FakeMicRecorder();
+    final provider = VoiceRecorderProvider(
+      microphone: mic,
+      requestMicrophonePermission: () async {},
+    );
+    addTearDown(provider.dispose);
+
+    await provider.startRecording();
+    preferences.declineAiConsent();
+    final processing = provider.processRecording();
+    await Future<void>.delayed(Duration.zero);
+
+    provider.close();
+    expect(provider.state, VoiceRecorderState.idle);
+    expect(provider.consentReviewRequired, isFalse);
+
+    mic.stopGate.complete();
+    await processing;
+
+    expect(provider.state, VoiceRecorderState.idle);
+    expect(provider.consentReviewRequired, isFalse);
+  });
 }
