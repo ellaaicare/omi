@@ -670,6 +670,7 @@ jobs:
             "tests/unit/test_capture_buffer_retention.py::test_stale_active_conversation_id_can_only_be_replaced_by_exact_cas"
             "tests/unit/test_capture_incident_1210_regressions.py::test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing"
             "tests/unit/test_capture_incident_1210_regressions.py::test_consent_rejection_defers_both_conversation_processing_callers_without_fallback"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_pusher_processing_request_settles_every_coalesced_waiter"
             "tests/unit/test_capture_incident_1210_regressions.py::test_pusher_processing_request_waits_for_terminal_response"
             "tests/unit/test_capture_incident_1210_regressions.py::test_capture_commit_is_fenced_after_reconnect_transfers_socket_ownership"
             "tests/unit/test_capture_incident_1210_regressions.py::test_reconnect_keeps_polling_until_a_late_superseded_socket_batch_is_committed"
@@ -740,7 +741,7 @@ jobs:
             "tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[todoist]"
             "tests/unit/test_capture_webhook_delivery.py::test_capture_developer_webhook_failure_is_not_acknowledged"
           )
-          test "$(grep -c '::' <<<"$capture_ids")" -eq 106
+          test "$(grep -c '::' <<<"$capture_ids")" -eq 107
           for required_id in "${required_capture_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$capture_ids"
           done

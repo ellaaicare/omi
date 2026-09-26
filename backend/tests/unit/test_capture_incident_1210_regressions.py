@@ -393,6 +393,70 @@ def test_consent_rejection_defers_both_conversation_processing_callers_without_f
     assert conversation["status"] == "processing"
 
 
+def test_pusher_processing_request_settles_every_coalesced_waiter():
+    class ConsentRejected(RuntimeError):
+        def __init__(self, *, retryable: bool):
+            self.retryable = retryable
+
+    async def exercise(mode: str, expected: str, *, retryable: bool = False):
+        queued = asyncio.Event()
+        release = asyncio.Event()
+        pending = {}
+        provider_calls = []
+
+        async def send_pusher_payload(_payload):
+            queued.set()
+            await release.wait()
+            if mode == "consent":
+                raise ConsentRejected(retryable=retryable)
+            provider_calls.append(mode)
+            if mode == "transport_error":
+                raise ConnectionError("pusher unavailable")
+
+        request_processing = _nested_function(
+            "routers/transcribe.py",
+            "request_conversation_processing",
+            {
+                "AiConsentWebSocketRejected": ConsentRejected,
+                "asyncio": asyncio,
+                "bytes": bytes,
+                "json": json,
+                "PUSHER_PROCESSING_RESPONSE_TIMEOUT_SECONDS": 0.01,
+                "struct": struct,
+            },
+            {
+                "language": "en",
+                "pending_conversation_requests": pending,
+                "pending_request_event": asyncio.Event(),
+                "pusher_connected": True,
+                "pusher_ws": object(),
+                "send_pusher_payload": send_pusher_payload,
+                "session_id": "socket-a",
+                "uid": "uid-a",
+                "websocket_active": False,
+            },
+        )
+        leader = asyncio.create_task(request_processing("conversation-a"))
+        await queued.wait()
+        follower = asyncio.create_task(request_processing("conversation-a"))
+        await asyncio.sleep(0)
+        release.set()
+        results = await asyncio.wait_for(asyncio.gather(leader, follower), timeout=1.0)
+
+        assert results == [expected, expected]
+        assert pending == {}
+        if mode == "consent":
+            assert provider_calls == []
+
+    async def scenario():
+        await exercise("consent", "consent_deferred", retryable=True)
+        await exercise("consent", "consent_required", retryable=False)
+        await exercise("transport_error", "unavailable")
+        await exercise("timeout", "unavailable")
+
+    asyncio.run(scenario())
+
+
 def test_pusher_processing_request_waits_for_terminal_response():
     async def send_with_consent(consent_guard, provider_send, payload):
         await consent_guard()

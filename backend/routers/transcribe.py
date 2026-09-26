@@ -166,6 +166,12 @@ class AiConsentWebSocketRejected(RuntimeError):
         self.retryable = retryable
 
 
+class _AiConsentSyncCheckRejected(RuntimeError):
+    def __init__(self, authority_error: HTTPException):
+        super().__init__("ai_consent_sync_check_rejected")
+        self.authority_error = authority_error
+
+
 class AiConsentSessionAuthority:
     """Bound provider egress to a periodically refreshed session authority."""
 
@@ -268,23 +274,34 @@ async def _send_pusher_payload_with_current_consent(
     await provider_send(data)
 
 
-async def _dispatch_scanner_with_current_consent(
-    consent_guard: Callable[[], Awaitable[None]],
-    scanner_send: Callable,
-    *,
-    uid: str,
-    conversation_id: str,
-    segments: list[dict],
-    latency_metadata: dict,
+async def _run_sync_provider_with_current_consent(
+    subject_uid: str,
+    consent_checker: Callable[[str], str],
+    reject_consent: Callable[[HTTPException], Awaitable[AiConsentWebSocketRejected]],
+    provider_call: Callable,
+    *args,
+    **kwargs,
 ):
-    await consent_guard()
-    return await run_in_threadpool(
-        scanner_send,
-        uid=uid,
-        conversation_id=conversation_id,
-        segments=segments,
-        latency_metadata=latency_metadata,
-    )
+    def invoke():
+        try:
+            consent_checker(subject_uid)
+        except HTTPException as exc:
+            raise _AiConsentSyncCheckRejected(exc) from exc
+        except Exception as exc:
+            authority_error = HTTPException(
+                status_code=503,
+                detail={
+                    "code": AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE,
+                    "retryable": True,
+                },
+            )
+            raise _AiConsentSyncCheckRejected(authority_error) from exc
+        return provider_call(*args, **kwargs)
+
+    try:
+        return await run_in_threadpool(invoke)
+    except _AiConsentSyncCheckRejected as exc:
+        raise await reject_consent(exc.authority_error) from exc
 
 
 async def _require_current_ai_consent_for_websocket(
@@ -1953,6 +1970,12 @@ async def _stream_handler(
                 print(f"Pusher not connected, falling back to local processing for {conversation_id}", uid, session_id)
                 return 'unavailable'
             response = None
+
+            def settle(result: str) -> str:
+                if response is not None and not response.done():
+                    response.set_result(result)
+                return result
+
             try:
                 existing = pending_conversation_requests.get(conversation_id)
                 if existing is not None and not existing.done():
@@ -1971,12 +1994,15 @@ async def _stream_handler(
                         return await asyncio.wait_for(asyncio.shield(response), timeout=0.25)
                     except asyncio.TimeoutError:
                         continue
-                return 'unavailable'
+                return settle('unavailable')
             except AiConsentWebSocketRejected as exc:
-                return 'consent_deferred' if exc.retryable else 'consent_required'
+                return settle('consent_deferred' if exc.retryable else 'consent_required')
+            except asyncio.CancelledError:
+                settle('unavailable')
+                raise
             except Exception as e:
                 print(f"Failed to send process_conversation request: {e}", uid, session_id)
-                return 'unavailable'
+                return settle('unavailable')
             finally:
                 if response is not None and pending_conversation_requests.get(conversation_id) is response:
                     pending_conversation_requests.pop(conversation_id, None)
@@ -2289,8 +2315,10 @@ async def _stream_handler(
                     continue
 
                 # Translation
-                await require_stt_egress_consent(refresh=True)
-                translated_text = await run_in_threadpool(
+                translated_text = await _run_sync_provider_with_current_consent(
+                    uid,
+                    assert_current_ai_consent,
+                    reject_stt_egress,
                     translation_service.translate_text_by_sentence,
                     translation_language,
                     segment_text,
@@ -2573,8 +2601,14 @@ async def _stream_handler(
             wav_bytes = output_buffer.getvalue()
 
             # Extract embedding (API call)
-            await require_stt_egress_consent(refresh=True)
-            query_embedding = await asyncio.to_thread(extract_embedding_from_bytes, wav_bytes, "query.wav")
+            query_embedding = await _run_sync_provider_with_current_consent(
+                uid,
+                assert_current_ai_consent,
+                reject_stt_egress,
+                extract_embedding_from_bytes,
+                wav_bytes,
+                "query.wav",
+            )
 
             # Find best match
             best_match = None
@@ -2817,8 +2851,10 @@ async def _stream_handler(
                 try:
                     from utils.ella import send_to_scanner
 
-                    await _dispatch_scanner_with_current_consent(
-                        lambda: require_stt_egress_consent(refresh=True),
+                    await _run_sync_provider_with_current_consent(
+                        uid,
+                        assert_current_ai_consent,
+                        reject_stt_egress,
                         send_to_scanner,
                         uid=uid,
                         conversation_id=batch_conversation_id,
