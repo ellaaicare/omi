@@ -273,17 +273,29 @@ class MemoryArtworkCache {
         // terminal cleanup or authoritative ready response.
         return false;
       }
-      if (!_diskReadsDisabled && _suppressionGenerations[cacheKey] == suppressionGeneration) {
+      final completedCurrentGeneration =
+          !_diskReadsDisabled && _suppressionGenerations[cacheKey] == suppressionGeneration;
+      if (completedCurrentGeneration) {
         // Keep the tombstone authoritative. A stale in-flight image download
         // can rewrite the old key after deletion, so a later ready response
         // publishes under a new cache generation instead of trusting it.
         _completedEvictionGenerations[cacheKey] = suppressionGeneration;
+        _forgetEvictedPublishedVariantCacheKey(cacheKey);
       }
-      _forgetEvictedPublishedVariantCacheKey(cacheKey);
-      return true;
+      return completedCurrentGeneration;
     }()
         .whenComplete(() {
       if (identical(_pendingEvictions[cacheKey], eviction)) _pendingEvictions.remove(cacheKey);
+      final currentGeneration = _suppressionGenerations[cacheKey];
+      if (!_diskReadsDisabled &&
+          _suppressedDisplayKeys.contains(cacheKey) &&
+          currentGeneration != null &&
+          currentGeneration != suppressionGeneration) {
+        // A newer terminal decision arrived while this deletion was running.
+        // Delete again in case an old image request rewrote the key, and keep
+        // the durable ledger until that newer generation succeeds.
+        unawaited(_evictSuppressedDisplayCacheKey(cacheKey, evict, waitTimeout));
+      }
     });
     _pendingEvictions[cacheKey] = eviction;
     return _waitForEviction(eviction, waitTimeout);

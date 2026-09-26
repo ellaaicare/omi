@@ -181,6 +181,76 @@ void main() {
     expect(MemoryArtworkCache.publishedVariantCacheKeysForTerminalCleanup(displayCacheKey: provisional), {variant});
   });
 
+  test('a stale eviction generation retains its ledger until the newest deletion succeeds', () async {
+    final displayCacheKey = 'c' * 64;
+    final variantCacheKey = 'd' * 64;
+    final releaseFirstEviction = Completer<void>();
+    final secondEvictionStarted = Completer<void>();
+    final releaseSecondEviction = Completer<void>();
+    var evictionCalls = 0;
+    var diskHasVariant = true;
+
+    MemoryArtworkCache.rememberPublishedVariantCacheKeys(
+      scopeKey: 'memory-a:authority-1:artwork-1',
+      displayCacheKey: displayCacheKey,
+      cacheKeys: {variantCacheKey},
+    );
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
+    MemoryArtworkCache.suppressDisplayCacheKeys({variantCacheKey});
+
+    Future<void> evict(String _) async {
+      evictionCalls++;
+      if (evictionCalls == 1) {
+        await releaseFirstEviction.future;
+        diskHasVariant = false;
+        diskHasVariant = true; // A stale image request rewrites the just-deleted file.
+        return;
+      }
+      if (evictionCalls == 2) {
+        secondEvictionStarted.complete();
+        await releaseSecondEviction.future;
+      }
+      diskHasVariant = false;
+    }
+
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(
+      {variantCacheKey},
+      evict,
+      waitTimeout: Duration.zero,
+    );
+    MemoryArtworkCache.suppressDisplayCacheKeys({variantCacheKey});
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(
+      {variantCacheKey},
+      evict,
+      waitTimeout: Duration.zero,
+    );
+    expect(evictionCalls, 1);
+
+    releaseFirstEviction.complete();
+    await secondEvictionStarted.future;
+    expect(diskHasVariant, isTrue);
+
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+    expect(
+      MemoryArtworkCache.publishedVariantCacheKeysForTerminalCleanup(displayCacheKey: displayCacheKey),
+      {variantCacheKey},
+    );
+
+    releaseSecondEviction.complete();
+    await Future<void>.delayed(Duration.zero);
+    MemoryArtworkCache.suppressDisplayCacheKeys({variantCacheKey});
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys({variantCacheKey}, evict);
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
+
+    expect(evictionCalls, 3);
+    expect(diskHasVariant, isFalse);
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+    expect(
+      MemoryArtworkCache.publishedVariantCacheKeysForTerminalCleanup(displayCacheKey: displayCacheKey),
+      isEmpty,
+    );
+  });
+
   test('explicit clear is bounded and removes a late stale ledger write', () async {
     final writerStarted = Completer<void>();
     final releaseWriter = Completer<void>();
