@@ -93,7 +93,10 @@ class WalOwnerAuthority {
     final prefs = preferences ?? SharedPreferencesUtil();
     final owner = currentOwner(preferences: prefs, authenticatedUid: authenticatedUid);
     if (owner == null) return null;
-    final consent = AiConsentAuthoritySnapshot.capture(preferences: prefs, expectedUid: owner.uid);
+    final consent = AiConsentActiveSessionLease.authorityForSessionStart(
+      preferences: prefs,
+      expectedUid: owner.uid,
+    );
     if (consent == null) return null;
     return ActiveWalAuthority(owner: owner, consent: consent);
   }

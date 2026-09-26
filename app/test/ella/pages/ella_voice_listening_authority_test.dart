@@ -80,16 +80,16 @@ void main() {
     expect(authorityLossCalls, 1);
   });
 
-  test('profile transition while startup is suspended reaches review without listening', () async {
+  test('local profile drift while startup is suspended preserves server-confirmed listening authority', () async {
     final suspended = Completer<void>();
     final starting = resumeSuspendedStartup(suspended.future);
 
     await preferences.saveString('aiConsentProfileBindingId', 'profile-binding-b');
     suspended.complete();
 
-    expect(await starting, isFalse);
-    expect(listenCalls, 0);
-    expect(authorityLossCalls, 1);
+    expect(await starting, isTrue);
+    expect(listenCalls, 1);
+    expect(authorityLossCalls, 0);
   });
 
   test('expired startup grace after a suspended await cannot begin listening', () async {

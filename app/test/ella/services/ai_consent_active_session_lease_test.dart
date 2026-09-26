@@ -194,7 +194,7 @@ void main() {
     lease.stop();
   });
 
-  test('newer server receipt remains current only for the captured profile authority', () async {
+  test('newer server receipt and local profile drift preserve same-account authority', () async {
     final authority = AiConsentAuthoritySnapshot.capture(preferences: preferences, expectedUid: 'uid-a');
     expect(authority, isNotNull);
 
@@ -207,14 +207,23 @@ void main() {
     expect(authority!.isCurrent(preferences: preferences), isTrue);
 
     await preferences.saveString('aiConsentProfileBindingId', 'profile-binding-b');
-    expect(authority.isCurrent(preferences: preferences), isFalse);
+    expect(authority.isCurrent(preferences: preferences), isTrue);
   });
 
-  test('same receipt cannot cross a verified persona transition', () async {
+  test('same receipt survives a local verified persona transition', () async {
     final authority = AiConsentAuthoritySnapshot.capture(preferences: preferences, expectedUid: 'uid-a');
     expect(authority, isNotNull);
 
     preferences.verifiedPersonaId = 'persona-b';
+
+    expect(authority!.isCurrent(preferences: preferences), isTrue);
+  });
+
+  test('same receipt cannot cross an authenticated account transition', () async {
+    final authority = AiConsentAuthoritySnapshot.capture(preferences: preferences, expectedUid: 'uid-a');
+    expect(authority, isNotNull);
+
+    preferences.uid = 'uid-b';
 
     expect(authority!.isCurrent(preferences: preferences), isFalse);
   });

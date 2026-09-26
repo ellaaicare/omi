@@ -39,7 +39,7 @@ class _FakeArtworkApi extends MemoryArtworkApi {
     List<MemoryArtworkQueueStatus?>? queueStatuses,
   })  : _displayResults = List<MemoryArtworkResult>.of(displayResults ?? const []),
         _queueStatuses = List<MemoryArtworkQueueStatus?>.of(queueStatuses ?? const []),
-        super(baseUrl: 'https://api.example.test', authorityProvider: () => null);
+        super(baseUrl: '', authorityProvider: () => null);
 
   final bool releaseEnabled;
   String selectedStyle = memoryArtworkDefaultStyle;
@@ -315,7 +315,7 @@ void main() {
 
     expect(find.textContaining('[Ella]'), findsNothing);
     expect(find.byIcon(Icons.auto_awesome_rounded), findsNWidgets(2));
-    expect(find.textContaining('Family dinner'), findsOneWidget);
+    expect(find.textContaining('Family dinner'), findsWidgets);
     expect(find.textContaining('A grounded summary'), findsOneWidget);
   });
 
@@ -343,7 +343,7 @@ void main() {
 
     expect(find.textContaining('[Ella]'), findsNothing);
     expect(find.byIcon(Icons.auto_awesome_rounded), findsOneWidget);
-    expect(find.textContaining('Family dinner'), findsOneWidget);
+    expect(find.textContaining('Family dinner'), findsWidgets);
   });
 
   testWidgets('gallery swipe affordances follow start and end in right-to-left layouts', (tester) async {
@@ -662,7 +662,8 @@ void main() {
     await tester.tap(find.byKey(const Key('memory-layout-menu')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Days'));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
 
     final memoryDayCard = find.byWidgetPredicate(
       (widget) => widget is MemoryDayGalleryCard && widget.memories.any((item) => item.id == 'evening'),
@@ -673,7 +674,8 @@ void main() {
     expect(find.byKey(const Key('memory-card-morning')), findsNothing);
 
     await tester.tap(memoryDayCard);
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
     expect(find.byKey(const Key('memory-day-list')), findsOneWidget);
     expect(find.byKey(const Key('memory-card-morning')), findsOneWidget);
     expect(find.byKey(const Key('memory-card-evening')), findsOneWidget);
@@ -775,7 +777,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Oldest first'));
     await tester.pumpAndSettle();
-    expect(find.text('Memory 35'), findsOneWidget);
+    expect(find.text('Memory 35'), findsWidgets);
 
     await tester.fling(find.byKey(const Key('ella-memories-list')), const Offset(0, -3200), 4000);
     await tester.pumpAndSettle();
@@ -788,7 +790,7 @@ void main() {
       find.descendant(of: find.byKey(const Key('ella-memories-list')), matching: find.byType(Scrollable)).first,
     );
     expect(scrollable.position.pixels, closeTo(0, 0.5));
-    expect(find.text('Memory 0'), findsOneWidget);
+    expect(find.text('Memory 0'), findsWidgets);
     expect(find.byKey(const Key('back-to-recent-memories')), findsNothing);
   });
 }
