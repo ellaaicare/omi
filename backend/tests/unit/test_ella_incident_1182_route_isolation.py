@@ -1,6 +1,7 @@
 import ast
 import asyncio
 import inspect
+import json
 import sys
 import textwrap
 from collections import Counter
@@ -28,6 +29,7 @@ sys.modules.setdefault("websockets", MagicMock())
 
 import ella
 from ella.routers import canonical_events, chat, resolve, trace
+from ella.services.runtime_errors import ProvisioningError
 from scripts import ella_memory_e2e_smoke
 from utils.ella import exact_firebase_auth
 
@@ -592,6 +594,38 @@ def test_unbound_non_owner_chat_fails_before_trace_or_provider(monkeypatch):
         )
     assert error.value.status_code == 409
     assert error.value.detail == {"code": "hermes_runtime_required"}
+    assert effects == ["resolver"]
+
+
+def test_provisioning_chat_returns_retryable_service_unavailable_before_provider(monkeypatch):
+    effects = []
+
+    async def provisioning_runtime(*_args, **_kwargs):
+        effects.append("resolver")
+        raise ProvisioningError("runtime_provisioning", retryable=True)
+
+    monkeypatch.setattr(chat, "resolve_isolated_runtime", provisioning_runtime)
+    monkeypatch.setattr(chat, "record_trace", lambda *_args, **_kwargs: effects.append("trace"))
+
+    class ForbiddenClient:
+        def __init__(self, *_args, **_kwargs):
+            effects.append("provider")
+            raise AssertionError("provisioning user reached provider")
+
+    monkeypatch.setattr(chat.httpx, "AsyncClient", ForbiddenClient)
+    request = Request({"type": "http", "method": "POST", "path": "/v1/ella/chat/stream", "headers": []})
+
+    response = asyncio.run(
+        chat.ella_chat_stream(
+            chat.EllaChatRequest(uid="uid-a", message="content-free test"),
+            request,
+            authenticated_uid="uid-a",
+        )
+    )
+
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "private, no-store"
+    assert json.loads(response.body) == {"code": "runtime_provisioning", "retryable": True}
     assert effects == ["resolver"]
 
 

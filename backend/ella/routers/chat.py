@@ -30,7 +30,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -1270,6 +1270,12 @@ async def ella_chat_stream(
     try:
         runtime = await resolve_isolated_runtime(uid, target_mode="hermes-cloud-chat")
     except ProvisioningError as exc:
+        if exc.code == "runtime_provisioning" and exc.retryable:
+            return JSONResponse(
+                status_code=503,
+                content={"code": "runtime_provisioning", "retryable": True},
+                headers={"Cache-Control": "private, no-store"},
+            )
         raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
 
     if runtime is None and not _retained_owner_chat_configured(uid):

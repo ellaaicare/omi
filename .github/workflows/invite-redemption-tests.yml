@@ -182,7 +182,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 196
+          test "$collected" -eq 198
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
@@ -227,7 +227,9 @@ jobs:
             "tests/unit/test_ella_provisioning_service.py::test_retained_owner_identity_is_exact_and_requires_server_configuration"
             "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_activation_does_not_require_invitation_target"
             "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_preserves_exact_active_retained_runtime"
-            "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_still_rejects_missing_isolated_binding"
+            "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_prefers_healthy_direct_binding_over_late_legacy_cluster"
+            "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_reports_missing_isolated_binding_as_provisioning"
+            "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_ready_job_without_binding_still_fails_closed"
             "tests/unit/test_ella_provisioning_service.py::test_resolve_self_hosted_active_direct_positive_healthy_active"
             "tests/unit/test_ella_provisioning_service.py::test_resolve_self_hosted_active_direct_negative_disabled_unhealthy"
             "tests/unit/test_ella_provisioning_service.py::test_resolve_self_hosted_active_direct_no_row_returns_none"
