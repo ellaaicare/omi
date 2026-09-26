@@ -169,6 +169,20 @@ ROUTE_GROUPS = (
         ),
     ),
     _group(
+        "dream_media",
+        "firebase_exact_owner",
+        "public",
+        ("GET", "/v1/ella/dreams", "list_dreams"),
+        ("GET", "/v1/ella/dreams/{dream_id}/media", "get_dream_media"),
+        ("DELETE", "/v1/ella/dreams/{dream_id}", "delete_dream"),
+    ),
+    _group(
+        "dream_media",
+        "dream_pipeline_service_exact_subject",
+        "internal_only",
+        ("POST", "/v1/ella/internal/dreams/{dream_id}/media", "upload_dream_media"),
+    ),
+    _group(
         "trace",
         "firebase_exact_owner",
         "permanent_edge_deny",

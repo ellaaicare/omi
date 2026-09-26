@@ -507,6 +507,22 @@ def _register_routers(app) -> None:
     else:
         print(f"  ⚠️ Ella memory artwork not available: {_MEMORY_ARTWORK_IMPORT_ERROR}", flush=True)
 
+    from database import conversations as conversations_db
+    from database import memories as memories_db
+    from ella.routers.dream_media import router as dream_media_router
+    from ella.services.dream_media import (
+        prepare_source_memory_dream_deletion,
+        start_dream_media_sweeper,
+        stop_dream_media_sweeper,
+    )
+
+    conversations_db.register_conversation_pre_delete_hook(prepare_source_memory_dream_deletion)
+    memories_db.register_memory_pre_delete_hook(prepare_source_memory_dream_deletion)
+    app.include_router(dream_media_router, tags=["Ella Dream Media"])
+    app.add_event_handler("startup", start_dream_media_sweeper)
+    app.add_event_handler("shutdown", stop_dream_media_sweeper)
+    print("  🌐 /v1/ella/dreams/* - Private authenticated dream media", flush=True)
+
     # Token-authenticated first-party adapter for the persistent Photon sidecar.
     try:
         from ella.routers.photon import router as photon_router
