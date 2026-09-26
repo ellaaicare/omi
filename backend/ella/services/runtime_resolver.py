@@ -621,19 +621,16 @@ async def resolve_isolated_runtime(
             job = await repository.get_job(uid, DEFAULT_TARGET_SCHEMA_VERSION)
         except Exception as exc:
             raise ProvisioningError("self_hosted_runtime_authority_unavailable", retryable=True) from exc
-        if (
-            job
-            and bool(job.get("retryable"))
-            and str(job.get("state") or "")
-            in {
-                "pending",
-                "queued",
-                "provisioning",
-                "retryable",
-                "rolling_back",
-                "degraded",
-            }
-        ):
+        job_state = str((job or {}).get("state") or "")
+        job_attempts = int((job or {}).get("attempts") or 0)
+        job_in_progress = job_state in {
+            "pending",
+            "queued",
+            "retryable",
+            "rolling_back",
+            "degraded",
+        } or (job_state == "provisioning" and job_attempts > 0)
+        if job and bool(job.get("retryable")) and job_in_progress:
             raise ProvisioningError("runtime_provisioning", retryable=True)
         raise ProvisioningError("self_hosted_invitation_runtime_not_provisioned", retryable=False)
     if retained_required:

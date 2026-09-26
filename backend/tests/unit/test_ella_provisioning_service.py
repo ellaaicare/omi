@@ -3447,6 +3447,20 @@ def test_fresh_uid_relax_ready_job_without_binding_still_fails_closed(monkeypatc
         )
     assert error.value.retryable is False
 
+    # Normal claim_job transitions increment attempts. A zero-attempt
+    # provisioning row cannot prove that setup is running and must not mask
+    # an inactive or authority-drifted binding as a retryable setup state.
+    repository.job.update(state="provisioning", stage="smoke_passed", retryable=True, attempts=0)
+    with pytest.raises(ProvisioningError, match="self_hosted_invitation_runtime_not_provisioned") as error:
+        asyncio.run(
+            resolve_isolated_runtime(
+                "fresh-user",
+                repository=repository,
+                target_mode="hermes-chat",
+            )
+        )
+    assert error.value.retryable is False
+
 
 def test_fresh_uid_relax_activation_does_not_require_invitation_target(monkeypatch):
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
