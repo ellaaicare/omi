@@ -323,6 +323,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                   ),
                                 ),
                 ),
+                const PassiveBackendProbeBanner(),
                 if (provider.lastStreamFailure != null)
                   _ClientFailureBanner(
                     failure: provider.lastStreamFailure!,

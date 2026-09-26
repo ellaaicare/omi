@@ -7,6 +7,20 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ai_consent_policy.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 
+class _TimeoutAfterCacheTransport extends _FakeTransport {
+  _TimeoutAfterCacheTransport({super.submitResult});
+
+  bool failNextFetch = false;
+  int fetchCalls = 0;
+
+  @override
+  Future<AiConsentPolicy?> fetchPolicy() async {
+    fetchCalls++;
+    if (failNextFetch) throw TimeoutException('policy');
+    return AiConsentPolicy.bundled;
+  }
+}
+
 class _FakeTransport extends EllaAiConsentTransport {
   _FakeTransport({this.policy, this.submitResult, this.fetchResult, this.fetchCompleter});
 
@@ -128,6 +142,21 @@ void main() {
 
     expect(outcome.failureKind, AiConsentGrantFailureKind.serverUnavailable);
     expect(outcome.supportCode, 'http_500');
+  });
+
+  test('a policy timeout after a cached policy still posts the grant once', () async {
+    final transport = _TimeoutAfterCacheTransport(
+      submitResult: AiConsentSubmitResult(httpStatus: 200, status: _currentGrantStatus(uid)),
+    );
+    final service = _service(transport);
+
+    expect((await service.grantCurrentConsentWithOutcome(uid: uid)).accepted, isTrue);
+    transport.failNextFetch = true;
+    final second = await service.grantCurrentConsentWithOutcome(uid: uid);
+
+    expect(second.accepted, isTrue);
+    expect(transport.submitCalls, 2);
+    expect(transport.fetchCalls, 2);
   });
 
   test('missing policy response uses the matching bundled policy for the authoritative submit', () async {

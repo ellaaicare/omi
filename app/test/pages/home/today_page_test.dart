@@ -10,6 +10,32 @@ import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/utils/enums.dart';
 
 void main() {
+  test('necklace recording copy requires audio bytes and a delivered transcript socket', () {
+    const silent = CaptureDiagnostics(source: CaptureDiagnosticSource.necklace);
+    expect(
+      todayDockShowsLiveNecklaceRecording(
+        deviceRecording: true,
+        transcriptionReady: true,
+        diagnostics: silent,
+      ),
+      isFalse,
+    );
+    expect(
+      todayDockShowsLiveNecklaceRecording(
+        deviceRecording: true,
+        transcriptionReady: true,
+        diagnostics: const CaptureDiagnostics(
+          source: CaptureDiagnosticSource.necklace,
+          physicalFrames: 2,
+          physicalBytes: 80,
+          transmittedFrames: 2,
+          transmittedBytes: 80,
+        ),
+      ),
+      isTrue,
+    );
+  });
+
   test('action item source labels survive API parsing', () {
     final item = ActionItemWithMetadata.fromJson({
       'id': 'from-david',

@@ -1043,15 +1043,14 @@ class MessageProvider extends ChangeNotifier {
 
   Future sendMessageStreamToServer(String text) async {
     final lease = _beginAccountCommit();
-    if (lease == null) return;
+    if (lease == null) {
+      _markSendFailed(text);
+      return;
+    }
     final operationGeneration = _operationGeneration;
     try {
       if (!await _ensureAiConsent()) {
-        if (_canCommit(lease, operationGeneration)) {
-          _lastFailedMessageText = text;
-          _setStreamFailure(const ClientApiFailure(ClientApiFailureKind.consentRequired, retryable: true));
-          setSendingMessage(false);
-        }
+        if (_canCommit(lease, operationGeneration)) _markSendFailed(text);
         return;
       }
       if (!_canCommit(lease, operationGeneration)) return;
@@ -1150,11 +1149,11 @@ class MessageProvider extends ChangeNotifier {
         _discardAssistantAt(aiIndex);
         _lastFailedMessageText = text;
         _setStreamFailure(failure);
+        setSendingMessage(false);
       } catch (_) {
         if (!_canCommit(lease, operationGeneration)) return;
         _discardAssistantAt(aiIndex);
-        _lastFailedMessageText = text;
-        _setStreamFailure(const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true));
+        _markSendFailed(text);
       } finally {
         if (_canCommit(lease, operationGeneration)) {
           aiStreamProgress = 1.0;
@@ -1164,9 +1163,17 @@ class MessageProvider extends ChangeNotifier {
           SharedPreferencesUtil().cachedMessages = messages;
         }
       }
+    } catch (_) {
+      if (_canCommit(lease, operationGeneration)) _markSendFailed(text);
     } finally {
       lease.close();
     }
+  }
+
+  void _markSendFailed(String text) {
+    _lastFailedMessageText = text;
+    _setStreamFailure(const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true));
+    setSendingMessage(false);
   }
 
   Future<void> retryLastFailedMessage() async {

@@ -7,6 +7,7 @@ import 'package:omi/backend/http/shared.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/providers/capture_provider.dart';
+import 'package:omi/providers/device_provider.dart';
 import 'package:omi/services/connectivity_service.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
@@ -52,6 +53,7 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
   Widget build(BuildContext context) {
     final connectivity = ConnectivityService();
     final capture = context.watch<CaptureProvider>();
+    final bleConnected = context.watch<DeviceProvider>().presentationIsConnected;
     return Scaffold(
       backgroundColor: EllaColors.bgPrimary,
       appBar: AppBar(
@@ -99,11 +101,12 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
               ),
               _DiagnosticRow(
                 label: context.l10n.diagnosticsBleRate,
-                value: '${capture.bleReceiveRateKbps.toStringAsFixed(2)} kbps',
+                value:
+                    '${bleConnected ? context.l10n.yes : context.l10n.no} · ${capture.bleBytesPerSecond.toStringAsFixed(0)} B/s',
               ),
               _DiagnosticRow(
                 label: context.l10n.diagnosticsWsRate,
-                value: '${capture.wsSendRateKbps.toStringAsFixed(2)} kbps',
+                value: '${capture.transcriptionSocketState} · ${capture.wsSendRateKbps.toStringAsFixed(2)} kbps',
               ),
             ],
           );
