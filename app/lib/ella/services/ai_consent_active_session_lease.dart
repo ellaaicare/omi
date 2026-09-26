@@ -295,7 +295,13 @@ class AiConsentActiveSessionLease {
 
     if (result.verified) {
       final status = result.status;
-      if (status != null) {
+      final persistedServerDecidedAt = DateTime.tryParse(_preferences.aiConsentServerDecidedAt);
+      final statusReceiptWasPersisted = status != null &&
+          _preferences.aiConsentReceiptId == status.receiptId &&
+          persistedServerDecidedAt != null &&
+          status.serverDecidedAt != null &&
+          persistedServerDecidedAt.isAtSameMomentAs(status.serverDecidedAt!);
+      if (statusReceiptWasPersisted) {
         _lastServerReceiptId = status.receiptId;
         _lastServerDecidedAt = status.serverDecidedAt;
       }

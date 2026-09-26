@@ -442,6 +442,21 @@ class EllaAiConsentService {
       return AiConsentAuthorityRefreshResult(terminalFromStatus, status: status);
     }
 
+    if (persistenceAuthority == null || !_isCurrentAuthority(persistenceAuthority)) {
+      return const AiConsentAuthorityRefreshResult(
+        AiConsentAuthorityRefreshDisposition.retryable,
+        supportCode: 'authority_superseded',
+      );
+    }
+    final expectedProfileBindingId = persistenceAuthority.profileBindingId;
+    if (expectedProfileBindingId.isEmpty || status.profileBindingId != expectedProfileBindingId) {
+      return AiConsentAuthorityRefreshResult(
+        AiConsentAuthorityRefreshDisposition.accountChanged,
+        status: status,
+        supportCode: 'profile_binding_changed',
+      );
+    }
+
     final decidedAt = status.serverDecidedAt;
     final sameReceipt = status.receiptId == expectedReceiptId;
     final newerReceipt = status.receiptId.startsWith(SharedPreferencesUtil.currentAiConsentReceiptPrefix) &&
@@ -460,13 +475,7 @@ class EllaAiConsentService {
     // Extend the normal five-minute preference TTL only when the response also
     // matches the bundled contract. A server-authorized same/newer receipt may
     // still keep this active lease alive across non-material deploy drift.
-    final expectedProfileBindingId = persistenceAuthority?.profileBindingId ?? '';
-    if (persistenceAuthority != null &&
-        _isCurrentAuthority(persistenceAuthority) &&
-        status.isCurrentGrantFor(
-          uid,
-          expectedProfileBindingId: expectedProfileBindingId.isEmpty ? null : expectedProfileBindingId,
-        )) {
+    if (status.isCurrentGrantFor(uid, expectedProfileBindingId: expectedProfileBindingId)) {
       _persistVerifiedGrant(persistenceAuthority, status);
     }
     _preferences.markAiConsentLastServerConfirmed(

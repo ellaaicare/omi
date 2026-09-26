@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
+import 'package:omi/ella/services/ai_consent_policy.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 
 void main() {
@@ -235,6 +236,53 @@ void main() {
     expect(preferences.aiConsentServerVerificationRemaining, isNull);
     expect(lease.scheduledRefreshDelay, AiConsentActiveSessionLease.refreshInterval);
     lease.stop();
+  });
+
+  test('unpersisted newer receipt does not advance the terminal refresh fence', () async {
+    final requestedReceipts = <String>[];
+    var authorityLossCalls = 0;
+    final lease = AiConsentActiveSessionLease(
+      uid: 'uid-a',
+      preferences: preferences,
+      refreshAuthority: (_, receiptId, __) async {
+        requestedReceipts.add(receiptId);
+        if (requestedReceipts.length == 1) {
+          return AiConsentAuthorityRefreshResult(
+            AiConsentAuthorityRefreshDisposition.verified,
+            status: AiConsentStatus(
+              subjectUid: 'uid-a',
+              authorized: true,
+              policy: AiConsentPolicy.bundled,
+              decision: AiConsentDecision.granted.wireValue,
+              receiptId: 'aicr_receipt-b',
+              policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+              processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+              appVersion: '1.0.572',
+              buildNumber: '866',
+              locale: 'en-US',
+              profileBindingId: 'profile-binding-a',
+              scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+              scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+              serverDecidedAt: DateTime.utc(2026, 7, 27, 0, 1),
+            ),
+          );
+        }
+        return const AiConsentAuthorityRefreshResult(AiConsentAuthorityRefreshDisposition.revoked);
+      },
+      onAuthorityLost: () {
+        authorityLossCalls++;
+      },
+    )..start();
+
+    await lease.refreshNow();
+    expect(lease.isActive, isTrue);
+    expect(preferences.aiConsentReceiptId, 'aicr_receipt-a');
+
+    await lease.refreshNow();
+
+    expect(requestedReceipts, ['aicr_receipt-a', 'aicr_receipt-a']);
+    expect(authorityLossCalls, 1);
+    expect(lease.isActive, isFalse);
   });
 
   test('retryable failures stop only after the thirty-minute grace expires', () async {

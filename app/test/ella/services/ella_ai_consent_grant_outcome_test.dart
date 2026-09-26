@@ -41,21 +41,27 @@ class _FakeTransport extends EllaAiConsentTransport {
   }
 }
 
-AiConsentStatus _currentGrantStatus(String uid) => AiConsentStatus(
+AiConsentStatus _currentGrantStatus(
+  String uid, {
+  String receiptId = '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1',
+  String profileBindingId = 'binding-1',
+  DateTime? serverDecidedAt,
+}) =>
+    AiConsentStatus(
       subjectUid: uid,
       authorized: true,
       policy: AiConsentPolicy.bundled,
       decision: 'granted',
-      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1',
+      receiptId: receiptId,
       policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
       processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
       appVersion: '1.0.0',
       buildNumber: '1',
       locale: 'en-US',
-      profileBindingId: 'binding-1',
+      profileBindingId: profileBindingId,
       scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
       scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
-      serverDecidedAt: DateTime.utc(2026, 8, 7),
+      serverDecidedAt: serverDecidedAt ?? DateTime.utc(2026, 8, 7),
     );
 
 EllaAiConsentService _service(_FakeTransport transport) => EllaAiConsentService(
@@ -219,6 +225,40 @@ void main() {
 
     expect(result.disposition, AiConsentAuthorityRefreshDisposition.verified);
     expect(preferences.aiConsentAccepted, isTrue);
+  });
+
+  test('active refresh rejects a newer grant for a different profile binding', () async {
+    final preferences = SharedPreferencesUtil();
+    const firstReceipt = '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1';
+    const replacementReceipt = '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-2';
+    preferences.acceptAiConsent(
+      receiptId: firstReceipt,
+      uid: uid,
+      profileBindingId: 'binding-1',
+      serverDecidedAt: '2026-08-07T00:00:00Z',
+    );
+    final transport = _FakeTransport(
+      fetchResult: AiConsentFetchResult(
+        httpStatus: 200,
+        status: _currentGrantStatus(
+          uid,
+          receiptId: replacementReceipt,
+          profileBindingId: 'binding-2',
+          serverDecidedAt: DateTime.utc(2026, 8, 7, 0, 1),
+        ),
+      ),
+    );
+
+    final result = await _service(transport).refreshActiveSessionAuthority(
+      uid: uid,
+      expectedReceiptId: firstReceipt,
+      expectedServerDecidedAt: DateTime.utc(2026, 8, 7),
+    );
+
+    expect(result.disposition, AiConsentAuthorityRefreshDisposition.accountChanged);
+    expect(result.supportCode, 'profile_binding_changed');
+    expect(preferences.aiConsentReceiptId, firstReceipt);
+    expect(preferences.aiConsentProfileBindingId, 'binding-1');
   });
 
   test('active refresh applies an explicit revoked state immediately', () async {
