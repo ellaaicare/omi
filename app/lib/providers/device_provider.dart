@@ -584,6 +584,9 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       return false;
     }
 
+    await prepareForExplicitDeviceSelection();
+    if (!_deviceServiceReady) return false;
+
     var freshSessionResetStarted = false;
     var connectionCommittedByAttempt = false;
     void markConnectionCommitted() => connectionCommittedByAttempt = true;
@@ -639,6 +642,19 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         if (freshSessionResetStarted) _showFreshSessionUnavailable(device);
       },
     );
+  }
+
+  Future<void> prepareForExplicitDeviceSelection() async {
+    _reconnectionTimer?.cancel();
+    _automaticReconnectCooldownUntil = null;
+    if (presentationIsConnected) return;
+
+    _deviceOperationGeneration++;
+    _activeConnectionAttemptToken = null;
+    _connectionAttemptStartedAt = null;
+    isConnecting = false;
+    await _deviceService.cancelPendingConnection();
+    if (!_disposed) notifyListeners();
   }
 
   void _showFreshSessionUnavailable(BtDevice device, {bool requireFreshSession = true}) {
@@ -740,12 +756,21 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       if (pairedDevice?.firmwareRevision != null && pairedDevice?.firmwareRevision != 'Unknown') {
         return;
       }
-      var connection = await _deviceService.ensureConnection(connectedDevice!.id);
+      final sourceDevice = connectedDevice!;
+      final expectedDeviceId = sourceDevice.id;
+      final connection = await _deviceService.ensureConnection(expectedDeviceId);
       if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
-      final info = await connectedDevice?.getDeviceInfo(connection);
+      if (connectedDevice?.id != expectedDeviceId) return;
+      final info = await sourceDevice.getDeviceInfo(connection);
       if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
+      if (connectedDevice?.id != expectedDeviceId || info.id != expectedDeviceId) return;
       pairedDevice = info;
-      await _persistRememberedDevice(pairedDevice!, operationGeneration: operationGeneration);
+      if (connection?.device.id == expectedDeviceId) {
+        connection!.device = info;
+        connectedDevice = info;
+        captureProvider?.updateRecordingDevice(info);
+      }
+      await _persistRememberedDevice(info, operationGeneration: operationGeneration);
       if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
     } else {
       final rememberedDevice = _rememberedDeviceForCurrentAuthority();

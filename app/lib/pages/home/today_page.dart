@@ -1487,9 +1487,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
 
     final source = _homeCaptureSource;
     bool? transportFinalized;
+    PhoneCaptureStopResult? phoneStopResult;
     switch (source) {
       case _HomeCaptureSource.phone:
-        transportFinalized = await capture.stopStreamRecordingAndFinalize();
+        phoneStopResult = await capture.stopPhoneCaptureForVoiceTakeover();
+        transportFinalized = phoneStopResult != PhoneCaptureStopResult.failed;
         break;
       case _HomeCaptureSource.necklaceOwned:
         transportFinalized = await capture.stopStreamDeviceRecordingAndFinalize();
@@ -1536,6 +1538,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
             _homeCaptureFinalizationPending = false;
             _homeCaptureSource = null;
           });
+          if (phoneStopResult == PhoneCaptureStopResult.empty) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayNoWordsCaptured)));
+          }
         }
         return true;
       }
@@ -2023,9 +2028,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                     child: _TodayHeader(
                       now: now,
                       onGreetingLongPress: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(builder: (_) => const EllaRuntimeDiagnosticsPage()),
-                        );
+                        Navigator.of(
+                          context,
+                        ).push(MaterialPageRoute(builder: (_) => const EllaRuntimeDiagnosticsPage()));
                       },
                     ),
                   ),
@@ -3272,7 +3277,12 @@ class TodayRecordMomentControl extends StatelessWidget {
                     child: _TodayDockAction(
                       actionKey: const Key('today-view-live-transcript'),
                       icon: Icons.subject_rounded,
-                      label: (activeSource ?? selectedSource) == EllaCaptureSource.necklace
+                      label: (necklaceRecording
+                                  ? EllaCaptureSource.necklace
+                                  : phoneRecording
+                                      ? EllaCaptureSource.phone
+                                      : selectedSource) ==
+                              EllaCaptureSource.necklace
                           ? context.l10n.todayDockTranscriptNecklace
                           : context.l10n.todayDockTranscriptPhone,
                       onTap: onViewTranscript,

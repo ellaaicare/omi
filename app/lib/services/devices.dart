@@ -27,20 +27,13 @@ abstract class IDeviceService {
 
   // WiFi sync support - pause BLE reconnection during WiFi transfer
   void setWifiSyncInProgress(bool value);
+  Future<void> cancelPendingConnection();
   Future<void> disconnectDevice();
 }
 
-enum DeviceServiceStatus {
-  init,
-  ready,
-  scanning,
-  stop,
-}
+enum DeviceServiceStatus { init, ready, scanning, stop }
 
-enum DeviceConnectionState {
-  connected,
-  disconnected,
-}
+enum DeviceConnectionState { connected, disconnected }
 
 /// Feature flags for Omi device capabilities
 /// Must match the firmware definitions in features.h
@@ -60,11 +53,7 @@ class OmiFeatures {
 abstract class IDeviceServiceSubsciption {
   void onDevices(List<BtDevice> devices);
   void onStatusChanged(DeviceServiceStatus status);
-  void onDeviceConnectionStateChanged(
-    String deviceId,
-    DeviceConnectionState state, {
-    int? connectionGeneration,
-  });
+  void onDeviceConnectionStateChanged(String deviceId, DeviceConnectionState state, {int? connectionGeneration});
 }
 
 typedef DeviceConnectionCreator = DeviceConnection? Function(BtDevice device);
@@ -92,10 +81,7 @@ class DeviceService implements IDeviceService {
   DateTime? _firstConnectedAt;
 
   @override
-  Future<void> discover({
-    String? desirableDeviceId,
-    int timeout = 5,
-  }) async {
+  Future<void> discover({String? desirableDeviceId, int timeout = 5}) async {
     Logger.debug("Device discovering...");
     if (_status != DeviceServiceStatus.ready) {
       logCommonErrorMessage("Device service is not ready, may busying or stop");
@@ -148,11 +134,14 @@ class DeviceService implements IDeviceService {
   }
 
   Future<void> _connectToDevice(String id) async {
-    // Drop existing connection first
-    if (_connection?.status == DeviceConnectionState.connected) {
-      await _connection?.disconnect();
+    // Logical state can lag CoreBluetooth after a timed-out attempt. Always
+    // fence and tear down the previous transport before replacing it.
+    final previousConnection = _connection;
+    if (previousConnection != null) {
+      _connectionGeneration++;
+      _connection = null;
+      await previousConnection.disconnect();
     }
-    _connection = null;
 
     var device = _devices.firstWhereOrNull((f) => f.id == id);
 
@@ -234,16 +223,9 @@ class DeviceService implements IDeviceService {
     }
   }
 
-  void onDeviceConnectionStateChanged(
-    String deviceId,
-    DeviceConnectionState state, {
-    int? connectionGeneration,
-  }) {
+  void onDeviceConnectionStateChanged(String deviceId, DeviceConnectionState state, {int? connectionGeneration}) {
     Logger.debug("device connection state changed...$deviceId...$state");
-    DebugLogManager.logEvent('device_connection_state', {
-      'device_id': deviceId,
-      'state': state.name,
-    });
+    DebugLogManager.logEvent('device_connection_state', {'device_id': deviceId, 'state': state.name});
     for (var s in _subscriptions.values) {
       s.onDeviceConnectionStateChanged(deviceId, state, connectionGeneration: connectionGeneration);
     }
@@ -326,6 +308,28 @@ class DeviceService implements IDeviceService {
   void setWifiSyncInProgress(bool value) {
     _isWifiSyncInProgress = value;
     Logger.debug("DeviceService: WiFi sync in progress: $value");
+  }
+
+  @override
+  Future<void> cancelPendingConnection() async {
+    final connection = _connection;
+    // Explicit selection must be able to cancel a connect that currently owns
+    // the service mutex or a discovery that has not created its connection yet.
+    // Fence both before bypassing that mutex.
+    _operationGeneration++;
+    _connectionGeneration++;
+    if (_status == DeviceServiceStatus.scanning) {
+      _status = DeviceServiceStatus.ready;
+      onStatusChanged(_status);
+    }
+    if (connection == null) return;
+
+    _connection = null;
+    try {
+      await connection.disconnect();
+    } catch (error) {
+      Logger.debug('DeviceService: Failed to cancel pending connection: $error');
+    }
   }
 
   @override
