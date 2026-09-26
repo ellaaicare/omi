@@ -40,8 +40,15 @@ bool get _isEllaApp => true;
 typedef ChatAppsRetriever = Future<List<App>> Function();
 typedef EllaChatStreamSender = Stream<ServerMessageChunk> Function(
   String text, {
+  required String clientMessageId,
+  required DateTime clientSentAt,
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
+});
+typedef EllaChatHistoryFetcher = Future<EllaServiceResult<List<ServerMessage>>> Function({
+  required int limit,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
 });
 typedef VoiceChatStreamSender = Stream<ServerMessageChunk> Function(
   List<File> files, {
@@ -92,6 +99,7 @@ class MessageProvider extends ChangeNotifier {
     ChatAppsRetriever? chatAppsRetriever,
     ActiveAccountAuthorityProvider? activeAuthority,
     EllaChatStreamSender? ellaChatStreamSender,
+    EllaChatHistoryFetcher? ellaChatHistoryFetcher,
     VoiceChatStreamSender? voiceChatStreamSender,
     VoiceTempFileSaver? voiceTempFileSaver,
     AttachmentFilePicker? filePicker,
@@ -103,6 +111,7 @@ class MessageProvider extends ChangeNotifier {
   })  : _chatAppsRetriever = chatAppsRetriever ?? _retrieveInstalledChatApps,
         _activeAuthority = activeAuthority ?? WalOwnerAuthority.operationEntry,
         _ellaChatStreamSender = ellaChatStreamSender ?? sendEllaChatStream,
+        _ellaChatHistoryFetcher = ellaChatHistoryFetcher ?? _fetchEllaChatHistory,
         _voiceChatStreamSender = voiceChatStreamSender ?? sendVoiceMessageStreamServer,
         _voiceTempFileSaver = voiceTempFileSaver ?? FileUtils.saveAudioBytesToTempFile,
         _filePicker = filePicker,
@@ -123,6 +132,7 @@ class MessageProvider extends ChangeNotifier {
   final ChatAppsRetriever _chatAppsRetriever;
   final ActiveAccountAuthorityProvider _activeAuthority;
   final EllaChatStreamSender _ellaChatStreamSender;
+  final EllaChatHistoryFetcher _ellaChatHistoryFetcher;
   final VoiceChatStreamSender _voiceChatStreamSender;
   final VoiceTempFileSaver _voiceTempFileSaver;
   final AttachmentFilePicker? _filePicker;
@@ -137,6 +147,17 @@ class MessageProvider extends ChangeNotifier {
     final result = await retrieveAppsSearch(installedApps: true, limit: 50);
     return result.apps;
   }
+
+  static Future<EllaServiceResult<List<ServerMessage>>> _fetchEllaChatHistory({
+    required int limit,
+    required String expectedAuthenticatedUid,
+    required ExactAccountAuthorityVerifier exactAuthority,
+  }) =>
+      fetchEllaChatHistory(
+        limit: limit,
+        expectedAuthenticatedUid: expectedAuthenticatedUid,
+        exactAuthority: exactAuthority,
+      );
 
   AppProvider? appProvider;
   List<ServerMessage> messages = [];
@@ -256,6 +277,7 @@ class MessageProvider extends ChangeNotifier {
             (message) => message.id == localMessageId && message.sender == MessageSender.human,
           );
     final outgoing = existing ?? addMessageLocally(text);
+    outgoing.canonicalTurnId ??= outgoing.id;
     outgoing.clientDeliveryState = ClientMessageDeliveryState.pending;
     SharedPreferencesUtil().cachedMessages = messages;
     notifyListeners();
@@ -282,8 +304,15 @@ class MessageProvider extends ChangeNotifier {
   ) {
     final merged = List<ServerMessage>.of(history);
     final serverIds = history.map((message) => message.id).toSet();
+    final canonicalHumanTurns = history
+        .where((message) => message.sender == MessageSender.human)
+        .map((message) => message.canonicalTurnId?.trim() ?? '')
+        .where((turnId) => turnId.isNotEmpty)
+        .toSet();
     for (final message in localUnsent) {
       if (serverIds.contains(message.id)) continue;
+      final canonicalTurnId = message.canonicalTurnId?.trim() ?? '';
+      if (canonicalTurnId.isNotEmpty && canonicalHumanTurns.contains(canonicalTurnId)) continue;
       if (!sendingMessage && message.clientDeliveryState == ClientMessageDeliveryState.pending) {
         message.clientDeliveryState = ClientMessageDeliveryState.failed;
       }
@@ -714,7 +743,7 @@ class MessageProvider extends ChangeNotifier {
 
         // Always try to rehydrate from server so a bad local/demo cache from a
         // previous TestFlight cannot mask the real account timeline.
-        final historyResult = await fetchEllaChatHistory(
+        final historyResult = await _ellaChatHistoryFetcher(
           limit: 50,
           expectedAuthenticatedUid: lease.uid,
           exactAuthority: lease,
@@ -845,8 +874,9 @@ class MessageProvider extends ChangeNotifier {
     if (appId == 'no_selected') {
       appId = null;
     }
+    final turnId = const Uuid().v4();
     var message = ServerMessage(
-      const Uuid().v4(),
+      turnId,
       DateTime.now(),
       messageText,
       MessageSender.human,
@@ -856,6 +886,7 @@ class MessageProvider extends ChangeNotifier {
       List.from(uploadedFiles),
       fileIds,
       [],
+      canonicalTurnId: turnId,
       clientDeliveryState: ClientMessageDeliveryState.pending,
     );
     messages.add(message);
@@ -1159,7 +1190,13 @@ class MessageProvider extends ChangeNotifier {
         // Ella uses its own simple chat endpoint; OMI uses the graph chat
         final isEllaApp = _isEllaApp; // TODO: replace with flavor check
         var stream = isEllaApp
-            ? _ellaChatStreamSender(text, expectedAuthenticatedUid: lease.uid, exactAuthority: lease)
+            ? _ellaChatStreamSender(
+                text,
+                clientMessageId: outgoing.canonicalTurnId!,
+                clientSentAt: outgoing.createdAt.toUtc(),
+                expectedAuthenticatedUid: lease.uid,
+                exactAuthority: lease,
+              )
             : sendMessageStreamServer(
                 text,
                 appId: currentAppId,
@@ -1236,12 +1273,48 @@ class MessageProvider extends ChangeNotifier {
   }
 
   Future<void> retryFailedMessage(String messageId) async {
-    final message = messages.firstWhereOrNull(
+    var message = messages.firstWhereOrNull(
       (candidate) => candidate.id == messageId && _isFailedOutgoingMessage(candidate),
     );
     if (message == null || message.text.trim().isEmpty || sendingMessage) return;
-    setSendingMessage(true);
+    if (!await _reconcileEllaHistoryBeforeRetry()) return;
+    message = messages.firstWhereOrNull(
+      (candidate) => candidate.id == messageId && _isFailedOutgoingMessage(candidate),
+    );
+    if (message == null || message.text.trim().isEmpty || sendingMessage) return;
     await sendMessageStreamToServer(message.text, localMessageId: message.id);
+  }
+
+  Future<bool> _reconcileEllaHistoryBeforeRetry() async {
+    final lease = _beginAccountCommit();
+    if (lease == null) return false;
+    final generation = _operationGeneration;
+    try {
+      final historyResult = await _ellaChatHistoryFetcher(
+        limit: 50,
+        expectedAuthenticatedUid: lease.uid,
+        exactAuthority: lease,
+      );
+      if (!_canCommit(lease, generation)) return false;
+      if (historyResult.isFailure) {
+        _setStreamFailure(
+          historyResult.failure ?? const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true),
+        );
+        return false;
+      }
+      _lastStreamFailure = null;
+      final localUnsent = messages.where(_isFailedOutgoingMessage).toList(growable: false);
+      messages = _mergeHistoryWithUnsentMessages(
+        historyResult.value ?? const <ServerMessage>[],
+        localUnsent,
+      )..sort(compareServerMessagesChronologically);
+      SharedPreferencesUtil().cachedMessages = messages;
+      setHasCachedMessages(messages.isNotEmpty);
+      notifyListeners();
+      return true;
+    } finally {
+      lease.close();
+    }
   }
 
   Future sendInitialAppMessage(App? app) async {

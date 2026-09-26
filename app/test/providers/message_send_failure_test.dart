@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/message.dart';
+import 'package:omi/ella/services/ella_service_result.dart';
 import 'package:omi/providers/message_provider.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
@@ -32,11 +33,23 @@ void main() {
 
   test('multiple failed turns remain independently visible and retry targets the original turn', () async {
     var attempts = 0;
+    final clientMessageIds = <String>[];
+    final clientSentAts = <DateTime>[];
     final provider = MessageProvider(
       activeAuthority: () => const _CurrentAuthority(),
       aiConsentEnsurer: () async => true,
-      ellaChatStreamSender: (text, {expectedAuthenticatedUid, exactAuthority}) async* {
+      ellaChatHistoryFetcher: ({required limit, required expectedAuthenticatedUid, required exactAuthority}) async =>
+          const EllaServiceResult.success(<ServerMessage>[]),
+      ellaChatStreamSender: (
+        text, {
+        required clientMessageId,
+        required clientSentAt,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async* {
         attempts++;
+        clientMessageIds.add(clientMessageId);
+        clientSentAts.add(clientSentAt);
         if (attempts <= 2) throw const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true);
         yield ServerMessageChunk(
           'assistant-1',
@@ -75,6 +88,60 @@ void main() {
       ClientMessageDeliveryState.failed,
     );
     expect(provider.messages.where((message) => message.sender == MessageSender.ai).single.text, 'Recovered');
+    expect(clientMessageIds[2], clientMessageIds[0]);
+    expect(clientMessageIds[1], isNot(clientMessageIds[0]));
+    expect(clientSentAts.last, clientSentAts.first);
+  });
+
+  test('a canonical server turn replaces a lost-ACK failure before retry can send again', () async {
+    var attempts = 0;
+    String? retainedTurnId;
+    DateTime? retainedSentAt;
+    final provider = MessageProvider(
+      activeAuthority: () => const _CurrentAuthority(),
+      aiConsentEnsurer: () async => true,
+      ellaChatStreamSender: (
+        text, {
+        required clientMessageId,
+        required clientSentAt,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async* {
+        attempts++;
+        retainedTurnId = clientMessageId;
+        retainedSentAt = clientSentAt;
+        throw const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true);
+      },
+      ellaChatHistoryFetcher: ({required limit, required expectedAuthenticatedUid, required exactAuthority}) async {
+        return EllaServiceResult.success([
+          ServerMessage(
+            'ios_chat:uid-a:$retainedTurnId:user',
+            retainedSentAt!,
+            'persisted before the ACK was lost',
+            MessageSender.human,
+            MessageType.text,
+            null,
+            false,
+            [],
+            [],
+            [],
+            canonicalTurnId: retainedTurnId,
+          ),
+        ]);
+      },
+    );
+
+    await provider.sendMessageStreamToServer('persisted before the ACK was lost');
+    final failedLocalId = provider.messages.single.id;
+    expect(provider.messages.single.canonicalTurnId, retainedTurnId);
+
+    await provider.retryFailedMessage(failedLocalId);
+
+    expect(attempts, 1);
+    expect(provider.messages, hasLength(1));
+    expect(provider.messages.single.id, 'ios_chat:uid-a:$retainedTurnId:user');
+    expect(provider.messages.single.canonicalTurnId, retainedTurnId);
+    expect(provider.messages.single.clientDeliveryState, isNull);
   });
 }
 

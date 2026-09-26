@@ -313,6 +313,8 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
 /// so callers (MessageProvider, EllaVoiceChatPage) need no logic changes.
 Stream<ServerMessageChunk> sendEllaChatStream(
   String text, {
+  String? clientMessageId,
+  DateTime? clientSentAt,
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
 }) async* {
@@ -334,8 +336,8 @@ Stream<ServerMessageChunk> sendEllaChatStream(
     sendEllaMessageStream(
       text,
       headers: _ellaDebugHeaders(routeSource: 'proxy-canonical'),
-      clientMessageId: const Uuid().v4(),
-      clientSentAt: DateTime.now().toUtc(),
+      clientMessageId: clientMessageId ?? const Uuid().v4(),
+      clientSentAt: (clientSentAt ?? DateTime.now()).toUtc(),
       expectedAuthenticatedUid: expectedAuthenticatedUid,
       exactAuthority: exactAuthority,
     ),

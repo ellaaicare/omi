@@ -6,7 +6,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/http/http_pool_manager.dart';
 import 'package:omi/backend/preferences.dart';
@@ -72,7 +71,7 @@ void main() {
     await SharedPreferencesUtil.init();
   });
 
-  test('Ella stream sends no caller-selected UID or legacy session authority', () async {
+  test('Ella stream sends the stable client turn identity without legacy session authority', () async {
     final preferences = SharedPreferencesUtil();
     preferences.authToken = 'test-bearer';
     preferences.tokenExpirationTime = DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch;
@@ -96,6 +95,8 @@ void main() {
       _InspectingClient((request) async {
         final body = jsonDecode(await request.finalize().bytesToString()) as Map<String, dynamic>;
         expect(body, isNot(contains('uid')));
+        expect(body['client_message_id'], 'stable-client-turn-a');
+        expect(body['client_sent_at'], '2026-08-04T00:00:00.000Z');
         expect(request.headers, isNot(contains('X-Ella-Session-Key')));
         expect(request.headers, isNot(contains('X-TTS-Provider')));
         expect(request.headers['authorization'], 'Bearer test-bearer');
@@ -104,7 +105,11 @@ void main() {
     );
 
     await expectLater(
-      sendEllaMessageStream('hello').toList(),
+      sendEllaChatStream(
+        'hello',
+        clientMessageId: 'stable-client-turn-a',
+        clientSentAt: DateTime.utc(2026, 8, 4),
+      ).toList(),
       throwsA(isA<ClientApiFailure>().having((failure) => failure.kind, 'kind', ClientApiFailureKind.unavailable)),
     );
   });

@@ -35,7 +35,11 @@ void main() {
     preferences.uid = 'uid-b';
 
     await expectLater(
-      sendEllaChatStream('private message').toList(),
+      sendEllaChatStream(
+        'private message',
+        clientMessageId: 'client-message-a',
+        clientSentAt: DateTime.utc(2026, 7, 27),
+      ).toList(),
       throwsA(
         isA<ClientApiFailure>().having((failure) => failure.kind, 'kind', ClientApiFailureKind.consentRequired),
       ),
