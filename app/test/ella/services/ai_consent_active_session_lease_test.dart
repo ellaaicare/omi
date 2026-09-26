@@ -108,6 +108,19 @@ void main() {
     );
   });
 
+  test('bounded grace cannot start a session from an obsolete bundled contract', () async {
+    SharedPreferencesUtil.clearAiConsentServerVerification();
+    await preferences.saveString('aiConsentContractVersion', 'ai-data-processors-v9');
+
+    expect(
+      AiConsentActiveSessionLease.authorityForSessionStart(
+        preferences: preferences,
+        expectedUid: 'uid-a',
+      ),
+      isNull,
+    );
+  });
+
   test('server revocation stops active session visibly and fails closed', () async {
     var authorityLossCalls = 0;
     final lease = AiConsentActiveSessionLease(

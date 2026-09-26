@@ -185,7 +185,11 @@ class AiConsentActiveSessionLease {
       preferences: current,
       expectedUid: expectedUid,
     );
-    if (authority == null || !authority.isCurrent(preferences: current)) return null;
+    if (authority == null ||
+        !authority.isCurrent(preferences: current) ||
+        current.persistedAiConsentReceiptIdForCurrentAccount != authority.receiptId) {
+      return null;
+    }
     if (current.aiConsentAccepted) return authority;
     final age = current.aiConsentLastServerConfirmationAge;
     return age != null && age <= gracePeriod ? authority : null;
