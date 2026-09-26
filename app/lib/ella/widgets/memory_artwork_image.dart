@@ -293,8 +293,8 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     });
   }
 
-  Future<void> _rememberPublishedVariantCacheKeys(String displayCacheKey, Iterable<String> cacheKeys) {
-    return MemoryArtworkCache.rememberPublishedVariantCacheKeys(
+  void _rememberPublishedVariantCacheKeys(String displayCacheKey, Iterable<String> cacheKeys) {
+    MemoryArtworkCache.rememberPublishedVariantCacheKeys(
       scopeKey: _publishedVariantScopeKey(displayCacheKey),
       displayCacheKey: displayCacheKey,
       cacheKeys: cacheKeys,
@@ -562,7 +562,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       }
       publishedReadyCacheKey = rememberedCacheKey;
       _displayCacheKey = provisionalCacheKey;
-      await _rememberPublishedVariantCacheKeys(provisionalCacheKey, {readyCacheKey, publishedReadyCacheKey});
+      _rememberPublishedVariantCacheKeys(provisionalCacheKey, {readyCacheKey, publishedReadyCacheKey});
       if (!mounted || generation != _requestGeneration || !result.isAuthorityCurrent) return;
     }
     setState(() {
@@ -821,7 +821,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       return;
     }
 
-    await _rememberPublishedVariantCacheKeys(publicationDisplayCacheKey, {selected.cacheKey, publishedCacheKey});
+    _rememberPublishedVariantCacheKeys(publicationDisplayCacheKey, {selected.cacheKey, publishedCacheKey});
     if (!mounted ||
         generation != _requestGeneration ||
         _pendingResponsiveVariantCacheKey != expectedCacheKey ||

@@ -88,12 +88,12 @@ void main() {
     const firstScope = 'memory-a:authority-1:artwork-1';
     const secondScope = 'memory-a:authority-2:artwork-1';
 
-    await MemoryArtworkCache.rememberPublishedVariantCacheKeys(
+    MemoryArtworkCache.rememberPublishedVariantCacheKeys(
       scopeKey: firstScope,
       displayCacheKey: provisional,
       cacheKeys: {compactVariant},
     );
-    await MemoryArtworkCache.rememberPublishedVariantCacheKeys(
+    MemoryArtworkCache.rememberPublishedVariantCacheKeys(
       scopeKey: firstScope,
       displayCacheKey: provisional,
       cacheKeys: {largeVariant},
@@ -110,7 +110,7 @@ void main() {
       isEmpty,
     );
 
-    await MemoryArtworkCache.rememberPublishedVariantCacheKeys(
+    MemoryArtworkCache.rememberPublishedVariantCacheKeys(
       scopeKey: secondScope,
       displayCacheKey: provisional,
       cacheKeys: {replacementVariant},

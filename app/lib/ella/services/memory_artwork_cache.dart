@@ -164,11 +164,11 @@ class MemoryArtworkCache {
     return Set<String>.unmodifiable(published);
   }
 
-  static Future<void> rememberPublishedVariantCacheKeys({
+  static void rememberPublishedVariantCacheKeys({
     required String scopeKey,
     required String displayCacheKey,
     required Iterable<String> cacheKeys,
-  }) async {
+  }) {
     _loadPersistentAliases();
     if (!_isPersistentVariantScope(scopeKey) || !_isPersistentPublishedCacheKey(displayCacheKey)) return;
     final keys = cacheKeys.where(_isPersistentPublishedCacheKey).toSet();
@@ -198,7 +198,7 @@ class MemoryArtworkCache {
       _publishedVariantKeys.remove(oldestScope);
       _publishedVariantDisplayKeys.remove(oldestScope);
     }
-    await _persistPublishedVariantKeys();
+    unawaited(_persistPublishedVariantKeys().catchError((_) {}));
   }
 
   static void forgetDisplayCacheKey(String provisionalCacheKey) {
