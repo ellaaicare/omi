@@ -47,7 +47,9 @@ class _ImmediateDiscoverer extends DeviceDiscoverer {
 }
 
 class _ConnectAfterCancelTransport implements DeviceTransport {
-  _ConnectAfterCancelTransport(this.deviceId);
+  _ConnectAfterCancelTransport(this.deviceId, {bool connectImmediately = false}) {
+    if (connectImmediately) releaseConnect.complete();
+  }
 
   @override
   final String deviceId;
@@ -129,24 +131,37 @@ void main() {
 
   test('explicit cancellation disconnects again when native startup settles late', () async {
     final device = BtDevice(name: 'Friend', id: 'necklace-late-connect', type: DeviceType.omi, rssi: -30);
-    final transport = _ConnectAfterCancelTransport(device.id);
+    final canceledTransport = _ConnectAfterCancelTransport(device.id);
+    final explicitTransport = _ConnectAfterCancelTransport(device.id, connectImmediately: true);
+    final connections = <OmiDeviceConnection>[
+      OmiDeviceConnection(device, canceledTransport),
+      OmiDeviceConnection(device, explicitTransport),
+    ];
     final service = DeviceService(
       discoverers: [_ImmediateDiscoverer(device)],
-      connectionCreator: (_) => OmiDeviceConnection(device, transport),
+      connectionCreator: (_) => connections.removeAt(0),
     )..start();
 
     await service.discover();
     final connection = service.ensureConnection(device.id, force: true);
-    await transport.connectStarted.future;
+    await canceledTransport.connectStarted.future;
 
     await service.cancelPendingConnection();
-    expect(transport.disconnectCalls, 1);
+    expect(canceledTransport.disconnectCalls, 1);
 
-    transport.releaseConnect.complete();
+    canceledTransport.releaseConnect.complete();
     expect(await connection, isNull);
-    expect(transport.connected, isFalse);
-    expect(transport.disconnectCalls, 2, reason: 'late native startup must be torn down after it settles');
+    expect(canceledTransport.connected, isFalse);
+    expect(canceledTransport.disconnectCalls, 2, reason: 'late native startup must be torn down after it settles');
 
-    await transport.dispose();
+    final explicitConnection = await service.ensureConnection(device.id, force: true);
+    expect(explicitConnection, isNotNull);
+    expect(explicitTransport.connected, isTrue, reason: 'explicit selection must connect after stale cleanup');
+
+    await service.disconnectDevice();
+    expect(explicitTransport.connected, isFalse);
+
+    await canceledTransport.dispose();
+    await explicitTransport.dispose();
   });
 }
