@@ -227,6 +227,51 @@ void main() {
     expect(preferences.aiConsentAccepted, isTrue);
   });
 
+  test('deploy-drift confirmation stays lease-local and does not renew startup grace', () async {
+    final preferences = SharedPreferencesUtil();
+    const receiptId = '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1';
+    final previousConfirmation = DateTime.utc(2026, 8, 7, 0, 0);
+    preferences.acceptAiConsent(
+      receiptId: receiptId,
+      uid: uid,
+      profileBindingId: 'binding-1',
+      serverDecidedAt: '2026-08-07T00:00:00Z',
+    );
+    preferences.markAiConsentLastServerConfirmed(
+      uid: uid,
+      receiptId: receiptId,
+      confirmedAt: previousConfirmation,
+    );
+    final driftedStatus = AiConsentStatus(
+      subjectUid: uid,
+      authorized: true,
+      policy: AiConsentPolicy.bundled,
+      decision: AiConsentDecision.granted.wireValue,
+      receiptId: receiptId,
+      policyVersion: 'server-policy-after-deploy',
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      appVersion: '1.0.572',
+      buildNumber: '866',
+      locale: 'en-US',
+      profileBindingId: 'binding-1',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+      serverDecidedAt: DateTime.utc(2026, 8, 7),
+    );
+    final transport = _FakeTransport(
+      fetchResult: AiConsentFetchResult(httpStatus: 200, status: driftedStatus),
+    );
+
+    final result = await _service(transport).refreshActiveSessionAuthority(
+      uid: uid,
+      expectedReceiptId: receiptId,
+      expectedServerDecidedAt: DateTime.utc(2026, 8, 7),
+    );
+
+    expect(result.disposition, AiConsentAuthorityRefreshDisposition.verified);
+    expect(preferences.aiConsentLastServerConfirmedAt, previousConfirmation);
+  });
+
   test('active refresh rejects a newer grant for a different profile binding', () async {
     final preferences = SharedPreferencesUtil();
     const firstReceipt = '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1';

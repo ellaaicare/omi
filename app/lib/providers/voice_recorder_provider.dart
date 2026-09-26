@@ -81,7 +81,7 @@ class VoiceRecorderProvider extends ChangeNotifier {
     }
     if (_state == VoiceRecorderState.recording) return;
 
-    _lifecycleGeneration++;
+    final lifecycleGeneration = ++_lifecycleGeneration;
     _activeConsentAuthority = authority;
     _consentReviewRequired = false;
     _state = VoiceRecorderState.recording;
@@ -101,6 +101,17 @@ class VoiceRecorderProvider extends ChangeNotifier {
       await Permission.microphone.request();
     }
 
+    if (_lifecycleGeneration != lifecycleGeneration || _state != VoiceRecorderState.recording) return;
+    final refreshedAuthority = AiConsentActiveSessionLease.authorityForSessionStart(
+      preferences: preferences,
+      expectedUid: authority.uid,
+    );
+    if (!authority.isCurrent(preferences: preferences) || refreshedAuthority == null) {
+      _markConsentReviewRequired();
+      return;
+    }
+    _activeConsentAuthority = refreshedAuthority;
+
     // Setup timer to update the wave visualization every second
     _waveformTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (_state == VoiceRecorderState.recording) {
@@ -110,8 +121,8 @@ class VoiceRecorderProvider extends ChangeNotifier {
 
     _aiConsentLease?.stop();
     _aiConsentLease = AiConsentActiveSessionLease(
-      uid: authority.uid,
-      authority: authority,
+      uid: refreshedAuthority.uid,
+      authority: refreshedAuthority,
       onAuthorityLost: _handleConsentAuthorityLost,
     )..start();
 

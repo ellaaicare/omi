@@ -475,13 +475,16 @@ class EllaAiConsentService {
     // Extend the normal five-minute preference TTL only when the response also
     // matches the bundled contract. A server-authorized same/newer receipt may
     // still keep this active lease alive across non-material deploy drift.
+    var persistedVerifiedGrant = false;
     if (status.isCurrentGrantFor(uid, expectedProfileBindingId: expectedProfileBindingId)) {
-      _persistVerifiedGrant(persistenceAuthority, status);
+      persistedVerifiedGrant = _persistVerifiedGrant(persistenceAuthority, status);
     }
-    _preferences.markAiConsentLastServerConfirmed(
-      uid: uid,
-      receiptId: expectedReceiptId,
-    );
+    if (persistedVerifiedGrant) {
+      _preferences.markAiConsentLastServerConfirmed(
+        uid: uid,
+        receiptId: status.receiptId,
+      );
+    }
     return AiConsentAuthorityRefreshResult(AiConsentAuthorityRefreshDisposition.verified, status: status);
   }
 

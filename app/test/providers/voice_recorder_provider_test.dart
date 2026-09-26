@@ -119,4 +119,26 @@ void main() {
     expect(provider.state, VoiceRecorderState.idle);
     expect(provider.consentReviewRequired, isFalse);
   });
+
+  test('authority is revalidated after microphone permission before recorder resources start', () async {
+    final mic = _FakeMicRecorder();
+    final permissionGate = Completer<void>();
+    final provider = VoiceRecorderProvider(
+      microphone: mic,
+      requestMicrophonePermission: () => permissionGate.future,
+    );
+    addTearDown(provider.dispose);
+
+    final starting = provider.startRecording();
+    await Future<void>.delayed(Duration.zero);
+    preferences.declineAiConsent();
+    permissionGate.complete();
+    await starting;
+
+    expect(mic.isRecording, isFalse);
+    expect(provider.hasActiveConsentLease, isFalse);
+    expect(provider.hasActiveWaveformTimer, isFalse);
+    expect(provider.consentReviewRequired, isTrue);
+    expect(provider.state, VoiceRecorderState.transcribeFailed);
+  });
 }
