@@ -88,6 +88,15 @@ class ConnectivityService {
     _isConnected = interfaceWasUp;
   }
 
+  /// Records the same no-interface probe the connectivity listener writes,
+  /// without touching the network-interface flag.
+  @visibleForTesting
+  void applyMissingInterfaceProbeForTest() {
+    final interfaceWasUp = _isConnected;
+    _recordProbe(reachable: false, statusCode: null, error: 'no_network_interface');
+    _isConnected = interfaceWasUp;
+  }
+
   static bool _hasNetworkInterface(List<ConnectivityResult> results) =>
       results.isNotEmpty && !results.contains(ConnectivityResult.none);
 

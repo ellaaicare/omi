@@ -74,12 +74,10 @@ class PassiveBackendProbeBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     final connectivity = context.watch<ConnectivityProvider>();
     if (connectivity.backendReachable != false) return const SizedBox.shrink();
-    final detail = connectivity.lastBackendProbeError;
-    final label = context.l10n.diagnosticsBackendProbe;
     return Padding(
       padding: const EdgeInsets.fromLTRB(18, 8, 18, 0),
       child: Text(
-        detail.isEmpty ? label : '$label: $detail',
+        context.l10n.ellaServerUnreachableBanner,
         key: const Key('passive-backend-probe-banner'),
       ),
     );

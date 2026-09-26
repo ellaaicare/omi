@@ -11076,5 +11076,6 @@
   "diagnosticsLastApi": "Last API request",
   "diagnosticsConsentLease": "AI permission lease",
   "diagnosticsBleRate": "Necklace audio rate",
-  "diagnosticsWsRate": "Transcription upload rate"
+  "diagnosticsWsRate": "Transcription upload rate",
+  "ellaServerUnreachableBanner": "Ella can't reach the server right now. Messages will send when you're back online."
 }
