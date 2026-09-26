@@ -45,7 +45,13 @@ from ella.services.hermes_cloud_runtime import (
     HermesCloudRuntimeService,
     HermesCloudTurnRequest,
 )
-from ella.services.ai_consent import assert_current_ai_consent, require_current_ai_consent
+from ella.services.ai_consent import (
+    AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE,
+    AI_CONSENT_REQUIRED_CODE,
+    AiConsentHTTPException,
+    assert_current_ai_consent,
+    require_current_ai_consent,
+)
 from ella.services.provisioning import ProvisioningError
 from ella.services.runtime_resolver import (
     IsolatedRuntime,
@@ -71,6 +77,28 @@ router = APIRouter(prefix="/v1/ella", tags=["ella-chat"])
 
 async def _assert_current_ai_consent_async(uid: str) -> str:
     return await run_in_threadpool(assert_current_ai_consent, uid)
+
+
+def _ai_consent_stream_code(exc: AiConsentHTTPException) -> str:
+    if exc.status_code >= 500:
+        return AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE
+    return AI_CONSENT_REQUIRED_CODE
+
+
+async def _hermes_nonstream_completion_with_current_consent(
+    uid: str,
+    messages: list[dict],
+    session_key: str,
+    memory_key: str,
+    **kwargs,
+) -> str:
+    await _assert_current_ai_consent_async(uid)
+    return await _hermes_nonstream_completion(
+        messages,
+        session_key,
+        memory_key,
+        **kwargs,
+    )
 
 
 XAI_API_KEY = authority_credential("XAI_API_KEY", strip=False)
@@ -901,7 +929,8 @@ async def _produce_hermes_chat_events(
                 recovery_runtime = await revalidate_runtime_authority(runtime_identity)
                 if recovery_runtime.provider != "hermes":
                     raise ProvisioningError("self_hosted_runtime_required", retryable=False)
-            recovery_text = await _hermes_nonstream_completion(
+            recovery_text = await _hermes_nonstream_completion_with_current_consent(
+                uid,
                 messages,
                 session_key,
                 memory_key,
@@ -960,6 +989,11 @@ async def _produce_hermes_chat_events(
             flush=True,
         )
 
+    except AiConsentHTTPException as exc:
+        code = _ai_consent_stream_code(exc)
+        _elapsed = int((_time.time() - _start) * 1000)
+        print(f"[FLOW:CHAT-HERMES] CONSENT_ERROR uid={uid} code={code} latency={_elapsed}ms", flush=True)
+        yield f"data: Error: {code}\n\n"
     except ProvisioningError as exc:
         _elapsed = int((_time.time() - _start) * 1000)
         print(f"[FLOW:CHAT-HERMES] AUTHORITY_ERROR uid={uid} code={exc.code} latency={_elapsed}ms", flush=True)
@@ -1152,6 +1186,30 @@ async def _stream_hermes_cloud_chat(
             result.duplicate,
             bool(result.response_id),
         )
+    except AiConsentHTTPException as exc:
+        code = _ai_consent_stream_code(exc)
+        logger.warning(
+            "[FLOW:CHAT-HERMES-CLOUD] uid=%s binding=%s code=%s retryable=%s",
+            uid,
+            runtime.binding_id,
+            code,
+            exc.status_code >= 500,
+        )
+        yield f"data: Error: {code}\n\n"
+        message = {
+            "id": f"hermes-error:{turn_id}",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "text": "",
+            "sender": "ai",
+            "type": "text",
+            "plugin_id": None,
+            "from_integration": False,
+            "memories": [],
+            "files": [],
+            "ask_for_nps": False,
+        }
+        encoded = base64.b64encode(json.dumps(message).encode()).decode()
+        yield f"done: {encoded}\n\n"
     except ProvisioningError as exc:
         logger.warning(
             "[FLOW:CHAT-HERMES-CLOUD] uid=%s binding=%s code=%s retryable=%s",

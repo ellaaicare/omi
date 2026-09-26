@@ -32,14 +32,20 @@ def test_consent_rejection_precedes_honcho_network_call(monkeypatch):
     def reject(_uid):
         raise HTTPException(status_code=403, detail={"code": "ai_consent_required"})
 
+    async def offload(function, *args):
+        calls.append("offloaded")
+        await asyncio.sleep(0)
+        return function(*args)
+
     monkeypatch.setattr(voice_honcho, "assert_current_ai_consent", reject)
+    monkeypatch.setattr(voice_honcho, "run_in_threadpool", offload)
     monkeypatch.setattr(voice_honcho.httpx, "AsyncClient", Client)
 
     with pytest.raises(HTTPException) as error:
         asyncio.run(voice_honcho.fetch_voice_honcho_context(_runtime(), query="synthetic"))
 
     assert error.value.detail == {"code": "ai_consent_required"}
-    assert calls == []
+    assert calls == ["offloaded"]
 
 
 def test_isolated_target_uses_runtime_receipt_without_profile_fallback(monkeypatch):

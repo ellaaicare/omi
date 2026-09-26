@@ -136,6 +136,7 @@ from ella.services.ai_consent import (
     AI_CONSENT_REQUIRED_CODE,
     AI_CONSENT_WEBSOCKET_CLOSE_CODE,
     AI_CONSENT_WEBSOCKET_RETRY_CLOSE_CODE,
+    AiConsentHTTPException,
     assert_current_ai_consent,
     resolve_processor,
 )
@@ -155,6 +156,7 @@ router = APIRouter()
 
 PUSHER_ENABLED = bool(os.getenv('HOSTED_PUSHER_API_URL'))
 CAPTURE_CONVERSATION_ID_KEY = "_capture_conversation_id"
+AI_CONSENT_SESSION_REFRESH_SECONDS = 1.0
 
 
 class AiConsentWebSocketRejected(RuntimeError):
@@ -163,6 +165,71 @@ class AiConsentWebSocketRejected(RuntimeError):
         self.close_code = close_code
         self.reason = reason
         self.retryable = retryable
+
+
+class AiConsentSessionAuthority:
+    """Bound provider egress to a periodically refreshed session authority."""
+
+    def __init__(
+        self,
+        uid: str,
+        *,
+        checker: Callable[[str], str] | None = None,
+        refresh_interval_seconds: float = AI_CONSENT_SESSION_REFRESH_SECONDS,
+    ):
+        self.uid = uid
+        self._checker = checker or assert_current_ai_consent
+        self.refresh_interval_seconds = max(0.1, refresh_interval_seconds)
+        self._lock = asyncio.Lock()
+        self._initialized = False
+        self._failure: HTTPException | None = None
+
+    async def refresh(self) -> None:
+        async with self._lock:
+            try:
+                await run_in_threadpool(self._checker, self.uid)
+            except HTTPException as exc:
+                self._failure = exc
+                self._initialized = True
+                raise
+            except Exception as exc:
+                failure = AiConsentHTTPException(
+                    status_code=503,
+                    detail={
+                        "code": AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE,
+                        "retryable": True,
+                    },
+                )
+                self._failure = failure
+                self._initialized = True
+                raise failure from exc
+            self._failure = None
+            self._initialized = True
+
+    async def require_current(self, *, refresh: bool = False) -> None:
+        if refresh or not self._initialized:
+            await self.refresh()
+            return
+        async with self._lock:
+            failure = self._failure
+        if failure is not None:
+            raise failure
+
+    async def monitor(
+        self,
+        *,
+        is_active: Callable[[], bool],
+        on_rejected: Callable[[HTTPException], Awaitable[None]],
+    ) -> None:
+        while is_active():
+            await asyncio.sleep(self.refresh_interval_seconds)
+            if not is_active():
+                return
+            try:
+                await self.refresh()
+            except HTTPException as exc:
+                await on_rejected(exc)
+                return
 
 
 def _ai_consent_websocket_contract(exc: HTTPException) -> tuple[int, str, bool]:
@@ -191,6 +258,15 @@ async def _forward_async_provider_audio_with_current_consent(
 ) -> None:
     await consent_guard()
     await forward_async_provider_audio(provider_send, data, delivery_receipt)
+
+
+async def _send_pusher_audio_with_current_consent(
+    consent_guard: Callable[[], Awaitable[None]],
+    provider_send: Callable[[bytes], Awaitable[None]],
+    data: bytes,
+) -> None:
+    await consent_guard()
+    await provider_send(data)
 
 
 async def _require_current_ai_consent_for_websocket(
@@ -1400,13 +1476,12 @@ async def _stream_handler(
     speech_profile_complete = asyncio.Event()  # Signals when speech profile send is done
     speech_profile_preseconds = 0  # Set by _process_stt(); used by flush_stt_buffer reconnect
     ai_consent_egress_rejected = asyncio.Event()
+    ai_consent_session_authority = AiConsentSessionAuthority(uid)
 
-    async def require_stt_egress_consent() -> None:
+    async def reject_stt_egress(exc: HTTPException) -> AiConsentWebSocketRejected:
         nonlocal accepting_capture, websocket_active, websocket_close_code
-        try:
-            await run_in_threadpool(assert_current_ai_consent, uid)
-        except HTTPException as exc:
-            close_code, reason, retryable = _ai_consent_websocket_contract(exc)
+        close_code, reason, retryable = _ai_consent_websocket_contract(exc)
+        if not ai_consent_egress_rejected.is_set():
             accepting_capture = False
             websocket_active = False
             websocket_close_code = close_code
@@ -1418,11 +1493,23 @@ async def _stream_handler(
             )
             if websocket.client_state == WebSocketState.CONNECTED:
                 await websocket.close(code=close_code, reason=reason)
-            raise AiConsentWebSocketRejected(
-                close_code=close_code,
-                reason=reason,
-                retryable=retryable,
-            ) from exc
+        return AiConsentWebSocketRejected(
+            close_code=close_code,
+            reason=reason,
+            retryable=retryable,
+        )
+
+    async def require_stt_egress_consent(*, refresh: bool = False) -> None:
+        try:
+            await ai_consent_session_authority.require_current(refresh=refresh)
+        except HTTPException as exc:
+            raise await reject_stt_egress(exc) from exc
+
+    async def monitor_stt_egress_consent() -> None:
+        await ai_consent_session_authority.monitor(
+            is_active=lambda: websocket_active,
+            on_rejected=reject_stt_egress,
+        )
 
     def stream_transcript(segments):
         nonlocal realtime_segment_buffers
@@ -1802,7 +1889,7 @@ async def _stream_handler(
 
     # Pusher
     #
-    def create_pusher_task_handler():
+    def create_pusher_task_handler(stt_egress_consent_guard=None):
         nonlocal websocket_active
         nonlocal current_conversation_id
 
@@ -1938,6 +2025,10 @@ async def _stream_handler(
 
             # Send audio bytes
             if pusher_connected and pusher_ws and len(audio_buffers) > 0:
+                if stt_egress_consent_guard is None:
+                    audio_buffers = bytearray()
+                    audio_buffer_last_received = None
+                    return
                 try:
                     # Calculate buffer start time:
                     # buffer_start = last_received_time - buffer_duration
@@ -1951,7 +2042,16 @@ async def _stream_handler(
                     data.extend(struct.pack("d", buffer_start_time))
                     data.extend(audio_buffers.copy())
                     audio_buffers = bytearray()  # reset
-                    await pusher_ws.send(data)
+                    audio_buffer_last_received = None
+                    await _send_pusher_audio_with_current_consent(
+                        lambda: stt_egress_consent_guard(refresh=True),
+                        pusher_ws.send,
+                        data,
+                    )
+                except AiConsentWebSocketRejected:
+                    audio_buffers = bytearray()
+                    audio_buffer_last_received = None
+                    return
                 except ConnectionClosed as e:
                     print(f"Pusher audio_bytes Connection closed: {e}", uid, session_id)
                     pusher_connected = False
@@ -3202,7 +3302,6 @@ async def _stream_handler(
                         await flush_stt_buffer()
 
                     if audio_bytes_send is not None:
-                        await require_stt_egress_consent()
                         audio_bytes_send(data, last_audio_received_time)
 
                 elif message.get("text") is not None:
@@ -3373,6 +3472,7 @@ async def _stream_handler(
 
     # Start
     #
+    ai_consent_monitor_task = asyncio.create_task(monitor_stt_egress_consent())
     try:
         # Init STT (fast - profile file loads and sends in background)
         _send_message_event(MessageServiceStatusEvent(status="stt_initiating", status_text="STT Service Starting"))
@@ -3392,7 +3492,7 @@ async def _stream_handler(
                 pusher_receive,
                 pusher_is_connected,
                 send_speaker_sample_request,
-            ) = create_pusher_task_handler()
+            ) = create_pusher_task_handler(require_stt_egress_consent)
 
             # Pusher connection
             await pusher_connect()
@@ -3436,6 +3536,7 @@ async def _stream_handler(
             lifecycle_manager_task,
             pending_conversations_task,
             speaker_id_task,
+            ai_consent_monitor_task,
         ] + pusher_tasks
 
         # Add speech profile task to run concurrently (sends profile audio in background)
@@ -3455,6 +3556,12 @@ async def _stream_handler(
             if transcription_seconds > 0 or words_to_record > 0:
                 record_usage(uid, transcription_seconds=transcription_seconds, words_transcribed=words_to_record)
         websocket_active = False
+        if not ai_consent_monitor_task.done():
+            ai_consent_monitor_task.cancel()
+            try:
+                await ai_consent_monitor_task
+            except asyncio.CancelledError:
+                pass
 
         if capture_protocol != CAPTURE_PROTOCOL_VERSION:
             try:

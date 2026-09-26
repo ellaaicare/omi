@@ -2,6 +2,7 @@ import ast
 import asyncio
 import types
 from pathlib import Path
+from typing import Awaitable, Callable
 
 import pytest
 from fastapi import HTTPException
@@ -56,6 +57,15 @@ def _function_code(source_path: Path, function_name: str):
                 return constant
             pending.append(constant)
     raise AssertionError(f"function code not found: {function_name}")
+
+
+def _class_from_source(source_path: Path, class_name: str, globals_: dict):
+    tree = ast.parse(source_path.read_text())
+    class_node = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
+    module = ast.Module(body=[class_node], type_ignores=[])
+    ast.fix_missing_locations(module)
+    exec(compile(module, str(source_path), "exec"), globals_)
+    return globals_[class_name]
 
 
 def test_authenticated_ai_egress_routes_share_the_consent_gate():
@@ -226,6 +236,13 @@ def test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary():
         ),
         {"forward_async_provider_audio": forward_async_provider_audio},
     )
+    pusher_forward = types.FunctionType(
+        _function_code(
+            BACKEND / "routers" / "transcribe.py",
+            "_send_pusher_audio_with_current_consent",
+        ),
+        {},
+    )
 
     state = {"failure": None}
 
@@ -239,7 +256,8 @@ def test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary():
     async def scenario():
         await deepgram_forward(consent_guard, object(), b"accepted-deepgram", object())
         await async_forward(consent_guard, provider_send, b"accepted-async", object())
-        assert provider_bytes == [b"accepted-deepgram", b"accepted-async"]
+        await pusher_forward(consent_guard, provider_send, b"accepted-pusher")
+        assert provider_bytes == [b"accepted-deepgram", b"accepted-async", b"accepted-pusher"]
 
         state["failure"] = HTTPException(
             status_code=403,
@@ -248,7 +266,9 @@ def test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary():
         with pytest.raises(HTTPException) as terminal:
             await deepgram_forward(consent_guard, object(), b"revoked", object())
         assert terminal.value.status_code == 403
-        assert provider_bytes == [b"accepted-deepgram", b"accepted-async"]
+        with pytest.raises(HTTPException):
+            await pusher_forward(consent_guard, provider_send, b"buffered-before-revoke")
+        assert provider_bytes == [b"accepted-deepgram", b"accepted-async", b"accepted-pusher"]
 
         state["failure"] = HTTPException(
             status_code=503,
@@ -257,15 +277,78 @@ def test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary():
         with pytest.raises(HTTPException) as retryable:
             await async_forward(consent_guard, provider_send, b"uncertain", object())
         assert retryable.value.status_code == 503
-        assert provider_bytes == [b"accepted-deepgram", b"accepted-async"]
+        with pytest.raises(HTTPException):
+            await pusher_forward(consent_guard, provider_send, b"buffered-before-outage")
+        assert provider_bytes == [b"accepted-deepgram", b"accepted-async", b"accepted-pusher"]
 
     asyncio.run(scenario())
 
     stream_source = _function_source(BACKEND / "routers" / "transcribe.py", "_stream_handler")
     assert "_forward_deepgram_audio_with_current_consent(" in stream_source
     assert "_forward_async_provider_audio_with_current_consent(" in stream_source
+    assert "_send_pusher_audio_with_current_consent(" in stream_source
+    assert "lambda: stt_egress_consent_guard(refresh=True)" in stream_source
+    assert "audio_bytes_send(data, last_audio_received_time)" in stream_source
     assert "except AiConsentWebSocketRejected" in stream_source
     assert "not ai_consent_egress_rejected.is_set()" in stream_source
+
+
+def test_stt_session_authority_avoids_transaction_per_audio_fragment_and_caches_fail_closed_state():
+    calls = []
+    state = {"failure": None}
+
+    async def run_in_threadpool(function, *args):
+        return function(*args)
+
+    def checker(uid):
+        calls.append(uid)
+        if state["failure"] is not None:
+            raise state["failure"]
+        return uid
+
+    authority_class = _class_from_source(
+        BACKEND / "routers" / "transcribe.py",
+        "AiConsentSessionAuthority",
+        {
+            "asyncio": asyncio,
+            "Awaitable": Awaitable,
+            "Callable": Callable,
+            "HTTPException": HTTPException,
+            "AiConsentHTTPException": HTTPException,
+            "AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE": "ai_consent_authority_unavailable",
+            "AI_CONSENT_SESSION_REFRESH_SECONDS": 1.0,
+            "assert_current_ai_consent": checker,
+            "run_in_threadpool": run_in_threadpool,
+        },
+    )
+
+    async def scenario():
+        authority = authority_class("uid-a", checker=checker, refresh_interval_seconds=0.01)
+        await authority.require_current()
+        for _ in range(100):
+            await authority.require_current()
+        assert calls == ["uid-a"]
+
+        state["failure"] = HTTPException(
+            status_code=503,
+            detail={"code": "ai_consent_authority_unavailable", "retryable": True},
+        )
+        with pytest.raises(HTTPException):
+            await authority.refresh()
+        assert calls == ["uid-a", "uid-a"]
+
+        with pytest.raises(HTTPException):
+            await authority.require_current()
+        assert calls == ["uid-a", "uid-a"]
+
+    asyncio.run(scenario())
+
+    guard_source = _function_source(
+        BACKEND / "routers" / "transcribe.py",
+        "require_stt_egress_consent",
+    )
+    assert "run_in_threadpool" not in guard_source
+    assert "ai_consent_session_authority.require_current" in guard_source
 
 
 def test_memory_artwork_provider_routes_share_the_consent_gate():
@@ -373,7 +456,7 @@ def test_background_ai_and_honcho_boundaries_recheck_consent_before_network_egre
 
     assert chat_source.index("_assert_current_ai_consent_async(uid)") < chat_source.index("httpx.AsyncClient(")
     assert "before_provider_call=lambda: _assert_current_ai_consent_async(uid)" in cloud_chat_source
-    assert voice_source.index("assert_current_ai_consent(") < voice_source.index("httpx.AsyncClient(")
+    assert voice_source.index("await run_in_threadpool(") < voice_source.index("httpx.AsyncClient(")
     assert recovery_source.index("assert_current_ai_consent(uid)") < recovery_source.index(
         "generate_summary_from_prompt("
     )
