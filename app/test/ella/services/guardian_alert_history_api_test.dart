@@ -1,10 +1,41 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:omi/ella/models/guardian_alert.dart';
+import 'package:omi/ella/pages/guardian_alert_history_page.dart';
 import 'package:omi/ella/services/guardian_alert_history_api.dart';
+import 'package:omi/l10n/app_localizations.dart';
 
 void main() {
   group('GuardianAlertHistoryApi', () {
+    testWidgets('history failure is distinct from an empty history and can retry', (tester) async {
+      var loads = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: GuardianAlertHistoryPage(
+            guardianAllowed: true,
+            loader: () async {
+              loads++;
+              return const GuardianAlertHistoryResult(
+                records: [],
+                source: GuardianAlertHistorySource.backend,
+                error: 'sanitized_failure',
+              );
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('whispers-history-error')), findsOneWidget);
+      expect(find.textContaining("When Ella whispers"), findsNothing);
+      await tester.tap(find.text('Retry'));
+      await tester.pumpAndSettle();
+      expect(loads, 2);
+    });
+
     test('parses backend alert records from suggested response shape newest-first', () {
       final records = GuardianAlertHistoryApi.parseBackendRecords({
         'alerts': [

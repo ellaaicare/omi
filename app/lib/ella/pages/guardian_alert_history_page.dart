@@ -9,9 +9,15 @@ import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/ella/services/guardian_alert_history_api.dart';
 import 'package:omi/pages/conversation_detail/page.dart';
 import 'package:omi/providers/conversation_provider.dart';
+import 'package:omi/utils/l10n_extensions.dart';
+
+typedef GuardianAlertHistoryLoader = Future<GuardianAlertHistoryResult> Function();
 
 class GuardianAlertHistoryPage extends StatefulWidget {
-  const GuardianAlertHistoryPage({super.key});
+  const GuardianAlertHistoryPage({super.key, this.loader, this.guardianAllowed});
+
+  final GuardianAlertHistoryLoader? loader;
+  final bool? guardianAllowed;
 
   @override
   State<GuardianAlertHistoryPage> createState() => _GuardianAlertHistoryPageState();
@@ -19,26 +25,32 @@ class GuardianAlertHistoryPage extends StatefulWidget {
 
 class _GuardianAlertHistoryPageState extends State<GuardianAlertHistoryPage> {
   late Future<GuardianAlertHistoryResult> _future;
+  bool get _guardianAllowed => widget.guardianAllowed ?? allowsGuardianSurface();
 
   @override
   void initState() {
     super.initState();
-    _future = allowsGuardianSurface()
-        ? GuardianAlertHistoryApi.fetch()
+    _future = _guardianAllowed
+        ? _load()
         : Future.value(
             const GuardianAlertHistoryResult(records: [], source: GuardianAlertHistorySource.disabled),
           );
   }
 
   Future<void> _refresh() async {
-    if (!allowsGuardianSurface()) return;
-    setState(() => _future = GuardianAlertHistoryApi.fetch());
-    await _future;
+    if (!_guardianAllowed) return;
+    final future = _load();
+    setState(() {
+      _future = future;
+    });
+    await future;
   }
+
+  Future<GuardianAlertHistoryResult> _load() => widget.loader?.call() ?? GuardianAlertHistoryApi.fetch();
 
   @override
   Widget build(BuildContext context) {
-    if (!allowsGuardianSurface()) return const SizedBox.shrink();
+    if (!_guardianAllowed) return const SizedBox.shrink();
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(
@@ -54,10 +66,13 @@ class _GuardianAlertHistoryPageState extends State<GuardianAlertHistoryPage> {
             return const Center(child: CircularProgressIndicator(color: EllaColors.tealDeep));
           }
           if (snapshot.hasError || snapshot.data == null) {
-            return _WhisperEmptyState(onRefresh: _refresh);
+            return _WhisperErrorState(onRefresh: _refresh);
           }
           final records =
               snapshot.data!.records.where((record) => !record.isSystemWakeAcknowledgement).toList(growable: false);
+          if (records.isEmpty && snapshot.data!.error != null) {
+            return _WhisperErrorState(onRefresh: _refresh);
+          }
           if (records.isEmpty) return _WhisperEmptyState(onRefresh: _refresh);
           final grouped = _groupByDay(records);
           return RefreshIndicator(
@@ -214,6 +229,58 @@ class _WhisperEmptyState extends StatelessWidget {
                       "When Ella whispers something helpful, you'll find it here. 🪽",
                       style: EllaTextStyles.body.copyWith(color: EllaColors.inkSoft),
                       textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _WhisperErrorState extends StatelessWidget {
+  const _WhisperErrorState({required this.onRefresh});
+
+  final Future<void> Function() onRefresh;
+
+  @override
+  Widget build(BuildContext context) {
+    return RefreshIndicator(
+      color: EllaColors.tealDeep,
+      onRefresh: onRefresh,
+      child: CustomScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        slivers: [
+          SliverFillRemaining(
+            hasScrollBody: false,
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 44),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.cloud_off_rounded, color: EllaColors.inkSoft, size: 32),
+                    const SizedBox(height: 16),
+                    Text(
+                      context.l10n.whispersHistoryUnavailableTitle,
+                      key: const Key('whispers-history-error'),
+                      style: EllaTextStyles.secondary.copyWith(fontWeight: FontWeight.w700),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      context.l10n.whispersHistoryUnavailableBody,
+                      style: EllaTextStyles.body.copyWith(color: EllaColors.inkSoft),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 16),
+                    TextButton.icon(
+                      onPressed: onRefresh,
+                      icon: const Icon(Icons.refresh_rounded),
+                      label: Text(context.l10n.retry),
                     ),
                   ],
                 ),

@@ -3,6 +3,23 @@ import Foundation
 import FirebaseAuth
 #endif
 
+enum GuardianPlaybackQueuePolicy {
+    static func shouldRemoveForIncomingClip(isCurrentItem: Bool, isSilenceItem: Bool) -> Bool {
+        !isCurrentItem && isSilenceItem
+    }
+}
+
+enum GuardianInterruptionRecoveryPolicy {
+    static func shouldResume(
+        isActive: Bool,
+        wasInterrupted: Bool,
+        systemAllowsResume: Bool,
+        authorityIsCurrent: Bool
+    ) -> Bool {
+        isActive && wasInterrupted && systemAllowsResume && authorityIsCurrent
+    }
+}
+
 final class GuardianModeAvailability {
     static let shared = GuardianModeAvailability()
 

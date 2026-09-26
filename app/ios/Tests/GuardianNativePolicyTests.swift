@@ -316,6 +316,69 @@ private func testUnauthorizedPollRefreshesTokenOnceUnderSameLease() async throws
     service.stopPolling()
 }
 
+private func testRepeatedUnauthorizedPollReportsSanitizedRefreshFailure() async throws {
+    configure(nil)
+    configure("uid-a")
+    let transport = ImmediateSequencePollTransport(responses: [
+        (401, #"{"detail":"expired"}"#),
+        (401, #"{"detail":"still_expired"}"#),
+    ])
+    let tokenCalls = TokenRefreshRecorder()
+    let recorder = EffectRecorder()
+    let service = GuardianModePollingService(
+        transport: transport.send,
+        tokenProvider: { lease, forcingRefresh in
+            tokenCalls.record(forcingRefresh)
+            return GuardianBearerCredential(uid: lease.uid, token: forcingRefresh ? "fresh-token" : "stale-token")
+        },
+        effects: makeEffects(recorder: recorder)
+    )
+    service.startPolling()
+    await service.executePoll()
+
+    try expect(transport.recordedRequests.count == 2, "repeated 401 did not stop after one refresh")
+    try expect(tokenCalls.calls == [false, true], "repeated 401 did not refresh exactly once")
+    try expect(recorder.count("injection") == 0, "unauthorized response released audio")
+    let diagnostic = GuardianPollingFailureDiagnostic.code(
+        for: GuardianPollingHTTPFailure(statusCode: 401, refreshedCredential: true)
+    )
+    try expect(diagnostic == "http_401_after_refresh", "401 diagnostic exposed unstable detail")
+    service.stopPolling()
+}
+
+private func testPlaybackQueueAndInterruptionRecoveryPolicies() throws {
+    try expect(
+        !GuardianPlaybackQueuePolicy.shouldRemoveForIncomingClip(isCurrentItem: true, isSilenceItem: true),
+        "incoming clip policy removed current silence"
+    )
+    try expect(
+        GuardianPlaybackQueuePolicy.shouldRemoveForIncomingClip(isCurrentItem: false, isSilenceItem: true),
+        "incoming clip policy retained future silence"
+    )
+    try expect(
+        !GuardianPlaybackQueuePolicy.shouldRemoveForIncomingClip(isCurrentItem: false, isSilenceItem: false),
+        "incoming clip policy removed an earlier remote clip"
+    )
+    try expect(
+        GuardianInterruptionRecoveryPolicy.shouldResume(
+            isActive: true,
+            wasInterrupted: true,
+            systemAllowsResume: true,
+            authorityIsCurrent: true
+        ),
+        "current active interruption did not resume"
+    )
+    try expect(
+        !GuardianInterruptionRecoveryPolicy.shouldResume(
+            isActive: true,
+            wasInterrupted: true,
+            systemAllowsResume: true,
+            authorityIsCurrent: false
+        ),
+        "stale authority resumed interrupted playback"
+    )
+}
+
 private func testUnauthorizedPollCannotRefreshAfterOwnerDrift() async throws {
     configure(nil)
     configure("uid-a")
@@ -645,6 +708,7 @@ private enum GuardianNativePolicyTests {
     static func main() async throws {
         try await testAuthenticatedCurrentPollExecutesProductionInjectionBranch()
         try await testUnauthorizedPollRefreshesTokenOnceUnderSameLease()
+        try await testRepeatedUnauthorizedPollReportsSanitizedRefreshFailure()
         try await testUnauthorizedPollCannotRefreshAfterOwnerDrift()
         try await testAccountADisabledThenAccountBCannotReleaseOldResponse()
         try await testUIDDriftBeforeReleaseProducesZeroDebugOrTTSEffects()
@@ -654,6 +718,7 @@ private enum GuardianNativePolicyTests {
         try await testDuplicateScheduleSuppressionAndRetainedCancellation()
         try await testNativeAuthDenialsDoNotStartGETOrPOST()
         try await testAuthenticatedPlaybackReporterUsesExactLeaseOwner()
+        try testPlaybackQueueAndInterruptionRecoveryPolicies()
         try testProductionNotificationBoundary()
         print("Guardian native production-boundary tests passed")
     }

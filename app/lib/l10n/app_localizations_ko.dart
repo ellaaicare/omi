@@ -9939,4 +9939,13 @@ class AppLocalizationsKo extends AppLocalizations {
 
   @override
   String get aiConsentNeededReviewBody => 'Ella will wait until you review AI permission.';
+
+  @override
+  String get todayWhispersPendingSetup => 'Whispers will be available when your account finishes setup.';
+
+  @override
+  String get whispersHistoryUnavailableTitle => 'Whispers couldn\'t load';
+
+  @override
+  String get whispersHistoryUnavailableBody => 'Your Whispers history is still safe. Pull down or try again.';
 }

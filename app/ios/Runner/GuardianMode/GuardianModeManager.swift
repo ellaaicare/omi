@@ -24,6 +24,8 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
     private var injectionTasks: [UUID: Task<Void, Never>] = [:]
     private var reportTasks: [UUID: Task<Void, Never>] = [:]
     private let effectPath = GuardianModeManagerEffectPath()
+    private var queuedSilenceItems = Set<ObjectIdentifier>()
+    private var isInterrupted = false
 
     // Buffer configuration
     private let initialQueueDepth = 50
@@ -88,6 +90,9 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
                 ])
             }
             guard !isActive else {
+                if isInterrupted {
+                    try resumePlaybackAfterInterruptionLocked()
+                }
                 NSLog("GuardianMode: Already active, ignoring start()")
                 return
             }
@@ -135,6 +140,8 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
             self.successfulInjections = 0
             self.failedInjections = 0
             self.injectionSequence = 0
+            self.queuedSilenceItems.removeAll()
+            self.isInterrupted = false
 
             setupItemEndObserver()
             startHealthMonitor()
@@ -142,6 +149,7 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
             let started = GuardianModeAvailability.shared.performIfCurrent(startLease) {
                 for item in silenceItems where queuePlayer.canInsert(item, after: nil) {
                     queuePlayer.insert(item, after: nil)
+                    self.queuedSilenceItems.insert(ObjectIdentifier(item))
                 }
                 queuePlayer.play()
                 return true
@@ -152,6 +160,8 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
                 self.audioPlayer = nil
                 self.isActive = false
                 self.activeLease = nil
+                self.queuedSilenceItems.removeAll()
+                self.isInterrupted = false
                 throw NSError(domain: "GuardianMode", code: 2, userInfo: [
                     NSLocalizedDescriptionKey: "Guardian authority changed during start"
                 ])
@@ -180,6 +190,8 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
             pendingReports.forEach { $0.cancel() }
 
             guard isActive else {
+                queuedSilenceItems.removeAll()
+                isInterrupted = false
                 cancellables.removeAll()
                 NSLog("GuardianMode: Already stopped, ignoring stop()")
                 return
@@ -190,6 +202,8 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
             audioPlayer?.removeAllItems()
             audioPlayer = nil
             activeLease = nil
+            queuedSilenceItems.removeAll()
+            isInterrupted = false
             cancellables.removeAll()
             isActive = false
 
@@ -217,23 +231,87 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
         }
     }
 
+    func handleAudioSessionInterruptionBegan() {
+        queue.async { [weak self] in
+            guard let self, self.isActive else { return }
+            self.isInterrupted = true
+            self.audioPlayer?.pause()
+            NSLog("GuardianMode: Playback paused for audio interruption")
+        }
+    }
+
+    func handleAudioSessionInterruptionEnded(shouldResume: Bool) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let authorityIsCurrent = self.activeLease.map(GuardianModeAvailability.shared.isCurrent) ?? false
+            guard GuardianInterruptionRecoveryPolicy.shouldResume(
+                isActive: self.isActive,
+                wasInterrupted: self.isInterrupted,
+                systemAllowsResume: shouldResume,
+                authorityIsCurrent: authorityIsCurrent
+            ) else {
+                NSLog("GuardianMode: Interruption ended without resume permission")
+                return
+            }
+            do {
+                try self.resumePlaybackAfterInterruptionLocked()
+                NSLog("GuardianMode: Playback resumed after audio interruption")
+            } catch {
+                NSLog("GuardianMode: Playback resume failed after audio interruption")
+            }
+        }
+    }
+
+    private func resumePlaybackAfterInterruptionLocked() throws {
+        guard let player = audioPlayer,
+              let lease = activeLease,
+              GuardianModeAvailability.shared.isCurrent(lease) else {
+            throw NSError(domain: "GuardianMode", code: 4, userInfo: [
+                NSLocalizedDescriptionKey: "Guardian authority changed during interruption"
+            ])
+        }
+        let routeOutcome = EllaVoiceAudioRoutePolicy().apply(
+            usage: .playback,
+            session: SystemEllaVoiceAudioSession()
+        )
+        guard routeOutcome.success else {
+            throw NSError(domain: "GuardianMode", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "Guardian audio route is unavailable"
+            ])
+        }
+        let resumed = GuardianModeAvailability.shared.performIfCurrent(lease) {
+            player.play()
+            return true
+        }
+        guard resumed else {
+            throw NSError(domain: "GuardianMode", code: 4, userInfo: [
+                NSLocalizedDescriptionKey: "Guardian authority changed during interruption"
+            ])
+        }
+        isInterrupted = false
+    }
+
     // MARK: - Queue Management (Progressive Buffering)
 
     private func setupItemEndObserver() {
         NotificationCenter.default
             .publisher(for: .AVPlayerItemDidPlayToEndTime)
-            .sink { [weak self] _ in
-                self?.onItemFinished()
+            .sink { [weak self] notification in
+                self?.onItemFinished(notification.object as? AVPlayerItem)
             }
             .store(in: &cancellables)
     }
 
     /// Called when any queued item finishes playing
-    private func onItemFinished() {
+    private func onItemFinished(_ item: AVPlayerItem?) {
         queue.async { [weak self] in
             guard let self = self,
                   let player = self.audioPlayer,
                   self.isActive else { return }
+
+            if let item {
+                self.queuedSilenceItems.remove(ObjectIdentifier(item))
+            }
 
             let depth = player.items().count
 
@@ -258,6 +336,7 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
                 let silenceItem = AVPlayerItem(url: silenceURL)
                 if player.canInsert(silenceItem, after: nil) {
                     player.insert(silenceItem, after: nil)
+                    queuedSilenceItems.insert(ObjectIdentifier(silenceItem))
                     added += 1
                 }
             }
@@ -293,7 +372,7 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
         let rate = player.rate
 
         // Detect stalled player
-        if rate == 0 && isActive {
+        if rate == 0 && isActive && !isInterrupted {
             _ = GuardianModeAvailability.shared.performIfCurrent(lease) {
                 NSLog("GuardianMode: HEALTH WARNING - Player stalled, restarting playback")
                 player.play()
@@ -317,6 +396,7 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
                 let items = (0..<initialQueueDepth).map { _ in AVPlayerItem(url: silenceURL) }
                 for item in items where player.canInsert(item, after: nil) {
                     player.insert(item, after: nil)
+                    queuedSilenceItems.insert(ObjectIdentifier(item))
                 }
                 player.play()
                 return true
@@ -477,7 +557,9 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
                     self.failedInjections += 1
                     return false
                 }
+                self.removeFutureSilence(from: player)
                 player.insert(audioItem, after: nil)
+                self.batchQueueSilence(count: self.batchRefillCount)
                 leasedPlayer = player
                 return true
             },
@@ -581,6 +663,19 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
             }
         )
         _ = await effectPath.execute(lease: lease, operations: operations)
+    }
+
+    private func removeFutureSilence(from player: AVQueuePlayer) {
+        let currentItem = player.currentItem
+        for item in player.items() {
+            let identifier = ObjectIdentifier(item)
+            guard GuardianPlaybackQueuePolicy.shouldRemoveForIncomingClip(
+                isCurrentItem: item === currentItem,
+                isSilenceItem: queuedSilenceItems.contains(identifier)
+            ) else { continue }
+            player.remove(item)
+            queuedSilenceItems.remove(identifier)
+        }
     }
 
     private func reportGuardianPlaybackFailure(

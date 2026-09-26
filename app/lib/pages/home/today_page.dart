@@ -45,10 +45,19 @@ typedef TodayCardTalkRouteOpener = Future<void> Function(BuildContext context, T
 typedef TodayCardAuthoritySnapshot = ({String uid, String authorityKey, bool isProvisioningReady});
 typedef TodayCardAuthoritySnapshotProvider = TodayCardAuthoritySnapshot Function();
 typedef TodayNowProvider = DateTime Function();
-typedef GuardianModeLoader = Future<GuardianModeInfo?> Function();
+
+class GuardianModeReadResult {
+  const GuardianModeReadResult({this.info, this.pendingSetup = false});
+
+  final GuardianModeInfo? info;
+  final bool pendingSetup;
+}
+
+typedef GuardianModeLoader = Future<GuardianModeReadResult> Function();
 typedef GuardianModeSetter = Future<bool> Function(GuardianModeState state);
 typedef GuardianNativeLifecycle = Future<void> Function();
 typedef GuardianAvailability = bool Function();
+typedef _WhisperModeRead = ({GuardianModeInfo? info, bool pendingSetup});
 typedef MemoryPresentationAuthorityProvider = ExactAccountAuthorityVerifier? Function();
 typedef _HomeArtworkAuthoritySnapshot = ({
   ExactAccountAuthorityVerifier authority,
@@ -276,6 +285,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   _HomeCaptureSource? _homeCaptureSource;
   bool _whispersOn = false;
   bool _whispersVerified = false;
+  bool _whispersPendingSetup = false;
   bool _whisperStateLoading = false;
   bool _whisperStateReloadPending = false;
   bool _updatingWhispers = false;
@@ -444,6 +454,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         // Never retain a previous account's mode while exact authority changes.
         _whispersOn = false;
         _whispersVerified = false;
+        _whispersPendingSetup = false;
         _homeMemoryLayout = MemoryGalleryLayout.journal;
         _homeMemorySort = MemoryGallerySort.recent;
         _homeArtworkPreferences = null;
@@ -1194,15 +1205,13 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }
 
   Future<void> _loadWhisperStateOnce() async {
-    final info = await _readWhisperState();
+    final read = await _readWhisperState();
+    final info = read.info;
     if (info == null) {
-      try {
-        await _reconcileWhisperNative(false);
-      } catch (_) {}
       if (!mounted) return;
       setState(() {
-        _whispersOn = false;
         _whispersVerified = false;
+        _whispersPendingSetup = read.pendingSetup;
       });
       return;
     }
@@ -1213,37 +1222,29 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     try {
       await _reconcileWhisperNative(serverEnabled);
       resolvedVerified = true;
-    } catch (_) {
-      // If native capture cannot match an authoritative ON response, disable
-      // the server mode only when both the write and readback confirm OFF.
-      // Otherwise keep the last authoritative value behind an unavailable
-      // control and make no ON/OFF claim.
-      if (serverEnabled && await _writeWhisperState(const GuardianModeState())) {
-        final confirmed = await _readWhisperState();
-        if (confirmed != null && !_whispersEnabled(confirmed)) {
-          resolvedEnabled = false;
-          try {
-            await _reconcileWhisperNative(false);
-            resolvedVerified = true;
-          } catch (_) {}
-        }
-      }
-    }
+    } catch (_) {}
     if (!mounted) return;
     setState(() {
       _whispersOn = resolvedEnabled;
       _whispersVerified = resolvedVerified;
+      _whispersPendingSetup = false;
     });
   }
 
-  Future<GuardianModeInfo?> _readWhisperState() async {
+  Future<_WhisperModeRead> _readWhisperState() async {
     try {
       final loader = widget.guardianModeLoader;
-      if (loader != null) return loader();
+      if (loader != null) {
+        final result = await loader();
+        return (info: result.info, pendingSetup: result.pendingSetup);
+      }
       final result = await guardian_api.getGuardianMode();
-      return result.isSuccess ? result.value : null;
+      return (
+        info: result.isSuccess ? result.value : null,
+        pendingSetup: result.failure?.statusCode == 404,
+      );
     } catch (_) {
-      return null;
+      return (info: null, pendingSetup: false);
     }
   }
 
@@ -1274,6 +1275,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final previousEnabled = _whispersOn;
     setState(() {
       _whispersOn = enabled;
+      _whispersPendingSetup = false;
       _updatingWhispers = true;
     });
     final state = enabled ? const GuardianModeState(features: ['ACTIVE_SUPPORT']) : const GuardianModeState();
@@ -1289,18 +1291,13 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     } catch (_) {
       success = false;
     }
-    if (!success && enabled) {
-      try {
-        await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
-        await _writeWhisperState(const GuardianModeState());
-      } catch (_) {}
-    }
     var resolvedEnabled = enabled;
     var resolvedVerified = success;
+    var resolvedPendingSetup = false;
     if (!success) {
       final authoritative = await _readWhisperState();
-      if (authoritative != null) {
-        resolvedEnabled = _whispersEnabled(authoritative);
+      if (authoritative.info != null) {
+        resolvedEnabled = _whispersEnabled(authoritative.info!);
         try {
           await _reconcileWhisperNative(resolvedEnabled);
           resolvedVerified = true;
@@ -1313,6 +1310,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         // never claim OFF (or ON) without an authoritative readback.
         resolvedEnabled = previousEnabled;
         resolvedVerified = false;
+        resolvedPendingSetup = authoritative.pendingSetup;
         try {
           await _reconcileWhisperNative(previousEnabled);
         } catch (_) {}
@@ -1323,6 +1321,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       _updatingWhispers = false;
       _whispersOn = resolvedEnabled;
       _whispersVerified = resolvedVerified;
+      _whispersPendingSetup = resolvedPendingSetup;
     });
     if (!success) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.anErrorOccurredTryAgain)));
@@ -1887,6 +1886,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         showWhispers: showGuardianSurfaces,
         whispersEnabled: _whispersOn,
         whispersVerified: _whispersVerified,
+        whispersPendingSetup: _whispersPendingSetup,
         whispersUpdating: _updatingWhispers,
         onWhispersChanged: (enabled) {
           Navigator.of(sheetContext).pop();
@@ -3590,6 +3590,7 @@ class _HomeControlsSheet extends StatelessWidget {
     required this.showWhispers,
     required this.whispersEnabled,
     required this.whispersVerified,
+    required this.whispersPendingSetup,
     required this.whispersUpdating,
     required this.onWhispersChanged,
     required this.onWhispersHistory,
@@ -3602,6 +3603,7 @@ class _HomeControlsSheet extends StatelessWidget {
   final bool showWhispers;
   final bool whispersEnabled;
   final bool whispersVerified;
+  final bool whispersPendingSetup;
   final bool whispersUpdating;
   final ValueChanged<bool> onWhispersChanged;
   final VoidCallback onWhispersHistory;
@@ -3729,7 +3731,9 @@ class _HomeControlsSheet extends StatelessWidget {
                                 child: Text(
                                   whispersVerified
                                       ? whisperStatusLead(whispersEnabled)
-                                      : context.l10n.todayWhispersUnavailable,
+                                      : whispersPendingSetup
+                                          ? context.l10n.todayWhispersPendingSetup
+                                          : context.l10n.todayWhispersUnavailable,
                                   style: EllaTextStyles.secondary.copyWith(fontWeight: FontWeight.w600),
                                 ),
                               ),

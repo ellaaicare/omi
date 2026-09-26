@@ -144,4 +144,23 @@ void main() {
     expect(staleResult.isFailure, isTrue);
     expect(staleTransportCalls, 0);
   });
+
+  test('pending provisioning 404 remains distinguishable for switch presentation', () async {
+    final authority = _Authority('uid-a');
+    final result = await getGuardianMode(
+      guardianAllowed: true,
+      exactAuthority: authority,
+      transport: ({
+        required url,
+        required method,
+        required body,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+      }) async =>
+          http.Response('{"detail":"Guardian user is not provisioned"}', 404),
+    );
+
+    expect(result.isFailure, isTrue);
+    expect(result.failure?.statusCode, 404);
+  });
 }
