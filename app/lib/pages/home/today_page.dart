@@ -7,6 +7,7 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/ella/demo/today_card_fixtures.dart';
@@ -47,17 +48,18 @@ typedef TodayCardAuthoritySnapshotProvider = TodayCardAuthoritySnapshot Function
 typedef TodayNowProvider = DateTime Function();
 
 class GuardianModeReadResult {
-  const GuardianModeReadResult({this.info, this.pendingSetup = false});
+  const GuardianModeReadResult({this.info, this.pendingSetup = false, this.failure});
 
   final GuardianModeInfo? info;
   final bool pendingSetup;
+  final ClientApiFailure? failure;
 }
 
 typedef GuardianModeLoader = Future<GuardianModeReadResult> Function();
 typedef GuardianModeSetter = Future<bool> Function(GuardianModeState state);
 typedef GuardianNativeLifecycle = Future<void> Function();
 typedef GuardianAvailability = bool Function();
-typedef _WhisperModeRead = ({GuardianModeInfo? info, bool pendingSetup});
+typedef _WhisperModeRead = ({GuardianModeInfo? info, bool pendingSetup, ClientApiFailure? failure});
 typedef MemoryPresentationAuthorityProvider = ExactAccountAuthorityVerifier? Function();
 typedef _HomeArtworkAuthoritySnapshot = ({
   ExactAccountAuthorityVerifier authority,
@@ -1208,6 +1210,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final read = await _readWhisperState();
     final info = read.info;
     if (info == null) {
+      if (read.failure?.retryable != true) {
+        try {
+          await _reconcileWhisperNative(false);
+        } catch (_) {}
+      }
       if (!mounted) return;
       setState(() {
         _whispersVerified = false;
@@ -1236,15 +1243,22 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       final loader = widget.guardianModeLoader;
       if (loader != null) {
         final result = await loader();
-        return (info: result.info, pendingSetup: result.pendingSetup);
+        return (info: result.info, pendingSetup: result.pendingSetup, failure: result.failure);
       }
       final result = await guardian_api.getGuardianMode();
       return (
         info: result.isSuccess ? result.value : null,
         pendingSetup: result.failure?.statusCode == 404,
+        failure: result.failure,
       );
+    } on ClientApiFailure catch (failure) {
+      return (info: null, pendingSetup: false, failure: failure);
     } catch (_) {
-      return (info: null, pendingSetup: false);
+      return (
+        info: null,
+        pendingSetup: false,
+        failure: const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true),
+      );
     }
   }
 

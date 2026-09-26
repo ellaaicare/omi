@@ -78,7 +78,9 @@ private final class AsyncGate: @unchecked Sendable {
         let continuations = self.continuations
         self.continuations.removeAll()
         lock.unlock()
-        continuations.forEach { $0.resume() }
+        for continuation in continuations {
+            continuation.resume()
+        }
     }
 }
 
@@ -106,7 +108,9 @@ private final class ControlledPollTransport: @unchecked Sendable {
 
     func complete(json: String) throws {
         let url = URL(string: "https://api.ella-ai-care.com/v1/ella/guardian/next-audio")!
-        guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil) else {
+        guard
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)
+        else {
             throw TestFailure.failed("could not create poll response")
         }
         lock.lock()
@@ -264,14 +268,19 @@ private func testAuthenticatedCurrentPollExecutesProductionInjectionBranch() asy
     service.startPolling()
 
     let poll = Task { await service.executePoll() }
-    try expect(transport.started.wait(timeout: .now() + 2) == .success, "authenticated poll did not start")
+    try expect(
+        transport.started.wait(timeout: .now() + 2) == .success, "authenticated poll did not start")
     try transport.complete(json: #"{"url":"https://audio.example/a.mp3","id":"guardian-a"}"#)
     await poll.value
 
     try expect(recorder.count("injection") == 1, "real production injection branch did not execute")
     let request = try require(transport.lastRequest, "poll request was not recorded")
-    try expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer firebase-token-a", "GET bearer missing")
-    try expect(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first?.value == "uid-a", "GET UID mismatch")
+    try expect(
+        request.value(forHTTPHeaderField: "Authorization") == "Bearer firebase-token-a",
+        "GET bearer missing")
+    try expect(
+        URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first?.value
+            == "uid-a", "GET UID mismatch")
     service.stopPolling()
 }
 
@@ -329,7 +338,8 @@ private func testRepeatedUnauthorizedPollReportsSanitizedRefreshFailure() async 
         transport: transport.send,
         tokenProvider: { lease, forcingRefresh in
             tokenCalls.record(forcingRefresh)
-            return GuardianBearerCredential(uid: lease.uid, token: forcingRefresh ? "fresh-token" : "stale-token")
+            return GuardianBearerCredential(
+                uid: lease.uid, token: forcingRefresh ? "fresh-token" : "stale-token")
         },
         effects: makeEffects(recorder: recorder)
     )
@@ -348,15 +358,18 @@ private func testRepeatedUnauthorizedPollReportsSanitizedRefreshFailure() async 
 
 private func testPlaybackQueueAndInterruptionRecoveryPolicies() throws {
     try expect(
-        !GuardianPlaybackQueuePolicy.shouldRemoveForIncomingClip(isCurrentItem: true, isSilenceItem: true),
+        !GuardianPlaybackQueuePolicy.shouldRemoveForIncomingClip(
+            isCurrentItem: true, isSilenceItem: true),
         "incoming clip policy removed current silence"
     )
     try expect(
-        GuardianPlaybackQueuePolicy.shouldRemoveForIncomingClip(isCurrentItem: false, isSilenceItem: true),
+        GuardianPlaybackQueuePolicy.shouldRemoveForIncomingClip(
+            isCurrentItem: false, isSilenceItem: true),
         "incoming clip policy retained future silence"
     )
     try expect(
-        !GuardianPlaybackQueuePolicy.shouldRemoveForIncomingClip(isCurrentItem: false, isSilenceItem: false),
+        !GuardianPlaybackQueuePolicy.shouldRemoveForIncomingClip(
+            isCurrentItem: false, isSilenceItem: false),
         "incoming clip policy removed an earlier remote clip"
     )
     try expect(
@@ -377,6 +390,50 @@ private func testPlaybackQueueAndInterruptionRecoveryPolicies() throws {
         ),
         "stale authority resumed interrupted playback"
     )
+
+    var interruption = GuardianInterruptionRecoveryState()
+    interruption.began()
+    try expect(!interruption.canResume, "routine start resumed before interruption end")
+    try expect(
+        !interruption.ended(systemAllowsResume: false, isActive: true, authorityIsCurrent: true),
+        "interruption end without permission authorized resume"
+    )
+    try expect(!interruption.canResume, "routine start resumed after denied interruption end")
+}
+
+private func testManagerInsertRefillAndStopCompleteWithinOneLease() async throws {
+    configure(nil)
+    configure("uid-a")
+    let lease = try require(GuardianModeAvailability.shared.captureLease(), "missing manager lease")
+    let recorder = EffectRecorder()
+    let operations = GuardianModeManagerEffectPath.Operations(
+        perform: { lease, effect in
+            GuardianModeAvailability.shared.performIfCurrent(lease, effect)
+        },
+        insert: {
+            recorder.record("insert")
+            return true
+        },
+        refillSilence: { recorder.record("refill") },
+        awaitReadiness: { .ready(durationMs: 1) },
+        reportStarted: { _ in recorder.record("report") },
+        reportFailed: { _ in recorder.record("report") },
+        registerCompletion: { true },
+        play: {
+            recorder.record("play")
+            return true
+        }
+    )
+
+    let completed = await GuardianModeManagerEffectPath().execute(
+        lease: lease, operations: operations)
+    try expect(completed, "production manager effect path did not complete")
+    try expect(recorder.count("insert") == 1, "manager did not insert the remote clip")
+    try expect(
+        recorder.count("refill") == 1, "manager did not refill silence inside the authorized mutation")
+    GuardianModeAvailability.shared.disable()
+    try expect(
+        GuardianModeAvailability.shared.captureLease() == nil, "manager stop boundary did not complete")
 }
 
 private func testUnauthorizedPollCannotRefreshAfterOwnerDrift() async throws {
@@ -426,7 +483,8 @@ private func testAccountADisabledThenAccountBCannotReleaseOldResponse() async th
     let service = makePollingService(transport: transport, recorder: recorder)
     service.startPolling()
     let poll = Task { await service.executePoll() }
-    try expect(transport.started.wait(timeout: .now() + 2) == .success, "account-A poll did not start")
+    try expect(
+        transport.started.wait(timeout: .now() + 2) == .success, "account-A poll did not start")
 
     service.stopPolling()
     GuardianModeAvailability.shared.disable()
@@ -455,7 +513,8 @@ private func testUIDDriftBeforeReleaseProducesZeroDebugOrTTSEffects() async thro
         let service = makePollingService(transport: transport, recorder: recorder)
         service.startPolling()
         let poll = Task { await service.executePoll() }
-        try expect(transport.started.wait(timeout: .now() + 2) == .success, "stale-effect poll did not start")
+        try expect(
+            transport.started.wait(timeout: .now() + 2) == .success, "stale-effect poll did not start")
         _ = GuardianModeAvailability.shared.invalidateIfUIDChanged("uid-b")
         try transport.complete(json: response)
         await poll.value
@@ -477,21 +536,29 @@ private func testUIDOnlyDriftAfterResponseReleaseFencesQueuedManagerEffects() as
     let managerTask = TaskBox()
     let effectPath = GuardianModeManagerEffectPath()
     let service = makePollingService(transport: transport, recorder: recorder) { lease in
-        managerTask.set(Task {
-            await managerRelease.wait()
-            let operations = GuardianModeManagerEffectPath.Operations(
-                perform: { lease, effect in
-                    GuardianModeAvailability.shared.performIfCurrent(lease, effect)
-                },
-                insert: { recorder.record("insert"); return true },
-                awaitReadiness: { .ready(durationMs: 1) },
-                reportStarted: { _ in recorder.record("report") },
-                reportFailed: { _ in recorder.record("report") },
-                registerCompletion: { true },
-                play: { recorder.record("play"); return true }
-            )
-            _ = await effectPath.execute(lease: lease, operations: operations)
-        })
+        managerTask.set(
+            Task {
+                await managerRelease.wait()
+                let operations = GuardianModeManagerEffectPath.Operations(
+                    perform: { lease, effect in
+                        GuardianModeAvailability.shared.performIfCurrent(lease, effect)
+                    },
+                    insert: {
+                        recorder.record("insert")
+                        return true
+                    },
+                    refillSilence: { recorder.record("refill") },
+                    awaitReadiness: { .ready(durationMs: 1) },
+                    reportStarted: { _ in recorder.record("report") },
+                    reportFailed: { _ in recorder.record("report") },
+                    registerCompletion: { true },
+                    play: {
+                        recorder.record("play")
+                        return true
+                    }
+                )
+                _ = await effectPath.execute(lease: lease, operations: operations)
+            })
     }
     service.startPolling()
     let poll = Task { await service.executePoll() }
@@ -520,7 +587,11 @@ private func testUIDDriftAfterReadinessAwaitFencesReportAndPlay() async throws {
         perform: { lease, effect in
             GuardianModeAvailability.shared.performIfCurrent(lease, effect)
         },
-        insert: { recorder.record("insert"); return true },
+        insert: {
+            recorder.record("insert")
+            return true
+        },
+        refillSilence: { recorder.record("refill") },
         awaitReadiness: {
             _ = GuardianModeAvailability.shared.invalidateIfUIDChanged("uid-b")
             return .ready(durationMs: 1)
@@ -528,7 +599,10 @@ private func testUIDDriftAfterReadinessAwaitFencesReportAndPlay() async throws {
         reportStarted: { _ in recorder.record("report") },
         reportFailed: { _ in recorder.record("report") },
         registerCompletion: { true },
-        play: { recorder.record("play"); return true }
+        play: {
+            recorder.record("play")
+            return true
+        }
     )
     _ = await effectPath.execute(lease: lease, operations: operations)
 
@@ -540,7 +614,8 @@ private func testUIDDriftAfterReadinessAwaitFencesReportAndPlay() async throws {
 private func testManagerCancellationFencesPostAwaitEffects() async throws {
     configure(nil)
     configure("uid-a")
-    let lease = try require(GuardianModeAvailability.shared.captureLease(), "missing cancellation lease")
+    let lease = try require(
+        GuardianModeAvailability.shared.captureLease(), "missing cancellation lease")
     let recorder = EffectRecorder()
     let readinessStarted = AsyncGate()
     let readinessRelease = AsyncGate()
@@ -550,7 +625,11 @@ private func testManagerCancellationFencesPostAwaitEffects() async throws {
             perform: { lease, effect in
                 GuardianModeAvailability.shared.performIfCurrent(lease, effect)
             },
-            insert: { recorder.record("insert"); return true },
+            insert: {
+                recorder.record("insert")
+                return true
+            },
+            refillSilence: { recorder.record("refill") },
             awaitReadiness: {
                 readinessStarted.open()
                 await readinessRelease.wait()
@@ -559,7 +638,10 @@ private func testManagerCancellationFencesPostAwaitEffects() async throws {
             reportStarted: { _ in recorder.record("report") },
             reportFailed: { _ in recorder.record("report") },
             registerCompletion: { true },
-            play: { recorder.record("play"); return true }
+            play: {
+                recorder.record("play")
+                return true
+            }
         )
         _ = await effectPath.execute(lease: lease, operations: operations)
     }
@@ -582,12 +664,14 @@ private func testDuplicateScheduleSuppressionAndRetainedCancellation() async thr
     service.startPolling()
     service.schedulePollNow()
     service.schedulePollNow()
-    try expect(transport.started.wait(timeout: .now() + 2) == .success, "scheduled poll did not start")
+    try expect(
+        transport.started.wait(timeout: .now() + 2) == .success, "scheduled poll did not start")
     try await Task.sleep(nanoseconds: 50_000_000)
     try expect(transport.requestCount == 1, "duplicate schedule started a second transport")
 
     service.stopPolling()
-    try expect(transport.cancelled.wait(timeout: .now() + 2) == .success, "stop did not cancel retained poll")
+    try expect(
+        transport.cancelled.wait(timeout: .now() + 2) == .success, "stop did not cancel retained poll")
     try transport.complete(json: #"{"priority":"debug","id":"debug-a"}"#)
     try await Task.sleep(nanoseconds: 50_000_000)
     try expect(recorder.count("debug") == 0, "cancelled poll mutated debug state")
@@ -611,7 +695,8 @@ private func testNativeAuthDenialsDoNotStartGETOrPOST() async throws {
         service.stopPolling()
 
         configure("uid-a")
-        let lease = try require(GuardianModeAvailability.shared.captureLease(), "missing reporter lease")
+        let lease = try require(
+            GuardianModeAvailability.shared.captureLease(), "missing reporter lease")
         let reporter = GuardianPlaybackReporter(
             backendURL: { "https://api.ella-ai-care.com" },
             tokenProvider: bridge.credential,
@@ -636,7 +721,9 @@ private func testAuthenticatedPlaybackReporterUsesExactLeaseOwner() async throws
     let sent = await reporter.report(playbackEvent(), lease: lease)
     try expect(sent, "current authenticated playback report was denied")
     let request = try require(recorder.lastRequest, "playback POST was not recorded")
-    try expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer firebase-token-a", "POST bearer missing")
+    try expect(
+        request.value(forHTTPHeaderField: "Authorization") == "Bearer firebase-token-a",
+        "POST bearer missing")
     let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any]
     try expect(body?["uid"] as? String == "uid-a", "POST did not carry lease UID")
 }
@@ -662,7 +749,9 @@ private func require<T>(_ value: T?, _ message: String) throws -> T {
 
 private func testProductionNotificationBoundary() throws {
     let publicDefines = encodedDefines(["ELLA_GUARDIAN_ENABLED=true", "ELLA_PUBLIC_BUILD=true"])
-    let invitationDefines = encodedDefines(["ELLA_GUARDIAN_ENABLED=true", "ELLA_ENTITLEMENT_GATE=true"])
+    let invitationDefines = encodedDefines([
+        "ELLA_GUARDIAN_ENABLED=true", "ELLA_ENTITLEMENT_GATE=true",
+    ])
     let internalDefines = encodedDefines(["ELLA_GUARDIAN_ENABLED=true"])
     let guardian: [AnyHashable: Any] = ["type": "ella_notification"]
     let ordinary: [AnyHashable: Any] = ["type": "merge_completed"]
@@ -709,6 +798,7 @@ private enum GuardianNativePolicyTests {
         try await testAuthenticatedCurrentPollExecutesProductionInjectionBranch()
         try await testUnauthorizedPollRefreshesTokenOnceUnderSameLease()
         try await testRepeatedUnauthorizedPollReportsSanitizedRefreshFailure()
+        try await testManagerInsertRefillAndStopCompleteWithinOneLease()
         try await testUnauthorizedPollCannotRefreshAfterOwnerDrift()
         try await testAccountADisabledThenAccountBCannotReleaseOldResponse()
         try await testUIDDriftBeforeReleaseProducesZeroDebugOrTTSEffects()

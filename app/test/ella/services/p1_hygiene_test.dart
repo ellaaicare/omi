@@ -124,6 +124,10 @@ void main() {
     expect(nativePolicy, contains('request.setValue("Bearer \\(credential.token)"'));
     expect(manager, contains('private var injectionTasks: [UUID: Task<Void, Never>]'));
     expect(manager, contains('performIfCurrent(lease)'));
+    expect(manager, contains('batchQueueSilenceAuthorized(count:'));
+    expect(manager,
+        isNot(contains('player.insert(audioItem, after: nil)\n                self.batchQueueSilence(count:')));
+    expect(manager, contains('private var interruptionRecovery = GuardianInterruptionRecoveryState()'));
     expect(manager, contains('func configureAvailability(_ enabled: Bool, uid: String?)'));
     expect(manager, contains('guard let startLease = GuardianModeAvailability.shared.captureLease() else'));
     expect(

@@ -400,6 +400,7 @@ void main() {
     var guardianNativeStartSucceeds = true;
     var guardianAvailable = false;
     var guardianPendingSetup = false;
+    ClientApiFailure? guardianReadFailure;
     guardian_model.GuardianModeState? writtenGuardianState;
     final runtimeNow = DateTime(2032, 5, 6, 9, 41);
     final previewNow = DateTime(2025, 7, 24, 9, 41);
@@ -488,6 +489,7 @@ void main() {
                   guardianModeLoader: () async {
                     guardianModeReads++;
                     if (guardianPendingSetup) return const GuardianModeReadResult(pendingSetup: true);
+                    if (guardianReadFailure != null) return GuardianModeReadResult(failure: guardianReadFailure);
                     return GuardianModeReadResult(
                       info: guardianReadbackSucceeds
                           ? guardian_model.GuardianModeInfo(
@@ -614,6 +616,7 @@ void main() {
       // If readback is also unavailable, keep the last verified switch value
       // but disable the control and show no OFF claim until authority returns.
       guardianReadbackSucceeds = false;
+      guardianReadFailure = const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true);
       await tester.tap(
         find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
       );
@@ -628,6 +631,23 @@ void main() {
       expect(unavailableSwitch.onChanged, isNull);
       expect(find.textContaining('Whispers are off'), findsNothing);
       expect(find.byKey(const Key('whispers-history-entry')), findsOneWidget);
+
+      final stopsBeforeRetryableRefresh = guardianNativeStops;
+      authorityChanges.value++;
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(guardianNativeStops, stopsBeforeRetryableRefresh);
+
+      // Same-UID authority loss is not an offline read. Native polling and
+      // playback must quiesce even though the Firebase UID did not change.
+      final stopsBeforeAuthorityLoss = guardianNativeStops;
+      guardianReadFailure = const ClientApiFailure(ClientApiFailureKind.authenticationRequired);
+      authorityChanges.value++;
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(guardianNativeStops, stopsBeforeAuthorityLoss + 1);
+
+      guardianReadFailure = null;
 
       // Initial reconciliation preserves the server choice when native start
       // fails. It must not compensate by writing OFF.
