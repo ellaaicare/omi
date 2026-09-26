@@ -900,6 +900,14 @@ jobs:
           )"
           echo "observed Hermes Cloud runtime collection count: $collected"
           required_ids=(
+            "tests/unit/test_ella_ai_consent.py::test_consent_rejection_handler_returns_stable_top_level_contract"
+            "tests/unit/test_ella_ai_consent.py::test_consent_authority_outage_is_retryable_and_not_revocation_shaped"
+            "tests/unit/test_ella_ai_consent.py::test_enforcement_is_server_authoritative_and_cannot_be_disabled"
+            "tests/unit/test_ella_ai_consent_route_gates.py::test_native_websocket_consent_check_precedes_runtime_and_stt_provider_work"
+            "tests/unit/test_ella_ai_consent_route_gates.py::test_websocket_consent_rejection_and_authority_outage_have_distinct_close_contracts"
+            "tests/unit/test_ella_ai_consent_route_gates.py::test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary"
+            "tests/unit/test_ella_ai_consent_route_gates.py::test_memory_artwork_provider_routes_share_the_consent_gate"
+            "tests/unit/test_ella_ai_consent_route_gates.py::test_background_ai_and_honcho_boundaries_recheck_consent_before_network_egress"
             "tests/unit/test_hermes_binding_envelope_contract.py::test_hermes_binding_envelope_v1_identity_and_content_free_shape"
             "tests/unit/test_hermes_binding_envelope_contract.py::test_omi_request_uses_exact_stock_contract_from_shared_envelope"
             "tests/unit/test_hermes_product_fit_canary.py::test_scenarios_a_to_f_pass_with_content_free_stage_tables"
@@ -967,6 +975,8 @@ jobs:
           )
           collected_ids="$(
             pytest --collect-only -q \
+              tests/unit/test_ella_ai_consent.py \
+              tests/unit/test_ella_ai_consent_route_gates.py \
               tests/unit/test_hermes_binding_envelope_contract.py \
               tests/unit/test_hermes_product_fit_canary.py \
               tests/unit/test_ella_postprocess_cloud_routing.py \
@@ -992,7 +1002,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 21
-          test "$collected" -eq 589
+          test "$collected" -eq 595
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
