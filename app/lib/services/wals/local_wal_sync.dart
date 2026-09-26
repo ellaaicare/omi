@@ -530,7 +530,7 @@ class LocalWalSyncImpl implements LocalWalSync {
           targetAuthority.uid != capturedAuthority.uid) {
         return null;
       }
-      if (!activeOwner.matches(targetAuthority.owner)) {
+      if (!activeOwner.durablyMatches(targetAuthority.owner)) {
         final rotated = await WalFileManager.rotateActiveSessionOwner(
           _wals,
           previousOwner: activeOwner,
@@ -562,7 +562,9 @@ class LocalWalSyncImpl implements LocalWalSync {
     if (previousOwner == null || !pending.every((wal) => wal.owner?.matches(previousOwner) == true)) {
       return currentAuthority;
     }
-    if (currentAuthority != null && currentAuthority.isCurrent() && previousOwner.matches(currentAuthority.owner)) {
+    if (currentAuthority != null &&
+        currentAuthority.isCurrent() &&
+        previousOwner.durablyMatches(currentAuthority.owner)) {
       return currentAuthority;
     }
 

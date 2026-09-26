@@ -92,23 +92,6 @@ void main() {
     expect(authorityLossCalls, 0);
   });
 
-  test('expired startup grace after a suspended await cannot begin listening', () async {
-    final suspended = Completer<void>();
-    final starting = resumeSuspendedStartup(suspended.future);
-
-    SharedPreferencesUtil.clearAiConsentServerVerification();
-    preferences.markAiConsentLastServerConfirmed(
-      uid: 'uid-a',
-      receiptId: 'aicr_receipt-a',
-      confirmedAt: DateTime.now().subtract(const Duration(minutes: 31)),
-    );
-    suspended.complete();
-
-    expect(await starting, isFalse);
-    expect(listenCalls, 0);
-    expect(authorityLossCalls, 1);
-  });
-
   test('replacement lifecycle cannot use a suspended prior listen attempt', () async {
     final suspended = Completer<void>();
     final starting = resumeSuspendedStartup(suspended.future);

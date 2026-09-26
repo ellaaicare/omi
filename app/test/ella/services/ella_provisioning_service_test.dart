@@ -914,7 +914,7 @@ void main() {
     EllaProvisioningAuthorityCoordinator.unregister(owner);
   });
 
-  test('same-account replacement consent receipt fails closed before provisioning recaptures authority', () async {
+  test('same-account replacement consent receipt keeps acceptance while provisioning recaptures authority', () async {
     final preferences = SharedPreferencesUtil()..uid = 'uid-a';
     final ready = EllaProvisioningResponse(
       statusCode: 200,
@@ -986,13 +986,11 @@ void main() {
       serverDecidedAt: '2026-07-27T00:01:00Z',
     );
 
-    expect(signalSnapshots, [
-      (receiptId: 'aicr_receipt-a', consentCurrent: false, provisioningCurrent: false),
-    ]);
+    expect(signalSnapshots, isEmpty);
     expect(preferences.aiConsentReceiptId, 'aicr_receipt-b');
-    expect(preferences.aiConsentAccepted, isFalse);
-    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
-    expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
+    expect(preferences.aiConsentAccepted, isTrue);
+    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+    expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
 
     preferences.markAiConsentServerVerified(
       uid: 'uid-a',

@@ -287,29 +287,15 @@ class SharedPreferencesUtil {
     if (enforceEnglishPilotLocale && !isEllaInternalPilotLocaleSupported(getString('app_locale'))) {
       return false;
     }
-    final accepted = getBool('aiConsentAccepted', defaultValue: false) &&
-        aiConsentContractVersion == currentAiConsentContractVersion &&
-        aiConsentProcessorSetHash == currentAiConsentProcessorSetHash;
-    if (!accepted ||
-        uid.isEmpty ||
-        !aiConsentReceiptId.startsWith(currentAiConsentReceiptPrefix) ||
-        aiConsentReceiptUid != uid ||
-        aiConsentProfileBindingId.isEmpty ||
-        aiConsentScopeVersion != currentAiConsentScopeVersion ||
-        aiConsentScopeHash != currentAiConsentScopeHash ||
-        DateTime.tryParse(aiConsentServerDecidedAt) == null) {
-      return false;
-    }
-    final verifiedAt = _verifiedAiConsentAt;
-    return verifiedAt != null &&
-        DateTime.now().difference(verifiedAt) <= aiConsentServerVerificationTtl &&
-        _verifiedAiConsentUid == uid &&
-        _verifiedAiConsentReceiptId == aiConsentReceiptId &&
-        _verifiedAiConsentPolicyVersion == currentAiConsentContractVersion &&
-        _verifiedAiConsentProcessorSetHash == currentAiConsentProcessorSetHash &&
-        _verifiedAiConsentProfileBindingId == aiConsentProfileBindingId &&
-        _verifiedAiConsentScopeVersion == currentAiConsentScopeVersion &&
-        _verifiedAiConsentScopeHash == currentAiConsentScopeHash;
+    // The server is the consent authority. This flag is only the cached
+    // last confirmation for the current uid. A missed refresh, a 5xx, or an
+    // expired in-memory TTL must not look like a revocation.
+    if (uid.isEmpty || !getBool('aiConsentAccepted', defaultValue: false)) return false;
+    final confirmedUid = getString(_aiConsentLastServerConfirmedUidKey);
+    if (confirmedUid.isNotEmpty && confirmedUid != uid) return false;
+    final receiptUid = aiConsentReceiptUid;
+    if (receiptUid.isNotEmpty && receiptUid != uid) return false;
+    return true;
   }
 
   Duration? get aiConsentServerVerificationRemaining {
@@ -413,18 +399,10 @@ class SharedPreferencesUtil {
     _verifiedAiConsentScopeVersion = scopeVersion;
     _verifiedAiConsentScopeHash = scopeHash;
     _verifiedAiConsentAt = verifiedAt ?? DateTime.now();
-    markAiConsentLastServerConfirmed(
-      uid: uid,
-      receiptId: receiptId,
-      confirmedAt: _verifiedAiConsentAt,
-    );
+    markAiConsentLastServerConfirmed(uid: uid, receiptId: receiptId, confirmedAt: _verifiedAiConsentAt);
   }
 
-  void markAiConsentLastServerConfirmed({
-    required String uid,
-    required String receiptId,
-    DateTime? confirmedAt,
-  }) {
+  void markAiConsentLastServerConfirmed({required String uid, required String receiptId, DateTime? confirmedAt}) {
     if (uid.isEmpty || uid != this.uid || receiptId.isEmpty || receiptId != aiConsentReceiptId) return;
     saveString(_aiConsentLastServerConfirmedUidKey, uid);
     saveString(_aiConsentLastServerConfirmedReceiptIdKey, receiptId);
@@ -469,11 +447,8 @@ class SharedPreferencesUtil {
     final hasAccountBoundReceipt = receiptId.startsWith(currentAiConsentReceiptPrefix) && uid.isNotEmpty;
     final nextReceiptId = hasAccountBoundReceipt ? receiptId : '';
     final nextReceiptUid = hasAccountBoundReceipt ? uid : '';
-    if (nextReceiptUid != aiConsentReceiptUid ||
-        profileBindingId != aiConsentProfileBindingId ||
-        nextReceiptId != aiConsentReceiptId) {
-      _invalidateAiConsentAuthority();
-    }
+    // Receipt and profile updates are not a local revocation. Account
+    // switch still wipes through invalidateAccountAuthorityForTransition.
     aiConsentAccepted = true;
     aiConsentAcceptedAt = DateTime.now().toUtc().toIso8601String();
     saveString('aiConsentContractVersion', currentAiConsentContractVersion);

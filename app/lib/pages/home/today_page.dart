@@ -3247,7 +3247,7 @@ class TodayRecordMomentControl extends StatelessWidget {
                     onPressed: onReviewConsent,
                     icon: const Icon(Icons.privacy_tip_outlined, color: EllaColors.error),
                     label: Text(
-                      context.l10n.aiConsentTranscriptionReview,
+                      context.l10n.aiConsentNeededReview,
                       style: EllaTextStyles.caption.copyWith(color: EllaColors.error, fontWeight: FontWeight.w700),
                     ),
                   ),

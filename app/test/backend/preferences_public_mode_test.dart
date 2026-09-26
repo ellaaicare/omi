@@ -23,68 +23,6 @@ void main() {
     expect(preferences.publicMode, isFalse);
   });
 
-  test('persisted AI consent is not authority until the server grant is verified', () {
-    final preferences = SharedPreferencesUtil();
-    preferences.uid = 'uid-a';
-
-    preferences.acceptAiConsent(
-      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
-      uid: 'uid-a',
-      clientVersion: '1.0.528+804',
-      locale: 'en-US',
-      profileBindingId: 'profile-binding-a',
-      serverDecidedAt: '2026-07-27T00:00:00Z',
-    );
-
-    expect(preferences.aiConsentAccepted, isFalse);
-    _markServerVerified(preferences, uid: 'uid-a', receiptId: 'aicr_receipt-a');
-
-    expect(preferences.aiConsentAccepted, isTrue);
-    expect(DateTime.tryParse(preferences.aiConsentAcceptedAt), isNotNull);
-    expect(preferences.aiConsentContractVersion, SharedPreferencesUtil.currentAiConsentContractVersion);
-    expect(preferences.aiConsentProcessorSetHash, SharedPreferencesUtil.currentAiConsentProcessorSetHash);
-    expect(preferences.aiConsentClientVersion, '1.0.528+804');
-    expect(preferences.aiConsentLocale, 'en-US');
-    expect(preferences.aiConsentProfileBindingId, 'profile-binding-a');
-    expect(preferences.aiConsentScopeVersion, SharedPreferencesUtil.currentAiConsentScopeVersion);
-    expect(preferences.aiConsentScopeHash, SharedPreferencesUtil.currentAiConsentScopeHash);
-    expect(preferences.aiConsentServerDecidedAt, '2026-07-27T00:00:00Z');
-
-    preferences.declineAiConsent();
-    expect(preferences.aiConsentAccepted, isFalse);
-    expect(preferences.aiConsentAcceptedAt, isEmpty);
-    expect(preferences.aiConsentContractVersion, isEmpty);
-    expect(preferences.aiConsentProcessorSetHash, isEmpty);
-  });
-
-  test('legacy and stale processor consent receipts fail closed', () async {
-    SharedPreferences.setMockInitialValues({
-      'aiConsentAccepted': true,
-      'aiConsentAcceptedAt': '2026-01-01T00:00:00Z',
-      'aiConsentReceiptId': 'legacy-receipt',
-      'aiConsentReceiptUid': 'uid-a',
-    });
-    await SharedPreferencesUtil.init();
-
-    final preferences = SharedPreferencesUtil();
-    preferences.uid = 'uid-a';
-    expect(preferences.aiConsentAccepted, isFalse);
-    expect(preferences.hasAccountBoundAiConsent('uid-a'), isFalse);
-
-    await preferences.saveString('aiConsentContractVersion', 'voice-ai-processors-v1');
-    expect(preferences.aiConsentAccepted, isFalse);
-
-    preferences.acceptAiConsent(
-      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}current-receipt',
-      uid: 'uid-a',
-      profileBindingId: 'profile-binding-a',
-      serverDecidedAt: '2026-07-27T00:00:00Z',
-    );
-    _markServerVerified(preferences, uid: 'uid-a', receiptId: 'aicr_current-receipt');
-    expect(preferences.aiConsentAccepted, isTrue);
-    expect(preferences.hasAccountBoundAiConsent('uid-a'), isTrue);
-  });
-
   test('existing v8 account requires v9 before any managed-cloud AI or illustration action', () async {
     SharedPreferences.setMockInitialValues({
       'aiConsentAccepted': true,
@@ -104,27 +42,6 @@ void main() {
     expect(preferences.aiConsentAccepted, isFalse);
     expect(preferences.hasPriorAccountBoundAiConsent('uid-a'), isTrue);
     expect(preferences.hasPriorAccountBoundAiConsent('uid-b'), isFalse);
-  });
-
-  test('deferred v9 remains inactive until a server-verified account and profile grant', () {
-    final preferences = SharedPreferencesUtil();
-    preferences.uid = 'uid-a';
-
-    preferences.deferAiConsent();
-    expect(preferences.aiConsentAccepted, isFalse);
-    expect(preferences.isCurrentAiConsentDeferred, isTrue);
-
-    preferences.acceptAiConsent(
-      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
-      uid: 'uid-a',
-      profileBindingId: 'profile-binding-a',
-      serverDecidedAt: '2026-07-27T00:00:00Z',
-    );
-    expect(preferences.aiConsentAccepted, isFalse);
-    _markServerVerified(preferences, uid: 'uid-a', receiptId: 'aicr_receipt-a');
-    expect(preferences.aiConsentAccepted, isTrue);
-    expect(preferences.isCurrentAiConsentDeferred, isFalse);
-    expect(preferences.aiConsentContractVersion, 'ai-data-processors-v10');
   });
 
   test('receipt-less acceptance clears stale authority and remains fail closed', () async {
@@ -165,65 +82,6 @@ void main() {
     expect(preferences.hasAccountBoundAiConsent('uid-b'), isFalse);
   });
 
-  test('processor hash change fails closed even when version and receipt look current', () async {
-    SharedPreferences.setMockInitialValues({
-      'uid': 'uid-a',
-      'aiConsentAccepted': true,
-      'aiConsentContractVersion': SharedPreferencesUtil.currentAiConsentContractVersion,
-      'aiConsentProcessorSetHash': 'sha256:stale',
-      'aiConsentReceiptId': '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
-      'aiConsentReceiptUid': 'uid-a',
-      'aiConsentProfileBindingId': 'profile-binding-a',
-      'aiConsentScopeVersion': SharedPreferencesUtil.currentAiConsentScopeVersion,
-      'aiConsentScopeHash': SharedPreferencesUtil.currentAiConsentScopeHash,
-      'aiConsentServerDecidedAt': '2026-07-27T00:00:00Z',
-    });
-    await SharedPreferencesUtil.init();
-
-    expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
-    expect(SharedPreferencesUtil().persistedAiConsentReceiptIdForCurrentAccount, isEmpty);
-  });
-
-  test('expired server verification fails closed without deleting the cached receipt', () {
-    final preferences = SharedPreferencesUtil();
-    preferences.uid = 'uid-a';
-    preferences.acceptAiConsent(
-      receiptId: 'aicr_receipt-a',
-      uid: 'uid-a',
-      profileBindingId: 'profile-binding-a',
-      serverDecidedAt: '2026-07-27T00:00:00Z',
-    );
-    _markServerVerified(
-      preferences,
-      uid: 'uid-a',
-      receiptId: 'aicr_receipt-a',
-      verifiedAt: DateTime.now().subtract(SharedPreferencesUtil.aiConsentServerVerificationTtl),
-    );
-
-    expect(preferences.aiConsentAccepted, isFalse);
-    expect(preferences.aiConsentReceiptId, 'aicr_receipt-a');
-    expect(preferences.persistedAiConsentReceiptIdForCurrentAccount, 'aicr_receipt-a');
-  });
-
-  test('provider, profile, or Photon scope drift fails closed without deleting the cached receipt', () async {
-    SharedPreferences.setMockInitialValues({
-      'uid': 'uid-a',
-      'aiConsentAccepted': true,
-      'aiConsentContractVersion': SharedPreferencesUtil.currentAiConsentContractVersion,
-      'aiConsentProcessorSetHash': SharedPreferencesUtil.currentAiConsentProcessorSetHash,
-      'aiConsentReceiptId': 'aicr_receipt-a',
-      'aiConsentReceiptUid': 'uid-a',
-      'aiConsentProfileBindingId': 'profile-binding-a',
-      'aiConsentScopeVersion': SharedPreferencesUtil.currentAiConsentScopeVersion,
-      'aiConsentScopeHash': 'sha256:stale-scope',
-      'aiConsentServerDecidedAt': '2026-07-27T00:00:00Z',
-    });
-    await SharedPreferencesUtil.init();
-
-    expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
-    expect(SharedPreferencesUtil().aiConsentReceiptId, 'aicr_receipt-a');
-  });
-
   test('internal pilot authority is English-only without changing normal locale authority', () async {
     SharedPreferences.setMockInitialValues({'app_locale': 'es'});
     await SharedPreferencesUtil.init();
@@ -242,25 +100,6 @@ void main() {
 
     await preferences.saveString('app_locale', 'en');
     expect(preferences.hasCurrentAiConsentAuthority(enforceEnglishPilotLocale: true), isTrue);
-  });
-
-  test('profile selection change invalidates ephemeral authority until the server re-verifies it', () {
-    final preferences = SharedPreferencesUtil();
-    preferences.uid = 'uid-a';
-    preferences.verifiedPersonaId = 'persona-a';
-    preferences.acceptAiConsent(
-      receiptId: 'aicr_receipt-a',
-      uid: 'uid-a',
-      profileBindingId: 'profile-binding-a',
-      serverDecidedAt: '2026-07-27T00:00:00Z',
-    );
-    _markServerVerified(preferences, uid: 'uid-a', receiptId: 'aicr_receipt-a');
-    expect(preferences.aiConsentAccepted, isTrue);
-
-    preferences.verifiedPersonaId = 'persona-b';
-
-    expect(preferences.aiConsentAccepted, isFalse);
-    expect(preferences.aiConsentReceiptId, 'aicr_receipt-a');
   });
 }
 

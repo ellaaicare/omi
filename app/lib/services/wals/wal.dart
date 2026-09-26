@@ -37,18 +37,22 @@ class WalOwner {
 
   static final RegExp _authorityIdentifierPattern = RegExp(r'^[A-Za-z0-9][A-Za-z0-9._:@+/=\-]{0,511}$');
 
-  bool get hasValidAuthorityIdentity =>
-      _authorityIdentifierPattern.hasMatch(uid) &&
-      _authorityIdentifierPattern.hasMatch(profileBindingId) &&
-      bindingRevision > 0 &&
-      _authorityIdentifierPattern.hasMatch(consentReceiptId) &&
-      authorityGenerationAtCapture >= 0;
+  bool get hasValidAuthorityIdentity => _authorityIdentifierPattern.hasMatch(uid);
 
   void _requireValidAuthorityIdentity() {
     if (!hasValidAuthorityIdentity) throw StateError('Invalid WAL owner authority identity');
   }
 
+  /// Disk folder for this account. Profile and binding revision stay on the
+  /// owner record, but they must not move pending audio into a new directory.
   String get storageNamespace {
+    _requireValidAuthorityIdentity();
+    final digest = sha256.convert(utf8.encode('wal-uid-namespace-v1\n$uid'));
+    return digest.toString().substring(0, 24);
+  }
+
+  /// Build 865 artwork and WAL folders hashed profile and binding revision.
+  String get legacyStorageNamespace {
     _requireValidAuthorityIdentity();
     final digest = sha256.convert(utf8.encode('$uid\n$profileBindingId\n$bindingRevision'));
     return digest.toString().substring(0, 24);
@@ -64,14 +68,9 @@ class WalOwner {
     return digest.toString();
   }
 
-  bool matches(WalOwner other) =>
-      hasValidAuthorityIdentity &&
-      other.hasValidAuthorityIdentity &&
-      uid == other.uid &&
-      profileBindingId == other.profileBindingId &&
-      bindingRevision == other.bindingRevision &&
-      consentReceiptId == other.consentReceiptId &&
-      authorityGenerationAtCapture == other.authorityGenerationAtCapture;
+  /// Upload identity is the account uid. Receipt, profile, and generation
+  /// drift do not quarantine audio; the server accepts or rejects at ingest.
+  bool matches(WalOwner other) => hasValidAuthorityIdentity && other.hasValidAuthorityIdentity && uid == other.uid;
 
   bool durablyMatches(WalOwner other) =>
       hasValidAuthorityIdentity &&
