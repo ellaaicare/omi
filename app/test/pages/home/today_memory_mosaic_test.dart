@@ -258,7 +258,13 @@ void main() {
               return SizedBox(
                 width: 360,
                 height: 420,
-                child: MemoryDayGalleryCard(dayLabel: 'TODAY', memories: memories, artworkApi: artwork, onOpen: () {}),
+                child: MemoryDayGalleryCard(
+                  dayLabel: 'TODAY',
+                  memories: memories,
+                  artworkApi: artwork,
+                  now: DateTime(2026, 9, 23),
+                  onOpen: () {},
+                ),
               );
             },
           ),
@@ -285,6 +291,38 @@ void main() {
     expect(identical(tester.state(artworkFor(newer.id)), newerState), isTrue);
     expect(artwork.displayRequests.where((request) => request.memoryId == earlier.id), hasLength(1));
     expect(artwork.displayRequests.where((request) => request.memoryId == newer.id), hasLength(1));
+  });
+
+  testWidgets('successful empty day artwork response resolves to typographic cards without permanent spinners', (
+    tester,
+  ) async {
+    final artwork = _ResolvedDayArtworkApi();
+    final memory = ServerConversation(
+      id: 'resolved-without-artwork',
+      createdAt: DateTime(2026, 9, 24, 12),
+      structured: Structured('A day without generated art', 'The memory remains readable without an illustration.'),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: MemoryDayGalleryCard(
+            dayLabel: 'TODAY',
+            memories: [memory],
+            artworkApi: artwork,
+            now: DateTime(2026, 9, 24),
+            onOpen: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(artwork.fetchDayCalls, 1);
+    expect(find.byKey(const Key('memory-artwork-placeholder-resolved-without-artwork')), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-generation-progress-resolved-without-artwork')), findsNothing);
   });
 
   testWidgets('Home retains day artwork state when midnight relabels the calendar date', (tester) async {
@@ -1543,7 +1581,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(artwork.recentRecoveryRequests, 1);
-    expect(find.byKey(const Key('memory-artwork-local-fallback-memory-1')), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-1')), findsOneWidget);
+    expect(find.text('Illustration unavailable'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
@@ -1635,19 +1674,16 @@ void main() {
         .toList(growable: false);
     expect(todayArtworkWidgets, hasLength(2));
     expect(todayArtworkWidgets.every((widget) => widget.enqueueIfMissing), isTrue);
-    expect(
-      todayArtworkWidgets.every((widget) => widget.fallbackAssetPath == memoryArtworkWatercolorFallbackAsset),
-      isTrue,
-    );
     final todayRepairRequests = artwork.displayRequests
         .where((request) => request.enqueueIfMissing && request.memoryId.startsWith('today-'))
         .map((request) => request.memoryId);
     expect(todayRepairRequests, containsAll(<String>['today-0', 'today-1']));
     expect(artwork.automaticDisplayRequests, isEmpty);
-    expect(find.text('Try artwork again'), findsWidgets);
+    expect(find.text('Try artwork again'), findsNothing);
+    expect(find.byKey(const Key('memory-artwork-placeholder-today-0')), findsOneWidget);
 
     final requestsBeforeRetry = artwork.displayRequests.length;
-    await tester.tap(find.byKey(const Key('memory-artwork-photo-retry-today-0')));
+    await tester.tap(find.byKey(const Key('memory-artwork-placeholder-today-0')));
     await tester.pump();
 
     expect(artwork.displayRequests.length, requestsBeforeRetry + 1);
@@ -1667,10 +1703,6 @@ void main() {
         .toList(growable: false);
     expect(yesterdayArtworkWidgets, hasLength(2));
     expect(yesterdayArtworkWidgets.every((widget) => widget.enqueueIfMissing), isTrue);
-    expect(
-      yesterdayArtworkWidgets.every((widget) => widget.fallbackAssetPath == memoryArtworkWatercolorFallbackAsset),
-      isTrue,
-    );
     expect(
       artwork.displayRequests.where((request) => request.enqueueIfMissing && request.memoryId.startsWith('yesterday-')),
       isNotEmpty,
@@ -1693,8 +1725,8 @@ void main() {
     final olderArtworkWidgets = tester
         .widgetList<MemoryArtworkImage>(find.descendant(of: olderDayCard, matching: find.byType(MemoryArtworkImage)))
         .toList(growable: false);
+    expect(olderArtworkWidgets, hasLength(1));
     expect(olderArtworkWidgets.every((widget) => !widget.enqueueIfMissing), isTrue);
-    expect(olderArtworkWidgets.every((widget) => widget.fallbackAssetPath == null), isTrue);
   });
 
   testWidgets('Home keeps a running full-history artwork queue indeterminate', (tester) async {
@@ -2866,7 +2898,6 @@ void main() {
       find.byWidgetPredicate((widget) => widget is MemoryGalleryCard && widget.conversation.id == 'oldest-read-only-0'),
     );
     expect(hero.enqueueArtworkIfMissing, isFalse);
-    expect(hero.artworkFallbackAsset, isNull);
     expect(
       artwork.displayRequests.where((request) => request.memoryId == 'oldest-read-only-0' && request.enqueueIfMissing),
       isEmpty,
@@ -3074,6 +3105,31 @@ Future<_MutableExactAuthority> _installArtworkAuthority({
     await preferences.clearMemoryArtworkBackfillCursor(style);
   }
   return _MutableExactAuthority(uid);
+}
+
+class _ResolvedDayArtworkApi extends MemoryArtworkApi {
+  _ResolvedDayArtworkApi() : super(authorityProvider: () => null);
+
+  int fetchDayCalls = 0;
+
+  @override
+  bool get supportsDayArtworkBatch => true;
+
+  @override
+  Future<MemoryArtworkDay?> fetchDay(
+    DateTime localDay, {
+    required int utcOffsetMinutes,
+    int authorityRevision = 0,
+    int contentRevision = 0,
+  }) async {
+    fetchDayCalls += 1;
+    return MemoryArtworkDay(
+      day: '${localDay.year.toString().padLeft(4, '0')}-${localDay.month.toString().padLeft(2, '0')}'
+          '-${localDay.day.toString().padLeft(2, '0')}',
+      utcOffsetMinutes: utcOffsetMinutes,
+      items: const <String, MemoryArtworkResult>{},
+    );
+  }
 }
 
 class _FakeMemoryArtworkApi extends MemoryArtworkApi {
@@ -3626,7 +3682,23 @@ class _FakeCaptureProvider extends CaptureProvider {
   int finalContentChecks = 0;
 
   @override
-  CaptureDiagnostics get captureDiagnostics => captureDiagnosticsOverride ?? super.captureDiagnostics;
+  CaptureDiagnostics get captureDiagnostics {
+    if (captureDiagnosticsOverride != null) return captureDiagnosticsOverride!;
+    if (recordingState == RecordingState.deviceRecord) {
+      return const CaptureDiagnostics(
+        source: CaptureDiagnosticSource.necklace,
+        phase: CaptureDiagnosticPhase.streaming,
+        physicalFrames: 2,
+        physicalBytes: 320,
+        transmittedFrames: 2,
+        transmittedBytes: 320,
+      );
+    }
+    return super.captureDiagnostics;
+  }
+
+  @override
+  bool get transcriptServiceReady => recordingState == RecordingState.deviceRecord || super.transcriptServiceReady;
 
   @override
   bool get hasCapturableContent => hasContent;

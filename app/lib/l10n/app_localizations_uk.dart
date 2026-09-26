@@ -10043,4 +10043,34 @@ class AppLocalizationsUk extends AppLocalizations {
 
   @override
   String get ellaAlertChannelsImessageUnavailable => 'iMessage is unavailable while Ella upgrades messaging.';
+
+  @override
+  String get aiConsentTranscriptionReview => 'AI permission needed to transcribe · Review';
+
+  @override
+  String get ellaChatCouldntSend => 'Couldn\'t send';
+
+  @override
+  String get ellaRuntimeDiagnostics => 'Runtime Diagnostics';
+
+  @override
+  String get ellaRuntimeDiagnosticsSubtitle => 'Internal connection, consent, and audio state';
+
+  @override
+  String get diagnosticsNetworkInterface => 'Network interface';
+
+  @override
+  String get diagnosticsBackendProbe => 'Backend health probe';
+
+  @override
+  String get diagnosticsLastApi => 'Last API request';
+
+  @override
+  String get diagnosticsConsentLease => 'AI permission lease';
+
+  @override
+  String get diagnosticsBleRate => 'Necklace audio rate';
+
+  @override
+  String get diagnosticsWsRate => 'Transcription upload rate';
 }

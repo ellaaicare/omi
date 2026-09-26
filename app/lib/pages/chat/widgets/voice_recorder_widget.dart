@@ -1,11 +1,9 @@
-import 'dart:async';
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 
 import 'package:provider/provider.dart';
 import 'package:omi/widgets/shimmer_with_timeout.dart';
 
+import 'package:omi/ella/services/ai_consent_coordinator.dart';
 import 'package:omi/providers/voice_recorder_provider.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/ella/ella_theme.dart';
@@ -14,11 +12,7 @@ class VoiceRecorderWidget extends StatefulWidget {
   final Function(String) onTranscriptReady;
   final VoidCallback onClose;
 
-  const VoiceRecorderWidget({
-    super.key,
-    required this.onTranscriptReady,
-    required this.onClose,
-  });
+  const VoiceRecorderWidget({super.key, required this.onTranscriptReady, required this.onClose});
 
   @override
   State<VoiceRecorderWidget> createState() => _VoiceRecorderWidgetState();
@@ -30,18 +24,13 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
   @override
   void initState() {
     super.initState();
-    _animationController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1000),
-    )..repeat(reverse: true);
+    _animationController = AnimationController(vsync: this, duration: const Duration(milliseconds: 1000))
+      ..repeat(reverse: true);
 
     // Set up callbacks and start recording
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final provider = context.read<VoiceRecorderProvider>();
-      provider.setCallbacks(
-        onTranscriptReady: widget.onTranscriptReady,
-        onClose: widget.onClose,
-      );
+      provider.setCallbacks(onTranscriptReady: widget.onTranscriptReady, onClose: widget.onClose);
 
       // Only start recording if not already recording
       if (!provider.isRecording) {
@@ -65,10 +54,7 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
         switch (provider.state) {
           case VoiceRecorderState.recording:
             return Container(
-              decoration: BoxDecoration(
-                color: EllaColors.bgTertiary,
-                borderRadius: BorderRadius.circular(16),
-              ),
+              decoration: BoxDecoration(color: EllaColors.bgTertiary, borderRadius: BorderRadius.circular(16)),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
@@ -79,11 +65,7 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
                   Expanded(
                     child: SizedBox(
                       height: 40,
-                      child: CustomPaint(
-                        painter: AudioWavePainter(
-                          levels: provider.audioLevels,
-                        ),
-                      ),
+                      child: CustomPaint(painter: AudioWavePainter(levels: provider.audioLevels)),
                     ),
                   ),
                   GestureDetector(
@@ -91,15 +73,8 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
                     child: Container(
                       padding: const EdgeInsets.all(4),
                       margin: const EdgeInsets.only(top: 10, bottom: 10, right: 6, left: 16),
-                      decoration: const BoxDecoration(
-                        color: EllaColors.primary,
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(
-                        Icons.check,
-                        color: Colors.white,
-                        size: 20.0,
-                      ),
+                      decoration: const BoxDecoration(color: EllaColors.primary, shape: BoxShape.circle),
+                      child: const Icon(Icons.check, color: Colors.white, size: 20.0),
                     ),
                   ),
                 ],
@@ -109,22 +84,14 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
           case VoiceRecorderState.transcribing:
             return Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              decoration: BoxDecoration(
-                color: EllaColors.bgTertiary,
-                borderRadius: BorderRadius.circular(16),
-              ),
+              decoration: BoxDecoration(color: EllaColors.bgTertiary, borderRadius: BorderRadius.circular(16)),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   ShimmerWithTimeout(
                     baseColor: EllaColors.textTertiary,
                     highlightColor: EllaColors.textPrimary,
-                    child: Text(
-                      context.l10n.transcribing,
-                      style: const TextStyle(
-                        color: EllaColors.textPrimary,
-                      ),
-                    ),
+                    child: Text(context.l10n.transcribing, style: const TextStyle(color: EllaColors.textPrimary)),
                   ),
                 ],
               ),
@@ -137,14 +104,8 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
                 Container(
                   width: double.infinity,
                   padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: EllaColors.bgTertiary,
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: Text(
-                    provider.transcript,
-                    style: const TextStyle(color: EllaColors.textPrimary),
-                  ),
+                  decoration: BoxDecoration(color: EllaColors.bgTertiary, borderRadius: BorderRadius.circular(16)),
+                  child: Text(provider.transcript, style: const TextStyle(color: EllaColors.textPrimary)),
                 ),
                 const SizedBox(height: 8),
                 Row(
@@ -164,12 +125,39 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
             );
 
           case VoiceRecorderState.transcribeFailed:
+            if (provider.consentReviewRequired) {
+              return Container(
+                key: const Key('voice-recorder-consent-review'),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: EllaColors.bgTertiary,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: EllaColors.error),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        context.l10n.aiConsentTranscriptionReview,
+                        style: const TextStyle(color: EllaColors.textPrimary, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () async {
+                        if (await AiConsentCoordinator.ensure(context) && context.mounted) {
+                          await provider.startRecording();
+                        }
+                      },
+                      child: Text(context.l10n.aiConsentReviewAction),
+                    ),
+                    IconButton(onPressed: provider.close, icon: const Icon(Icons.close)),
+                  ],
+                ),
+              );
+            }
             return Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
-              decoration: BoxDecoration(
-                color: EllaColors.bgTertiary,
-                borderRadius: BorderRadius.circular(16),
-              ),
+              decoration: BoxDecoration(color: EllaColors.bgTertiary, borderRadius: BorderRadius.circular(16)),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -181,39 +169,25 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
                   Expanded(
                     child: SizedBox(
                       height: 40,
-                      child: CustomPaint(
-                        painter: AudioWavePainter(
-                          levels: provider.audioLevels,
-                        ),
-                      ),
+                      child: CustomPaint(painter: AudioWavePainter(levels: provider.audioLevels)),
                     ),
                   ),
                   Row(
                     children: [
                       GestureDetector(
-                          onTap: provider.retry,
-                          child: Container(
-                            padding: const EdgeInsets.all(4),
-                            margin: const EdgeInsets.only(left: 10, right: 0, top: 10, bottom: 10),
-                            decoration: const BoxDecoration(
-                              color: EllaColors.primary,
-                              shape: BoxShape.circle,
-                            ),
-                            child: const Icon(
-                              color: Colors.white,
-                              Icons.refresh,
-                              size: 20.0,
-                            ),
-                          )),
+                        onTap: provider.retry,
+                        child: Container(
+                          padding: const EdgeInsets.all(4),
+                          margin: const EdgeInsets.only(left: 10, right: 0, top: 10, bottom: 10),
+                          decoration: const BoxDecoration(color: EllaColors.primary, shape: BoxShape.circle),
+                          child: const Icon(color: Colors.white, Icons.refresh, size: 20.0),
+                        ),
+                      ),
                       GestureDetector(
                         onTap: provider.close,
                         child: Container(
                           padding: const EdgeInsets.only(left: 14, right: 0, top: 14, bottom: 14),
-                          child: const Icon(
-                            Icons.close,
-                            color: EllaColors.textPrimary,
-                            size: 20,
-                          ),
+                          child: const Icon(Icons.close, color: EllaColors.textPrimary, size: 20),
                         ),
                       ),
                     ],
@@ -233,9 +207,7 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
 class AudioWavePainter extends CustomPainter {
   final List<double> levels;
 
-  AudioWavePainter({
-    required List<double> levels,
-  }) : levels = List<double>.from(levels);
+  AudioWavePainter({required List<double> levels}) : levels = List<double>.from(levels);
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -262,11 +234,7 @@ class AudioWavePainter extends CustomPainter {
       final bottomY = height / 2 + barHeight / 2;
 
       // Draw only the individual bars with rounded caps
-      canvas.drawLine(
-        Offset(x, topY),
-        Offset(x, bottomY),
-        paint,
-      );
+      canvas.drawLine(Offset(x, topY), Offset(x, bottomY), paint);
     }
   }
 

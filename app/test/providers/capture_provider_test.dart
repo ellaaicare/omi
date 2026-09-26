@@ -14,6 +14,7 @@ import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/services/ella_account_commit_barrier.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
+import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/people_provider.dart';
@@ -310,6 +311,84 @@ ServerConversation _conversationWithEvidence(
 }
 
 void main() {
+  test('retryable consent refresh keeps a durable same-account capture authority usable', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    SharedPreferencesUtil.clearAiConsentServerVerification();
+    final authority = AiConsentAuthoritySnapshot.capture(expectedUid: 'uid-a');
+
+    expect(
+      await ensureCaptureConsentAuthority(
+        hasCurrentConsent: () => SharedPreferencesUtil().aiConsentAccepted,
+        persistedAuthority: () => authority,
+        lastServerConfirmationAge: () => SharedPreferencesUtil().aiConsentLastServerConfirmationAge,
+        refreshAuthority: (uid, receiptId, serverDecidedAt) async => const AiConsentAuthorityRefreshResult(
+          AiConsentAuthorityRefreshDisposition.retryable,
+          supportCode: 'ai_consent_authority_unavailable',
+        ),
+      ),
+      isTrue,
+    );
+  });
+
+  test('consent refresh exception keeps a durable same-account capture authority usable', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    SharedPreferencesUtil.clearAiConsentServerVerification();
+    final authority = AiConsentAuthoritySnapshot.capture(expectedUid: 'uid-a');
+
+    expect(
+      await ensureCaptureConsentAuthority(
+        hasCurrentConsent: () => SharedPreferencesUtil().aiConsentAccepted,
+        persistedAuthority: () => authority,
+        lastServerConfirmationAge: () => SharedPreferencesUtil().aiConsentLastServerConfirmationAge,
+        refreshAuthority: (uid, receiptId, serverDecidedAt) async => throw TimeoutException('consent refresh'),
+      ),
+      isTrue,
+    );
+  });
+
+  test('explicit consent revoke blocks capture before the socket opens', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    SharedPreferencesUtil.clearAiConsentServerVerification();
+    final authority = AiConsentAuthoritySnapshot.capture(expectedUid: 'uid-a');
+
+    expect(
+      await ensureCaptureConsentAuthority(
+        hasCurrentConsent: () => SharedPreferencesUtil().aiConsentAccepted,
+        persistedAuthority: () => authority,
+        lastServerConfirmationAge: () => SharedPreferencesUtil().aiConsentLastServerConfirmationAge,
+        refreshAuthority: (uid, receiptId, serverDecidedAt) async => const AiConsentAuthorityRefreshResult(
+          AiConsentAuthorityRefreshDisposition.revoked,
+        ),
+      ),
+      isFalse,
+    );
+  });
+
+  test('retryable consent refresh cannot reset an expired grace checkpoint', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final preferences = SharedPreferencesUtil();
+    preferences.markAiConsentLastServerConfirmed(
+      uid: 'uid-a',
+      receiptId: 'aicr_uid-a',
+      confirmedAt: DateTime.now().subtract(const Duration(minutes: 31)),
+    );
+    SharedPreferencesUtil.clearAiConsentServerVerification();
+    final authority = AiConsentAuthoritySnapshot.capture(expectedUid: 'uid-a');
+
+    expect(
+      await ensureCaptureConsentAuthority(
+        hasCurrentConsent: () => preferences.aiConsentAccepted,
+        persistedAuthority: () => authority,
+        lastServerConfirmationAge: () => preferences.aiConsentLastServerConfirmationAge,
+        refreshAuthority: (uid, receiptId, serverDecidedAt) async => const AiConsentAuthorityRefreshResult(
+          AiConsentAuthorityRefreshDisposition.retryable,
+          supportCode: 'http_503',
+        ),
+      ),
+      isFalse,
+    );
+  });
+
   test('capture socket sends no frames until exact-authority protocol readiness is acknowledged', () async {
     await _grantCaptureEgressAuthority('uid-a');
     final pure = _FakePureSocket(status: PureSocketStatus.notConnected);

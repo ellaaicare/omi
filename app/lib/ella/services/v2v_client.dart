@@ -637,17 +637,6 @@ class V2VClient {
       _activeClient = this;
     }
 
-    if (!SharedPreferencesUtil().aiConsentAccepted) {
-      return _completeReceipt(
-        V2VConnectionReceipt(
-          connected: false,
-          provider: provider,
-          stage: V2VConnectionStage.consent,
-          errorCode: 'ai_consent_required',
-        ),
-      );
-    }
-
     if (!isSessionProvider(provider)) {
       return _completeReceipt(
         V2VConnectionReceipt(
@@ -683,7 +672,7 @@ class V2VClient {
       );
     }
 
-    final authority = AiConsentAuthoritySnapshot.capture(expectedUid: uid);
+    final authority = AiConsentActiveSessionLease.authorityForSessionStart(expectedUid: uid);
     if (authority == null) {
       if (_activeClient == this) _activeClient = null;
       return _completeReceipt(

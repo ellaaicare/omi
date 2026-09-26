@@ -19,6 +19,9 @@ class SharedPreferencesUtil {
   static final SharedPreferencesUtil _instance = SharedPreferencesUtil._internal();
   static SharedPreferences? _preferences;
   static const Duration aiConsentServerVerificationTtl = Duration(minutes: 5);
+  static const String _aiConsentLastServerConfirmedAtKey = 'aiConsentLastServerConfirmedAt';
+  static const String _aiConsentLastServerConfirmedUidKey = 'aiConsentLastServerConfirmedUid';
+  static const String _aiConsentLastServerConfirmedReceiptIdKey = 'aiConsentLastServerConfirmedReceiptId';
   static String _verifiedAiConsentUid = '';
   static String _verifiedAiConsentReceiptId = '';
   static String _verifiedAiConsentPolicyVersion = '';
@@ -252,7 +255,8 @@ class SharedPreferencesUtil {
 
   /// Returns the durable receipt for the current account and bundled contract
   /// without treating it as live data authority. Callers must still perform a
-  /// fresh server verification before any protected capture or egress.
+  /// fresh server verification or enforce the bounded last-confirmed grace
+  /// window before any protected capture or egress.
   String get persistedAiConsentReceiptIdForCurrentAccount {
     if (isEllaInternalPilotEnabled && !isEllaInternalPilotLocaleSupported(getString('app_locale'))) {
       return '';
@@ -314,6 +318,20 @@ class SharedPreferencesUtil {
     }
     final remaining = aiConsentServerVerificationTtl - DateTime.now().difference(verifiedAt);
     return remaining.isNegative ? Duration.zero : remaining;
+  }
+
+  DateTime? get aiConsentLastServerConfirmedAt {
+    final confirmedUid = getString(_aiConsentLastServerConfirmedUidKey);
+    final confirmedReceiptId = getString(_aiConsentLastServerConfirmedReceiptIdKey);
+    if (uid.isEmpty || confirmedUid != uid || confirmedReceiptId != aiConsentReceiptId) return null;
+    return DateTime.tryParse(getString(_aiConsentLastServerConfirmedAtKey));
+  }
+
+  Duration? get aiConsentLastServerConfirmationAge {
+    final confirmedAt = aiConsentLastServerConfirmedAt;
+    if (confirmedAt == null) return null;
+    final age = DateTime.now().difference(confirmedAt);
+    return age.isNegative ? Duration.zero : age;
   }
 
   set aiConsentAcceptedAt(String value) => saveString('aiConsentAcceptedAt', value);
@@ -387,6 +405,22 @@ class SharedPreferencesUtil {
     _verifiedAiConsentScopeVersion = scopeVersion;
     _verifiedAiConsentScopeHash = scopeHash;
     _verifiedAiConsentAt = verifiedAt ?? DateTime.now();
+    markAiConsentLastServerConfirmed(
+      uid: uid,
+      receiptId: receiptId,
+      confirmedAt: _verifiedAiConsentAt,
+    );
+  }
+
+  void markAiConsentLastServerConfirmed({
+    required String uid,
+    required String receiptId,
+    DateTime? confirmedAt,
+  }) {
+    if (uid.isEmpty || uid != this.uid || receiptId.isEmpty || receiptId != aiConsentReceiptId) return;
+    saveString(_aiConsentLastServerConfirmedUidKey, uid);
+    saveString(_aiConsentLastServerConfirmedReceiptIdKey, receiptId);
+    saveString(_aiConsentLastServerConfirmedAtKey, (confirmedAt ?? DateTime.now()).toUtc().toIso8601String());
   }
 
   static void clearAiConsentServerVerification() {
@@ -403,6 +437,9 @@ class SharedPreferencesUtil {
   static void _invalidateAiConsentAuthority() {
     _aiConsentAuthorityGeneration++;
     clearAiConsentServerVerification();
+    _preferences?.remove(_aiConsentLastServerConfirmedAtKey);
+    _preferences?.remove(_aiConsentLastServerConfirmedUidKey);
+    _preferences?.remove(_aiConsentLastServerConfirmedReceiptIdKey);
     _clearEllaProvisioningServerVerification();
     _aiConsentAuthorityChanges.value = _aiConsentAuthorityGeneration;
   }
@@ -1033,6 +1070,9 @@ class SharedPreferencesUtil {
       'aiConsentScopeHash',
       'aiConsentServerDecidedAt',
       'aiConsentDeferredVersion',
+      _aiConsentLastServerConfirmedAtKey,
+      _aiConsentLastServerConfirmedUidKey,
+      _aiConsentLastServerConfirmedReceiptIdKey,
     ]) {
       await remove(key);
     }

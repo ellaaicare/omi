@@ -511,6 +511,42 @@ void main() {
       await client.disconnect();
     });
 
+    test('recent server confirmation keeps V2V startup available during transient verification failure', () async {
+      grantCurrentConsent();
+      final preferences = SharedPreferencesUtil();
+      preferences.markAiConsentServerVerified(
+        uid: 'uid-a',
+        receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+        policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+        processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+        profileBindingId: 'profile-binding-a',
+        scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+        scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+        verifiedAt: DateTime.now().subtract(const Duration(minutes: 6)),
+      );
+      expect(preferences.aiConsentAccepted, isFalse);
+
+      final protectedEgress = <V2VProtectedEgressBoundary>[];
+      final client = V2VClient(
+        onEvent: (_) {},
+        onConnectionChanged: (_) {},
+        providerRegistryValidator: (_) async => null,
+        sessionCreator: (_, __, ___) async => const {},
+        onProtectedEgress: protectedEgress.add,
+      );
+
+      final receipt = await client.connect(provider: 'grok-voice');
+
+      expect(receipt.connected, isFalse);
+      expect(receipt.stage, V2VConnectionStage.session);
+      expect(receipt.errorCode, 'invalid_session_contract');
+      expect(protectedEgress, [
+        V2VProtectedEgressBoundary.providerRegistry,
+        V2VProtectedEgressBoundary.session,
+      ]);
+      await client.disconnect();
+    });
+
     test('disconnect releases the interactive iOS audio session', () async {
       var releases = 0;
       final client = V2VClient(
@@ -996,7 +1032,7 @@ void main() {
       await client.disconnect();
     });
 
-    test('profile drift during delayed startup produces zero protected egress and zero microphone frames', () async {
+    test('profile drift during delayed startup preserves the server-confirmed authority', () async {
       grantCurrentConsent();
       final preferences = SharedPreferencesUtil();
       final boundaryReached = Completer<void>();
@@ -1020,15 +1056,18 @@ void main() {
       final receipt = await connectFuture;
 
       expect(receipt.connected, isFalse);
-      expect(receipt.stage, V2VConnectionStage.consent);
-      expect(receipt.errorCode, 'consent_authority_lost');
-      expect(protectedEgress, isEmpty);
+      expect(receipt.stage, V2VConnectionStage.session);
+      expect(receipt.errorCode, isNot('consent_authority_lost'));
+      expect(protectedEgress, [
+        V2VProtectedEgressBoundary.providerRegistry,
+        V2VProtectedEgressBoundary.session,
+      ]);
       expect(client.micChunksSentForTesting, 0);
       expect(client.hasActiveConsentLeaseForTesting, isFalse);
       await client.disconnect();
     });
 
-    test('profile drift at the microphone boundary starts no recorder and sends no protected data', () async {
+    test('profile drift at the microphone boundary keeps the server-confirmed lease active', () async {
       grantCurrentConsent();
       final preferences = SharedPreferencesUtil();
       final authority = AiConsentAuthoritySnapshot.capture(preferences: preferences, expectedUid: 'uid-a');
@@ -1058,11 +1097,11 @@ void main() {
       preferences.verifiedPersonaId = 'persona-b';
       releaseBoundary.complete();
 
-      expect(await startFuture, isFalse);
-      expect(microphoneStarts, 0);
-      expect(protectedEgress, isEmpty);
+      expect(await startFuture, isTrue);
+      expect(microphoneStarts, 1);
+      expect(protectedEgress, [V2VProtectedEgressBoundary.microphoneCapture]);
       expect(client.micChunksSentForTesting, 0);
-      expect(client.hasActiveConsentLeaseForTesting, isFalse);
+      expect(client.hasActiveConsentLeaseForTesting, isTrue);
       await client.disconnect();
     });
 

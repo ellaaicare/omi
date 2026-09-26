@@ -24,6 +24,20 @@ EllaDisplayValue parseEllaDisplayValue(String value) {
 
 String stripEllaDisplayPrefix(String value) => parseEllaDisplayValue(value).text;
 
+String safeMemoryDisplayTitle(String value, String fallback) {
+  var title = value.replaceFirst(RegExp(r'^🪽\s*'), '').replaceFirst(RegExp(r'^(?:\[[^\]]+\]\s*)+'), '').trim();
+  title = title.split(RegExp(r'\s*(?:,|\band\b)\s*', caseSensitive: false)).first.trim();
+  title = title.replaceAll(
+    RegExp(
+      r'\b(?:doctor|medical|clinical|monitoring|emergency|alert|tracking|detecting)(?:[- ]\w+)?\b',
+      caseSensitive: false,
+    ),
+    '',
+  );
+  final words = title.split(RegExp(r'\s+')).where((word) => word.isNotEmpty).take(4).toList();
+  return words.isEmpty ? fallback : words.join(' ');
+}
+
 String persistEllaDisplayValue(String value, {required bool isEllaGenerated}) {
   final displayValue = parseEllaDisplayValue(value);
   return isEllaGenerated ? '[Ella] ${displayValue.text.trimLeft()}' : displayValue.text;

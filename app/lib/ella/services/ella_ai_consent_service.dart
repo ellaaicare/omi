@@ -34,6 +34,8 @@ class AiConsentStatus {
     required this.scopeVersion,
     required this.scopeHash,
     required this.serverDecidedAt,
+    this.authorityState = '',
+    this.accountEpochToken = '',
   });
 
   factory AiConsentStatus.fromJson(Map<String, dynamic> json) {
@@ -51,7 +53,7 @@ class AiConsentStatus {
         : null;
     return AiConsentStatus(
       subjectUid: json['subject_uid'] is String ? json['subject_uid'] as String : '',
-      authorized: json['authorized'] is bool ? json['authorized'] as bool : false,
+      authorized: json['authorized'] is bool ? json['authorized'] as bool : json['authority_state'] == 'authorized',
       policy: policy,
       decision: readString('decision'),
       receiptId: readString('receipt_id'),
@@ -64,6 +66,8 @@ class AiConsentStatus {
       scopeVersion: readString('scope_version'),
       scopeHash: readString('scope_hash'),
       serverDecidedAt: DateTime.tryParse(readString('server_decided_at')),
+      authorityState: json['authority_state'] is String ? json['authority_state'] as String : '',
+      accountEpochToken: json['account_epoch_token'] is String ? json['account_epoch_token'] as String : '',
     );
   }
 
@@ -81,6 +85,8 @@ class AiConsentStatus {
   final String scopeVersion;
   final String scopeHash;
   final DateTime? serverDecidedAt;
+  final String authorityState;
+  final String accountEpochToken;
 
   bool isCurrentGrantFor(String uid, {String? expectedProfileBindingId}) {
     return uid.isNotEmpty &&
@@ -110,6 +116,7 @@ class AiConsentSubmission {
     required this.locale,
     required this.scopeVersion,
     required this.scopeHash,
+    this.accountEpochToken = '',
   });
 
   final AiConsentDecision decision;
@@ -121,6 +128,7 @@ class AiConsentSubmission {
   final String locale;
   final String scopeVersion;
   final String scopeHash;
+  final String accountEpochToken;
 
   Map<String, dynamic> toJson() => {
         'decision': decision.wireValue,
@@ -132,6 +140,7 @@ class AiConsentSubmission {
         'locale': locale,
         'scope_version': scopeVersion,
         'scope_hash': scopeHash,
+        if (accountEpochToken.isNotEmpty) 'account_epoch_token': accountEpochToken,
       };
 }
 
@@ -147,6 +156,52 @@ class AiConsentSubmitResult {
 
   /// Backend `detail.code` for non-200 responses, when present.
   final String errorCode;
+}
+
+/// Transport-level status read used by active capture. A missing status with
+/// no HTTP code means the server was unreachable, not that consent was revoked.
+class AiConsentFetchResult {
+  const AiConsentFetchResult({
+    this.status,
+    this.httpStatus,
+    this.errorCode = '',
+    this.authorityState = '',
+    this.retryable = false,
+  });
+
+  final AiConsentStatus? status;
+  final int? httpStatus;
+  final String errorCode;
+  final String authorityState;
+  final bool retryable;
+}
+
+enum AiConsentAuthorityRefreshDisposition {
+  verified,
+  retryable,
+  revoked,
+  declined,
+  reconsentRequired,
+  deleted,
+  notAccepted,
+  accountChanged,
+}
+
+class AiConsentAuthorityRefreshResult {
+  const AiConsentAuthorityRefreshResult(
+    this.disposition, {
+    this.status,
+    this.supportCode = '',
+    this.renewsStartupGrace = false,
+  });
+
+  final AiConsentAuthorityRefreshDisposition disposition;
+  final AiConsentStatus? status;
+  final String supportCode;
+  final bool renewsStartupGrace;
+
+  bool get verified => disposition == AiConsentAuthorityRefreshDisposition.verified;
+  bool get retryable => disposition == AiConsentAuthorityRefreshDisposition.retryable;
 }
 
 enum AiConsentGrantFailureKind { authorityChanged, policyMismatch, serverUnavailable, network, rejected }
@@ -171,6 +226,11 @@ abstract class EllaAiConsentTransport {
   Future<AiConsentPolicy?> fetchPolicy();
 
   Future<AiConsentStatus?> fetchStatus();
+
+  Future<AiConsentFetchResult> fetchStatusWithDetails() async {
+    final status = await fetchStatus();
+    return AiConsentFetchResult(status: status, httpStatus: status == null ? null : 200);
+  }
 
   Future<AiConsentStatus?> submit(AiConsentSubmission submission);
 
@@ -203,6 +263,9 @@ class EllaAiConsentHttpTransport implements EllaAiConsentTransport {
       headers: const {},
       method: 'GET',
       body: '',
+      timeout: const Duration(seconds: 6),
+      retries: 0,
+      enforceAbsoluteTimeout: true,
       requireAuthCheck: false,
     );
     if (response?.statusCode != 200) return null;
@@ -211,11 +274,34 @@ class EllaAiConsentHttpTransport implements EllaAiConsentTransport {
   }
 
   @override
-  Future<AiConsentStatus?> fetchStatus() async {
-    final response = await makeApiCall(url: _endpoint, headers: const {}, method: 'GET', body: '');
-    if (response?.statusCode != 200) return null;
-    final body = _decodeMap(response!.body);
-    return body == null ? null : AiConsentStatus.fromJson(body);
+  Future<AiConsentStatus?> fetchStatus() async => (await fetchStatusWithDetails()).status;
+
+  @override
+  Future<AiConsentFetchResult> fetchStatusWithDetails() async {
+    final response = await makeApiCall(
+      url: _endpoint,
+      headers: const {},
+      method: 'GET',
+      body: '',
+      timeout: const Duration(seconds: 8),
+      retries: 0,
+      enforceAbsoluteTimeout: true,
+    );
+    if (response == null) return const AiConsentFetchResult();
+    if (response.statusCode != 200) {
+      final detail = _errorDetail(response.body);
+      return AiConsentFetchResult(
+        httpStatus: response.statusCode,
+        errorCode: detail.code,
+        authorityState: detail.authorityState,
+        retryable: detail.retryable,
+      );
+    }
+    final body = _decodeMap(response.body);
+    return AiConsentFetchResult(
+      status: body == null ? null : AiConsentStatus.fromJson(body),
+      httpStatus: response.statusCode,
+    );
   }
 
   @override
@@ -228,6 +314,9 @@ class EllaAiConsentHttpTransport implements EllaAiConsentTransport {
       headers: const {},
       method: 'POST',
       body: jsonEncode(submission.toJson()),
+      timeout: const Duration(seconds: 10),
+      retries: 0,
+      enforceAbsoluteTimeout: true,
     );
     if (response == null) return const AiConsentSubmitResult();
     if (response.statusCode != 200) {
@@ -238,11 +327,24 @@ class EllaAiConsentHttpTransport implements EllaAiConsentTransport {
   }
 
   static String _errorCode(String body) {
+    return _errorDetail(body).code;
+  }
+
+  static ({String code, String authorityState, bool retryable}) _errorDetail(String body) {
     final decoded = _decodeMap(body);
     final detail = decoded?['detail'];
-    if (detail is Map<String, dynamic> && detail['code'] is String) return detail['code'] as String;
-    if (decoded?['code'] is String) return decoded!['code'] as String;
-    return '';
+    if (detail is Map<String, dynamic>) {
+      return (
+        code: detail['code'] is String ? detail['code'] as String : '',
+        authorityState: detail['authority_state'] is String ? detail['authority_state'] as String : '',
+        retryable: detail['retryable'] == true,
+      );
+    }
+    return (
+      code: decoded?['code'] is String ? decoded!['code'] as String : '',
+      authorityState: decoded?['authority_state'] is String ? decoded!['authority_state'] as String : '',
+      retryable: decoded?['retryable'] == true,
+    );
   }
 }
 
@@ -270,6 +372,167 @@ class EllaAiConsentService {
   final String Function() _localeFactory;
   final bool _pilotLocaleRestricted;
   final String Function() _appLocaleFactory;
+
+  /// Refreshes an already-authorized active audio session. Only explicit
+  /// server dispositions are terminal; transport and deploy uncertainty stays
+  /// retryable so the lease can apply its bounded grace window.
+  Future<AiConsentAuthorityRefreshResult> refreshActiveSessionAuthority({
+    required String uid,
+    required String expectedReceiptId,
+    required DateTime? expectedServerDecidedAt,
+  }) async {
+    if (uid.isEmpty || _preferences.uid != uid || expectedReceiptId.isEmpty) {
+      return const AiConsentAuthorityRefreshResult(AiConsentAuthorityRefreshDisposition.accountChanged);
+    }
+    final persistenceAuthority = _captureAuthority(uid);
+
+    AiConsentFetchResult response;
+    try {
+      response = await _transport.fetchStatusWithDetails();
+    } catch (_) {
+      return const AiConsentAuthorityRefreshResult(
+        AiConsentAuthorityRefreshDisposition.retryable,
+        supportCode: 'transport_exception',
+      );
+    }
+    if (_preferences.uid != uid) {
+      return const AiConsentAuthorityRefreshResult(AiConsentAuthorityRefreshDisposition.accountChanged);
+    }
+
+    final terminalFromCode = _terminalRefreshDisposition(
+      response.authorityState.isNotEmpty ? response.authorityState : response.errorCode,
+    );
+    if (terminalFromCode != null) {
+      if (!_isExpectedRefreshAuthorityCurrent(
+        persistenceAuthority,
+        expectedReceiptId: expectedReceiptId,
+        expectedServerDecidedAt: expectedServerDecidedAt,
+      )) {
+        return const AiConsentAuthorityRefreshResult(
+          AiConsentAuthorityRefreshDisposition.retryable,
+          supportCode: 'authority_superseded',
+        );
+      }
+      _applyTerminalRefreshDisposition(terminalFromCode);
+      return AiConsentAuthorityRefreshResult(terminalFromCode, supportCode: response.errorCode);
+    }
+    final status = response.status;
+    if (response.httpStatus != 200 || status == null) {
+      return AiConsentAuthorityRefreshResult(
+        AiConsentAuthorityRefreshDisposition.retryable,
+        supportCode: response.errorCode.isEmpty ? 'http_${response.httpStatus ?? 'unreachable'}' : response.errorCode,
+      );
+    }
+    if (status.subjectUid != uid) {
+      return const AiConsentAuthorityRefreshResult(
+        AiConsentAuthorityRefreshDisposition.retryable,
+        supportCode: 'subject_mismatch',
+      );
+    }
+
+    final terminalFromStatus = _terminalRefreshDisposition(
+      status.authorityState.isNotEmpty ? status.authorityState : status.decision,
+    );
+    if (terminalFromStatus != null) {
+      if (!_isExpectedRefreshAuthorityCurrent(
+        persistenceAuthority,
+        expectedReceiptId: expectedReceiptId,
+        expectedServerDecidedAt: expectedServerDecidedAt,
+      )) {
+        return const AiConsentAuthorityRefreshResult(
+          AiConsentAuthorityRefreshDisposition.retryable,
+          supportCode: 'authority_superseded',
+        );
+      }
+      _applyTerminalRefreshDisposition(terminalFromStatus);
+      return AiConsentAuthorityRefreshResult(terminalFromStatus, status: status);
+    }
+
+    if (persistenceAuthority == null || !_isCurrentAuthority(persistenceAuthority)) {
+      return const AiConsentAuthorityRefreshResult(
+        AiConsentAuthorityRefreshDisposition.retryable,
+        supportCode: 'authority_superseded',
+      );
+    }
+    final expectedProfileBindingId = persistenceAuthority.profileBindingId;
+    if (expectedProfileBindingId.isEmpty || status.profileBindingId != expectedProfileBindingId) {
+      return AiConsentAuthorityRefreshResult(
+        AiConsentAuthorityRefreshDisposition.accountChanged,
+        status: status,
+        supportCode: 'profile_binding_changed',
+      );
+    }
+
+    final decidedAt = status.serverDecidedAt;
+    final sameReceipt = status.receiptId == expectedReceiptId;
+    final newerReceipt = status.receiptId.startsWith(SharedPreferencesUtil.currentAiConsentReceiptPrefix) &&
+        decidedAt != null &&
+        (expectedServerDecidedAt == null || decidedAt.isAfter(expectedServerDecidedAt));
+    if (!status.authorized ||
+        (status.authorityState.isEmpty && status.decision != AiConsentDecision.granted.wireValue) ||
+        (!sameReceipt && !newerReceipt)) {
+      return AiConsentAuthorityRefreshResult(
+        AiConsentAuthorityRefreshDisposition.retryable,
+        status: status,
+        supportCode: 'grant_not_explicitly_terminal',
+      );
+    }
+
+    // Extend the normal five-minute preference TTL only when the response also
+    // matches the bundled contract. A server-authorized same/newer receipt may
+    // still keep this active lease alive across non-material deploy drift.
+    var persistedVerifiedGrant = false;
+    if (status.isCurrentGrantFor(uid, expectedProfileBindingId: expectedProfileBindingId)) {
+      persistedVerifiedGrant = _persistVerifiedGrant(persistenceAuthority, status);
+    }
+    if (persistedVerifiedGrant) {
+      _preferences.markAiConsentLastServerConfirmed(
+        uid: uid,
+        receiptId: status.receiptId,
+      );
+    }
+    return AiConsentAuthorityRefreshResult(
+      AiConsentAuthorityRefreshDisposition.verified,
+      status: status,
+      renewsStartupGrace: persistedVerifiedGrant,
+    );
+  }
+
+  static AiConsentAuthorityRefreshDisposition? _terminalRefreshDisposition(String value) {
+    return switch (value.trim().toLowerCase()) {
+      'revoked' || 'ai_consent_revoked' => AiConsentAuthorityRefreshDisposition.revoked,
+      'declined' || 'ai_consent_declined' => AiConsentAuthorityRefreshDisposition.declined,
+      'reconsent_required' ||
+      're-consent-required' ||
+      'ai_consent_reconsent_required' ||
+      'ai_consent_required' =>
+        AiConsentAuthorityRefreshDisposition.reconsentRequired,
+      'deleted' || 'account_deleted' => AiConsentAuthorityRefreshDisposition.deleted,
+      'not_accepted' => AiConsentAuthorityRefreshDisposition.notAccepted,
+      _ => null,
+    };
+  }
+
+  void _applyTerminalRefreshDisposition(AiConsentAuthorityRefreshDisposition disposition) {
+    if (disposition == AiConsentAuthorityRefreshDisposition.declined) {
+      _preferences.deferAiConsent();
+    } else {
+      _preferences.declineAiConsent();
+    }
+  }
+
+  bool _isExpectedRefreshAuthorityCurrent(
+    _AiConsentAuthority? authority, {
+    required String expectedReceiptId,
+    required DateTime? expectedServerDecidedAt,
+  }) {
+    if (authority == null || !_isCurrentAuthority(authority) || _preferences.aiConsentReceiptId != expectedReceiptId) {
+      return false;
+    }
+    if (expectedServerDecidedAt == null) return true;
+    final currentServerDecidedAt = DateTime.tryParse(_preferences.aiConsentServerDecidedAt);
+    return currentServerDecidedAt?.isAtSameMomentAs(expectedServerDecidedAt) == true;
+  }
 
   Future<bool> refreshServerAuthority({required String uid}) async {
     final authority = _captureAuthority(uid);
@@ -330,12 +593,12 @@ class EllaAiConsentService {
     SharedPreferencesUtil.clearAiConsentServerVerification();
     if (!_requireCurrentAuthority(authority)) return authorityChanged;
 
-    final policy = await _transport.fetchPolicy();
+    final policy = await _fetchAcceptedPolicy();
     if (!_requireCurrentAuthority(authority)) return authorityChanged;
     if (policy == null) {
       return const AiConsentGrantOutcome.failed(
-        AiConsentGrantFailureKind.serverUnavailable,
-        supportCode: 'consent_policy_unavailable',
+        AiConsentGrantFailureKind.policyMismatch,
+        supportCode: 'consent_policy_mismatch',
       );
     }
     if (!policy.isBundledCurrent) {
@@ -345,9 +608,41 @@ class EllaAiConsentService {
       );
     }
 
-    final result =
-        await _transport.submitWithDetails(_buildSubmission(policy: policy, decision: AiConsentDecision.granted));
+    var result = await _transport.submitWithDetails(
+      _buildSubmission(policy: policy, decision: AiConsentDecision.granted),
+    );
     if (!_requireCurrentAuthority(authority)) return authorityChanged;
+    if (result.httpStatus == 403 && result.errorCode == 'ai_consent_account_deleted') {
+      AiConsentFetchResult epochResponse;
+      try {
+        epochResponse = await _transport.fetchStatusWithDetails();
+      } catch (_) {
+        return const AiConsentGrantOutcome.failed(
+          AiConsentGrantFailureKind.serverUnavailable,
+          supportCode: 'account_epoch_unavailable',
+        );
+      }
+      if (!_requireCurrentAuthority(authority)) return authorityChanged;
+      final epochStatus = epochResponse.status;
+      if (epochResponse.httpStatus != 200 ||
+          epochStatus == null ||
+          epochStatus.subjectUid != uid ||
+          epochStatus.authorityState != 'deleted' ||
+          epochStatus.accountEpochToken.isEmpty) {
+        return AiConsentGrantOutcome.failed(
+          AiConsentGrantFailureKind.serverUnavailable,
+          supportCode: epochResponse.errorCode.isEmpty ? 'account_epoch_unavailable' : epochResponse.errorCode,
+        );
+      }
+      result = await _transport.submitWithDetails(
+        _buildSubmission(
+          policy: policy,
+          decision: AiConsentDecision.granted,
+          accountEpochToken: epochStatus.accountEpochToken,
+        ),
+      );
+      if (!_requireCurrentAuthority(authority)) return authorityChanged;
+    }
     if (result.httpStatus == null) {
       return const AiConsentGrantOutcome.failed(AiConsentGrantFailureKind.network);
     }
@@ -404,7 +699,11 @@ class EllaAiConsentService {
     return _requireCurrentAuthority(authority) ? status : null;
   }
 
-  AiConsentSubmission _buildSubmission({required AiConsentPolicy policy, required AiConsentDecision decision}) {
+  AiConsentSubmission _buildSubmission({
+    required AiConsentPolicy policy,
+    required AiConsentDecision decision,
+    String accountEpochToken = '',
+  }) {
     final fullVersion = _clientVersionFactory();
     final separator = fullVersion.lastIndexOf('+');
     final appVersion = separator > 0 ? fullVersion.substring(0, separator) : fullVersion;
@@ -420,12 +719,14 @@ class EllaAiConsentService {
       locale: _localeFactory(),
       scopeVersion: policy.scopeVersion,
       scopeHash: policy.scopeHash,
+      accountEpochToken: accountEpochToken,
     );
   }
 
   Future<AiConsentPolicy?> _fetchAcceptedPolicy() async {
     final policy = await _transport.fetchPolicy();
-    return policy?.isBundledCurrent == true ? policy : null;
+    if (policy == null) return AiConsentPolicy.bundled;
+    return policy.isBundledCurrent ? policy : null;
   }
 
   _AiConsentAuthority? _captureAuthority(String uid) {

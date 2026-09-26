@@ -18,6 +18,7 @@ import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
 import 'package:omi/ella/pages/ella_voice_chat_page.dart';
 import 'package:omi/ella/pages/guardian_alert_history_page.dart';
+import 'package:omi/ella/services/ai_consent_coordinator.dart';
 import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
 import 'package:omi/ella/services/guardian_mode_service.dart' as guardian_native;
@@ -26,7 +27,6 @@ import 'package:omi/ella/services/today_card_controller.dart';
 import 'package:omi/ella/services/today_card_repository.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
-import 'package:omi/ella/widgets/memory_artwork_image.dart';
 import 'package:omi/ella/widgets/today_card_surface.dart';
 import 'package:omi/pages/capture/connect.dart';
 import 'package:omi/pages/conversation_capturing/page.dart';
@@ -36,6 +36,7 @@ import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/ella_provisioning_provider.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
+import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
@@ -180,20 +181,7 @@ Set<String> homeRecentArtworkRepairMemoryIds(
 }
 
 String homeMemoryDisplayTitle(ServerConversation conversation, String fallback) {
-  var title = conversation.structured.title
-      .replaceFirst(RegExp(r'^🪽\s*'), '')
-      .replaceFirst(RegExp(r'^(?:\[[^\]]+\]\s*)+'), '')
-      .trim();
-  title = title.split(RegExp(r'\s*(?:,|\band\b)\s*', caseSensitive: false)).first.trim();
-  title = title.replaceAll(
-    RegExp(
-      r'\b(?:doctor|medical|clinical|monitoring|emergency|alert|tracking|detecting)(?:[- ]\w+)?\b',
-      caseSensitive: false,
-    ),
-    '',
-  );
-  final words = title.split(RegExp(r'\s+')).where((word) => word.isNotEmpty).take(4).toList();
-  return words.isEmpty ? fallback : words.join(' ');
+  return safeMemoryDisplayTitle(conversation.structured.title, fallback);
 }
 
 class TodayPage extends StatefulWidget {
@@ -1822,8 +1810,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       if (necklaceTransportOwned) {
         if (necklaceConnected && connectedDevice != null) {
           _resumeNecklaceAfterPhoneCapture = connectedDevice;
-          _resumeNecklaceWithFreshSessionAfterPhoneCapture =
-              todayNecklaceFailureRequiresFreshSession(capture.captureDiagnostics.failure);
+          _resumeNecklaceWithFreshSessionAfterPhoneCapture = todayNecklaceFailureRequiresFreshSession(
+            capture.captureDiagnostics.failure,
+          );
         }
         if (capture.recordingState == RecordingState.deviceRecord || capture.recordingState == RecordingState.pause) {
           final hadCapturableContent = capture.captureDiagnostics.hasPhysicalAudio || capture.hasCapturableContent;
@@ -2052,9 +2041,6 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                               artworkRefreshEpoch: _homeArtworkDisplayEpoch,
                               artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
                               enqueueArtworkIfMissing: automaticArtworkRepairMemoryIds.contains(heroMemory.id),
-                              artworkFallbackAsset: automaticArtworkRepairMemoryIds.contains(heroMemory.id)
-                                  ? memoryArtworkWatercolorFallbackAsset
-                                  : null,
                               onOpen: () => _openMemoryDetail(heroMemory),
                               onDelete: () => _deleteMemory(heroMemory),
                             ),
@@ -2139,6 +2125,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               necklaceConnectionFailed: device.connectionAttemptFailed,
               recordingState: capture.recordingState,
               diagnostics: capture.captureDiagnostics,
+              transcriptionReady: capture.transcriptServiceReady,
               showWhispers: showGuardianSurfaces,
               whispersEnabled: _whispersOn,
               whispersVerified: _whispersVerified,
@@ -2147,6 +2134,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                   Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage())),
               onViewTranscript: () => _openLiveTranscript(capture),
               onSourceSelected: _selectCaptureSource,
+              onReviewConsent: () => unawaited(AiConsentCoordinator.ensure(context)),
               onUnavailable: () => ScaffoldMessenger.of(
                 context,
               ).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable))),
@@ -2190,7 +2178,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                 artworkRefreshEpoch: _homeArtworkDisplayEpoch,
                 artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
                 automaticRepairMemoryIds: automaticRepairMemoryIds,
-                artworkFallbackMemoryIds: automaticRepairMemoryIds,
+                now: now,
                 onOpen: () {
                   final authority = _memoryPresentationAuthorityProvider();
                   if (SharedPreferencesUtil.isPublicBuild && (authority == null || !authority.isExactCurrent())) {
@@ -2257,8 +2245,6 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         artworkRefreshEpoch: _homeArtworkDisplayEpoch,
         artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
         enqueueArtworkIfMissing: automaticRepairMemoryIds.contains(conversation.id),
-        artworkFallbackAsset:
-            automaticRepairMemoryIds.contains(conversation.id) ? memoryArtworkWatercolorFallbackAsset : null,
         onOpen: () => _openMemoryDetail(conversation),
         onDelete: () => _deleteMemory(conversation),
       );
@@ -3052,6 +3038,7 @@ class TodayRecordMomentControl extends StatelessWidget {
     this.necklaceConnectionFailed = false,
     required this.recordingState,
     this.diagnostics = const CaptureDiagnostics(),
+    this.transcriptionReady = false,
     this.showWhispers = false,
     this.whispersEnabled = false,
     this.whispersVerified = false,
@@ -3059,6 +3046,7 @@ class TodayRecordMomentControl extends StatelessWidget {
     this.onOpenWhispers,
     required this.onViewTranscript,
     required this.onSourceSelected,
+    this.onReviewConsent,
     this.onUnavailable,
     required this.onTap,
   });
@@ -3074,6 +3062,7 @@ class TodayRecordMomentControl extends StatelessWidget {
   final bool necklaceConnectionFailed;
   final RecordingState recordingState;
   final CaptureDiagnostics diagnostics;
+  final bool transcriptionReady;
   final bool showWhispers;
   final bool whispersEnabled;
   final bool whispersVerified;
@@ -3081,14 +3070,22 @@ class TodayRecordMomentControl extends StatelessWidget {
   final VoidCallback? onOpenWhispers;
   final VoidCallback onViewTranscript;
   final ValueChanged<EllaCaptureSource> onSourceSelected;
+  final VoidCallback? onReviewConsent;
   final VoidCallback? onUnavailable;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final initialising = starting || recordingState == RecordingState.initialising;
+    final rawNecklaceRecording = recordingState == RecordingState.deviceRecord;
+    final necklaceRecording = rawNecklaceRecording &&
+        transcriptionReady &&
+        diagnostics.source == CaptureDiagnosticSource.necklace &&
+        diagnostics.hasPhysicalAudio &&
+        diagnostics.hasTranscriptionDelivery &&
+        diagnostics.failure == CaptureDiagnosticFailure.none;
+    final necklaceTransportStarting = rawNecklaceRecording && !necklaceRecording;
+    final initialising = starting || recordingState == RecordingState.initialising || necklaceTransportStarting;
     final phoneRecording = recordingState == RecordingState.record;
-    final necklaceRecording = recordingState == RecordingState.deviceRecord;
     final active = phoneRecording || necklaceRecording;
     final canEscapeNecklaceStartup =
         initialising && activeSource == EllaCaptureSource.necklace && selectedSource == EllaCaptureSource.necklace;
@@ -3107,11 +3104,12 @@ class TodayRecordMomentControl extends StatelessWidget {
       necklaceConnectionFailed: necklaceConnectionFailed,
     );
     final sourceIsNecklace = selectedSource == EllaCaptureSource.necklace;
-    final necklaceStateActive = sourceIsNecklace && (necklaceConnected || necklaceConnecting || necklaceRecording);
+    final necklaceStateActive =
+        sourceIsNecklace && (necklaceConnected || necklaceConnecting || necklaceRecording || necklaceTransportStarting);
     final dotActive = active || necklaceStateActive;
     final dotColor = active
         ? EllaColors.error
-        : necklaceConnecting
+        : necklaceConnecting || necklaceTransportStarting
             ? EllaColors.warning
             : necklaceConnected && sourceIsNecklace
                 ? EllaColors.success
@@ -3180,7 +3178,7 @@ class TodayRecordMomentControl extends StatelessWidget {
                         children: [
                           EllaBreathingDot(
                             active: dotActive,
-                            live: active || necklaceConnecting,
+                            live: active || necklaceConnecting || necklaceTransportStarting,
                             activeColor: dotColor,
                             inactiveColor: dotColor,
                           ),
@@ -3213,6 +3211,21 @@ class TodayRecordMomentControl extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 4),
+              if (diagnostics.failure == CaptureDiagnosticFailure.consentUnavailable) ...[
+                SizedBox(
+                  width: double.infinity,
+                  child: TextButton.icon(
+                    key: const Key('today-ai-consent-review'),
+                    onPressed: onReviewConsent,
+                    icon: const Icon(Icons.privacy_tip_outlined, color: EllaColors.error),
+                    label: Text(
+                      context.l10n.aiConsentTranscriptionReview,
+                      style: EllaTextStyles.caption.copyWith(color: EllaColors.error, fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 4),
+              ],
               Row(
                 children: [
                   Expanded(

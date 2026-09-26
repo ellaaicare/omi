@@ -11066,5 +11066,15 @@
     }
   },
   "ellaAlertChannelsUnavailableBadge": "Unavailable",
-  "ellaAlertChannelsImessageUnavailable": "iMessage is unavailable while Ella upgrades messaging."
+  "ellaAlertChannelsImessageUnavailable": "iMessage is unavailable while Ella upgrades messaging.",
+  "aiConsentTranscriptionReview": "AI permission needed to transcribe · Review",
+  "ellaChatCouldntSend": "Couldn't send",
+  "ellaRuntimeDiagnostics": "Runtime Diagnostics",
+  "ellaRuntimeDiagnosticsSubtitle": "Internal connection, consent, and audio state",
+  "diagnosticsNetworkInterface": "Network interface",
+  "diagnosticsBackendProbe": "Backend health probe",
+  "diagnosticsLastApi": "Last API request",
+  "diagnosticsConsentLease": "AI permission lease",
+  "diagnosticsBleRate": "Necklace audio rate",
+  "diagnosticsWsRate": "Transcription upload rate"
 }

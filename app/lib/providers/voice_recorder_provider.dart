@@ -16,20 +16,25 @@ import 'package:omi/utils/file.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
-enum VoiceRecorderState {
-  idle,
-  recording,
-  transcribing,
-  transcribeSuccess,
-  transcribeFailed,
-}
+enum VoiceRecorderState { idle, recording, transcribing, transcribeSuccess, transcribeFailed }
 
 class VoiceRecorderProvider extends ChangeNotifier {
+  VoiceRecorderProvider({
+    IMicRecorderService? microphone,
+    Future<void> Function()? requestMicrophonePermission,
+  })  : _microphone = microphone,
+        _requestMicrophonePermission = requestMicrophonePermission;
+
+  final IMicRecorderService? _microphone;
+  final Future<void> Function()? _requestMicrophonePermission;
   VoiceRecorderState _state = VoiceRecorderState.idle;
   List<List<int>> _audioChunks = [];
   String _transcript = '';
   bool _isProcessing = false;
   AiConsentActiveSessionLease? _aiConsentLease;
+  AiConsentAuthoritySnapshot? _activeConsentAuthority;
+  bool _consentReviewRequired = false;
+  int _lifecycleGeneration = 0;
 
   // Audio visualization
   final List<double> _audioLevels = List.generate(20, (_) => 0.1);
@@ -45,11 +50,16 @@ class VoiceRecorderProvider extends ChangeNotifier {
   List<double> get audioLevels => List.unmodifiable(_audioLevels);
   bool get isRecording => _state == VoiceRecorderState.recording;
   bool get isActive => _state != VoiceRecorderState.idle;
+  bool get consentReviewRequired => _consentReviewRequired;
+  IMicRecorderService get _mic => _microphone ?? ServiceManager.instance().mic;
 
-  void setCallbacks({
-    Function(String transcript)? onTranscriptReady,
-    VoidCallback? onClose,
-  }) {
+  @visibleForTesting
+  bool get hasActiveConsentLease => _aiConsentLease?.isActive == true;
+
+  @visibleForTesting
+  bool get hasActiveWaveformTimer => _waveformTimer?.isActive == true;
+
+  void setCallbacks({Function(String transcript)? onTranscriptReady, VoidCallback? onClose}) {
     _onTranscriptReady = onTranscriptReady;
     _onClose = onClose;
   }
@@ -60,9 +70,20 @@ class VoiceRecorderProvider extends ChangeNotifier {
   }
 
   Future<void> startRecording() async {
-    if (!SharedPreferencesUtil().aiConsentAccepted) return;
+    final preferences = SharedPreferencesUtil();
+    final authority = AiConsentActiveSessionLease.authorityForSessionStart(
+      preferences: preferences,
+      expectedUid: preferences.uid,
+    );
+    if (authority == null) {
+      _markConsentReviewRequired();
+      return;
+    }
     if (_state == VoiceRecorderState.recording) return;
 
+    final lifecycleGeneration = ++_lifecycleGeneration;
+    _activeConsentAuthority = authority;
+    _consentReviewRequired = false;
     _state = VoiceRecorderState.recording;
     _audioChunks = [];
     _transcript = '';
@@ -73,7 +94,23 @@ class VoiceRecorderProvider extends ChangeNotifier {
     }
     notifyListeners();
 
-    await Permission.microphone.request();
+    final requestMicrophonePermission = _requestMicrophonePermission;
+    if (requestMicrophonePermission != null) {
+      await requestMicrophonePermission();
+    } else {
+      await Permission.microphone.request();
+    }
+
+    if (_lifecycleGeneration != lifecycleGeneration || _state != VoiceRecorderState.recording) return;
+    final refreshedAuthority = AiConsentActiveSessionLease.authorityForSessionStart(
+      preferences: preferences,
+      expectedUid: authority.uid,
+    );
+    if (!authority.isCurrent(preferences: preferences) || refreshedAuthority == null) {
+      _markConsentReviewRequired();
+      return;
+    }
+    _activeConsentAuthority = refreshedAuthority;
 
     // Setup timer to update the wave visualization every second
     _waveformTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -84,14 +121,15 @@ class VoiceRecorderProvider extends ChangeNotifier {
 
     _aiConsentLease?.stop();
     _aiConsentLease = AiConsentActiveSessionLease(
-      uid: SharedPreferencesUtil().uid,
+      uid: refreshedAuthority.uid,
+      authority: refreshedAuthority,
       onAuthorityLost: _handleConsentAuthorityLost,
     )..start();
 
     try {
-      await ServiceManager.instance().mic.start(
+      await _mic.start(
         onByteReceived: (bytes) {
-          if (_state == VoiceRecorderState.recording) {
+          if (_state == VoiceRecorderState.recording && _aiConsentLease?.hasCurrentAuthority == true) {
             _audioChunks.add(bytes.toList());
 
             // Update audio visualization based on actual audio levels
@@ -161,26 +199,41 @@ class VoiceRecorderProvider extends ChangeNotifier {
     }
   }
 
-  void stopRecording() {
+  Future<void> stopRecording() async {
     _aiConsentLease?.stop();
     _aiConsentLease = null;
     _waveformTimer?.cancel();
-    ServiceManager.instance().mic.stop();
+    _waveformTimer = null;
+    await _mic.stop();
   }
 
   Future<void> _handleConsentAuthorityLost() async {
-    stopRecording();
+    await _stopRecordingForConsentReview();
+  }
+
+  Future<void> _stopRecordingForConsentReview() async {
+    final lifecycleGeneration = _lifecycleGeneration;
+    try {
+      await stopRecording();
+    } finally {
+      if (_lifecycleGeneration == lifecycleGeneration && _state != VoiceRecorderState.idle) {
+        _markConsentReviewRequired();
+      }
+    }
+  }
+
+  void _markConsentReviewRequired() {
     _state = VoiceRecorderState.transcribeFailed;
     _audioChunks = [];
     _isProcessing = false;
+    _consentReviewRequired = true;
     notifyListeners();
-    AppSnackbar.showSnackbarError(MyApp.navigatorKey.currentContext?.l10n.aiConsentActiveAudioStopped ??
-        'AI permission could not be verified. Recording stopped.');
   }
 
   Future<void> processRecording() async {
-    if (!SharedPreferencesUtil().aiConsentAccepted) {
-      close();
+    final authority = _activeConsentAuthority;
+    if (authority == null || !authority.isCurrent()) {
+      await _stopRecordingForConsentReview();
       return;
     }
     if (_isProcessing) return;
@@ -194,7 +247,7 @@ class VoiceRecorderProvider extends ChangeNotifier {
     _isProcessing = true;
     notifyListeners();
 
-    stopRecording();
+    await stopRecording();
 
     // Flatten audio chunks into a single list
     List<int> flattenedBytes = [];
@@ -237,9 +290,11 @@ class VoiceRecorderProvider extends ChangeNotifier {
       Logger.debug('Error processing recording: $e');
       _state = VoiceRecorderState.transcribeFailed;
       _isProcessing = false;
+      _consentReviewRequired = false;
       notifyListeners();
       AppSnackbar.showSnackbarError(
-          MyApp.navigatorKey.currentContext?.l10n.voiceFailedToTranscribe ?? 'Failed to transcribe audio');
+        MyApp.navigatorKey.currentContext?.l10n.voiceFailedToTranscribe ?? 'Failed to transcribe audio',
+      );
     }
   }
 
@@ -257,14 +312,17 @@ class VoiceRecorderProvider extends ChangeNotifier {
       return;
     }
 
+    _lifecycleGeneration++;
     if (_state == VoiceRecorderState.recording) {
-      stopRecording();
+      unawaited(stopRecording());
     }
     _waveformTimer?.cancel();
     _state = VoiceRecorderState.idle;
     _audioChunks = [];
     _transcript = '';
     _isProcessing = false;
+    _activeConsentAuthority = null;
+    _consentReviewRequired = false;
 
     // Reset audio levels
     for (int i = 0; i < _audioLevels.length; i++) {
@@ -281,7 +339,7 @@ class VoiceRecorderProvider extends ChangeNotifier {
     _aiConsentLease = null;
     _waveformTimer?.cancel();
     if (_state == VoiceRecorderState.recording) {
-      ServiceManager.instance().mic.stop();
+      unawaited(_mic.stop());
     }
     super.dispose();
   }

@@ -825,7 +825,67 @@ void main() {
     expect(SharedPreferencesUtil().aiConsentContractVersion, SharedPreferencesUtil.currentAiConsentContractVersion);
   });
 
-  test('AI consent stays disabled when the public policy is unavailable', () async {
+  test('post-deletion grant fetches and echoes the one-time server account epoch', () async {
+    final preferences = SharedPreferencesUtil()..uid = 'uid-a';
+    var requestSequence = 0;
+    final transport = _DeletedAccountEpochConsentTransport(
+      epochStatus: _consentStatus(
+        authorized: false,
+        decision: 'deleted',
+        authorityState: 'deleted',
+        accountEpochToken: 'server-account-epoch',
+      ),
+      acceptedStatus: _consentStatus(),
+    );
+    final service = EllaAiConsentService(
+      transport: transport,
+      requestIdFactory: () => 'request-${++requestSequence}'.padRight(8, '0'),
+      clientVersionFactory: () => '1.0.572+866',
+      localeFactory: () => 'en-US',
+    );
+
+    final outcome = await service.grantCurrentConsentWithOutcome(uid: 'uid-a');
+
+    expect(outcome.accepted, isTrue);
+    expect(transport.statusCalls, 1);
+    expect(transport.submissions, hasLength(2));
+    expect(transport.submissions.first.toJson(), isNot(containsPair('account_epoch_token', anything)));
+    expect(transport.submissions.last.toJson()['account_epoch_token'], 'server-account-epoch');
+    expect(transport.submissions.first.requestId, isNot(transport.submissions.last.requestId));
+    expect(preferences.aiConsentAccepted, isTrue);
+    final sharedPreferences = await SharedPreferences.getInstance();
+    final storedValues = sharedPreferences.getKeys().map(sharedPreferences.get);
+    expect(storedValues, isNot(contains('server-account-epoch')));
+  });
+
+  test('post-deletion grant fails closed when no fresh server account epoch is available', () async {
+    SharedPreferencesUtil().uid = 'uid-a';
+    final transport = _DeletedAccountEpochConsentTransport(
+      epochStatus: _consentStatus(
+        authorized: false,
+        decision: 'deleted',
+        authorityState: 'deleted',
+      ),
+      acceptedStatus: _consentStatus(),
+    );
+    final service = EllaAiConsentService(
+      transport: transport,
+      requestIdFactory: () => 'request-epoch-missing',
+      clientVersionFactory: () => '1.0.572+866',
+      localeFactory: () => 'en-US',
+    );
+
+    final outcome = await service.grantCurrentConsentWithOutcome(uid: 'uid-a');
+
+    expect(outcome.accepted, isFalse);
+    expect(outcome.failureKind, AiConsentGrantFailureKind.serverUnavailable);
+    expect(outcome.supportCode, 'account_epoch_unavailable');
+    expect(transport.statusCalls, 1);
+    expect(transport.submissions, hasLength(1));
+    expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
+  });
+
+  test('bundled policy fallback cannot grant authority when the server submission is unavailable', () async {
     SharedPreferencesUtil().uid = 'uid-a';
     final transport = _FakeConsentTransport(policy: null);
     final service = EllaAiConsentService(
@@ -838,7 +898,7 @@ void main() {
     final receiptId = await service.grantCurrentConsent(uid: 'uid-a');
 
     expect(receiptId, isNull);
-    expect(transport.submissions, isEmpty);
+    expect(transport.submissions, hasLength(1));
     expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
     expect(SharedPreferencesUtil().aiConsentReceiptId, isEmpty);
   });
@@ -1085,6 +1145,24 @@ void main() {
     expect(status.isCurrentGrantFor('uid-a'), isFalse);
   });
 
+  test('deleted consent status reads the one-time account epoch only from the top-level response', () {
+    final status = AiConsentStatus.fromJson({
+      'subject_uid': 'uid-a',
+      'authorized': false,
+      'authority_state': 'deleted',
+      'account_epoch_token': 'server-account-epoch',
+      'consent': {
+        'decision': 'deleted',
+        'receipt_id': 'aicr_deleted',
+        'account_epoch_token': 'must-not-be-read-from-public-consent',
+      },
+    });
+
+    expect(status.authorityState, 'deleted');
+    expect(status.accountEpochToken, 'server-account-epoch');
+    expect(status.isCurrentGrantFor('uid-a'), isFalse);
+  });
+
   test('revocation stops local authority before an unreachable server update', () async {
     final preferences = SharedPreferencesUtil();
     preferences.uid = 'uid-a';
@@ -1117,7 +1195,7 @@ void main() {
     expect(synced, isFalse);
     expect(preferences.aiConsentAccepted, isFalse);
     expect(preferences.aiConsentReceiptId, isEmpty);
-    expect(transport.submissions, isEmpty);
+    expect(transport.submissions, hasLength(1));
   });
 }
 
@@ -1377,6 +1455,44 @@ class _DeferredConsentSubmitTransport extends EllaAiConsentTransport {
   }
 }
 
+class _DeletedAccountEpochConsentTransport extends EllaAiConsentTransport {
+  _DeletedAccountEpochConsentTransport({required this.epochStatus, required this.acceptedStatus});
+
+  final AiConsentStatus epochStatus;
+  final AiConsentStatus acceptedStatus;
+  final List<AiConsentSubmission> submissions = [];
+  int statusCalls = 0;
+
+  @override
+  Future<AiConsentPolicy?> fetchPolicy() async => AiConsentPolicy.bundled;
+
+  @override
+  Future<AiConsentStatus?> fetchStatus() async {
+    statusCalls++;
+    return epochStatus;
+  }
+
+  @override
+  Future<AiConsentFetchResult> fetchStatusWithDetails() async {
+    statusCalls++;
+    return AiConsentFetchResult(status: epochStatus, httpStatus: 200);
+  }
+
+  @override
+  Future<AiConsentStatus?> submit(AiConsentSubmission submission) async {
+    return (await submitWithDetails(submission)).status;
+  }
+
+  @override
+  Future<AiConsentSubmitResult> submitWithDetails(AiConsentSubmission submission) async {
+    submissions.add(submission);
+    if (submissions.length == 1) {
+      return const AiConsentSubmitResult(httpStatus: 403, errorCode: 'ai_consent_account_deleted');
+    }
+    return AiConsentSubmitResult(status: acceptedStatus, httpStatus: 200);
+  }
+}
+
 AiConsentStatus _consentStatus({
   bool authorized = true,
   String decision = 'granted',
@@ -1385,6 +1501,8 @@ AiConsentStatus _consentStatus({
   String scopeVersion = SharedPreferencesUtil.currentAiConsentScopeVersion,
   String scopeHash = SharedPreferencesUtil.currentAiConsentScopeHash,
   bool includeServerDecidedAt = true,
+  String authorityState = '',
+  String accountEpochToken = '',
 }) {
   return AiConsentStatus(
     subjectUid: 'uid-a',
@@ -1401,5 +1519,7 @@ AiConsentStatus _consentStatus({
     scopeVersion: scopeVersion,
     scopeHash: scopeHash,
     serverDecidedAt: includeServerDecidedAt ? DateTime.parse('2026-07-27T00:00:00Z') : null,
+    authorityState: authorityState,
+    accountEpochToken: accountEpochToken,
   );
 }

@@ -592,7 +592,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   }
 }
 
-class MemoryDayGalleryCard extends StatelessWidget {
+class MemoryDayGalleryCard extends StatefulWidget {
   const MemoryDayGalleryCard({
     super.key,
     required this.dayLabel,
@@ -602,7 +602,7 @@ class MemoryDayGalleryCard extends StatelessWidget {
     this.artworkRefreshEpoch = 0,
     this.artworkAuthorityEpoch = 0,
     this.automaticRepairMemoryIds = const <String>{},
-    this.artworkFallbackMemoryIds = const <String>{},
+    this.now,
   });
 
   final String dayLabel;
@@ -612,68 +612,177 @@ class MemoryDayGalleryCard extends StatelessWidget {
   final int artworkRefreshEpoch;
   final int artworkAuthorityEpoch;
   final Set<String> automaticRepairMemoryIds;
-  final Set<String> artworkFallbackMemoryIds;
+  final DateTime? now;
+
+  @override
+  State<MemoryDayGalleryCard> createState() => _MemoryDayGalleryCardState();
+}
+
+class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
+  MemoryArtworkDay? _dayArtwork;
+  bool _dayBatchResolved = false;
+  int _loadGeneration = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadDayArtwork());
+  }
+
+  @override
+  void didUpdateWidget(covariant MemoryDayGalleryCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.artworkApi != widget.artworkApi ||
+        oldWidget.artworkRefreshEpoch != widget.artworkRefreshEpoch ||
+        oldWidget.artworkAuthorityEpoch != widget.artworkAuthorityEpoch ||
+        _dayKey(oldWidget.memories) != _dayKey(widget.memories)) {
+      unawaited(_loadDayArtwork());
+    }
+  }
+
+  Future<void> _loadDayArtwork() async {
+    final generation = ++_loadGeneration;
+    final memories = widget.memories;
+    if (memories.isEmpty) return;
+    if (mounted && _usesDayBatch) {
+      setState(() {
+        _dayArtwork = null;
+        _dayBatchResolved = false;
+      });
+    }
+    final localDay = memories.first.createdAt.toLocal();
+    final result = await (widget.artworkApi ?? MemoryArtworkApi()).fetchDay(
+      DateTime(localDay.year, localDay.month, localDay.day),
+      utcOffsetMinutes: localDay.timeZoneOffset.inMinutes,
+      authorityRevision: widget.artworkAuthorityEpoch,
+      contentRevision: widget.artworkRefreshEpoch,
+    );
+    if (!mounted || generation != _loadGeneration) return;
+    setState(() {
+      _dayArtwork = result;
+      _dayBatchResolved = result != null;
+    });
+  }
+
+  static String _dayKey(List<ServerConversation> memories) =>
+      memories.isEmpty ? '' : memoryConversationCalendarDayKey(memories.first);
+
+  bool get _usesDayBatch => (widget.artworkApi ?? MemoryArtworkApi()).supportsDayArtworkBatch;
 
   @override
   Widget build(BuildContext context) {
-    final titles = memories
+    final titles = widget.memories
         .take(3)
         .map((memory) => parseEllaDisplayValue(memory.structured.title).text.trim())
         .where((title) => title.isNotEmpty)
         .join(' · ');
     return Semantics(
       button: true,
-      label: context.l10n.memoryDayOpen(dayLabel, memories.length),
+      label: context.l10n.memoryDayOpen(widget.dayLabel, widget.memories.length),
       child: Material(
-        key: Key('memory-day-${memoryConversationCalendarDayKey(memories.first)}'),
+        key: Key('memory-day-${memoryConversationCalendarDayKey(widget.memories.first)}'),
         color: EllaColors.card,
         borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
-          onTap: onOpen,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              AspectRatio(
-                aspectRatio: 1.75,
-                child: _MemoryDayArtworkCollage(
-                  memories: memories,
-                  artworkApi: artworkApi,
-                  artworkRefreshEpoch: artworkRefreshEpoch,
-                  artworkAuthorityEpoch: artworkAuthorityEpoch,
-                  automaticRepairMemoryIds: automaticRepairMemoryIds,
-                  artworkFallbackMemoryIds: artworkFallbackMemoryIds,
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(dayLabel, style: EllaTextStyles.display),
-                          const SizedBox(height: 4),
-                          Text(context.l10n.memoryDayCount(memories.length), style: EllaTextStyles.secondary),
-                          if (titles.isNotEmpty) ...[
-                            const SizedBox(height: 6),
-                            Text(titles, maxLines: 2, overflow: TextOverflow.ellipsis, style: EllaTextStyles.body),
-                          ],
-                        ],
-                      ),
-                    ),
-                    const Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep),
-                  ],
-                ),
-              ),
-            ],
-          ),
+          onTap: widget.onOpen,
+          child: _isRecentDay ? _recentDayContent(context, titles) : _olderDayContent(context, titles),
         ),
       ),
     );
   }
+
+  bool get _isRecentDay {
+    final memoryDay = widget.memories.first.createdAt.toLocal();
+    final current = (widget.now ?? DateTime.now()).toLocal();
+    final day = DateTime(memoryDay.year, memoryDay.month, memoryDay.day);
+    final today = DateTime(current.year, current.month, current.day);
+    return today.difference(day).inDays <= 1;
+  }
+
+  Widget _recentDayContent(BuildContext context, String titles) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          AspectRatio(
+            aspectRatio: 1.75,
+            child: _MemoryDayArtworkCollage(
+              memories: widget.memories,
+              artworkApi: widget.artworkApi,
+              artworkRefreshEpoch: widget.artworkRefreshEpoch,
+              artworkAuthorityEpoch: widget.artworkAuthorityEpoch,
+              automaticRepairMemoryIds: widget.automaticRepairMemoryIds,
+              prefetchedArtwork: _dayArtwork?.items ?? const <String, MemoryArtworkResult>{},
+              dayBatchResolved: _dayBatchResolved,
+            ),
+          ),
+          _dayDescription(context, titles),
+        ],
+      );
+
+  Widget _olderDayContent(BuildContext context, String titles) {
+    final memory = widget.memories.first;
+    return SizedBox(
+      key: Key('memory-day-compact-${memoryConversationCalendarDayKey(memory)}'),
+      height: 112,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            width: 112,
+            child: MemoryArtworkImage(
+              conversation: memory,
+              api: widget.artworkApi,
+              refreshEpoch: widget.artworkRefreshEpoch,
+              authorityEpoch: widget.artworkAuthorityEpoch,
+              allowManualGeneration: false,
+              prefetchedResult: _dayArtwork?.items[memory.id],
+              prefetchResolved: _dayBatchResolved,
+              deferRemoteFetch: _usesDayBatch && !_dayBatchResolved,
+            ),
+          ),
+          Expanded(child: _dayDescription(context, titles, compact: true)),
+        ],
+      ),
+    );
+  }
+
+  Widget _dayDescription(BuildContext context, String titles, {bool compact = false}) => Padding(
+        padding: EdgeInsets.all(compact ? 12 : 16),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Column(
+                mainAxisAlignment: compact ? MainAxisAlignment.center : MainAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    widget.dayLabel,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: compact
+                        ? EllaTextStyles.body.copyWith(fontSize: 18, fontWeight: FontWeight.w700)
+                        : EllaTextStyles.display,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    context.l10n.memoryDayCount(widget.memories.length),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: EllaTextStyles.secondary,
+                  ),
+                  if (titles.isNotEmpty && (!compact || MediaQuery.textScalerOf(context).scale(12) <= 18)) ...[
+                    const SizedBox(height: 6),
+                    Text(titles,
+                        maxLines: compact ? 1 : 2, overflow: TextOverflow.ellipsis, style: EllaTextStyles.body),
+                  ],
+                ],
+              ),
+            ),
+            const Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep),
+          ],
+        ),
+      );
 }
 
 class _MemoryDayArtworkCollage extends StatelessWidget {
@@ -683,7 +792,8 @@ class _MemoryDayArtworkCollage extends StatelessWidget {
     this.artworkRefreshEpoch = 0,
     this.artworkAuthorityEpoch = 0,
     this.automaticRepairMemoryIds = const <String>{},
-    this.artworkFallbackMemoryIds = const <String>{},
+    this.prefetchedArtwork = const <String, MemoryArtworkResult>{},
+    this.dayBatchResolved = false,
   });
 
   final List<ServerConversation> memories;
@@ -691,7 +801,8 @@ class _MemoryDayArtworkCollage extends StatelessWidget {
   final int artworkRefreshEpoch;
   final int artworkAuthorityEpoch;
   final Set<String> automaticRepairMemoryIds;
-  final Set<String> artworkFallbackMemoryIds;
+  final Map<String, MemoryArtworkResult> prefetchedArtwork;
+  final bool dayBatchResolved;
 
   Widget _art(ServerConversation memory) => MemoryArtworkImage(
         conversation: memory,
@@ -700,7 +811,9 @@ class _MemoryDayArtworkCollage extends StatelessWidget {
         authorityEpoch: artworkAuthorityEpoch,
         enqueueIfMissing: automaticRepairMemoryIds.contains(memory.id),
         allowManualGeneration: true,
-        fallbackAssetPath: artworkFallbackMemoryIds.contains(memory.id) ? memoryArtworkWatercolorFallbackAsset : null,
+        prefetchedResult: prefetchedArtwork[memory.id],
+        prefetchResolved: dayBatchResolved,
+        deferRemoteFetch: (artworkApi ?? MemoryArtworkApi()).supportsDayArtworkBatch && !dayBatchResolved,
       );
 
   @override
@@ -930,7 +1043,6 @@ class MemoryGalleryCard extends StatelessWidget {
     this.artworkRefreshEpoch = 0,
     this.artworkAuthorityEpoch = 0,
     this.enqueueArtworkIfMissing = false,
-    this.artworkFallbackAsset,
   });
 
   final ServerConversation conversation;
@@ -942,7 +1054,6 @@ class MemoryGalleryCard extends StatelessWidget {
   final int artworkRefreshEpoch;
   final int artworkAuthorityEpoch;
   final bool enqueueArtworkIfMissing;
-  final String? artworkFallbackAsset;
 
   String get _title => displayTitle ?? conversation.structured.title;
 
@@ -963,7 +1074,6 @@ class MemoryGalleryCard extends StatelessWidget {
                   authorityEpoch: artworkAuthorityEpoch,
                   allowManualGeneration: true,
                   enqueueIfMissing: enqueueArtworkIfMissing,
-                  fallbackAssetPath: artworkFallbackAsset,
                 ),
               ),
               Expanded(
@@ -983,7 +1093,6 @@ class MemoryGalleryCard extends StatelessWidget {
                   authorityEpoch: artworkAuthorityEpoch,
                   allowManualGeneration: true,
                   enqueueIfMissing: enqueueArtworkIfMissing,
-                  fallbackAssetPath: artworkFallbackAsset,
                 ),
               ),
               Padding(padding: const EdgeInsets.all(16), child: details),
