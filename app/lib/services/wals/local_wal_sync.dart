@@ -354,7 +354,9 @@ class LocalWalSyncImpl implements LocalWalSync {
     _frameAuthorities.removeRange(0, pivot);
   }
 
-  Future _flush() async {
+  Future<void> _flush() => WalFileManager.runExclusive(_flushExclusive);
+
+  Future<void> _flushExclusive() async {
     await _waitForInitialization();
     Logger.debug("_flushing");
     for (var i = 0; i < _wals.length; i++) {

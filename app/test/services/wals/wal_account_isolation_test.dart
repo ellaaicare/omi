@@ -463,6 +463,97 @@ void main() {
     expect(File('${intermediateDirectory.path}/wals_backup.json').existsSync(), isFalse);
   });
 
+  test('rollover serializes a concurrent flush until the owner commit finishes', () async {
+    final ownerA = _owner('uid-a');
+    final ownerB = _rotatedOwner('uid-a', suffix: 'b', bindingRevision: 4, generation: 8);
+    final capturedAuthority = _authority(ownerA, () => true);
+    var currentAuthority = capturedAuthority;
+    final rotationSuspended = Completer<void>();
+    final resumeRotation = Completer<void>();
+    WalFileManager.rotationBeforeCommitForTesting = () async {
+      rotationSuspended.complete();
+      await resumeRotation.future;
+    };
+    SharedPreferencesUtil().unlimitedLocalStorageEnabled = true;
+    await WalFileManager.init(baseDirectory: directory, activeOwner: ownerA);
+    final sync = LocalWalSyncImpl(
+      listener,
+      currentOwner: () => currentAuthority.owner,
+      activeAuthority: () => currentAuthority,
+    );
+    await sync.initializeForTesting();
+    await sync.onAudioCodecChanged(BleAudioCodec.opusFS320);
+    final earlierAudio = File('${directory.path}/before-concurrent-flush.bin')..writeAsBytesSync([7, 8, 9]);
+    await sync.addExternalWal(_wal(owner: ownerA, path: earlierAudio.path));
+    _appendChunkableFrames(sync, capturedAuthority);
+
+    currentAuthority = _authority(ownerB, () => true);
+    final chunk = sync.chunkForTesting();
+    await rotationSuspended.future;
+    var flushCompleted = false;
+    final flush = sync.flushForTesting().then((_) => flushCompleted = true);
+    await Future<void>.delayed(Duration.zero);
+    expect(flushCompleted, isFalse);
+
+    resumeRotation.complete();
+    await Future.wait([chunk, flush]);
+    await sync.flushForTesting();
+
+    final pending = await sync.getAllWals();
+    expect(pending, hasLength(2));
+    expect(pending.every((wal) => wal.owner?.matches(ownerB) == true), isTrue);
+    expect(pending.every((wal) => wal.status == WalStatus.miss), isTrue);
+    expect(pending.every((wal) => wal.storage == WalStorage.disk), isTrue);
+    expect(await WalFileManager.getQuarantineCount(), 0);
+  });
+
+  test('rollover marks a missing payload corrupted without blocking valid WAL upload', () async {
+    final ownerA = _owner('uid-a');
+    final ownerB = _rotatedOwner('uid-a', suffix: 'b', bindingRevision: 4, generation: 8);
+    final capturedAuthority = _authority(ownerA, () => true);
+    var currentAuthority = capturedAuthority;
+    var uploads = 0;
+    SharedPreferencesUtil().unlimitedLocalStorageEnabled = true;
+    await WalFileManager.init(baseDirectory: directory, activeOwner: ownerA);
+    final sync = LocalWalSyncImpl(
+      listener,
+      currentOwner: () => currentAuthority.owner,
+      activeAuthority: () => currentAuthority,
+      upload: (files, uid) async {
+        expect(uid, 'uid-a');
+        expect(files, hasLength(2));
+        uploads++;
+        return SyncLocalFilesResponse(newConversationIds: ['conversation-a'], updatedConversationIds: []);
+      },
+    );
+    await sync.initializeForTesting();
+    await sync.onAudioCodecChanged(BleAudioCodec.opusFS320);
+    _appendChunkableFrames(sync, capturedAuthority);
+    await sync.chunkForTesting();
+    await sync.flushForTesting();
+
+    final staleSource = File('${directory.path}/stale-before-rollover.bin')..writeAsBytesSync([1, 2, 3]);
+    final staleWal = _wal(owner: ownerA, path: staleSource.path)..timerStart = 2;
+    await sync.addExternalWal(staleWal);
+    final validSource = File('${directory.path}/valid-before-rollover.bin')..writeAsBytesSync([4, 5, 6]);
+    final validWal = _wal(owner: ownerA, path: validSource.path)..timerStart = 3;
+    await sync.addExternalWal(validWal);
+    await File(staleWal.filePath!).delete();
+
+    currentAuthority = _authority(ownerB, () => true);
+    await sync.syncAll();
+
+    expect(uploads, 1);
+    expect(staleWal.owner?.matches(ownerB), isTrue);
+    expect(staleWal.status, WalStatus.corrupted);
+    expect(validWal.owner?.matches(ownerB), isTrue);
+    expect(validWal.status, WalStatus.synced);
+    final remaining = await sync.getAllWals();
+    expect(remaining.where((wal) => wal.status == WalStatus.synced), hasLength(2));
+    expect(remaining.where((wal) => wal.status == WalStatus.corrupted), [staleWal]);
+    expect(await WalFileManager.getQuarantineCount(), 0);
+  });
+
   test('rollover restores manifests and original audio when commit fails after destination manifest write', () async {
     final ownerA = _owner('uid-a');
     final ownerB = _rotatedOwner('uid-a', suffix: 'b', bindingRevision: 4, generation: 8);

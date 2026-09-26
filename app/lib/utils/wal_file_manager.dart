@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -22,6 +23,8 @@ class WalFileManager {
   static Directory? _baseDirectory;
   static WalOwner? _activeOwner;
   static Future<void>? _initialization;
+  static Future<void> _exclusiveOperation = Future<void>.value();
+  static final Object _exclusiveOperationZoneKey = Object();
 
   @visibleForTesting
   static Future<void> Function()? rotationBeforeCommitForTesting;
@@ -70,11 +73,45 @@ class WalFileManager {
     _baseDirectory = null;
     _activeOwner = null;
     _initialization = null;
+    _exclusiveOperation = Future<void>.value();
     rotationBeforeCommitForTesting = null;
     rotationAfterActiveManifestWriteForTesting = null;
   }
 
+  static Future<T> runExclusive<T>(Future<T> Function() operation) {
+    if (Zone.current[_exclusiveOperationZoneKey] == true) return operation();
+
+    final result = _exclusiveOperation.then<T>(
+      (_) => runZoned<Future<T>>(
+        operation,
+        zoneValues: {_exclusiveOperationZoneKey: true},
+      ),
+    );
+    _exclusiveOperation = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace __) {},
+    );
+    return result;
+  }
+
   static Future<bool> rotateActiveSessionOwner(
+    List<Wal> wals, {
+    required WalOwner previousOwner,
+    required ActiveWalAuthority capturedAuthority,
+    required ActiveWalAuthority targetAuthority,
+    required ActiveWalAuthority? Function() readCurrentAuthority,
+  }) =>
+      runExclusive(
+        () => _rotateActiveSessionOwner(
+          wals,
+          previousOwner: previousOwner,
+          capturedAuthority: capturedAuthority,
+          targetAuthority: targetAuthority,
+          readCurrentAuthority: readCurrentAuthority,
+        ),
+      );
+
+  static Future<bool> _rotateActiveSessionOwner(
     List<Wal> wals, {
     required WalOwner previousOwner,
     required ActiveWalAuthority capturedAuthority,
@@ -119,21 +156,28 @@ class WalFileManager {
       if (wal.owner?.matches(previousOwner) != true) return false;
       File? source;
       File? destination;
+      var sourceMissing = false;
       if (wal.storage == WalStorage.disk && wal.filePath != null && wal.filePath!.isNotEmpty) {
         final sourcePath = await resolveWalFilePath(wal);
         if (sourcePath == null) return false;
         source = File(sourcePath);
-        if (!await source.exists()) return false;
-        destination = File(p.join(nextActiveDirectory.path, p.basename(sourcePath)));
-        if (source.path != destination.path && await destination.exists()) return false;
+        if (!await source.exists()) {
+          source = null;
+          sourceMissing = true;
+        } else {
+          destination = File(p.join(nextActiveDirectory.path, p.basename(sourcePath)));
+          if (source.path != destination.path && await destination.exists()) return false;
+        }
       }
       rotations.add(
         _WalOwnerRotation(
           wal: wal,
           previousOwner: wal.owner!,
           previousPath: wal.filePath,
+          previousStatus: wal.status,
           source: source,
           destination: destination,
+          sourceMissing: sourceMissing,
         ),
       );
     }
@@ -156,6 +200,10 @@ class WalFileManager {
         }
         rotation.wal.owner = targetOwner;
         if (destination != null) rotation.wal.filePath = destination.path;
+        if (rotation.sourceMissing) {
+          rotation.wal.status = WalStatus.corrupted;
+          Logger.debug('WalFileManager: Marked missing WAL payload corrupted during owner rotation');
+        }
       }
       await rotationBeforeCommitForTesting?.call();
       if (!capturedAuthority.isCurrent() || !targetIsExactCurrent()) {
@@ -175,6 +223,7 @@ class WalFileManager {
       for (final rotation in rotations) {
         rotation.wal.owner = rotation.previousOwner;
         rotation.wal.filePath = rotation.previousPath;
+        rotation.wal.status = rotation.previousStatus;
       }
       var manifestsRestored = true;
       for (final snapshot in manifestSnapshots.reversed) {
@@ -250,7 +299,7 @@ class WalFileManager {
   }
 
   static Future<bool> saveWals(List<Wal> wals) async {
-    return _saveWals(wals);
+    return runExclusive(() => _saveWals(wals));
   }
 
   static Future<bool> _saveWals(
@@ -547,15 +596,19 @@ class _WalOwnerRotation {
     required this.wal,
     required this.previousOwner,
     required this.previousPath,
+    required this.previousStatus,
     required this.source,
     required this.destination,
+    required this.sourceMissing,
   });
 
   final Wal wal;
   final WalOwner previousOwner;
   final String? previousPath;
+  final WalStatus previousStatus;
   final File? source;
   final File? destination;
+  final bool sourceMissing;
 }
 
 class _FileSnapshot {
