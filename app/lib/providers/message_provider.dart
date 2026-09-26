@@ -149,10 +149,9 @@ class MessageProvider extends ChangeNotifier {
   bool sendingMessage = false;
   double aiStreamProgress = 1.0;
   ClientApiFailure? _lastStreamFailure;
-  String? _lastFailedMessageText;
 
   ClientApiFailure? get lastStreamFailure => _lastStreamFailure;
-  bool get canRetryLastMessage => _lastFailedMessageText?.trim().isNotEmpty == true;
+  bool get canRetryLastMessage => messages.any(_isFailedOutgoingMessage);
   bool get requiresClientUpdate => _lastStreamFailure?.kind == ClientApiFailureKind.updateRequired;
 
   String firstTimeLoadingText = '';
@@ -188,7 +187,6 @@ class MessageProvider extends ChangeNotifier {
     sendingMessage = false;
     aiStreamProgress = 1.0;
     _lastStreamFailure = null;
-    _lastFailedMessageText = null;
     firstTimeLoadingText = '';
     chatApps = [];
     isLoadingChatApps = false;
@@ -246,6 +244,52 @@ class MessageProvider extends ChangeNotifier {
     if (index >= 0 && index < messages.length && messages[index].sender == MessageSender.ai) {
       messages.removeAt(index);
     }
+  }
+
+  bool _isFailedOutgoingMessage(ServerMessage message) =>
+      message.sender == MessageSender.human && message.clientDeliveryState == ClientMessageDeliveryState.failed;
+
+  ServerMessage _prepareOutgoingMessage(String text, String? localMessageId) {
+    final existing = localMessageId == null
+        ? null
+        : messages.firstWhereOrNull(
+            (message) => message.id == localMessageId && message.sender == MessageSender.human,
+          );
+    final outgoing = existing ?? addMessageLocally(text);
+    outgoing.clientDeliveryState = ClientMessageDeliveryState.pending;
+    SharedPreferencesUtil().cachedMessages = messages;
+    notifyListeners();
+    return outgoing;
+  }
+
+  void _markOutgoingDelivered(ServerMessage outgoing) {
+    outgoing.clientDeliveryState = null;
+    SharedPreferencesUtil().cachedMessages = messages;
+    notifyListeners();
+  }
+
+  void _markOutgoingFailed(ServerMessage outgoing, ClientApiFailure failure) {
+    outgoing.clientDeliveryState = ClientMessageDeliveryState.failed;
+    _lastStreamFailure = failure.kind == ClientApiFailureKind.updateRequired ? failure : null;
+    SharedPreferencesUtil().cachedMessages = messages;
+    setSendingMessage(false);
+    notifyListeners();
+  }
+
+  List<ServerMessage> _mergeHistoryWithUnsentMessages(
+    List<ServerMessage> history,
+    List<ServerMessage> localUnsent,
+  ) {
+    final merged = List<ServerMessage>.of(history);
+    final serverIds = history.map((message) => message.id).toSet();
+    for (final message in localUnsent) {
+      if (serverIds.contains(message.id)) continue;
+      if (!sendingMessage && message.clientDeliveryState == ClientMessageDeliveryState.pending) {
+        message.clientDeliveryState = ClientMessageDeliveryState.failed;
+      }
+      merged.add(message);
+    }
+    return merged;
   }
 
   void setChatApps(List<App> apps) {
@@ -659,6 +703,10 @@ class MessageProvider extends ChangeNotifier {
       final isEllaApp = _isEllaApp; // TODO: replace with flavor check
       if (isEllaApp) {
         final cached = SharedPreferencesUtil().cachedMessages;
+        final localUnsentById = <String, ServerMessage>{
+          for (final message in [...messages, ...cached])
+            if (message.sender == MessageSender.human && message.clientDeliveryState != null) message.id: message,
+        };
         if (cached.isNotEmpty) {
           messages = cached;
           setHasCachedMessages(true);
@@ -679,9 +727,17 @@ class MessageProvider extends ChangeNotifier {
         } else {
           _lastStreamFailure = null;
           final history = historyResult.value ?? const <ServerMessage>[];
-          messages = history;
+          messages = _mergeHistoryWithUnsentMessages(history, localUnsentById.values.toList(growable: false));
           SharedPreferencesUtil().cachedMessages = messages;
           setHasCachedMessages(messages.isNotEmpty);
+        }
+        if (!sendingMessage) {
+          for (final message in messages) {
+            if (message.clientDeliveryState == ClientMessageDeliveryState.pending) {
+              message.clientDeliveryState = ClientMessageDeliveryState.failed;
+            }
+          }
+          SharedPreferencesUtil().cachedMessages = messages;
         }
         messages.sort(compareServerMessagesChronologically);
         setLoadingMessages(false);
@@ -783,7 +839,7 @@ class MessageProvider extends ChangeNotifier {
     }
   }
 
-  void addMessageLocally(String messageText) {
+  ServerMessage addMessageLocally(String messageText) {
     List<String> fileIds = uploadedFiles.map((e) => e.id).toList();
     var appId = appProvider?.selectedChatAppId;
     if (appId == 'no_selected') {
@@ -800,14 +856,13 @@ class MessageProvider extends ChangeNotifier {
       List.from(uploadedFiles),
       fileIds,
       [],
+      clientDeliveryState: ClientMessageDeliveryState.pending,
     );
-    if (messages.firstWhereOrNull((m) => m.id == message.id) != null) {
-      return;
-    }
     messages.add(message);
     // Persist immediately so the user message survives tab switches before streaming completes
     SharedPreferencesUtil().cachedMessages = messages;
     notifyListeners();
+    return message;
   }
 
   void addMessage(ServerMessage message) {
@@ -1041,16 +1096,20 @@ class MessageProvider extends ChangeNotifier {
     }
   }
 
-  Future sendMessageStreamToServer(String text) async {
+  Future sendMessageStreamToServer(String text, {String? localMessageId}) async {
+    final outgoing = _prepareOutgoingMessage(text, localMessageId);
+    if (!sendingMessage) setSendingMessage(true);
     final lease = _beginAccountCommit();
     if (lease == null) {
-      _markSendFailed(text);
+      _markOutgoingFailed(outgoing, const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true));
       return;
     }
     final operationGeneration = _operationGeneration;
     try {
       if (!await _ensureAiConsent()) {
-        if (_canCommit(lease, operationGeneration)) _markSendFailed(text);
+        if (_canCommit(lease, operationGeneration)) {
+          _markOutgoingFailed(outgoing, const ClientApiFailure(ClientApiFailureKind.consentRequired));
+        }
         return;
       }
       if (!_canCommit(lease, operationGeneration)) return;
@@ -1059,13 +1118,13 @@ class MessageProvider extends ChangeNotifier {
         messages = DemoFixtures.chatMessages();
         setSendingMessage(false);
         setShowTypingIndicator(false);
+        _markOutgoingDelivered(outgoing);
         notifyListeners();
         return;
       }
       if (!_canCommit(lease, operationGeneration)) return;
       aiStreamProgress = 0.0;
       _lastStreamFailure = null;
-      _lastFailedMessageText = null;
       setShowTypingIndicator(true);
       var currentAppId = appProvider?.selectedChatAppId;
       if (currentAppId == 'no_selected') {
@@ -1143,17 +1202,15 @@ class MessageProvider extends ChangeNotifier {
             throw const ClientApiFailure(ClientApiFailureKind.invalidResponse);
           }
         }
-        if (_canCommit(lease, operationGeneration)) _lastFailedMessageText = null;
+        if (_canCommit(lease, operationGeneration)) _markOutgoingDelivered(outgoing);
       } on ClientApiFailure catch (failure) {
         if (!_canCommit(lease, operationGeneration)) return;
         _discardAssistantAt(aiIndex);
-        _lastFailedMessageText = text;
-        _setStreamFailure(failure);
-        setSendingMessage(false);
+        _markOutgoingFailed(outgoing, failure);
       } catch (_) {
         if (!_canCommit(lease, operationGeneration)) return;
         _discardAssistantAt(aiIndex);
-        _markSendFailed(text);
+        _markOutgoingFailed(outgoing, const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true));
       } finally {
         if (_canCommit(lease, operationGeneration)) {
           aiStreamProgress = 1.0;
@@ -1164,23 +1221,27 @@ class MessageProvider extends ChangeNotifier {
         }
       }
     } catch (_) {
-      if (_canCommit(lease, operationGeneration)) _markSendFailed(text);
+      if (_canCommit(lease, operationGeneration)) {
+        _markOutgoingFailed(outgoing, const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true));
+      }
     } finally {
       lease.close();
     }
   }
 
-  void _markSendFailed(String text) {
-    _lastFailedMessageText = text;
-    _setStreamFailure(const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true));
-    setSendingMessage(false);
+  Future<void> retryLastFailedMessage() async {
+    final message = messages.lastWhereOrNull(_isFailedOutgoingMessage);
+    if (message == null) return;
+    await retryFailedMessage(message.id);
   }
 
-  Future<void> retryLastFailedMessage() async {
-    final text = _lastFailedMessageText;
-    if (text == null || text.trim().isEmpty || sendingMessage) return;
+  Future<void> retryFailedMessage(String messageId) async {
+    final message = messages.firstWhereOrNull(
+      (candidate) => candidate.id == messageId && _isFailedOutgoingMessage(candidate),
+    );
+    if (message == null || message.text.trim().isEmpty || sendingMessage) return;
     setSendingMessage(true);
-    await sendMessageStreamToServer(text);
+    await sendMessageStreamToServer(message.text, localMessageId: message.id);
   }
 
   Future sendInitialAppMessage(App? app) async {

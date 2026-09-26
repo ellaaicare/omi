@@ -163,6 +163,45 @@ void main() {
     expect(result.value![1].createdAt.toUtc(), DateTime.parse('2026-08-09T03:00:00Z'));
   });
 
+  test('canonical Omi memory summaries render as Ella messages without rewriting user chat', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final result = await fetchEllaChatHistory(
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: authority,
+      transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async => http.Response(
+        jsonEncode({
+          'messages': [
+            {
+              'id': 'memory-summary',
+              'sender': 'human',
+              'text': '[Ella] You compared design options.',
+              'created_at': '2026-08-09T02:59:00Z',
+              'metadata': {
+                'source': 'canonical_timeline',
+                'channel': 'omi',
+                'provider': 'omi-backend',
+                'source_identity': 'omi:memory-1',
+              },
+            },
+            {
+              'id': 'literal-user-message',
+              'sender': 'human',
+              'text': '[Ella] is the name I typed.',
+              'created_at': '2026-08-09T03:00:00Z',
+            },
+          ],
+        }),
+        200,
+      ),
+    );
+
+    expect(result.value, hasLength(2));
+    expect(result.value![0].sender, MessageSender.ai);
+    expect(result.value![0].text, 'You compared design options.');
+    expect(result.value![1].sender, MessageSender.human);
+    expect(result.value![1].text, '[Ella] is the name I typed.');
+  });
+
   test('history preserves equal-time turn pairs instead of grouping by role', () async {
     const authority = _CurrentAuthority('uid-a');
     final result = await fetchEllaChatHistory(

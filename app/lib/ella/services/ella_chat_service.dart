@@ -13,6 +13,7 @@ import 'package:omi/ella/demo/demo_fixtures.dart';
 import 'package:omi/ella/services/ella_service_result.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
+import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
@@ -241,15 +242,23 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
     var recognizedHistoryShape = rawMessages.isEmpty;
     for (final m in rawMessages) {
       if (m is! Map<String, dynamic>) continue;
+      final metadata =
+          m['metadata'] is Map ? Map<String, dynamic>.from(m['metadata'] as Map) : const <String, dynamic>{};
       final rawSender = (m['sender'] ?? m['role']) as String? ?? '';
       final content = (m['content'] ?? m['text']) as String? ?? '';
       final ts = (m['timestamp'] ?? m['created_at']) as String?;
       final id = m['id'] as String? ?? const Uuid().v4();
-      final messageSender = switch (rawSender) {
+      final parsedSender = switch (rawSender) {
         'human' || 'user' => MessageSender.human,
         'ai' || 'assistant' => MessageSender.ai,
         _ => null,
       };
+      final isCanonicalOmiMemory = parsedSender == MessageSender.human &&
+          metadata['source'] == 'canonical_timeline' &&
+          metadata['channel'] == 'omi' &&
+          metadata['provider'] == 'omi-backend' &&
+          parseEllaDisplayValue(content).isEllaGenerated;
+      final messageSender = isCanonicalOmiMemory ? MessageSender.ai : parsedSender;
       recognizedHistoryShape =
           recognizedHistoryShape || ((m.containsKey('content') || m.containsKey('text')) && messageSender != null);
       if (content.isEmpty) continue;
@@ -262,7 +271,7 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
         ServerMessage(
           id,
           ts != null ? DateTime.parse(ts).toLocal() : DateTime.now(),
-          content,
+          isCanonicalOmiMemory ? stripEllaDisplayPrefix(content) : content,
           messageSender,
           MessageType.text,
           null,
@@ -271,10 +280,10 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
           [],
           [],
           askForNps: false,
-          canonicalConversationId: (m['metadata'] as Map?)?['conversation_id']?.toString(),
-          canonicalTurnId: (m['metadata'] as Map?)?['turn_id']?.toString(),
-          canonicalTurnOrdinal: parseCanonicalTurnOrdinal((m['metadata'] as Map?)?['turn_ordinal']),
-          canonicalEventSequence: parseCanonicalEventSequence((m['metadata'] as Map?)?['event_sequence']),
+          canonicalConversationId: metadata['conversation_id']?.toString(),
+          canonicalTurnId: metadata['turn_id']?.toString(),
+          canonicalTurnOrdinal: parseCanonicalTurnOrdinal(metadata['turn_ordinal']),
+          canonicalEventSequence: parseCanonicalEventSequence(metadata['event_sequence']),
         ),
       );
     }

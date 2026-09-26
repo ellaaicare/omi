@@ -1530,15 +1530,14 @@ class DesktopChatPageState extends State<DesktopChatPage> with AutomaticKeepAliv
     });
   }
 
-  void _sendMessageUtil(String text) {
+  Future<void> _sendMessageUtil(String text) async {
     var provider = context.read<MessageProvider>();
     provider.setSendingMessage(true);
-    provider.addMessageLocally(text);
+    final outgoing = provider.addMessageLocally(text);
     scrollToBottom();
     textController.clear();
-    provider.sendMessageStreamToServer(text);
+    await provider.sendMessageStreamToServer(text, localMessageId: outgoing.id);
     provider.clearSelectedFiles();
-    provider.setSendingMessage(false);
   }
 
   void scrollToBottom() {
