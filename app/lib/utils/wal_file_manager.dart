@@ -34,6 +34,12 @@ class WalFileManager {
   @visibleForTesting
   static Future<void> Function()? rotationAfterActiveManifestWriteForTesting;
 
+  @visibleForTesting
+  static Future<void> Function()? migrationAfterByteCopyForTesting;
+
+  @visibleForTesting
+  static Future<void> Function()? migrationAfterDestinationManifestCommitForTesting;
+
   static Directory get _accountsDirectory => Directory(p.join(_baseDirectory!.path, _accountsDirectoryName));
   static Directory get _quarantineDirectory => Directory(p.join(_baseDirectory!.path, _quarantineDirectoryName));
   static Directory? get _activeDirectory =>
@@ -71,7 +77,7 @@ class WalFileManager {
     await _accountsDirectory.create(recursive: true);
     await _quarantineDirectory.create(recursive: true);
     if (_activeDirectory != null) await _activeDirectory!.create(recursive: true);
-    await _migrateSameUidNamespaces();
+    await runExclusive(_migrateSameUidNamespaces);
     await _quarantineLegacyRootManifest();
     await _quarantineLegacyRootAudioFiles();
   }
@@ -85,6 +91,8 @@ class WalFileManager {
     _exclusiveOperation = Future<void>.value();
     rotationBeforeCommitForTesting = null;
     rotationAfterActiveManifestWriteForTesting = null;
+    migrationAfterByteCopyForTesting = null;
+    migrationAfterDestinationManifestCommitForTesting = null;
   }
 
   static Future<T> runExclusive<T>(Future<T> Function() operation) {
@@ -660,65 +668,137 @@ class WalFileManager {
   }
 
   /// Older builds stored audio under a hash of uid, profile, and binding
-  /// revision. Pending files for this uid are moved into the uid directory so
-  /// a same-account rollover plus a restart can still retry them.
+  /// revision. Pending files for this uid are copied into the uid directory.
+  /// The destination manifest is committed before the source entry or bytes
+  /// are removed, so a crash before that commit leaves the source authoritative.
   static Future<void> _migrateSameUidNamespaces() async {
     final owner = _activeOwner;
     final target = _activeDirectory;
     if (owner == null || target == null || !await _accountsDirectory.exists()) return;
 
     final entries = await _accountsDirectory.list(followLinks: false).toList();
-    final incoming = <Wal>[];
     for (final entry in entries) {
       if (entry is! Directory || p.normalize(entry.path) == p.normalize(target.path)) continue;
       final manifest = File(p.join(entry.path, _walFileName));
       final backup = File(p.join(entry.path, _walBackupFileName));
       final wals = await _readWals(manifest);
-      if (wals.isEmpty) continue;
-      final keep = <Wal>[];
-      var moved = false;
       for (final wal in wals) {
         final walOwner = wal.owner;
         if (wal.status == WalStatus.quarantined || walOwner == null || !walOwner.matches(owner)) {
-          keep.add(wal);
           continue;
         }
-        final filename = wal.filePath == null || wal.filePath!.isEmpty ? null : p.basename(wal.filePath!);
-        if (filename != null) {
-          final source = File(p.join(entry.path, filename));
-          final absolute = wal.filePath != null && p.isAbsolute(wal.filePath!) ? File(wal.filePath!) : null;
-          final actual = await source.exists()
-              ? source
-              : absolute != null && await absolute.exists()
-                  ? absolute
-                  : null;
-          if (actual != null) {
-            final destination = File(p.join(target.path, filename));
-            if (actual.path != destination.path) {
-              await destination.parent.create(recursive: true);
-              if (await destination.exists()) {
-                final unique = File(p.join(target.path, '${wal.timerStart}_$filename'));
-                await actual.rename(unique.path);
-                wal.filePath = unique.path;
-              } else {
-                await actual.rename(destination.path);
-                wal.filePath = destination.path;
-              }
-            }
-          }
-        }
-        incoming.add(wal);
-        moved = true;
+        await _commitSameUidWal(
+          wal: wal,
+          sourceDirectory: entry,
+          sourceManifest: manifest,
+          sourceBackup: backup,
+          target: target,
+        );
       }
-      if (moved) await _writeWals(manifest, backup, keep);
     }
-    if (incoming.isEmpty) return;
+  }
+
+  static Future<void> _commitSameUidWal({
+    required Wal wal,
+    required Directory sourceDirectory,
+    required File sourceManifest,
+    required File sourceBackup,
+    required Directory target,
+  }) async {
+    final committed = await _committedSameUidWal(wal);
+    if (committed == null) {
+      final copied = await _copySameUidAudio(wal, sourceDirectory, target);
+      if (copied != null) wal.filePath = copied.path;
+      final afterCopy = migrationAfterByteCopyForTesting;
+      if (afterCopy != null) await afterCopy();
+      await _commitDestinationWal(wal);
+      final afterCommit = migrationAfterDestinationManifestCommitForTesting;
+      if (afterCommit != null) await afterCommit();
+    }
+    await _dropSourceWal(wal, sourceDirectory, sourceManifest, sourceBackup);
+  }
+
+  static Future<Wal?> _committedSameUidWal(Wal wal) async {
+    for (final candidate in await _readWals(_activeWalFile)) {
+      if (candidate.id != wal.id) continue;
+      final path = candidate.filePath;
+      if (path == null || path.isEmpty) return candidate;
+      if (await File(path).exists()) return candidate;
+    }
+    return null;
+  }
+
+  static Future<File?> _copySameUidAudio(Wal wal, Directory sourceDirectory, Directory target) async {
+    final filename = wal.filePath == null || wal.filePath!.isEmpty ? null : p.basename(wal.filePath!);
+    if (filename == null) return null;
+    final sibling = File(p.join(sourceDirectory.path, filename));
+    final absolute = wal.filePath != null && p.isAbsolute(wal.filePath!) ? File(wal.filePath!) : null;
+    final actual = await sibling.exists()
+        ? sibling
+        : absolute != null && await absolute.exists()
+            ? absolute
+            : null;
+    if (actual == null) return null;
+    await target.create(recursive: true);
+    final destination = await _uniqueAccountDestination(target, filename);
+    if (p.normalize(actual.path) == p.normalize(destination.path)) return actual;
+    await actual.copy(destination.path);
+    return destination;
+  }
+
+  static Future<void> _commitDestinationWal(Wal wal) async {
     final current = await _readWals(_activeWalFile);
-    final seen = current.map((wal) => '${wal.device}\n${wal.timerStart}\n${wal.filePath ?? ''}').toSet();
-    for (final wal in incoming) {
-      if (seen.add('${wal.device}\n${wal.timerStart}\n${wal.filePath ?? ''}')) current.add(wal);
+    final index = current.indexWhere((candidate) => candidate.id == wal.id);
+    if (index >= 0) {
+      current[index] = wal;
+    } else {
+      current.add(wal);
     }
-    await _writeWals(_activeWalFile, _activeWalBackupFile, current);
+    await _commitWalManifest(_activeWalFile, _activeWalBackupFile, current);
+  }
+
+  static Future<void> _dropSourceWal(
+    Wal wal,
+    Directory sourceDirectory,
+    File sourceManifest,
+    File sourceBackup,
+  ) async {
+    final sourceWals = await _readWals(sourceManifest);
+    String? sourcePath;
+    for (final candidate in sourceWals) {
+      if (candidate.id == wal.id) sourcePath = candidate.filePath;
+    }
+    final remaining = sourceWals.where((candidate) => candidate.id != wal.id).toList();
+    if (remaining.length != sourceWals.length) {
+      await _commitWalManifest(sourceManifest, sourceBackup, remaining);
+    }
+    final committedPath = (await _committedSameUidWal(wal))?.filePath;
+    final names = <String>{};
+    if (sourcePath != null && sourcePath.isNotEmpty) names.add(p.basename(sourcePath));
+    if (wal.filePath != null && wal.filePath!.isNotEmpty) names.add(p.basename(wal.filePath!));
+    final candidates = <File>[
+      if (sourcePath != null && sourcePath.isNotEmpty) File(sourcePath),
+      for (final name in names) File(p.join(sourceDirectory.path, name)),
+    ];
+    for (final sourceFile in candidates) {
+      if (committedPath != null && p.normalize(sourceFile.path) == p.normalize(committedPath)) continue;
+      if (await sourceFile.exists()) await sourceFile.delete();
+    }
+  }
+
+  static Future<void> _commitWalManifest(File? file, File? backup, List<Wal> wals) async {
+    if (file == null) return;
+    await file.parent.create(recursive: true);
+    if (file.existsSync() && backup != null) {
+      await file.copy(backup.path);
+    }
+    final temp = File('${file.path}.tmp');
+    await temp.writeAsString(jsonEncode({
+      'version': 2,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'wals': wals.map((wal) => wal.toJson()).toList(),
+    }));
+    await temp.rename(file.path);
   }
 
   static Future<void> _quarantineLegacyRootManifest() async {

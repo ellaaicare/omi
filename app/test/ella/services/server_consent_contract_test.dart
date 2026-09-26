@@ -236,4 +236,130 @@ void main() {
     expect(await queued.readAsBytes(), const [9, 8, 7, 6]);
     expect(queued.parent.path, contains(rolled.storageNamespace));
   });
+
+  test('restart keeps the source WAL authoritative when migration stops after the byte copy', () async {
+    final fixture = await _seedLegacyNamespaceWal();
+    addTearDown(fixture.dispose);
+    WalFileManager.migrationAfterByteCopyForTesting = () async {
+      throw StateError('injected_after_copy');
+    };
+
+    await expectLater(
+      WalFileManager.init(baseDirectory: fixture.root, activeOwner: fixture.rolled),
+      throwsA(isA<StateError>()),
+    );
+
+    expect(await fixture.audio.readAsBytes(), const [9, 8, 7, 6]);
+    expect(fixture.sourceManifest.readAsStringSync(), contains('1700000000'));
+    final destinationManifest = File('${fixture.destinationDirectory.path}/wals.json');
+    expect(destinationManifest.existsSync(), isFalse);
+
+    WalFileManager.migrationAfterByteCopyForTesting = null;
+    WalFileManager.resetForTesting();
+    await WalFileManager.init(baseDirectory: fixture.root, activeOwner: fixture.rolled);
+    final loaded = await WalFileManager.loadWals(activeOwner: fixture.rolled);
+    expect(loaded, hasLength(1));
+    expect(await File(loaded.single.filePath!).readAsBytes(), const [9, 8, 7, 6]);
+    expect(fixture.sourceManifest.readAsStringSync(), isNot(contains('1700000000')));
+    expect(await fixture.audio.exists(), isFalse);
+  });
+
+  test('restart finishes cleanup when migration stops after the destination manifest commit', () async {
+    final fixture = await _seedLegacyNamespaceWal();
+    addTearDown(fixture.dispose);
+    WalFileManager.migrationAfterDestinationManifestCommitForTesting = () async {
+      throw StateError('injected_after_commit');
+    };
+
+    await expectLater(
+      WalFileManager.init(baseDirectory: fixture.root, activeOwner: fixture.rolled),
+      throwsA(isA<StateError>()),
+    );
+
+    expect(await fixture.audio.readAsBytes(), const [9, 8, 7, 6]);
+    expect(fixture.sourceManifest.readAsStringSync(), contains('1700000000'));
+    final destinationManifest = File('${fixture.destinationDirectory.path}/wals.json');
+    final committed = jsonDecode(destinationManifest.readAsStringSync()) as Map<String, dynamic>;
+    final committedWals = committed['wals'] as List;
+    expect(committedWals, hasLength(1));
+    final committedPath = (committedWals.single as Map<String, dynamic>)['file_path'] as String;
+    expect(await File(committedPath).readAsBytes(), const [9, 8, 7, 6]);
+
+    WalFileManager.migrationAfterDestinationManifestCommitForTesting = null;
+    WalFileManager.resetForTesting();
+    await WalFileManager.init(baseDirectory: fixture.root, activeOwner: fixture.rolled);
+    final loaded = await WalFileManager.loadWals(activeOwner: fixture.rolled);
+    expect(loaded, hasLength(1));
+    expect(loaded.single.filePath, committedPath);
+    expect(await File(loaded.single.filePath!).readAsBytes(), const [9, 8, 7, 6]);
+    expect(fixture.sourceManifest.readAsStringSync(), isNot(contains('1700000000')));
+    expect(await fixture.audio.exists(), isFalse);
+    final reread = jsonDecode(destinationManifest.readAsStringSync()) as Map<String, dynamic>;
+    expect(reread['wals'] as List, hasLength(1));
+  });
+}
+
+class _LegacyWalFixture {
+  _LegacyWalFixture({
+    required this.root,
+    required this.rolled,
+    required this.audio,
+    required this.sourceManifest,
+    required this.destinationDirectory,
+  });
+
+  final Directory root;
+  final WalOwner rolled;
+  final File audio;
+  final File sourceManifest;
+  final Directory destinationDirectory;
+
+  Future<void> dispose() async {
+    WalFileManager.resetForTesting();
+    if (await root.exists()) await root.delete(recursive: true);
+  }
+}
+
+Future<_LegacyWalFixture> _seedLegacyNamespaceWal() async {
+  const previous = WalOwner(
+    uid: 'owner',
+    profileBindingId: 'old-profile',
+    bindingRevision: 1,
+    consentReceiptId: 'aicr_old',
+    authorityGenerationAtCapture: 2,
+  );
+  const rolled = WalOwner(
+    uid: 'owner',
+    profileBindingId: 'new-profile',
+    bindingRevision: 9,
+    consentReceiptId: 'aicr_new',
+    authorityGenerationAtCapture: 40,
+  );
+  final root = await Directory.systemTemp.createTemp('wal-uid-namespace-crash');
+  final legacyDir = Directory('${root.path}/ella_wal_accounts/legacy-profile-namespace')..createSync(recursive: true);
+  final audio = File('${legacyDir.path}/audio_owner.bin');
+  await audio.writeAsBytes(const [9, 8, 7, 6]);
+  final wal = Wal(
+    timerStart: 1700000000,
+    codec: BleAudioCodec.opus,
+    seconds: 1,
+    status: WalStatus.miss,
+    storage: WalStorage.disk,
+    filePath: audio.path,
+    device: 'phone',
+    owner: previous,
+  );
+  final manifest = File('${legacyDir.path}/wals.json');
+  await manifest.writeAsString(jsonEncode({
+    'version': 2,
+    'wals': [wal.toJson()..['codec'] = 'opus'],
+  }));
+  WalFileManager.resetForTesting();
+  return _LegacyWalFixture(
+    root: root,
+    rolled: rolled,
+    audio: audio,
+    sourceManifest: manifest,
+    destinationDirectory: Directory('${root.path}/ella_wal_accounts/${rolled.storageNamespace}'),
+  );
 }
