@@ -21,8 +21,6 @@ See ella/README.md for full documentation.
 import os
 from typing import Optional, Callable, Dict
 
-from database import conversations as conversations_db
-from database import memories as memories_db
 from ella.routers.canonical_events import _get_pool
 from ella.routers.invites import router as invite_router
 
@@ -532,6 +530,9 @@ def _register_routers(app) -> None:
         print(f"  ⚠️ Ella memory artwork not available: {_MEMORY_ARTWORK_IMPORT_ERROR}", flush=True)
 
     if dream_media_router is not None:
+        from database import conversations as conversations_db
+        from database import memories as memories_db
+
         conversations_db.register_conversation_pre_delete_hook(prepare_source_memory_dream_deletion)
         memories_db.register_memory_pre_delete_hook(prepare_source_memory_dream_deletion)
         app.include_router(dream_media_router, tags=["Ella Dream Media"])

@@ -9,8 +9,6 @@ from typing import Any, Optional, Protocol
 
 from google.cloud import firestore
 
-from database._client import db as default_db
-
 DREAMS_COLLECTION = "dreams"
 RECONCILIATION_COLLECTION = "ella_dream_media_reconciliation"
 USER_DELETION_FIELDS = (
@@ -97,7 +95,11 @@ def dream_is_tombstoned(dream: Optional[dict[str, Any]]) -> bool:
 
 class FirestoreDreamMediaRepository:
     def __init__(self, client=None):
-        self.db = client or default_db
+        if client is None:
+            from database._client import db as default_db
+
+            client = default_db
+        self.db = client
 
     def _user_ref(self, uid: str):
         return self.db.collection("users").document(uid)
