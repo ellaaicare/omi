@@ -332,6 +332,51 @@ void main() {
     expect(inheritedEvictionCalls, 1);
   });
 
+  test('continuously failed tombstone persistence defers deletion without stalling ready artwork', () async {
+    const terminalCacheKey = 'terminal-cache-key-awaiting-durable-tombstone';
+    const readyCacheKey = 'unrelated-ready-cache-key';
+    final writerStarted = Completer<void>();
+    var allowPersistence = false;
+    var directTerminalEvictions = 0;
+    var deferredTerminalEvictions = 0;
+
+    MemoryArtworkCache.configurePublishedVariantPersistenceForTesting(
+      writer: (key, value) async {
+        if (!writerStarted.isCompleted) writerStarted.complete();
+        if (!allowPersistence) return false;
+        return SharedPreferencesUtil().saveString(key, value);
+      },
+      retryDelay: const Duration(milliseconds: 1),
+    );
+    MemoryArtworkCache.configureTerminalEvictorForTesting((cacheKey) async {
+      expect(cacheKey, terminalCacheKey);
+      deferredTerminalEvictions++;
+    });
+
+    MemoryArtworkCache.suppressDisplayCacheKeys({terminalCacheKey});
+    await writerStarted.future;
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(
+      {terminalCacheKey},
+      (_) async {
+        directTerminalEvictions++;
+      },
+      persistenceWaitTimeout: Duration.zero,
+    ).timeout(const Duration(seconds: 1));
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(
+      {readyCacheKey},
+      (_) async => fail('an unsuppressed ready key must not be evicted'),
+      persistenceWaitTimeout: Duration.zero,
+    ).timeout(const Duration(seconds: 1));
+
+    expect(directTerminalEvictions, 0, reason: 'physical deletion must wait for a durable tombstone');
+    expect(deferredTerminalEvictions, 0);
+
+    allowPersistence = true;
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
+    await MemoryArtworkCache.waitForTerminalEvictionsForTesting();
+    expect(deferredTerminalEvictions, 1);
+  });
+
   test('explicit clear is bounded and removes a late stale ledger write', () async {
     final writerStarted = Completer<void>();
     final releaseWriter = Completer<void>();

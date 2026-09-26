@@ -17,6 +17,7 @@ class MemoryArtworkCache {
   static const int _maxTrustedDisplayKeys = 1000;
   static const int _maxSuppressedDisplayKeys = 4096;
   static const Duration _evictionTimeout = Duration(seconds: 5);
+  static const Duration _terminalTombstonePersistenceWaitTimeout = Duration(seconds: 1);
   static const Duration _publishedVariantPersistenceInitialRetryDelay = Duration(seconds: 1);
   static const Duration _publishedVariantPersistenceMaxRetryDelay = Duration(seconds: 30);
   static const Duration _publishedVariantPersistenceCancellationTimeout = Duration(seconds: 1);
@@ -33,7 +34,9 @@ class MemoryArtworkCache {
   static final Map<String, int> _suppressionGenerations = {};
   static final Map<String, int> _completedEvictionGenerations = {};
   static final Map<String, Future<bool>> _pendingEvictions = {};
+  static final LinkedHashMap<String, Duration> _deferredTerminalEvictions = LinkedHashMap();
   static Future<void>? _pendingTerminalResume;
+  static Future<void>? _deferredTerminalEvictionWorker;
   static int _nextSuppressionGeneration = 0;
   static int _evictionAuthorityGeneration = 0;
   static int _nextRecoveryCacheGeneration = 0;
@@ -253,16 +256,84 @@ class MemoryArtworkCache {
     Iterable<String> cacheKeys,
     Future<void> Function(String cacheKey) evict, {
     Duration waitTimeout = _evictionTimeout,
+    Duration persistenceWaitTimeout = _terminalTombstonePersistenceWaitTimeout,
   }) async {
     _loadPersistentAliases();
-    // The durable tombstone must land before bytes are removed. Otherwise a
-    // process exit followed by a late cache write can make the key undiscoverable.
-    await _waitForPublishedVariantPersistence();
+    final uniqueKeys = cacheKeys.where((cacheKey) => cacheKey.isNotEmpty).toSet();
+    final keysAwaitingCurrentProcessTombstones = uniqueKeys
+        .where(
+          (cacheKey) =>
+              _suppressedDisplayKeys.contains(cacheKey) &&
+              _terminalEvictionProcessIds[cacheKey] == _terminalEvictionProcessId,
+        )
+        .toSet();
+    final readyKeys = uniqueKeys.difference(keysAwaitingCurrentProcessTombstones);
+    if (keysAwaitingCurrentProcessTombstones.isNotEmpty) {
+      // Never delete a newly terminal key until its tombstone is durable. Keep
+      // this UI-facing wait bounded; the coalesced worker finishes cleanup as
+      // soon as preferences persistence recovers.
+      final tombstonesAreDurable = await _waitForPublishedVariantPersistenceUntil(persistenceWaitTimeout);
+      if (tombstonesAreDurable) {
+        readyKeys.addAll(keysAwaitingCurrentProcessTombstones);
+      } else {
+        _deferTerminalEvictions(keysAwaitingCurrentProcessTombstones, waitTimeout);
+        debugPrint('Memory artwork terminal eviction deferred until its tombstone is durable.');
+      }
+    }
     final evictions = <Future<bool>>[];
-    for (final cacheKey in cacheKeys.where((cacheKey) => cacheKey.isNotEmpty).toSet()) {
+    for (final cacheKey in readyKeys) {
       evictions.add(_evictSuppressedDisplayCacheKey(cacheKey, evict, waitTimeout));
     }
     await Future.wait(evictions);
+  }
+
+  static Future<bool> _waitForPublishedVariantPersistenceUntil(Duration timeout) async {
+    if (_pendingPublishedVariantSnapshot == null && _publishedVariantPersistenceWorker == null) return true;
+    try {
+      await _waitForPublishedVariantPersistence().timeout(timeout);
+    } on TimeoutException {
+      return false;
+    }
+    return _pendingPublishedVariantSnapshot == null && _publishedVariantPersistenceWorker == null;
+  }
+
+  static void _deferTerminalEvictions(Iterable<String> cacheKeys, Duration waitTimeout) {
+    for (final cacheKey in cacheKeys) {
+      _deferredTerminalEvictions.remove(cacheKey);
+      _deferredTerminalEvictions[cacheKey] = waitTimeout;
+    }
+    _startDeferredTerminalEvictionWorker();
+  }
+
+  static void _startDeferredTerminalEvictionWorker() {
+    if (_deferredTerminalEvictions.isEmpty || _deferredTerminalEvictionWorker != null) return;
+    final evictionAuthorityGeneration = _evictionAuthorityGeneration;
+    late final Future<void> worker;
+    worker = _runDeferredTerminalEvictions(evictionAuthorityGeneration).whenComplete(() {
+      if (!identical(_deferredTerminalEvictionWorker, worker)) return;
+      _deferredTerminalEvictionWorker = null;
+      if (_deferredTerminalEvictions.isNotEmpty && evictionAuthorityGeneration == _evictionAuthorityGeneration) {
+        _startDeferredTerminalEvictionWorker();
+      }
+    });
+    _deferredTerminalEvictionWorker = worker;
+    unawaited(worker);
+  }
+
+  static Future<void> _runDeferredTerminalEvictions(int evictionAuthorityGeneration) async {
+    while (evictionAuthorityGeneration == _evictionAuthorityGeneration && _deferredTerminalEvictions.isNotEmpty) {
+      await _waitForPublishedVariantPersistence();
+      if (evictionAuthorityGeneration != _evictionAuthorityGeneration) return;
+      final evictions = Map<String, Duration>.from(_deferredTerminalEvictions);
+      for (final cacheKey in evictions.keys) {
+        _deferredTerminalEvictions.remove(cacheKey);
+      }
+      await Future.wait(
+        evictions.entries.map(
+          (entry) => _evictSuppressedDisplayCacheKey(entry.key, _evictPersistedTerminalCacheFile, entry.value),
+        ),
+      );
+    }
   }
 
   static Future<bool> _evictSuppressedDisplayCacheKey(
@@ -380,7 +451,9 @@ class MemoryArtworkCache {
     _suppressionGenerations.clear();
     _completedEvictionGenerations.clear();
     _pendingEvictions.clear();
+    _deferredTerminalEvictions.clear();
     _pendingTerminalResume = null;
+    _deferredTerminalEvictionWorker = null;
     _diskReadsDisabled = false;
     _persistentAliasesLoaded = false;
   }
@@ -407,9 +480,11 @@ class MemoryArtworkCache {
 
   @visibleForTesting
   static Future<void> waitForTerminalEvictionsForTesting() async {
-    while (_pendingTerminalResume != null || _pendingEvictions.isNotEmpty) {
+    while (_pendingTerminalResume != null || _deferredTerminalEvictionWorker != null || _pendingEvictions.isNotEmpty) {
       final terminalResume = _pendingTerminalResume;
       if (terminalResume != null) await terminalResume;
+      final deferredWorker = _deferredTerminalEvictionWorker;
+      if (deferredWorker != null) await deferredWorker;
       if (_pendingEvictions.isEmpty) continue;
       await Future.wait(_pendingEvictions.values);
     }
@@ -437,6 +512,8 @@ class MemoryArtworkCache {
       _suppressedDisplayKeys.clear();
       _suppressionGenerations.clear();
       _completedEvictionGenerations.clear();
+      _deferredTerminalEvictions.clear();
+      _deferredTerminalEvictionWorker = null;
       _diskReadsDisabled = false;
       unawaited(SharedPreferencesUtil().remove(_displayAliasesPreferenceKey));
       unawaited(_clearPublishedVariantPersistence());
@@ -457,6 +534,8 @@ class MemoryArtworkCache {
     _suppressionGenerations.clear();
     _completedEvictionGenerations.clear();
     _pendingEvictions.clear();
+    _deferredTerminalEvictions.clear();
+    _deferredTerminalEvictionWorker = null;
     unawaited(_persistDisplayAliases());
     _schedulePublishedVariantPersistence();
   }
@@ -472,7 +551,9 @@ class MemoryArtworkCache {
     _suppressionGenerations.clear();
     _completedEvictionGenerations.clear();
     _pendingEvictions.clear();
+    _deferredTerminalEvictions.clear();
     _pendingTerminalResume = null;
+    _deferredTerminalEvictionWorker = null;
     _diskReadsDisabled = false;
     _persistentAliasesLoaded = true;
     _nextRecoveryCacheGeneration = 0;
@@ -604,7 +685,11 @@ class MemoryArtworkCache {
       _completedEvictionGenerations.remove(cacheKey);
     }
     late final Future<void> resume;
-    resume = evictSuppressedDisplayCacheKeys(inheritedKeys, _evictPersistedTerminalCacheFile).whenComplete(() {
+    // Let a synchronous terminal response coalesce with restart recovery before
+    // physical deletion starts, so the newest suppression generation is removed once.
+    resume = Future<void>.microtask(
+      () => evictSuppressedDisplayCacheKeys(inheritedKeys, _evictPersistedTerminalCacheFile),
+    ).whenComplete(() {
       if (identical(_pendingTerminalResume, resume)) _pendingTerminalResume = null;
     });
     _pendingTerminalResume = resume;
