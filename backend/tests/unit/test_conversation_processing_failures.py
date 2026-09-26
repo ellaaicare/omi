@@ -207,6 +207,8 @@ _REAL_SAVE_ACTION_ITEMS = conversation_processor._save_action_items
 
 @pytest.fixture(autouse=True)
 def _claim_persisted_processing(monkeypatch):
+    monkeypatch.setattr(conversation_processor, "assert_current_ai_consent", lambda uid: uid)
+    monkeypatch.setattr(ella_postprocess, "assert_current_ai_consent", lambda uid: uid)
     monkeypatch.setattr(
         conversation_processor.conversations_db,
         "claim_initial_conversation_processing",

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+from ella.services.ai_consent import assert_current_ai_consent
 
 from ella.services.observer import ObserverCandidate, structured_candidate_extractor
 from ella.services import runtime_resolver
@@ -428,6 +429,8 @@ async def build_extraction_result(
         return ExtractionResult(metadata={"extractor": "structured_candidate_extractor"})
     if normalized == "heuristic":
         return _heuristic_extraction_result(events)
+
+    assert_current_ai_consent(uid)
 
     heuristic = _heuristic_extraction_result(events)
     hermes_kwargs: dict[str, Any] = {}

@@ -873,6 +873,8 @@ jobs:
             pytest --collect-only -q \
               tests/unit/test_ella_ai_consent.py \
               tests/unit/test_ella_ai_consent_route_gates.py \
+              tests/unit/test_ella_chat_stream_resilience.py \
+              tests/unit/test_voice_honcho.py \
               tests/unit/test_hermes_cloud_migration.py \
               tests/unit/test_hermes_cloud_openapi.py \
               tests/unit/test_hermes_cloud_policy.py \
@@ -900,6 +902,21 @@ jobs:
           )"
           echo "observed Hermes Cloud runtime collection count: $collected"
           required_ids=(
+            "tests/unit/test_ella_ai_consent.py::test_consent_rejection_handler_returns_stable_top_level_contract"
+            "tests/unit/test_ella_ai_consent.py::test_consent_authority_outage_is_retryable_and_not_revocation_shaped"
+            "tests/unit/test_ella_ai_consent.py::test_enforcement_is_server_authoritative_and_cannot_be_disabled"
+            "tests/unit/test_ella_ai_consent_route_gates.py::test_native_websocket_consent_check_precedes_runtime_and_stt_provider_work"
+            "tests/unit/test_ella_ai_consent_route_gates.py::test_websocket_consent_rejection_and_authority_outage_have_distinct_close_contracts"
+            "tests/unit/test_ella_ai_consent_route_gates.py::test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary"
+            "tests/unit/test_ella_ai_consent_route_gates.py::test_stt_session_authority_avoids_transaction_per_audio_fragment_and_caches_fail_closed_state"
+            "tests/unit/test_ella_ai_consent_route_gates.py::test_memory_artwork_provider_routes_share_the_consent_gate"
+            "tests/unit/test_ella_ai_consent_route_gates.py::test_background_ai_and_honcho_boundaries_recheck_consent_before_network_egress"
+            "tests/unit/test_ella_chat_stream_resilience.py::test_empty_hermes_stream_rechecks_consent_before_nonstream_fallback[403-detail0-ai_consent_required]"
+            "tests/unit/test_ella_chat_stream_resilience.py::test_empty_hermes_stream_rechecks_consent_before_nonstream_fallback[503-detail1-ai_consent_authority_unavailable]"
+            "tests/unit/test_ella_chat_stream_resilience.py::test_cloud_hermes_post_header_consent_race_preserves_exact_sse_code[403-detail0-ai_consent_required]"
+            "tests/unit/test_ella_chat_stream_resilience.py::test_cloud_hermes_post_header_consent_race_preserves_exact_sse_code[503-detail1-ai_consent_authority_unavailable]"
+            "tests/unit/test_voice_honcho.py::test_consent_rejection_precedes_honcho_network_call"
+            "tests/unit/test_ella_postprocess_cloud_routing.py::test_missing_consent_blocks_cloud_queue_and_legacy_webhooks"
             "tests/unit/test_hermes_binding_envelope_contract.py::test_hermes_binding_envelope_v1_identity_and_content_free_shape"
             "tests/unit/test_hermes_binding_envelope_contract.py::test_omi_request_uses_exact_stock_contract_from_shared_envelope"
             "tests/unit/test_hermes_product_fit_canary.py::test_scenarios_a_to_f_pass_with_content_free_stage_tables"
@@ -956,6 +973,8 @@ jobs:
             "tests/unit/test_hermes_cloud_enrichment.py::test_enrichment_ignores_self_attestation_and_requires_independent_verifier"
             "tests/unit/test_hermes_cloud_runtime.py::test_grounding_verifier_is_stateless_and_uses_transcript_admission"
             "tests/unit/test_hermes_cloud_runtime.py::test_broker_grounding_verifier_fails_closed_before_admission"
+            "tests/unit/test_hermes_cloud_runtime.py::test_provider_boundary_preserves_exact_ai_consent_exception[403-detail0-ai_consent_required]"
+            "tests/unit/test_hermes_cloud_runtime.py::test_provider_boundary_preserves_exact_ai_consent_exception[503-detail1-ai_consent_authority_unavailable]"
             "tests/unit/test_hermes_broker_prototype.py::test_grounding_verifier_fails_closed_before_broker_admission"
             "tests/unit/test_ella_provisioning_repository.py::test_stateless_runtime_interaction_skips_predecessor_at_create_and_claim"
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact"
@@ -967,6 +986,10 @@ jobs:
           )
           collected_ids="$(
             pytest --collect-only -q \
+              tests/unit/test_ella_ai_consent.py \
+              tests/unit/test_ella_ai_consent_route_gates.py \
+              tests/unit/test_ella_chat_stream_resilience.py \
+              tests/unit/test_voice_honcho.py \
               tests/unit/test_hermes_binding_envelope_contract.py \
               tests/unit/test_hermes_product_fit_canary.py \
               tests/unit/test_ella_postprocess_cloud_routing.py \
@@ -992,10 +1015,12 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 21
-          test "$collected" -eq 589
+          test "$collected" -eq 617
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
+            tests/unit/test_ella_chat_stream_resilience.py \
+            tests/unit/test_voice_honcho.py \
             tests/unit/test_hermes_cloud_migration.py \
             tests/unit/test_hermes_cloud_openapi.py \
             tests/unit/test_hermes_cloud_policy.py \
@@ -1299,7 +1324,17 @@ jobs:
           pytest tests/unit/test_ella_observer.py -v
           test "$(pytest --collect-only -q tests/unit/test_invitation_redemption.py | grep -c '::')" -eq 19
           pytest tests/unit/test_invitation_redemption.py -v
-          test "$(pytest --collect-only -q tests/unit/test_memory_reinterpretation_outbox.py | grep -c '::')" -eq 28
+          memory_reinterpretation_ids="$(
+            pytest --collect-only -q tests/unit/test_memory_reinterpretation_outbox.py |
+              sed '/^$/d'
+          )"
+          grep -Fqx \
+            "tests/unit/test_memory_reinterpretation_outbox.py::test_worker_classifies_consent_failure_before_hermes[403-ai_consent_required-dead_letter]" \
+            <<<"$memory_reinterpretation_ids"
+          grep -Fqx \
+            "tests/unit/test_memory_reinterpretation_outbox.py::test_worker_classifies_consent_failure_before_hermes[503-ai_consent_authority_unavailable-retry]" \
+            <<<"$memory_reinterpretation_ids"
+          test "$(grep -c '::' <<<"$memory_reinterpretation_ids")" -eq 30
           pytest tests/unit/test_memory_reinterpretation_outbox.py -v
           test "$(pytest --collect-only -q tests/unit/test_scanner_keyterms.py | grep -c '::')" -eq 10
           pytest tests/unit/test_scanner_keyterms.py -v

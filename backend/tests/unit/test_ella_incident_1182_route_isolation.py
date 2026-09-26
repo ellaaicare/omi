@@ -34,6 +34,11 @@ from utils.ella import exact_firebase_auth
 _BACKEND = Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture(autouse=True)
+def _current_ai_consent(monkeypatch):
+    monkeypatch.setattr(chat, "assert_current_ai_consent", lambda uid: uid)
+
+
 class RecordingCanonicalStore(canonical_events.CanonicalEventStore):
     def __init__(self):
         self.writes = []
@@ -514,7 +519,9 @@ def test_chat_caller_metadata_is_fixed_before_canonical_and_cloud_sinks(monkeypa
         def __init__(self, **_kwargs):
             pass
 
-        async def run_turn(self, _runtime, turn_request):
+        async def run_turn(self, _runtime, turn_request, *, before_provider_call=None):
+            if before_provider_call is not None:
+                await before_provider_call()
             cloud_requests.append(turn_request)
             return SimpleNamespace(
                 text="ok",

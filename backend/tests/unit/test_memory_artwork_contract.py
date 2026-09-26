@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -6856,6 +6856,8 @@ def _load_memory_artwork_router_module(router_name: str):
     saved_summary = sys.modules.get(summary_module_name)
     auth_module_name = "utils.ella.exact_firebase_auth"
     saved_auth = sys.modules.get(auth_module_name)
+    consent_module_name = "ella.services.ai_consent"
+    saved_consent = sys.modules.get(consent_module_name)
     parent_auth = sys.modules.get("utils.ella")
     saved_parent_auth = getattr(parent_auth, "exact_firebase_auth", None) if parent_auth is not None else None
 
@@ -6873,6 +6875,14 @@ def _load_memory_artwork_router_module(router_name: str):
     auth_stub.get_exact_firebase_uid = reject_unauthenticated
     auth_stub.get_exact_service_authority = lambda **kwargs: TestAuthority()
 
+    consent_stub = types.ModuleType(consent_module_name)
+
+    def require_current_ai_consent(uid=Depends(auth_stub.get_exact_firebase_uid)):
+        return uid
+
+    consent_stub.assert_current_ai_consent = lambda uid: uid
+    consent_stub.require_current_ai_consent = require_current_ai_consent
+
     recovery_stub = types.ModuleType(recovery_module_name)
     recovery_stub.claim_memory_artwork_enrichment_recovery = lambda uid, memory_id: None
     summary_stub = types.ModuleType(summary_module_name)
@@ -6882,6 +6892,7 @@ def _load_memory_artwork_router_module(router_name: str):
     sys.modules[recovery_module_name] = recovery_stub
     sys.modules[summary_module_name] = summary_stub
     sys.modules[auth_module_name] = auth_stub
+    sys.modules[consent_module_name] = consent_stub
     if parent_auth is not None:
         setattr(parent_auth, "exact_firebase_auth", auth_stub)
     spec = importlib.util.spec_from_file_location(
@@ -6910,6 +6921,10 @@ def _load_memory_artwork_router_module(router_name: str):
             sys.modules.pop(auth_module_name, None)
         else:
             sys.modules[auth_module_name] = saved_auth
+        if saved_consent is None:
+            sys.modules.pop(consent_module_name, None)
+        else:
+            sys.modules[consent_module_name] = saved_consent
         if parent_auth is not None:
             if saved_parent_auth is None:
                 if getattr(parent_auth, "exact_firebase_auth", None) is auth_stub:

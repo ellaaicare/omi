@@ -98,6 +98,7 @@ def _disable_external_observer_side_effects(monkeypatch):
     monkeypatch.setattr(corrections, "_run_correction_propagation_for_submission", noop_propagate)
     monkeypatch.setattr(summary_recovery, "_conversation_vector_present", lambda uid, cid: False)
     monkeypatch.setattr(summary_recovery, "resolve_isolated_runtime", retained_runtime)
+    monkeypatch.setattr(summary_recovery, "assert_current_ai_consent", lambda uid: uid)
 
 
 def _conversation():

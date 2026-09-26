@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from utils.ella import postprocess
 
@@ -17,6 +18,11 @@ class FakeResponse:
     def raise_for_status(self):
         if self.status_code >= 400:
             raise postprocess.requests.HTTPError(f"HTTP {self.status_code}")
+
+
+@pytest.fixture(autouse=True)
+def _current_ai_consent(monkeypatch):
+    monkeypatch.setattr(postprocess, "assert_current_ai_consent", lambda uid: uid)
 
 
 def _conversation():
@@ -66,6 +72,26 @@ def test_cloud_selected_uid_queues_and_skips_all_legacy_webhooks(
     postprocess.fire_postprocess_webhook("synthetic-user", _conversation())
 
     assert queued == [("synthetic-user", "conversation-a")]
+    assert calls == []
+
+
+def test_missing_consent_blocks_cloud_queue_and_legacy_webhooks(monkeypatch):
+    _configure_cloud(monkeypatch)
+    queued = []
+    calls = []
+
+    def reject(_uid):
+        raise HTTPException(status_code=403, detail={"code": "ai_consent_required"})
+
+    monkeypatch.setattr(postprocess, "assert_current_ai_consent", reject)
+    monkeypatch.setattr(postprocess, "enqueue_cloud_enrichment", lambda *args: queued.append(args))
+    monkeypatch.setattr(postprocess.requests, "post", lambda *args, **kwargs: calls.append(args))
+
+    with pytest.raises(HTTPException) as error:
+        postprocess.fire_postprocess_webhook("synthetic-user", _conversation())
+
+    assert error.value.detail == {"code": "ai_consent_required"}
+    assert queued == []
     assert calls == []
 
 

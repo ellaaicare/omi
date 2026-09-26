@@ -1458,9 +1458,10 @@ elif mode in {"chat-xai", "chat-xai-whitespace"}:
             return SyntheticStreamResponse()
 
     module.httpx.AsyncClient = SyntheticAsyncClient
+    module.assert_current_ai_consent = lambda uid: uid
 
     async def consume():
-        async for _ in module._stream_level_2_grok("hello"):
+        async for _ in module._stream_level_2_grok("hello", "synthetic-user"):
             pass
 
     asyncio.run(consume())

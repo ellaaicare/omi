@@ -257,6 +257,10 @@ def caller_modules(monkeypatch):
     _stub_module(
         monkeypatch,
         "ella.services.ai_consent",
+        AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE="ai_consent_authority_unavailable",
+        AI_CONSENT_REQUIRED_CODE="ai_consent_required",
+        AI_CONSENT_WEBSOCKET_CLOSE_CODE=4403,
+        AI_CONSENT_WEBSOCKET_RETRY_CLOSE_CODE=1013,
         assert_current_ai_consent=_noop,
         require_current_ai_consent=lambda: "uid-1",
         resolve_processor=lambda *_args: object(),

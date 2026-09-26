@@ -248,8 +248,43 @@ def test_missing_consent_is_fail_closed_when_enforcement_is_enabled(monkeypatch)
         consent.assert_current_ai_consent("user-a")
 
     assert error.value.status_code == 403
-    assert error.value.detail["code"] == "ai_consent_required"
-    assert error.value.detail["decision"] == "not_recorded"
+    assert error.value.detail == {"code": "ai_consent_required"}
+
+
+def test_consent_rejection_handler_returns_stable_top_level_contract(monkeypatch):
+    monkeypatch.setattr(consent, "_repository", consent.InMemoryConsentRepository())
+    app = FastAPI()
+    app.add_exception_handler(consent.AiConsentHTTPException, consent.ai_consent_http_exception_handler)
+
+    @app.get("/protected")
+    def protected():
+        consent.assert_current_ai_consent("user-a")
+
+    response = TestClient(app).get("/protected")
+
+    assert response.status_code == 403
+    assert response.json() == {"code": "ai_consent_required"}
+
+
+def test_consent_authority_outage_is_retryable_and_not_revocation_shaped(monkeypatch):
+    class UnavailableRepository(consent.InMemoryConsentRepository):
+        def get_current(self, uid):
+            raise RuntimeError("synthetic datastore outage")
+
+    monkeypatch.setattr(consent, "_repository", UnavailableRepository())
+    app = FastAPI()
+    app.add_exception_handler(consent.AiConsentHTTPException, consent.ai_consent_http_exception_handler)
+
+    @app.get("/protected")
+    def protected():
+        consent.assert_current_ai_consent("user-a")
+
+    response = TestClient(app).get("/protected")
+
+    assert response.status_code == 503
+    assert response.json() == {"code": "ai_consent_authority_unavailable", "retryable": True}
+    assert consent.AI_CONSENT_WEBSOCKET_CLOSE_CODE == 4403
+    assert consent.AI_CONSENT_WEBSOCKET_RETRY_CLOSE_CODE == 1013
 
 
 def test_exact_policy_grant_is_server_timestamped_and_authorizes(monkeypatch):
@@ -546,7 +581,7 @@ def test_v6_grant_is_rejected_and_cannot_pass_protected_route_gate(
         consent.assert_current_ai_consent("user-a")
 
     assert error.value.status_code == 403
-    assert error.value.detail["required_policy_version"] == ("ai-data-processors-v10")
+    assert error.value.detail == {"code": "ai_consent_required"}
 
 
 def test_nonmaterial_policy_metadata_drift_keeps_explicit_grant_current(monkeypatch):
@@ -613,14 +648,7 @@ def test_human_bumped_minimum_policy_requires_reconsent(monkeypatch):
     with pytest.raises(HTTPException) as error:
         consent.assert_current_ai_consent("user-a")
     assert error.value.status_code == 403
-    assert error.value.detail == {
-        "code": "ai_consent_reconsent_required",
-        "authority_state": "reconsent_required",
-        "retryable": False,
-        "decision": "granted",
-        "required_policy_version": "ai-data-processors-v11",
-        "required_processor_set_hash": consent.CURRENT_PROCESSOR_SET_HASH,
-    }
+    assert error.value.detail == {"code": "ai_consent_required"}
 
 
 def test_revoke_supersedes_prior_grant():
@@ -847,8 +875,7 @@ def test_decline_and_revoke_block_central_target_uid_egress(monkeypatch, decisio
         consent.assert_current_ai_consent("user-a")
 
     assert error.value.status_code == 403
-    assert error.value.detail["code"] == "ai_consent_required"
-    assert error.value.detail["decision"] == decision
+    assert error.value.detail == {"code": "ai_consent_required"}
 
 
 def test_account_deletion_receipt_is_opaque_and_completed():
@@ -999,14 +1026,16 @@ def test_receipts_are_user_scoped():
     assert service.receipt("user-b", receipt_id) is None
 
 
-def test_enforcement_defaults_off_and_supports_uid_canary(monkeypatch):
+def test_enforcement_is_server_authoritative_and_cannot_be_disabled(monkeypatch):
     monkeypatch.delenv("ELLA_AI_CONSENT_ENFORCEMENT_ENABLED", raising=False)
     monkeypatch.delenv("ELLA_AI_CONSENT_ENFORCEMENT_UIDS", raising=False)
-    assert consent.ai_consent_enforcement_required("user-a") is False
+    assert consent.ai_consent_enforcement_required("user-a") is True
 
     monkeypatch.setenv("ELLA_AI_CONSENT_ENFORCEMENT_UIDS", "user-a,user-b")
     assert consent.ai_consent_enforcement_required("user-a") is True
-    assert consent.ai_consent_enforcement_required("user-c") is False
+    assert consent.ai_consent_enforcement_required("user-c") is True
+    monkeypatch.setenv("ELLA_AI_CONSENT_ENFORCEMENT_ENABLED", "false")
+    assert consent.ai_consent_global_enforcement_enabled() is True
 
 
 def test_tts_gate_accepts_configured_internal_service_token(monkeypatch):
@@ -1484,7 +1513,6 @@ def test_protected_route_reports_integrity_failure_as_retryable_unavailable(monk
     assert error.value.status_code == 503
     assert error.value.detail == {
         "code": "ai_consent_authority_unavailable",
-        "authority_state": "unavailable",
         "retryable": True,
     }
 

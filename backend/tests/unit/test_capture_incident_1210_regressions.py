@@ -38,12 +38,12 @@ def _cell(value):
     return (lambda: value).__closure__[0]
 
 
-def _nested_function(relative_path: str, name: str, globals_: dict, closure_values: dict):
+def _nested_function(relative_path: str, name: str, globals_: dict, closure_values: dict, *, argdefs=None):
     code = _nested_code(relative_path, name)
     missing = set(code.co_freevars) - set(closure_values)
     assert not missing, f"missing closure values for {name}: {sorted(missing)}"
     closure = tuple(_cell(closure_values[freevar]) for freevar in code.co_freevars)
-    return types.FunctionType(code, {"__builtins__": __builtins__, **globals_}, name, closure=closure)
+    return types.FunctionType(code, {"__builtins__": __builtins__, **globals_}, name, argdefs, closure)
 
 
 @cache
@@ -193,6 +193,7 @@ def test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing(
             "uid": "uid-a",
             "websocket_active": True,
         },
+        argdefs=(None,),
     )
     connect, close, *_unused, request_processing, _receive, _connected, _speaker = handler()
     fallback_calls = []
@@ -328,6 +329,7 @@ def test_pusher_processing_request_waits_for_terminal_response():
             "uid": "uid-a",
             "websocket_active": True,
         },
+        argdefs=(None,),
     )
     connect, _close, *_unused, request_processing, receive, _connected, _speaker = handler()
 

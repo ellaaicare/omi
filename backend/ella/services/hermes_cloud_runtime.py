@@ -16,6 +16,9 @@ from database import voice_canary as voice_canary_db
 from database.ella_provisioning import EllaProvisioningRepository, RuntimePoolClaimError
 from ella.routers.canonical_events import CanonicalEventIn, CanonicalEventStore
 from ella.services.ai_consent import (
+    AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE,
+    AI_CONSENT_REQUIRED_CODE,
+    AiConsentHTTPException,
     MANAGED_CLOUD_MEMORY_PROVIDER,
     MANAGED_CLOUD_PHOTON_SCOPE,
 )
@@ -835,6 +838,25 @@ class HermesCloudRuntimeService:
                 interaction_id=str(claimed["id"]),
                 error_code=normalized_error,
             )
+            raise
+        except AiConsentHTTPException as exc:
+            normalized_error = (
+                AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE if exc.status_code >= 500 else AI_CONSENT_REQUIRED_CODE
+            )
+            await self.repository.fail_runtime_interaction(
+                interaction_id=str(claimed["id"]),
+                error_code=normalized_error,
+            )
+            for receipt, completed in (
+                (user_receipt, user_ingestion_completed),
+                (assistant_receipt, assistant_ingestion_completed),
+            ):
+                if receipt and not completed:
+                    await self.repository.complete_runtime_ingestion(
+                        receipt_id=str(receipt["id"]),
+                        status="failed",
+                        metadata={"error_code": normalized_error, "content_free": True},
+                    )
             raise
         except ProvisioningError as exc:
             normalized_error = exc.code

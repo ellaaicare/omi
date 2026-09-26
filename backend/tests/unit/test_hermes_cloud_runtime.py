@@ -758,6 +758,64 @@ def test_provider_boundary_callback_runs_after_final_checks_and_before_cloud(
     ]
 
 
+@pytest.mark.parametrize(
+    ("status_code", "detail", "expected_code"),
+    [
+        (403, {"code": "ai_consent_required"}, "ai_consent_required"),
+        (
+            503,
+            {"code": "ai_consent_authority_unavailable", "retryable": True},
+            "ai_consent_authority_unavailable",
+        ),
+    ],
+)
+def test_provider_boundary_preserves_exact_ai_consent_exception(
+    status_code,
+    detail,
+    expected_code,
+):
+    class SendTrackingCloud(FakeCloudClient):
+        def __init__(self):
+            super().__init__()
+            self.provider_posts = 0
+
+        async def create_response(self, binding, **kwargs):
+            await kwargs["before_provider_send"]()
+            self.provider_posts += 1
+            return await super().create_response(binding, **kwargs)
+
+    repository = FakeRepository()
+    policy = FakePolicy()
+    cloud = SendTrackingCloud()
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=cloud,
+        voice_policy=policy,
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 1,
+    )
+
+    async def reject_provider_boundary():
+        raise ai_consent.AiConsentHTTPException(status_code=status_code, detail=detail)
+
+    with pytest.raises(ai_consent.AiConsentHTTPException) as error:
+        asyncio.run(
+            service.run_turn(
+                _runtime(),
+                _request(),
+                before_provider_call=reject_provider_boundary,
+            )
+        )
+
+    assert error.value.status_code == status_code
+    assert error.value.detail == detail
+    assert repository.failures == [expected_code]
+    assert cloud.provider_posts == 0
+    assert policy.reserved
+    assert policy.released
+
+
 def test_consent_revoked_after_reservation_blocks_provider_call(monkeypatch):
     repository = FakeRepository()
     policy = FakePolicy()

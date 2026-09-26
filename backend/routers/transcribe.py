@@ -10,7 +10,7 @@ import uuid
 import wave
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Dict, List, Optional, Set, Tuple, Callable
+from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 import av
 import numpy as np
@@ -18,7 +18,7 @@ import opuslib  # type: ignore
 
 import lc3  # lc3py
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from starlette.concurrency import run_in_threadpool
 from fastapi.websockets import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
@@ -131,7 +131,15 @@ from ella.routers.auto_provision import (
     get_agent_cluster,
     listen_runtime_gate,
 )
-from ella.services.ai_consent import assert_current_ai_consent, require_current_ai_consent, resolve_processor
+from ella.services.ai_consent import (
+    AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE,
+    AI_CONSENT_REQUIRED_CODE,
+    AI_CONSENT_WEBSOCKET_CLOSE_CODE,
+    AI_CONSENT_WEBSOCKET_RETRY_CLOSE_CODE,
+    assert_current_ai_consent,
+    resolve_processor,
+)
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid
 
 from utils.aac import AACDecoder
 from utils.audio import AudioRingBuffer
@@ -147,6 +155,144 @@ router = APIRouter()
 
 PUSHER_ENABLED = bool(os.getenv('HOSTED_PUSHER_API_URL'))
 CAPTURE_CONVERSATION_ID_KEY = "_capture_conversation_id"
+AI_CONSENT_SESSION_REFRESH_SECONDS = 1.0
+
+
+class AiConsentWebSocketRejected(RuntimeError):
+    def __init__(self, *, close_code: int, reason: str, retryable: bool):
+        super().__init__(reason)
+        self.close_code = close_code
+        self.reason = reason
+        self.retryable = retryable
+
+
+class AiConsentSessionAuthority:
+    """Bound provider egress to a periodically refreshed session authority."""
+
+    def __init__(
+        self,
+        uid: str,
+        *,
+        checker: Callable[[str], str] | None = None,
+        refresh_interval_seconds: float = AI_CONSENT_SESSION_REFRESH_SECONDS,
+    ):
+        self.uid = uid
+        self._checker = checker or assert_current_ai_consent
+        self.refresh_interval_seconds = max(0.1, refresh_interval_seconds)
+        self._lock = asyncio.Lock()
+        self._initialized = False
+        self._failure: HTTPException | None = None
+
+    async def refresh(self) -> None:
+        async with self._lock:
+            try:
+                await run_in_threadpool(self._checker, self.uid)
+            except HTTPException as exc:
+                self._failure = exc
+                self._initialized = True
+                raise
+            except Exception as exc:
+                failure = HTTPException(
+                    status_code=503,
+                    detail={
+                        "code": AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE,
+                        "retryable": True,
+                    },
+                )
+                self._failure = failure
+                self._initialized = True
+                raise failure from exc
+            self._failure = None
+            self._initialized = True
+
+    async def require_current(self, *, refresh: bool = False) -> None:
+        if refresh or not self._initialized:
+            await self.refresh()
+            return
+        async with self._lock:
+            failure = self._failure
+        if failure is not None:
+            raise failure
+
+    async def monitor(
+        self,
+        *,
+        is_active: Callable[[], bool],
+        on_rejected: Callable[[HTTPException], Awaitable[None]],
+    ) -> None:
+        while is_active():
+            await asyncio.sleep(self.refresh_interval_seconds)
+            if not is_active():
+                return
+            try:
+                await self.refresh()
+            except HTTPException as exc:
+                await on_rejected(exc)
+                return
+
+
+def _ai_consent_websocket_contract(exc: HTTPException) -> tuple[int, str, bool]:
+    detail = exc.detail if isinstance(exc.detail, dict) else {}
+    retryable = exc.status_code >= 500
+    reason = AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE if retryable else detail.get("code", AI_CONSENT_REQUIRED_CODE)
+    close_code = AI_CONSENT_WEBSOCKET_RETRY_CLOSE_CODE if retryable else AI_CONSENT_WEBSOCKET_CLOSE_CODE
+    return close_code, reason, retryable
+
+
+async def _forward_deepgram_audio_with_current_consent(
+    consent_guard: Callable[[], Awaitable[None]],
+    provider_socket,
+    data: bytes,
+    delivery_receipt: SttSessionDeliveryReceipt,
+) -> None:
+    await consent_guard()
+    forward_deepgram_audio(provider_socket, data, delivery_receipt)
+
+
+async def _forward_async_provider_audio_with_current_consent(
+    consent_guard: Callable[[], Awaitable[None]],
+    provider_send: Callable,
+    data: bytes,
+    delivery_receipt: SttSessionDeliveryReceipt,
+) -> None:
+    await consent_guard()
+    await forward_async_provider_audio(provider_send, data, delivery_receipt)
+
+
+async def _send_pusher_audio_with_current_consent(
+    consent_guard: Callable[[], Awaitable[None]],
+    provider_send: Callable[[bytes], Awaitable[None]],
+    data: bytes,
+) -> None:
+    await consent_guard()
+    await provider_send(data)
+
+
+async def _require_current_ai_consent_for_websocket(
+    websocket: WebSocket,
+    uid: str,
+    *,
+    accepted: bool,
+    send_auth_response: bool = False,
+) -> bool:
+    try:
+        await run_in_threadpool(assert_current_ai_consent, uid)
+        return True
+    except HTTPException as exc:
+        close_code, error_code, retryable = _ai_consent_websocket_contract(exc)
+        if not accepted:
+            await websocket.accept()
+        if send_auth_response:
+            await websocket.send_json(
+                {
+                    "type": "auth_response",
+                    "success": False,
+                    "error": error_code,
+                    "retryable": retryable,
+                }
+            )
+        await websocket.close(code=close_code, reason=error_code)
+        return False
 
 
 def drain_capture_persistence_batches(
@@ -1328,6 +1474,41 @@ async def _stream_handler(
     deepgram_profile_socket = None  # Temporary socket for speech profile phase
     speech_profile_complete = asyncio.Event()  # Signals when speech profile send is done
     speech_profile_preseconds = 0  # Set by _process_stt(); used by flush_stt_buffer reconnect
+    ai_consent_egress_rejected = asyncio.Event()
+    ai_consent_session_authority = AiConsentSessionAuthority(uid)
+
+    async def reject_stt_egress(exc: HTTPException) -> AiConsentWebSocketRejected:
+        nonlocal accepting_capture, websocket_active, websocket_close_code
+        close_code, reason, retryable = _ai_consent_websocket_contract(exc)
+        if not ai_consent_egress_rejected.is_set():
+            accepting_capture = False
+            websocket_active = False
+            websocket_close_code = close_code
+            ai_consent_egress_rejected.set()
+            _delivery_log(
+                "ai_consent_egress_rejected",
+                terminal_reason=reason,
+                retryable=retryable,
+            )
+            if websocket.client_state == WebSocketState.CONNECTED:
+                await websocket.close(code=close_code, reason=reason)
+        return AiConsentWebSocketRejected(
+            close_code=close_code,
+            reason=reason,
+            retryable=retryable,
+        )
+
+    async def require_stt_egress_consent(*, refresh: bool = False) -> None:
+        try:
+            await ai_consent_session_authority.require_current(refresh=refresh)
+        except HTTPException as exc:
+            raise await reject_stt_egress(exc) from exc
+
+    async def monitor_stt_egress_consent() -> None:
+        await ai_consent_session_authority.monitor(
+            is_active=lambda: websocket_active,
+            on_rejected=reject_stt_egress,
+        )
 
     def stream_transcript(segments):
         nonlocal realtime_segment_buffers
@@ -1371,6 +1552,8 @@ async def _stream_handler(
                 _latency_log("stt_custom_mode_ready")
                 print(f"Custom STT mode enabled - using suggested transcripts from app", uid, session_id)
                 return None
+
+            await require_stt_egress_consent()
 
             speech_profile_preseconds = 0
             has_speech_profile = False
@@ -1432,6 +1615,7 @@ async def _stream_handler(
 
             # DEEPGRAM
             if stt_service == STTService.deepgram:
+                await require_stt_egress_consent()
                 deepgram_socket = await process_audio_dg(
                     stream_transcript,
                     stt_language,
@@ -1444,6 +1628,7 @@ async def _stream_handler(
                     delivery_event_callback=_provider_delivery_event_callback,
                 )
                 if has_speech_profile:
+                    await require_stt_egress_consent()
                     deepgram_profile_socket = await process_audio_dg(
                         stream_transcript,
                         stt_language,
@@ -1464,6 +1649,7 @@ async def _stream_handler(
                     hints = [language]
 
                 try:
+                    await require_stt_egress_consent()
                     soniox_socket = await process_audio_soniox(
                         stream_transcript,
                         sample_rate,
@@ -1476,6 +1662,7 @@ async def _stream_handler(
 
                     # Create a second socket for initial speech profile if needed
                     if has_speech_profile:
+                        await require_stt_egress_consent()
                         soniox_profile_socket = await process_audio_soniox(
                             stream_transcript,
                             sample_rate,
@@ -1498,6 +1685,7 @@ async def _stream_handler(
                     selected_stt_service = STTService.deepgram
                     selected_stt_model = 'nova-3'
                     complete_profile_without_preload("provider_fallback_zero_preload")
+                    await require_stt_egress_consent()
                     deepgram_socket = await process_audio_dg(
                         stream_transcript,
                         stt_language,
@@ -1516,6 +1704,7 @@ async def _stream_handler(
                 selected_stt_service = STTService.deepgram
                 selected_stt_model = 'nova-2-general'
                 complete_profile_without_preload("provider_fallback_zero_preload")
+                await require_stt_egress_consent()
                 deepgram_socket = await process_audio_dg(
                     stream_transcript,
                     stt_language if stt_language != 'multi' else 'multi',
@@ -1530,6 +1719,7 @@ async def _stream_handler(
 
             # SPEECHMATICS
             elif stt_service == STTService.speechmatics:
+                await require_stt_egress_consent()
                 speechmatics_socket = await process_audio_speechmatics(
                     stream_transcript, sample_rate, stt_language, preseconds=speech_profile_preseconds
                 )
@@ -1546,6 +1736,8 @@ async def _stream_handler(
                 return _create_speech_profile_loader_task(lambda: websocket_active, sample_rate)
             return None
 
+        except AiConsentWebSocketRejected:
+            raise
         except Exception as e:
             _latency_log(
                 "stt_connection_error",
@@ -1591,7 +1783,12 @@ async def _stream_handler(
                 if stt_service == STTService.deepgram and deepgram_socket:
 
                     async def deepgram_socket_send(data):
-                        forward_deepgram_audio(deepgram_socket, data, delivery_receipt)
+                        await _forward_deepgram_audio_with_current_consent(
+                            require_stt_egress_consent,
+                            deepgram_socket,
+                            data,
+                            delivery_receipt,
+                        )
                         return True
 
                     await send_initial_file_path(
@@ -1604,7 +1801,12 @@ async def _stream_handler(
                 elif stt_service == STTService.soniox and soniox_socket:
 
                     async def soniox_socket_send(data):
-                        await forward_async_provider_audio(soniox_socket.send, data, delivery_receipt)
+                        await _forward_async_provider_audio_with_current_consent(
+                            require_stt_egress_consent,
+                            soniox_socket.send,
+                            data,
+                            delivery_receipt,
+                        )
 
                     await send_initial_file_path(
                         file_path,
@@ -1616,7 +1818,12 @@ async def _stream_handler(
                 elif stt_service == STTService.grok and grok_socket:
 
                     async def grok_socket_send(data):
-                        await forward_async_provider_audio(grok_socket.send, data, delivery_receipt)
+                        await _forward_async_provider_audio_with_current_consent(
+                            require_stt_egress_consent,
+                            grok_socket.send,
+                            data,
+                            delivery_receipt,
+                        )
 
                     await send_initial_file_path(
                         file_path,
@@ -1628,7 +1835,12 @@ async def _stream_handler(
                 elif stt_service == STTService.speechmatics and speechmatics_socket:
 
                     async def speechmatics_socket_send(data):
-                        await forward_async_provider_audio(speechmatics_socket.send, data, delivery_receipt)
+                        await _forward_async_provider_audio_with_current_consent(
+                            require_stt_egress_consent,
+                            speechmatics_socket.send,
+                            data,
+                            delivery_receipt,
+                        )
 
                     await send_initial_file_path(
                         file_path,
@@ -1652,6 +1864,9 @@ async def _stream_handler(
                     )
                     await asyncio.sleep(SPEECH_PROFILE_STABILIZE_DELAY)
 
+            except AiConsentWebSocketRejected:
+                websocket_active = False
+                raise
             except ProviderAudioSendRejected:
                 websocket_close_code = 1011
                 websocket_active = False
@@ -1673,7 +1888,7 @@ async def _stream_handler(
 
     # Pusher
     #
-    def create_pusher_task_handler():
+    def create_pusher_task_handler(stt_egress_consent_guard=None):
         nonlocal websocket_active
         nonlocal current_conversation_id
 
@@ -1809,6 +2024,10 @@ async def _stream_handler(
 
             # Send audio bytes
             if pusher_connected and pusher_ws and len(audio_buffers) > 0:
+                if stt_egress_consent_guard is None:
+                    audio_buffers = bytearray()
+                    audio_buffer_last_received = None
+                    return
                 try:
                     # Calculate buffer start time:
                     # buffer_start = last_received_time - buffer_duration
@@ -1822,7 +2041,16 @@ async def _stream_handler(
                     data.extend(struct.pack("d", buffer_start_time))
                     data.extend(audio_buffers.copy())
                     audio_buffers = bytearray()  # reset
-                    await pusher_ws.send(data)
+                    audio_buffer_last_received = None
+                    await _send_pusher_audio_with_current_consent(
+                        lambda: stt_egress_consent_guard(refresh=True),
+                        pusher_ws.send,
+                        data,
+                    )
+                except AiConsentWebSocketRejected:
+                    audio_buffers = bytearray()
+                    audio_buffer_last_received = None
+                    return
                 except ConnectionClosed as e:
                     print(f"Pusher audio_bytes Connection closed: {e}", uid, session_id)
                     pusher_connected = False
@@ -2688,8 +2916,11 @@ async def _stream_handler(
         await send_event_func(PhotoProcessingEvent(temp_id=temp_id, photo_id=photo_id))
 
         try:
+            await require_stt_egress_consent()
             description = await describe_image(image_b64)
             discarded = not description or not description.strip()
+        except AiConsentWebSocketRejected:
+            raise
         except Exception as e:
             print(f"Error describing image: {e}", uid, session_id)
             description = "Could not generate description."
@@ -2805,7 +3036,12 @@ async def _stream_handler(
             if dg_socket is not None:
                 if profile_complete or not deepgram_profile_socket:
                     try:
-                        forward_deepgram_audio(dg_socket, chunk, delivery_receipt)
+                        await _forward_deepgram_audio_with_current_consent(
+                            require_stt_egress_consent,
+                            dg_socket,
+                            chunk,
+                            delivery_receipt,
+                        )
                     except ProviderAudioSendRejected:
                         websocket_close_code = 1011
                         _delivery_log("provider_send_rejected", terminal_reason="provider_send_rejected")
@@ -2823,7 +3059,12 @@ async def _stream_handler(
                         asyncio.create_task(close_dg_profile())
                 else:
                     try:
-                        forward_deepgram_audio(deepgram_profile_socket, chunk, delivery_receipt)
+                        await _forward_deepgram_audio_with_current_consent(
+                            require_stt_egress_consent,
+                            deepgram_profile_socket,
+                            chunk,
+                            delivery_receipt,
+                        )
                     except ProviderAudioSendRejected:
                         websocket_close_code = 1011
                         _delivery_log("provider_send_rejected", terminal_reason="profile_provider_send_rejected")
@@ -2831,7 +3072,12 @@ async def _stream_handler(
 
             if soniox_sock is not None:
                 if profile_complete or not soniox_profile_socket:
-                    await forward_async_provider_audio(soniox_sock.send, chunk, delivery_receipt)
+                    await _forward_async_provider_audio_with_current_consent(
+                        require_stt_egress_consent,
+                        soniox_sock.send,
+                        chunk,
+                        delivery_receipt,
+                    )
                     if soniox_profile_socket:
                         print('Scheduling delayed close of soniox_profile_socket', uid, session_id)
                         socket_to_close = soniox_profile_socket
@@ -2844,7 +3090,12 @@ async def _stream_handler(
 
                         asyncio.create_task(close_soniox_profile())
                 else:
-                    await forward_async_provider_audio(soniox_profile_socket.send, chunk, delivery_receipt)
+                    await _forward_async_provider_audio_with_current_consent(
+                        require_stt_egress_consent,
+                        soniox_profile_socket.send,
+                        chunk,
+                        delivery_receipt,
+                    )
 
             if grok_sock is not None:
                 # Proactively reconnect if Grok closed the connection (internal error, timeout, etc.)
@@ -2857,6 +3108,7 @@ async def _stream_handler(
                 if _grok_dead:
                     print("[GROK] connection lost (state not OPEN), reconnecting...")
                     try:
+                        await require_stt_egress_consent()
                         try:
                             await grok_sock.close()
                         except Exception:
@@ -2874,10 +3126,18 @@ async def _stream_handler(
                         grok_sock = None
                 if grok_sock is not None:
                     try:
-                        await forward_async_provider_audio(grok_sock.send, bytes(chunk), delivery_receipt)
+                        await _forward_async_provider_audio_with_current_consent(
+                            require_stt_egress_consent,
+                            grok_sock.send,
+                            bytes(chunk),
+                            delivery_receipt,
+                        )
                     except Exception as _grok_send_err:
+                        if isinstance(_grok_send_err, AiConsentWebSocketRejected):
+                            raise
                         print(f"[GROK] send error ({_grok_send_err}), reconnecting...")
                         try:
+                            await require_stt_egress_consent()
                             try:
                                 await grok_sock.close()
                             except Exception:
@@ -2889,14 +3149,24 @@ async def _stream_handler(
                                 preseconds=speech_profile_preseconds,
                                 stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
                             )
-                            await forward_async_provider_audio(grok_sock.send, bytes(chunk), delivery_receipt)
+                            await _forward_async_provider_audio_with_current_consent(
+                                require_stt_egress_consent,
+                                grok_sock.send,
+                                bytes(chunk),
+                                delivery_receipt,
+                            )
                             print("[GROK] reconnected and sent chunk")
                         except Exception as _grok_reconnect_err2:
                             print(f"[GROK] reconnect failed: {_grok_reconnect_err2}, dropping Grok")
                             grok_sock = None
 
             if speechmatics_sock is not None:
-                await forward_async_provider_audio(speechmatics_sock.send, chunk, delivery_receipt)
+                await _forward_async_provider_audio_with_current_consent(
+                    require_stt_egress_consent,
+                    speechmatics_sock.send,
+                    chunk,
+                    delivery_receipt,
+                )
 
         async def finish_stt_inputs_for_drain() -> None:
             await flush_stt_buffer(force=True)
@@ -3118,6 +3388,7 @@ async def _stream_handler(
                                 suggested_segments = json_data.get('segments', [])
                                 stt_provider = json_data.get('stt_provider')
                                 if suggested_segments:
+                                    await require_stt_egress_consent()
                                     if first_audio_byte_timestamp is None:
                                         first_audio_byte_timestamp = last_activity_time
                                         last_usage_record_timestamp = first_audio_byte_timestamp
@@ -3184,12 +3455,15 @@ async def _stream_handler(
 
         except WebSocketDisconnect:
             print("WebSocket disconnected (exception)", uid, session_id)
+        except AiConsentWebSocketRejected as exc:
+            websocket_close_code = exc.close_code
+            websocket_active = False
         except Exception as e:
             print(f'Could not process data: error {e}', uid, session_id)
             websocket_close_code = 1011
         finally:
             # Flush any remaining audio in buffer to STT
-            if not use_custom_stt:
+            if not use_custom_stt and not ai_consent_egress_rejected.is_set():
                 await flush_stt_buffer(force=True)
             websocket_active = False
             image_chunks.clear()
@@ -3197,6 +3471,7 @@ async def _stream_handler(
 
     # Start
     #
+    ai_consent_monitor_task = asyncio.create_task(monitor_stt_egress_consent())
     try:
         # Init STT (fast - profile file loads and sends in background)
         _send_message_event(MessageServiceStatusEvent(status="stt_initiating", status_text="STT Service Starting"))
@@ -3216,7 +3491,7 @@ async def _stream_handler(
                 pusher_receive,
                 pusher_is_connected,
                 send_speaker_sample_request,
-            ) = create_pusher_task_handler()
+            ) = create_pusher_task_handler(require_stt_egress_consent)
 
             # Pusher connection
             await pusher_connect()
@@ -3260,6 +3535,7 @@ async def _stream_handler(
             lifecycle_manager_task,
             pending_conversations_task,
             speaker_id_task,
+            ai_consent_monitor_task,
         ] + pusher_tasks
 
         # Add speech profile task to run concurrently (sends profile audio in background)
@@ -3268,6 +3544,8 @@ async def _stream_handler(
 
         await asyncio.gather(*tasks)
 
+    except AiConsentWebSocketRejected:
+        pass
     except Exception as e:
         print(f"Error during WebSocket operation: {e}", uid, session_id)
     finally:
@@ -3277,6 +3555,12 @@ async def _stream_handler(
             if transcription_seconds > 0 or words_to_record > 0:
                 record_usage(uid, transcription_seconds=transcription_seconds, words_transcribed=words_to_record)
         websocket_active = False
+        if not ai_consent_monitor_task.done():
+            ai_consent_monitor_task.cancel()
+            try:
+                await ai_consent_monitor_task
+            except asyncio.CancelledError:
+                pass
 
         if capture_protocol != CAPTURE_PROTOCOL_VERSION:
             try:
@@ -3416,7 +3700,7 @@ async def _listen(
 @router.websocket("/v4/listen")
 async def listen_handler(
     websocket: WebSocket,
-    uid: str = Depends(require_current_ai_consent),
+    uid: str = Depends(get_exact_firebase_uid),
     language: str = 'en',
     sample_rate: int = 8000,
     codec: str = 'pcm8',
@@ -3430,6 +3714,9 @@ async def listen_handler(
     speaker_auto_assign: str = 'disabled',
     capture_protocol: int = 0,
 ):
+    if not await _require_current_ai_consent_for_websocket(websocket, uid, accepted=False):
+        return
+
     custom_stt_mode = CustomSttMode.enabled if custom_stt == 'enabled' else CustomSttMode.disabled
     onboarding_mode = onboarding == 'enabled'
     speaker_auto_assign_enabled = speaker_auto_assign == 'enabled'
@@ -3535,18 +3822,12 @@ async def web_listen_handler(
         await websocket.close(code=1008, reason="Auth error")
         return
 
-    try:
-        assert_current_ai_consent(uid)
-    except HTTPException as exc:
-        detail = exc.detail if isinstance(exc.detail, dict) else {}
-        await websocket.send_json(
-            {
-                "type": "auth_response",
-                "success": False,
-                "error": detail.get("code", "ai_consent_required"),
-            }
-        )
-        await websocket.close(code=1008, reason="AI consent required")
+    if not await _require_current_ai_consent_for_websocket(
+        websocket,
+        uid,
+        accepted=True,
+        send_auth_response=True,
+    ):
         return
 
     runtime_gate = await listen_runtime_gate(uid, user_db.is_exists_user)

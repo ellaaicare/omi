@@ -32,6 +32,7 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from ella.config import ELLA_CONFIG
 from database.ella_provisioning import EllaProvisioningRepository
@@ -44,7 +45,13 @@ from ella.services.hermes_cloud_runtime import (
     HermesCloudRuntimeService,
     HermesCloudTurnRequest,
 )
-from ella.services.ai_consent import require_current_ai_consent
+from ella.services.ai_consent import (
+    AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE,
+    AI_CONSENT_REQUIRED_CODE,
+    AiConsentHTTPException,
+    assert_current_ai_consent,
+    require_current_ai_consent,
+)
 from ella.services.provisioning import ProvisioningError
 from ella.services.runtime_resolver import (
     IsolatedRuntime,
@@ -66,6 +73,33 @@ from utils.ella.time_context import timezone_name
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/ella", tags=["ella-chat"])
+
+
+async def _assert_current_ai_consent_async(uid: str) -> str:
+    return await run_in_threadpool(assert_current_ai_consent, uid)
+
+
+def _ai_consent_stream_code(exc: AiConsentHTTPException) -> str:
+    if exc.status_code >= 500:
+        return AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE
+    return AI_CONSENT_REQUIRED_CODE
+
+
+async def _hermes_nonstream_completion_with_current_consent(
+    uid: str,
+    messages: list[dict],
+    session_key: str,
+    memory_key: str,
+    **kwargs,
+) -> str:
+    await _assert_current_ai_consent_async(uid)
+    return await _hermes_nonstream_completion(
+        messages,
+        session_key,
+        memory_key,
+        **kwargs,
+    )
+
 
 XAI_API_KEY = authority_credential("XAI_API_KEY", strip=False)
 XAI_BASE_URL = "https://api.x.ai/v1"
@@ -430,7 +464,7 @@ async def _stream_level_1_ack(user_message: str):
     yield "data: [DONE]\n\n"
 
 
-async def _stream_level_2_grok(user_message: str):
+async def _stream_level_2_grok(user_message: str, uid: str):
     """Level 2: Direct Grok API call via xAI."""
     _start = _time.time()
 
@@ -438,6 +472,13 @@ async def _stream_level_2_grok(user_message: str):
         print(f"[FLOW:CHAT-L2] ERROR provider=xai key_missing=true", flush=True)
         error_data = json.dumps({"error": "XAI_API_KEY not configured"})
         yield f"data: {error_data}\n\n"
+        return
+
+    try:
+        await _assert_current_ai_consent_async(uid)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        yield f"data: Error: {detail.get('code', 'ai_consent_authority_unavailable')}\n\n"
         return
 
     print(f"[FLOW:CHAT-L2] provider=xai model={XAI_CHAT_MODEL} streaming=true", flush=True)
@@ -512,6 +553,13 @@ async def _stream_level_3_n8n(user_message: str, uid: str, conversation_id: str)
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "source": "ella-chat-debug-3",
     }
+
+    try:
+        await _assert_current_ai_consent_async(uid)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        yield f"data: Error: {detail.get('code', 'ai_consent_authority_unavailable')}\n\n"
+        return
 
     async with httpx.AsyncClient() as client:
         try:
@@ -630,6 +678,13 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
             }
         )
     messages.append({"role": "user", "content": user_message})
+
+    try:
+        await _assert_current_ai_consent_async(uid)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        yield f"data: Error: {detail.get('code', 'ai_consent_authority_unavailable')}\n\n"
+        return
 
     # Use asyncio.Task so we can yield keep-alives while waiting
     async def _call_openclaw():
@@ -817,6 +872,7 @@ async def _produce_hermes_chat_events(
         agent_id = send_runtime.agent_id if send_runtime else HERMES_MODEL
         if not gateway_token:
             raise ProvisioningError("hermes_runtime_credential_missing", retryable=False)
+        await _assert_current_ai_consent_async(uid)
         async with httpx.AsyncClient(timeout=HERMES_CHAT_REQUEST_TIMEOUT_SECONDS) as client:
             async with client.stream(
                 "POST",
@@ -873,7 +929,8 @@ async def _produce_hermes_chat_events(
                 recovery_runtime = await revalidate_runtime_authority(runtime_identity)
                 if recovery_runtime.provider != "hermes":
                     raise ProvisioningError("self_hosted_runtime_required", retryable=False)
-            recovery_text = await _hermes_nonstream_completion(
+            recovery_text = await _hermes_nonstream_completion_with_current_consent(
+                uid,
                 messages,
                 session_key,
                 memory_key,
@@ -932,6 +989,11 @@ async def _produce_hermes_chat_events(
             flush=True,
         )
 
+    except AiConsentHTTPException as exc:
+        code = _ai_consent_stream_code(exc)
+        _elapsed = int((_time.time() - _start) * 1000)
+        print(f"[FLOW:CHAT-HERMES] CONSENT_ERROR uid={uid} code={code} latency={_elapsed}ms", flush=True)
+        yield f"data: Error: {code}\n\n"
     except ProvisioningError as exc:
         _elapsed = int((_time.time() - _start) * 1000)
         print(f"[FLOW:CHAT-HERMES] AUTHORITY_ERROR uid={uid} code={exc.code} latency={_elapsed}ms", flush=True)
@@ -1101,6 +1163,7 @@ async def _stream_hermes_cloud_chat(
                 started_at=client_sent_at,
                 client_metadata=client_info or {},
             ),
+            before_provider_call=lambda: _assert_current_ai_consent_async(uid),
         )
         yield f"data: {result.text.replace(chr(10), '__CRLF__')}\n\n"
         message = {
@@ -1123,6 +1186,30 @@ async def _stream_hermes_cloud_chat(
             result.duplicate,
             bool(result.response_id),
         )
+    except AiConsentHTTPException as exc:
+        code = _ai_consent_stream_code(exc)
+        logger.warning(
+            "[FLOW:CHAT-HERMES-CLOUD] uid=%s binding=%s code=%s retryable=%s",
+            uid,
+            runtime.binding_id,
+            code,
+            exc.status_code >= 500,
+        )
+        yield f"data: Error: {code}\n\n"
+        message = {
+            "id": f"hermes-error:{turn_id}",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "text": "",
+            "sender": "ai",
+            "type": "text",
+            "plugin_id": None,
+            "from_integration": False,
+            "memories": [],
+            "files": [],
+            "ask_for_nps": False,
+        }
+        encoded = base64.b64encode(json.dumps(message).encode()).decode()
+        yield f"done: {encoded}\n\n"
     except ProvisioningError as exc:
         logger.warning(
             "[FLOW:CHAT-HERMES-CLOUD] uid=%s binding=%s code=%s retryable=%s",
@@ -1204,6 +1291,12 @@ async def ella_chat_stream(
     client_sent_at = _parse_client_sent_at(request.client_sent_at)
     turn_id = _canonical_turn_id(uid, request, client_sent_at)
 
+    # Recheck immediately before committing streaming response headers. The
+    # dependency check authenticates admission; this closes the route-to-provider
+    # race with an exact HTTP 403/503 contract while each provider path retains
+    # its own last-boundary check.
+    await _assert_current_ai_consent_async(uid)
+
     if CHAT_PLATFORM == "hermes" or runtime is not None:
         trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
         record_trace(trace)
@@ -1244,7 +1337,7 @@ async def ella_chat_stream(
         trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
         record_trace(trace)
         return StreamingResponse(
-            _stream_level_2_grok(request.message),
+            _stream_level_2_grok(request.message, uid),
             media_type="text/event-stream",
         )
 
@@ -1272,7 +1365,7 @@ async def ella_chat_stream(
     trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
     record_trace(trace)
     return StreamingResponse(
-        _stream_level_2_grok(request.message),
+        _stream_level_2_grok(request.message, uid),
         media_type="text/event-stream",
     )
 
