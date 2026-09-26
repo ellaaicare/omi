@@ -184,11 +184,12 @@ class LocalWalSyncImpl implements LocalWalSync {
       final capturedAuthorities = _frameAuthorities.sublist(groupStart, groupEnd);
       final capturedAuthority = capturedAuthorities.first;
       final oneCaptureAuthority = capturedAuthority != null &&
-          capturedAuthorities.every((candidate) => identical(candidate, capturedAuthority)) &&
+          capturedAuthorities.every((candidate) =>
+              candidate != null && candidate.isCurrent() && candidate.hasEquivalentCaptureFence(capturedAuthority)) &&
           capturedAuthority.owner.matches(owner!);
       WalOwner? persistedOwner;
       if (owner != null && oneCaptureAuthority && capturedAuthority.isCurrent()) {
-        final previousOwner = identical(_adoptedFrameAuthority, capturedAuthority) ? _adoptedFrameOwner : owner;
+        final previousOwner = _authoritiesMatch(_adoptedFrameAuthority, capturedAuthority) ? _adoptedFrameOwner : owner;
         final exactAuthority = previousOwner == null
             ? null
             : await _rotateActiveSessionOwner(
@@ -203,7 +204,7 @@ class LocalWalSyncImpl implements LocalWalSync {
           final currentAuthority = _activeAuthority();
           if (capturedAuthority.isCurrent() &&
               (currentAuthority == null || currentAuthority.uid == capturedAuthority.uid)) {
-            persistedOwner = identical(_adoptedFrameAuthority, capturedAuthority) && _adoptedFrameOwner != null
+            persistedOwner = _authoritiesMatch(_adoptedFrameAuthority, capturedAuthority) && _adoptedFrameOwner != null
                 ? _adoptedFrameOwner
                 : owner;
             _stageInterruptedRecoveryBridge(
@@ -298,6 +299,9 @@ class LocalWalSyncImpl implements LocalWalSync {
     return left.matches(right);
   }
 
+  bool _authoritiesMatch(ActiveWalAuthority? left, ActiveWalAuthority? right) =>
+      left != null && right != null && left.hasEquivalentCaptureFence(right);
+
   @override
   Future onAudioCodecChanged(BleAudioCodec codec) async {
     if (codec.getFramesPerSecond() == _framesPerSecond && codec == _codec) {
@@ -362,11 +366,13 @@ class LocalWalSyncImpl implements LocalWalSync {
         firstOwner != null && capturedOwners.every((candidate) => candidate?.matches(firstOwner) == true);
     final capturedAuthority = capturedAuthorities.first;
     final oneCaptureAuthority = capturedAuthority != null &&
-        capturedAuthorities.every((candidate) => identical(candidate, capturedAuthority)) &&
+        capturedAuthorities.every((candidate) =>
+            candidate != null && candidate.isCurrent() && candidate.hasEquivalentCaptureFence(capturedAuthority)) &&
         capturedAuthority.owner.matches(firstOwner!);
     WalOwner? owner;
     if (oneExactOwner && oneCaptureAuthority && capturedAuthority.isCurrent()) {
-      final previousOwner = identical(_adoptedFrameAuthority, capturedAuthority) ? _adoptedFrameOwner : firstOwner;
+      final previousOwner =
+          _authoritiesMatch(_adoptedFrameAuthority, capturedAuthority) ? _adoptedFrameOwner : firstOwner;
       final exactAuthority = previousOwner == null
           ? null
           : await _rotateActiveSessionOwner(

@@ -23,6 +23,7 @@ class WalFileManager {
 
   static Directory? _baseDirectory;
   static WalOwner? _activeOwner;
+  static _ActiveOwnerAdoption? _activeOwnerAdoption;
   static Future<void>? _initialization;
   static Future<void> _exclusiveOperation = Future<void>.value();
   static final Object _exclusiveOperationZoneKey = Object();
@@ -61,7 +62,12 @@ class WalFileManager {
     _baseDirectory = baseDirectory ??
         _baseDirectory ??
         (Platform.isMacOS ? await getApplicationSupportDirectory() : await getApplicationDocumentsDirectory());
-    _activeOwner = activeOwner ?? WalOwnerAuthority.currentOwner();
+    final nextActiveOwner = activeOwner ?? WalOwnerAuthority.currentOwner();
+    final sameActiveOwner = _activeOwner == null
+        ? nextActiveOwner == null
+        : nextActiveOwner != null && _activeOwner!.matches(nextActiveOwner);
+    if (!sameActiveOwner) _activeOwnerAdoption = null;
+    _activeOwner = nextActiveOwner;
     await _accountsDirectory.create(recursive: true);
     await _quarantineDirectory.create(recursive: true);
     if (_activeDirectory != null) await _activeDirectory!.create(recursive: true);
@@ -73,6 +79,7 @@ class WalFileManager {
   static void resetForTesting() {
     _baseDirectory = null;
     _activeOwner = null;
+    _activeOwnerAdoption = null;
     _initialization = null;
     _exclusiveOperation = Future<void>.value();
     rotationBeforeCommitForTesting = null;
@@ -123,6 +130,7 @@ class WalFileManager {
     final capturedOwner = capturedAuthority.owner;
     final targetOwner = targetAuthority.owner;
     final previousActiveOwner = _activeOwner;
+    final previousActiveOwnerAdoption = _activeOwnerAdoption;
     bool targetIsExactCurrent() {
       final current = readCurrentAuthority();
       return targetAuthority.isCurrent() &&
@@ -221,6 +229,7 @@ class WalFileManager {
       }
     } catch (error) {
       _activeOwner = previousActiveOwner;
+      _activeOwnerAdoption = previousActiveOwnerAdoption;
       for (final rotation in rotations) {
         rotation.wal.owner = rotation.previousOwner;
         rotation.wal.filePath = rotation.previousPath;
@@ -252,6 +261,11 @@ class WalFileManager {
       Logger.debug('WalFileManager: Active WAL owner rotation failed (${error.runtimeType})');
       return false;
     }
+
+    _activeOwnerAdoption = _ActiveOwnerAdoption(
+      capturedAuthority: capturedAuthority,
+      adoptedOwner: targetOwner,
+    );
 
     for (final rotation in rotations) {
       final source = rotation.source;
@@ -297,12 +311,18 @@ class WalFileManager {
     required ActiveWalAuthority capturedAuthority,
   }) async {
     await init(activeOwner: _activeOwner);
+    final capturedOwner = capturedAuthority.owner;
+    final adoption = _activeOwnerAdoption;
+    final sourceFollowsCapturedAuthority = capturedOwner.matches(sourceOwner) ||
+        (adoption != null &&
+            adoption.adoptedOwner.matches(sourceOwner) &&
+            adoption.capturedAuthority.hasEquivalentCaptureFence(capturedAuthority));
     if (_activeOwner?.matches(sourceOwner) != true ||
         !sourceOwner.hasValidAuthorityIdentity ||
         !targetOwner.hasValidAuthorityIdentity ||
         sourceOwner.uid != targetOwner.uid ||
         sourceOwner.durablyMatches(targetOwner) ||
-        !capturedAuthority.owner.matches(sourceOwner) ||
+        !sourceFollowsCapturedAuthority ||
         !capturedAuthority.isCurrent()) {
       return false;
     }
@@ -863,6 +883,16 @@ class _WalOwnerRotation {
   final File? source;
   final File? destination;
   final bool sourceMissing;
+}
+
+class _ActiveOwnerAdoption {
+  const _ActiveOwnerAdoption({
+    required this.capturedAuthority,
+    required this.adoptedOwner,
+  });
+
+  final ActiveWalAuthority capturedAuthority;
+  final WalOwner adoptedOwner;
 }
 
 class _WalOwnerRecoveryBridge {

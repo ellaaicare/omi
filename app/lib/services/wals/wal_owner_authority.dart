@@ -53,6 +53,22 @@ class ActiveWalAuthority implements AccountCommitAuthority {
 
   @override
   bool isExactCurrent() => isCurrent();
+
+  bool hasEquivalentCaptureFence(ActiveWalAuthority other) =>
+      owner.matches(other.owner) &&
+      consent.generation == other.consent.generation &&
+      consent.terminalAccountConsentGeneration == other.consent.terminalAccountConsentGeneration &&
+      consent.uid == other.consent.uid &&
+      consent.verifiedPersonaId == other.consent.verifiedPersonaId &&
+      consent.profileBindingId == other.consent.profileBindingId &&
+      consent.receiptId == other.consent.receiptId &&
+      consent.policyVersion == other.consent.policyVersion &&
+      consent.processorSetHash == other.consent.processorSetHash &&
+      consent.scopeVersion == other.consent.scopeVersion &&
+      consent.scopeHash == other.consent.scopeHash &&
+      consent.serverDecidedAt == other.consent.serverDecidedAt &&
+      accountConsentTerminalGeneration == other.accountConsentTerminalGeneration &&
+      provisioningTerminalGeneration == other.provisioningTerminalGeneration;
 }
 
 class AccountGenerationAuthority implements AccountCommitAuthority {

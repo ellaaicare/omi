@@ -465,6 +465,10 @@ void main() {
     await beforeRestart.stop();
     final stopped = await beforeRestart.getAllWals();
     expect(stopped, hasLength(2));
+    expect(
+      stopped.fold<int>(0, (total, wal) => total + wal.totalFrames),
+      newFrameSyncDelaySeconds * BleAudioCodec.opusFS320.getFramesPerSecond() + 1,
+    );
     expect(stopped.every((wal) => wal.owner?.matches(ownerA) == true), isTrue);
     expect(stopped.every((wal) => wal.status == WalStatus.miss), isTrue);
     expect(stopped.every((wal) => wal.storage == WalStorage.disk), isTrue);
@@ -486,6 +490,10 @@ void main() {
     await afterRestart.initializeForTesting();
     final recovered = await afterRestart.getAllWals();
     expect(recovered, hasLength(2));
+    expect(
+      recovered.fold<int>(0, (total, wal) => total + wal.totalFrames),
+      newFrameSyncDelaySeconds * BleAudioCodec.opusFS320.getFramesPerSecond() + 1,
+    );
     expect(recovered.every((wal) => wal.owner?.matches(confirmedOwnerB) == true), isTrue);
     expect(recovered.every((wal) => wal.status == WalStatus.miss), isTrue);
 
@@ -496,6 +504,141 @@ void main() {
     expect(await WalFileManager.getQuarantineCount(), 0);
     final sourceDirectory = Directory('${directory.path}/ella_wal_accounts/${ownerA.storageNamespace}');
     expect(File('${sourceDirectory.path}/wals.json').existsSync(), isFalse);
+  });
+
+  test('restart recovers an adopted owner through a second temporary rollover', () async {
+    final ownerA = _owner('uid-a');
+    final ownerB = _rotatedOwner('uid-a', suffix: 'b', bindingRevision: 4, generation: 8);
+    final pendingOwnerC = _rotatedOwner('uid-a', suffix: 'c', bindingRevision: 5, generation: 9);
+    final confirmedOwnerC = WalOwner(
+      uid: pendingOwnerC.uid,
+      profileBindingId: pendingOwnerC.profileBindingId,
+      bindingRevision: 6,
+      consentReceiptId: pendingOwnerC.consentReceiptId,
+      authorityGenerationAtCapture: 0,
+    );
+    final capturedAuthority = _authority(ownerA, () => true);
+    ActiveWalAuthority? currentAuthority = capturedAuthority;
+    var uploads = 0;
+    SharedPreferencesUtil().unlimitedLocalStorageEnabled = true;
+    await WalFileManager.init(baseDirectory: directory, activeOwner: ownerA);
+    final beforeRestart = LocalWalSyncImpl(
+      listener,
+      currentOwner: () => currentAuthority?.owner,
+      pendingOwner: () => pendingOwnerC,
+      activeAuthority: () => currentAuthority,
+    );
+    await beforeRestart.initializeForTesting();
+    await beforeRestart.onAudioCodecChanged(BleAudioCodec.opusFS320);
+    _appendChunkableFrames(beforeRestart, capturedAuthority);
+
+    currentAuthority = _authority(ownerB, () => true);
+    await beforeRestart.chunkForTesting();
+    currentAuthority = null;
+    await beforeRestart.stop();
+
+    final stopped = await beforeRestart.getAllWals();
+    expect(stopped, hasLength(2));
+    expect(stopped.every((wal) => wal.owner?.matches(ownerB) == true), isTrue);
+    expect(stopped.every((wal) => wal.status == WalStatus.miss), isTrue);
+    expect(stopped.every((wal) => wal.storage == WalStorage.disk), isTrue);
+    expect(await WalFileManager.getQuarantineCount(), 0);
+
+    WalFileManager.resetForTesting();
+    currentAuthority = _authority(confirmedOwnerC, () => true);
+    await WalFileManager.init(baseDirectory: directory, activeOwner: confirmedOwnerC);
+    final afterRestart = LocalWalSyncImpl(
+      listener,
+      currentOwner: () => currentAuthority?.owner,
+      activeAuthority: () => currentAuthority,
+      upload: (files, uid) async {
+        expect(uid, ownerA.uid);
+        uploads++;
+        return SyncLocalFilesResponse(newConversationIds: ['conversation-a'], updatedConversationIds: []);
+      },
+    );
+    await afterRestart.initializeForTesting();
+
+    final recovered = await afterRestart.getAllWals();
+    expect(recovered, hasLength(2));
+    expect(recovered.every((wal) => wal.owner?.matches(confirmedOwnerC) == true), isTrue);
+    expect(recovered.every((wal) => wal.status == WalStatus.miss), isTrue);
+    await afterRestart.syncAll();
+    expect(uploads, 1);
+    expect(recovered.every((wal) => wal.status == WalStatus.synced), isTrue);
+    expect(await WalFileManager.getQuarantineCount(), 0);
+  });
+
+  test('equivalent successive capture authorities chunk without quarantine', () async {
+    final owner = _owner('uid-a');
+    final firstAuthority = _authority(owner, () => true);
+    final secondAuthority = _authority(owner, () => true);
+    SharedPreferencesUtil().unlimitedLocalStorageEnabled = true;
+    await WalFileManager.init(baseDirectory: directory, activeOwner: owner);
+    final sync = LocalWalSyncImpl(
+      listener,
+      currentOwner: () => owner,
+      activeAuthority: () => secondAuthority,
+    );
+    await sync.initializeForTesting();
+    await sync.onAudioCodecChanged(BleAudioCodec.opusFS320);
+    sync.onByteStream([0, 0, 1, 10, 20, 30], authorityAtCapture: firstAuthority);
+    sync.onByteStream([0, 0, 2, 11, 21, 31], authorityAtCapture: secondAuthority);
+    for (var index = 0; index < newFrameSyncDelaySeconds * BleAudioCodec.opusFS320.getFramesPerSecond(); index++) {
+      sync.onByteStream([0, index ~/ 255, index % 255, 12, 22, index % 251], authorityAtCapture: secondAuthority);
+    }
+
+    await sync.chunkForTesting();
+    await sync.flushForTesting();
+
+    final pending = await sync.getAllWals();
+    expect(pending, hasLength(1));
+    expect(pending.single.owner?.matches(owner), isTrue);
+    expect(pending.single.status, WalStatus.miss);
+    expect(pending.single.totalFrames, 2);
+    expect(
+      pending.single.data,
+      [
+        [0, 0, 1, 10, 20, 30],
+        [0, 0, 2, 11, 21, 31],
+      ],
+    );
+    expect(pending.single.quarantineReason, isNull);
+    expect(await WalFileManager.getQuarantineCount(), 0);
+  });
+
+  test('equivalent successive capture authorities drain on stop without quarantine', () async {
+    final owner = _owner('uid-a');
+    final firstAuthority = _authority(owner, () => true);
+    final secondAuthority = _authority(owner, () => true);
+    SharedPreferencesUtil().unlimitedLocalStorageEnabled = true;
+    await WalFileManager.init(baseDirectory: directory, activeOwner: owner);
+    final sync = LocalWalSyncImpl(
+      listener,
+      currentOwner: () => owner,
+      activeAuthority: () => secondAuthority,
+    );
+    await sync.initializeForTesting();
+    await sync.onAudioCodecChanged(BleAudioCodec.opusFS320);
+    sync.onByteStream([0, 0, 1, 10, 20, 30], authorityAtCapture: firstAuthority);
+    sync.onByteStream([0, 0, 2, 11, 21, 31], authorityAtCapture: secondAuthority);
+
+    await sync.stop();
+
+    final pending = await sync.getAllWals();
+    expect(pending, hasLength(1));
+    expect(pending.single.owner?.matches(owner), isTrue);
+    expect(pending.single.status, WalStatus.miss);
+    expect(pending.single.totalFrames, 2);
+    expect(
+      pending.single.data,
+      [
+        [0, 0, 1, 10, 20, 30],
+        [0, 0, 2, 11, 21, 31],
+      ],
+    );
+    expect(pending.single.quarantineReason, isNull);
+    expect(await WalFileManager.getQuarantineCount(), 0);
   });
 
   test('restart recovers a new receipt in place when the storage namespace is unchanged', () async {
@@ -609,6 +752,22 @@ void main() {
         sourceOwner: ownerA,
         targetOwner: ownerB,
         capturedAuthority: _authority(ownerA, () => false),
+      ),
+      isFalse,
+    );
+  });
+
+  test('same-account interrupted recovery rejects a source without an in-process adoption proof', () async {
+    final ownerA = _owner('uid-a');
+    final ownerB = _rotatedOwner('uid-a', suffix: 'b', bindingRevision: 4, generation: 8);
+    final ownerC = _rotatedOwner('uid-a', suffix: 'c', bindingRevision: 5, generation: 9);
+    await WalFileManager.init(baseDirectory: directory, activeOwner: ownerB);
+
+    expect(
+      await WalFileManager.authorizeInterruptedSameAccountRecovery(
+        sourceOwner: ownerB,
+        targetOwner: ownerC,
+        capturedAuthority: _authority(ownerA, () => true),
       ),
       isFalse,
     );
