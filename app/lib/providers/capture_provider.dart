@@ -250,22 +250,29 @@ List<int> physicalDeviceAudioPayload(DeviceType deviceType, List<int> frame) {
 Future<bool> ensureCaptureConsentAuthority({
   required bool Function() hasCurrentConsent,
   required AiConsentAuthoritySnapshot? Function() persistedAuthority,
+  required Duration? Function() lastServerConfirmationAge,
   required Future<AiConsentAuthorityRefreshResult> Function(
     String uid,
     String expectedReceiptId,
     DateTime? expectedServerDecidedAt,
   ) refreshAuthority,
+  Duration gracePeriod = AiConsentActiveSessionLease.verificationGracePeriod,
 }) async {
   if (hasCurrentConsent()) return true;
   final authority = persistedAuthority();
   if (authority == null || !authority.isCurrent()) return false;
+  bool withinGrace() {
+    final age = lastServerConfirmationAge();
+    return age != null && age <= gracePeriod && authority.isCurrent();
+  }
+
   try {
     final result = await refreshAuthority(authority.uid, authority.receiptId, authority.serverDecidedAt);
     if (result.verified) return authority.isCurrent();
-    return result.retryable && authority.isCurrent();
+    return result.retryable && withinGrace();
   } catch (error) {
     Logger.debug('Capture consent refresh failed transiently: ${error.runtimeType}');
-    return authority.isCurrent();
+    return withinGrace();
   }
 }
 
@@ -2176,6 +2183,7 @@ class CaptureProvider extends ChangeNotifier
         persistedAuthority: () => AiConsentAuthoritySnapshot.capture(
           expectedUid: WalOwnerAuthority.authenticatedUid,
         ),
+        lastServerConfirmationAge: () => SharedPreferencesUtil().aiConsentLastServerConfirmationAge,
         refreshAuthority: (uid, receiptId, serverDecidedAt) => EllaAiConsentService().refreshActiveSessionAuthority(
           uid: uid,
           expectedReceiptId: receiptId,

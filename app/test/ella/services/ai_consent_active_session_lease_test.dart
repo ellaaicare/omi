@@ -150,6 +150,11 @@ void main() {
 
   test('retryable failures stop only after the thirty-minute grace expires', () async {
     var now = DateTime(2026, 7, 27, 0, 4);
+    preferences.markAiConsentLastServerConfirmed(
+      uid: 'uid-a',
+      receiptId: 'aicr_receipt-a',
+      confirmedAt: now,
+    );
     var authorityLossCalls = 0;
     final lease = AiConsentActiveSessionLease(
       uid: 'uid-a',
@@ -174,5 +179,18 @@ void main() {
     expect(authorityLossCalls, 1);
     expect(lease.isActive, isFalse);
     expect(AiConsentActiveSessionLease.diagnostics.value.terminalReason, 'verification_grace_expired');
+  });
+
+  test('last server confirmation survives verification reset but not account switch', () async {
+    final confirmedAt = preferences.aiConsentLastServerConfirmedAt;
+    expect(confirmedAt, isNotNull);
+
+    SharedPreferencesUtil.clearAiConsentServerVerification();
+    expect(preferences.aiConsentLastServerConfirmedAt, confirmedAt);
+    expect(preferences.aiConsentLastServerConfirmationAge, isNotNull);
+
+    preferences.uid = 'uid-b';
+    expect(preferences.aiConsentLastServerConfirmedAt, isNull);
+    expect(preferences.aiConsentLastServerConfirmationAge, isNull);
   });
 }

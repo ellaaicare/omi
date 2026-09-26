@@ -1,9 +1,49 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
+import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
+import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/providers/capture_provider.dart';
+
+Future<AiConsentAuthoritySnapshot> _grantConsentAuthority() async {
+  SharedPreferences.setMockInitialValues({});
+  await SharedPreferencesUtil.init();
+  final preferences = SharedPreferencesUtil()..uid = 'owner';
+  preferences.acceptAiConsent(
+    receiptId: 'aicr_local-receipt',
+    uid: 'owner',
+    profileBindingId: 'profile-owner',
+    serverDecidedAt: '2026-09-25T00:00:00Z',
+  );
+  preferences.markAiConsentServerVerified(
+    uid: 'owner',
+    receiptId: 'aicr_local-receipt',
+    policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+    processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+    profileBindingId: 'profile-owner',
+    scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+    scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+  );
+  expect(preferences.uid, 'owner');
+  expect(preferences.getBool('aiConsentAccepted', defaultValue: false), isTrue);
+  expect(preferences.aiConsentReceiptId, 'aicr_local-receipt');
+  expect(preferences.aiConsentReceiptUid, 'owner');
+  return const AiConsentAuthoritySnapshot(
+    generation: 0,
+    uid: 'owner',
+    verifiedPersonaId: null,
+    profileBindingId: 'profile-owner',
+    receiptId: 'aicr_local-receipt',
+    policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+    processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+    scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+    scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+  );
+}
 
 void main() {
   test('empty frames cannot prove phone capture started', () async {
@@ -84,11 +124,11 @@ void main() {
 
     final accepted = await ensureCaptureConsentAuthority(
       hasCurrentConsent: () => true,
-      authenticatedUid: () => 'owner',
-      persistedConsentReceiptId: () => '',
-      refreshAuthority: (_) async {
+      persistedAuthority: () => null,
+      lastServerConfirmationAge: () => null,
+      refreshAuthority: (_, __, ___) async {
         refreshCalls++;
-        return true;
+        return const AiConsentAuthorityRefreshResult(AiConsentAuthorityRefreshDisposition.verified);
       },
     );
 
@@ -97,18 +137,19 @@ void main() {
   });
 
   test('expired consent refreshes before capture', () async {
-    var consentCurrent = false;
+    final authority = await _grantConsentAuthority();
+    SharedPreferencesUtil.clearAiConsentServerVerification();
     var refreshCalls = 0;
 
     final accepted = await ensureCaptureConsentAuthority(
-      hasCurrentConsent: () => consentCurrent,
-      authenticatedUid: () => ' owner ',
-      persistedConsentReceiptId: () => 'aicr-local-receipt',
-      refreshAuthority: (uid) async {
+      hasCurrentConsent: () => SharedPreferencesUtil().aiConsentAccepted,
+      persistedAuthority: () => authority,
+      lastServerConfirmationAge: () => SharedPreferencesUtil().aiConsentLastServerConfirmationAge,
+      refreshAuthority: (uid, receiptId, decidedAt) async {
         refreshCalls++;
         expect(uid, 'owner');
-        consentCurrent = true;
-        return true;
+        expect(receiptId, 'aicr_local-receipt');
+        return const AiConsentAuthorityRefreshResult(AiConsentAuthorityRefreshDisposition.verified);
       },
     );
 
@@ -121,11 +162,11 @@ void main() {
 
     final accepted = await ensureCaptureConsentAuthority(
       hasCurrentConsent: () => false,
-      authenticatedUid: () => '   ',
-      persistedConsentReceiptId: () => 'aicr-local-receipt',
-      refreshAuthority: (_) async {
+      persistedAuthority: () => null,
+      lastServerConfirmationAge: () => Duration.zero,
+      refreshAuthority: (_, __, ___) async {
         refreshCalls++;
-        return true;
+        return const AiConsentAuthorityRefreshResult(AiConsentAuthorityRefreshDisposition.verified);
       },
     );
 
@@ -138,11 +179,11 @@ void main() {
 
     final accepted = await ensureCaptureConsentAuthority(
       hasCurrentConsent: () => false,
-      authenticatedUid: () => 'owner',
-      persistedConsentReceiptId: () => '',
-      refreshAuthority: (_) async {
+      persistedAuthority: () => null,
+      lastServerConfirmationAge: () => Duration.zero,
+      refreshAuthority: (_, __, ___) async {
         refreshCalls++;
-        return true;
+        return const AiConsentAuthorityRefreshResult(AiConsentAuthorityRefreshDisposition.verified);
       },
     );
 
@@ -151,29 +192,30 @@ void main() {
   });
 
   test('refresh receipt must make local consent authority current', () async {
+    final authority = await _grantConsentAuthority();
+    SharedPreferencesUtil.clearAiConsentServerVerification();
     final accepted = await ensureCaptureConsentAuthority(
       hasCurrentConsent: () => false,
-      authenticatedUid: () => 'owner',
-      persistedConsentReceiptId: () => 'aicr-local-receipt',
-      refreshAuthority: (_) async => true,
+      persistedAuthority: () => authority,
+      lastServerConfirmationAge: () => SharedPreferencesUtil().aiConsentLastServerConfirmationAge,
+      refreshAuthority: (_, __, ___) async {
+        SharedPreferencesUtil().declineAiConsent();
+        return const AiConsentAuthorityRefreshResult(AiConsentAuthorityRefreshDisposition.verified);
+      },
     );
 
     expect(accepted, isFalse);
   });
 
-  test('server refresh cannot replace the local capture receipt', () async {
-    var consentCurrent = false;
-    var receiptId = 'aicr-local-receipt';
-
+  test('explicit server revocation cannot enter grace', () async {
+    final authority = await _grantConsentAuthority();
+    SharedPreferencesUtil.clearAiConsentServerVerification();
     final accepted = await ensureCaptureConsentAuthority(
-      hasCurrentConsent: () => consentCurrent,
-      authenticatedUid: () => 'owner',
-      persistedConsentReceiptId: () => receiptId,
-      refreshAuthority: (_) async {
-        consentCurrent = true;
-        receiptId = 'aicr-different-receipt';
-        return true;
-      },
+      hasCurrentConsent: () => false,
+      persistedAuthority: () => authority,
+      lastServerConfirmationAge: () => SharedPreferencesUtil().aiConsentLastServerConfirmationAge,
+      refreshAuthority: (_, __, ___) async =>
+          const AiConsentAuthorityRefreshResult(AiConsentAuthorityRefreshDisposition.revoked),
     );
 
     expect(accepted, isFalse);

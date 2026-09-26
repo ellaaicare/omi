@@ -443,6 +443,10 @@ class EllaAiConsentService {
         )) {
       _persistVerifiedGrant(persistenceAuthority, status);
     }
+    _preferences.markAiConsentLastServerConfirmed(
+      uid: uid,
+      receiptId: expectedReceiptId,
+    );
     return AiConsentAuthorityRefreshResult(AiConsentAuthorityRefreshDisposition.verified, status: status);
   }
 

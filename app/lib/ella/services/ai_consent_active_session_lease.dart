@@ -180,9 +180,10 @@ class AiConsentActiveSessionLease {
     _lastServerDecidedAt = _authority!.serverDecidedAt;
     final now = _now();
     final verificationRemaining = _preferences.aiConsentServerVerificationRemaining;
-    _lastConfirmedAt = verificationRemaining == null
-        ? now
-        : now.subtract(SharedPreferencesUtil.aiConsentServerVerificationTtl - verificationRemaining);
+    _lastConfirmedAt = _preferences.aiConsentLastServerConfirmedAt;
+    if (_lastConfirmedAt == null && verificationRemaining != null) {
+      _lastConfirmedAt = now.subtract(SharedPreferencesUtil.aiConsentServerVerificationTtl - verificationRemaining);
+    }
     _diagnosticOwner = _diagnosticId;
     _publishDiagnostics(AiConsentLeasePhase.active);
     _scheduleRefresh();
@@ -268,6 +269,11 @@ class AiConsentActiveSessionLease {
         _lastServerDecidedAt = status.serverDecidedAt;
       }
       _lastConfirmedAt = _now();
+      _preferences.markAiConsentLastServerConfirmed(
+        uid: uid,
+        receiptId: authority.receiptId,
+        confirmedAt: _lastConfirmedAt,
+      );
       _retryableFailures = 0;
       _publishDiagnostics(AiConsentLeasePhase.active);
       unawaited(DebugLogManager.logEvent('ai_consent_active_session_refreshed', {'uid_matches': true}));

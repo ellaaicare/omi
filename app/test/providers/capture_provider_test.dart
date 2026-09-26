@@ -320,6 +320,7 @@ void main() {
       await ensureCaptureConsentAuthority(
         hasCurrentConsent: () => SharedPreferencesUtil().aiConsentAccepted,
         persistedAuthority: () => authority,
+        lastServerConfirmationAge: () => SharedPreferencesUtil().aiConsentLastServerConfirmationAge,
         refreshAuthority: (uid, receiptId, serverDecidedAt) async => const AiConsentAuthorityRefreshResult(
           AiConsentAuthorityRefreshDisposition.retryable,
           supportCode: 'ai_consent_authority_unavailable',
@@ -338,6 +339,7 @@ void main() {
       await ensureCaptureConsentAuthority(
         hasCurrentConsent: () => SharedPreferencesUtil().aiConsentAccepted,
         persistedAuthority: () => authority,
+        lastServerConfirmationAge: () => SharedPreferencesUtil().aiConsentLastServerConfirmationAge,
         refreshAuthority: (uid, receiptId, serverDecidedAt) async => throw TimeoutException('consent refresh'),
       ),
       isTrue,
@@ -353,8 +355,34 @@ void main() {
       await ensureCaptureConsentAuthority(
         hasCurrentConsent: () => SharedPreferencesUtil().aiConsentAccepted,
         persistedAuthority: () => authority,
+        lastServerConfirmationAge: () => SharedPreferencesUtil().aiConsentLastServerConfirmationAge,
         refreshAuthority: (uid, receiptId, serverDecidedAt) async => const AiConsentAuthorityRefreshResult(
           AiConsentAuthorityRefreshDisposition.revoked,
+        ),
+      ),
+      isFalse,
+    );
+  });
+
+  test('retryable consent refresh cannot reset an expired grace checkpoint', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    final preferences = SharedPreferencesUtil();
+    preferences.markAiConsentLastServerConfirmed(
+      uid: 'uid-a',
+      receiptId: 'aicr_uid-a',
+      confirmedAt: DateTime.now().subtract(const Duration(minutes: 31)),
+    );
+    SharedPreferencesUtil.clearAiConsentServerVerification();
+    final authority = AiConsentAuthoritySnapshot.capture(expectedUid: 'uid-a');
+
+    expect(
+      await ensureCaptureConsentAuthority(
+        hasCurrentConsent: () => preferences.aiConsentAccepted,
+        persistedAuthority: () => authority,
+        lastServerConfirmationAge: () => preferences.aiConsentLastServerConfirmationAge,
+        refreshAuthority: (uid, receiptId, serverDecidedAt) async => const AiConsentAuthorityRefreshResult(
+          AiConsentAuthorityRefreshDisposition.retryable,
+          supportCode: 'http_503',
         ),
       ),
       isFalse,
