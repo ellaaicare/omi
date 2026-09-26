@@ -35,6 +35,7 @@ class AiConsentStatus {
     required this.scopeHash,
     required this.serverDecidedAt,
     this.authorityState = '',
+    this.accountEpochToken = '',
   });
 
   factory AiConsentStatus.fromJson(Map<String, dynamic> json) {
@@ -66,6 +67,7 @@ class AiConsentStatus {
       scopeHash: readString('scope_hash'),
       serverDecidedAt: DateTime.tryParse(readString('server_decided_at')),
       authorityState: json['authority_state'] is String ? json['authority_state'] as String : '',
+      accountEpochToken: json['account_epoch_token'] is String ? json['account_epoch_token'] as String : '',
     );
   }
 
@@ -84,6 +86,7 @@ class AiConsentStatus {
   final String scopeHash;
   final DateTime? serverDecidedAt;
   final String authorityState;
+  final String accountEpochToken;
 
   bool isCurrentGrantFor(String uid, {String? expectedProfileBindingId}) {
     return uid.isNotEmpty &&
@@ -113,6 +116,7 @@ class AiConsentSubmission {
     required this.locale,
     required this.scopeVersion,
     required this.scopeHash,
+    this.accountEpochToken = '',
   });
 
   final AiConsentDecision decision;
@@ -124,6 +128,7 @@ class AiConsentSubmission {
   final String locale;
   final String scopeVersion;
   final String scopeHash;
+  final String accountEpochToken;
 
   Map<String, dynamic> toJson() => {
         'decision': decision.wireValue,
@@ -135,6 +140,7 @@ class AiConsentSubmission {
         'locale': locale,
         'scope_version': scopeVersion,
         'scope_hash': scopeHash,
+        if (accountEpochToken.isNotEmpty) 'account_epoch_token': accountEpochToken,
       };
 }
 
@@ -547,10 +553,41 @@ class EllaAiConsentService {
       );
     }
 
-    final result = await _transport.submitWithDetails(
+    var result = await _transport.submitWithDetails(
       _buildSubmission(policy: policy, decision: AiConsentDecision.granted),
     );
     if (!_requireCurrentAuthority(authority)) return authorityChanged;
+    if (result.httpStatus == 403 && result.errorCode == 'ai_consent_account_deleted') {
+      AiConsentFetchResult epochResponse;
+      try {
+        epochResponse = await _transport.fetchStatusWithDetails();
+      } catch (_) {
+        return const AiConsentGrantOutcome.failed(
+          AiConsentGrantFailureKind.serverUnavailable,
+          supportCode: 'account_epoch_unavailable',
+        );
+      }
+      if (!_requireCurrentAuthority(authority)) return authorityChanged;
+      final epochStatus = epochResponse.status;
+      if (epochResponse.httpStatus != 200 ||
+          epochStatus == null ||
+          epochStatus.subjectUid != uid ||
+          epochStatus.authorityState != 'deleted' ||
+          epochStatus.accountEpochToken.isEmpty) {
+        return AiConsentGrantOutcome.failed(
+          AiConsentGrantFailureKind.serverUnavailable,
+          supportCode: epochResponse.errorCode.isEmpty ? 'account_epoch_unavailable' : epochResponse.errorCode,
+        );
+      }
+      result = await _transport.submitWithDetails(
+        _buildSubmission(
+          policy: policy,
+          decision: AiConsentDecision.granted,
+          accountEpochToken: epochStatus.accountEpochToken,
+        ),
+      );
+      if (!_requireCurrentAuthority(authority)) return authorityChanged;
+    }
     if (result.httpStatus == null) {
       return const AiConsentGrantOutcome.failed(AiConsentGrantFailureKind.network);
     }
@@ -607,7 +644,11 @@ class EllaAiConsentService {
     return _requireCurrentAuthority(authority) ? status : null;
   }
 
-  AiConsentSubmission _buildSubmission({required AiConsentPolicy policy, required AiConsentDecision decision}) {
+  AiConsentSubmission _buildSubmission({
+    required AiConsentPolicy policy,
+    required AiConsentDecision decision,
+    String accountEpochToken = '',
+  }) {
     final fullVersion = _clientVersionFactory();
     final separator = fullVersion.lastIndexOf('+');
     final appVersion = separator > 0 ? fullVersion.substring(0, separator) : fullVersion;
@@ -623,6 +664,7 @@ class EllaAiConsentService {
       locale: _localeFactory(),
       scopeVersion: policy.scopeVersion,
       scopeHash: policy.scopeHash,
+      accountEpochToken: accountEpochToken,
     );
   }
 
