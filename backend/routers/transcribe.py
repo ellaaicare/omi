@@ -259,13 +259,32 @@ async def _forward_async_provider_audio_with_current_consent(
     await forward_async_provider_audio(provider_send, data, delivery_receipt)
 
 
-async def _send_pusher_audio_with_current_consent(
+async def _send_pusher_payload_with_current_consent(
     consent_guard: Callable[[], Awaitable[None]],
     provider_send: Callable[[bytes], Awaitable[None]],
     data: bytes,
 ) -> None:
     await consent_guard()
     await provider_send(data)
+
+
+async def _dispatch_scanner_with_current_consent(
+    consent_guard: Callable[[], Awaitable[None]],
+    scanner_send: Callable,
+    *,
+    uid: str,
+    conversation_id: str,
+    segments: list[dict],
+    latency_metadata: dict,
+):
+    await consent_guard()
+    return await run_in_threadpool(
+        scanner_send,
+        uid=uid,
+        conversation_id=conversation_id,
+        segments=segments,
+        latency_metadata=latency_metadata,
+    )
 
 
 async def _require_current_ai_consent_for_websocket(
@@ -1905,6 +1924,15 @@ async def _stream_handler(
         pending_conversation_requests: dict[str, asyncio.Future] = {}
         pending_request_event = asyncio.Event()
 
+        async def send_pusher_payload(data: bytes) -> None:
+            if stt_egress_consent_guard is None:
+                raise RuntimeError("ai_consent_guard_missing")
+            await _send_pusher_payload_with_current_consent(
+                lambda: stt_egress_consent_guard(refresh=True),
+                pusher_ws.send,
+                data,
+            )
+
         def fail_pending_conversation_requests() -> None:
             for future in tuple(pending_conversation_requests.values()):
                 if not future.done():
@@ -1935,7 +1963,7 @@ async def _stream_handler(
                 data = bytearray()
                 data.extend(struct.pack("I", 104))
                 data.extend(bytes(json.dumps({"conversation_id": conversation_id, "language": language}), "utf-8"))
-                await pusher_ws.send(data)
+                await send_pusher_payload(data)
                 print(f"Sent process_conversation request to pusher: {conversation_id}", uid, session_id)
                 deadline = asyncio.get_running_loop().time() + PUSHER_PROCESSING_RESPONSE_TIMEOUT_SECONDS
                 while websocket_active and asyncio.get_running_loop().time() < deadline:
@@ -1962,12 +1990,15 @@ async def _stream_handler(
                         data = bytearray()
                         data.extend(struct.pack("I", 102))
                         data.extend(bytes(json.dumps(payload), "utf-8"))
-                        await pusher_ws.send(data)
+                        await send_pusher_payload(data)
 
                     await deliver_all_pusher_transcript_batches(
                         segment_buffers,
                         send_payload,
                     )
+                except AiConsentWebSocketRejected:
+                    segment_buffers.clear()
+                    return
                 except ConnectionClosed as e:
                     print(f"Pusher transcripts Connection closed: {e}", uid, session_id)
                     pusher_connected = False
@@ -2014,8 +2045,12 @@ async def _stream_handler(
                     data = bytearray()
                     data.extend(struct.pack("I", 103))
                     data.extend(bytes(current_conversation_id, "utf-8"))
-                    await pusher_ws.send(data)
+                    await send_pusher_payload(data)
                     last_synced_conversation_id = current_conversation_id
+                except AiConsentWebSocketRejected:
+                    audio_buffers = bytearray()
+                    audio_buffer_last_received = None
+                    return
                 except ConnectionClosed as e:
                     print(f"Pusher audio_bytes Connection closed: {e}", uid, session_id)
                     pusher_connected = False
@@ -2042,11 +2077,7 @@ async def _stream_handler(
                     data.extend(audio_buffers.copy())
                     audio_buffers = bytearray()  # reset
                     audio_buffer_last_received = None
-                    await _send_pusher_audio_with_current_consent(
-                        lambda: stt_egress_consent_guard(refresh=True),
-                        pusher_ws.send,
-                        data,
-                    )
+                    await send_pusher_payload(data)
                 except AiConsentWebSocketRejected:
                     audio_buffers = bytearray()
                     audio_buffer_last_received = None
@@ -2195,7 +2226,7 @@ async def _stream_handler(
                         "utf-8",
                     )
                 )
-                await pusher_ws.send(data)
+                await send_pusher_payload(data)
                 print(
                     f"Sent speaker sample request to pusher: person={person_id}, {len(segment_ids)} segments",
                     uid,
@@ -2256,7 +2287,12 @@ async def _stream_handler(
                     continue
 
                 # Translation
-                translated_text = translation_service.translate_text_by_sentence(translation_language, segment_text)
+                await require_stt_egress_consent(refresh=True)
+                translated_text = await run_in_threadpool(
+                    translation_service.translate_text_by_sentence,
+                    translation_language,
+                    segment_text,
+                )
 
                 if translated_text == segment_text:
                     # If translation is same as original, it's likely in the target language.
@@ -2298,6 +2334,8 @@ async def _stream_handler(
             if websocket_active:
                 _send_message_event(TranslationEvent(segments=[s.dict() for s in translated_segments]))
 
+        except AiConsentWebSocketRejected:
+            return
         except Exception as e:
             print(f"Translation error: {e}", uid, session_id)
 
@@ -2533,6 +2571,7 @@ async def _stream_handler(
             wav_bytes = output_buffer.getvalue()
 
             # Extract embedding (API call)
+            await require_stt_egress_consent(refresh=True)
             query_embedding = await asyncio.to_thread(extract_embedding_from_bytes, wav_bytes, "query.wav")
 
             # Find best match
@@ -2576,6 +2615,8 @@ async def _stream_handler(
             else:
                 print(f"Speaker ID: speaker {speaker_id} no match (best={best_distance:.3f})", uid, session_id)
 
+        except AiConsentWebSocketRejected:
+            return
         except Exception as e:
             print(f"Speaker ID: match error for speaker {speaker_id}: {e}", uid, session_id)
 
@@ -2774,7 +2815,9 @@ async def _stream_handler(
                 try:
                     from utils.ella import send_to_scanner
 
-                    send_to_scanner(
+                    await _dispatch_scanner_with_current_consent(
+                        lambda: require_stt_egress_consent(refresh=True),
+                        send_to_scanner,
                         uid=uid,
                         conversation_id=batch_conversation_id,
                         segments=[s.dict() for s in transcript_segments],
@@ -2789,6 +2832,11 @@ async def _stream_handler(
                             since_first_audio_ms=_elapsed_ms(first_audio_frame_at, first_transcript_dispatched_at),
                             since_first_stt_result_ms=_elapsed_ms(first_stt_result_at, first_transcript_dispatched_at),
                         )
+                except AiConsentWebSocketRejected:
+                    _delivery_log(
+                        "scanner_dispatch_suppressed",
+                        terminal_reason="ai_consent_egress_rejected",
+                    )
                 except ImportError:
                     pass
 
@@ -2810,9 +2858,12 @@ async def _stream_handler(
                 elif not PUSHER_ENABLED and user_has_credits:
                     # Fallback: trigger realtime integrations directly when pusher is disabled
                     try:
+                        await require_stt_egress_consent(refresh=True)
                         await trigger_realtime_integrations(
                             uid, [s.dict() for s in transcript_segments], batch_conversation_id
                         )
+                    except AiConsentWebSocketRejected:
+                        pass
                     except Exception as e:
                         print(f"Error triggering realtime integrations: {e}", uid, session_id)
 

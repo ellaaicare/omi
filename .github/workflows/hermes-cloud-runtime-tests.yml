@@ -1320,7 +1320,11 @@ jobs:
           pytest tests/unit/test_ella_reviewed_route_integration.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_listen_runtime_gate.py | grep -c '::')" -eq 9
           pytest tests/unit/test_ella_listen_runtime_gate.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_observer.py | grep -c '::')" -eq 19
+          observer_ids="$(pytest --collect-only -q tests/unit/test_ella_observer.py | sed '/^$/d')"
+          grep -Fqx \
+            "tests/unit/test_ella_observer.py::test_observer_consent_lookup_is_offloaded_before_hermes" \
+            <<<"$observer_ids"
+          test "$(grep -c '::' <<<"$observer_ids")" -eq 20
           pytest tests/unit/test_ella_observer.py -v
           test "$(pytest --collect-only -q tests/unit/test_invitation_redemption.py | grep -c '::')" -eq 19
           pytest tests/unit/test_invitation_redemption.py -v

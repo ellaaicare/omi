@@ -142,6 +142,10 @@ def _load_ownership_redis_module():
 
 
 def test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing():
+    async def send_with_consent(consent_guard, provider_send, payload):
+        await consent_guard()
+        await provider_send(payload)
+
     class PusherSocket:
         def __init__(self):
             self.sent = []
@@ -176,6 +180,8 @@ def test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing(
             "List": List,
             "ConnectionClosed": ConnectionError,
             "PusherTranscriptBatch": object,
+            "AiConsentWebSocketRejected": RuntimeError,
+            "_send_pusher_payload_with_current_consent": send_with_consent,
             "connect_to_trigger_pusher": connect_to_pusher,
             "deliver_all_pusher_transcript_batches": deliver_all,
             "get_audio_bytes_webhook_seconds": lambda _uid: 0,
@@ -195,7 +201,8 @@ def test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing(
         },
         argdefs=(None,),
     )
-    connect, close, *_unused, request_processing, _receive, _connected, _speaker = handler()
+    consent_guard = lambda **_kwargs: asyncio.sleep(0)
+    connect, close, *_unused, request_processing, _receive, _connected, _speaker = handler(consent_guard)
     fallback_calls = []
 
     async def fallback(conversation):
@@ -281,6 +288,10 @@ def test_pusher_send_then_disconnect_without_ack_falls_back_to_local_processing(
 
 
 def test_pusher_processing_request_waits_for_terminal_response():
+    async def send_with_consent(consent_guard, provider_send, payload):
+        await consent_guard()
+        await provider_send(payload)
+
     class PusherSocket:
         def __init__(self):
             self.sent = []
@@ -312,6 +323,8 @@ def test_pusher_processing_request_waits_for_terminal_response():
             "List": List,
             "ConnectionClosed": ConnectionError,
             "PusherTranscriptBatch": object,
+            "AiConsentWebSocketRejected": RuntimeError,
+            "_send_pusher_payload_with_current_consent": send_with_consent,
             "connect_to_trigger_pusher": connect_to_pusher,
             "deliver_all_pusher_transcript_batches": lambda *_args: asyncio.sleep(0, result=0),
             "get_audio_bytes_webhook_seconds": lambda _uid: 0,
@@ -331,7 +344,8 @@ def test_pusher_processing_request_waits_for_terminal_response():
         },
         argdefs=(None,),
     )
-    connect, _close, *_unused, request_processing, receive, _connected, _speaker = handler()
+    consent_guard = lambda **_kwargs: asyncio.sleep(0)
+    connect, _close, *_unused, request_processing, receive, _connected, _speaker = handler(consent_guard)
 
     async def scenario():
         await connect()
