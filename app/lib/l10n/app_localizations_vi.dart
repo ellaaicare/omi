@@ -10067,4 +10067,10 @@ class AppLocalizationsVi extends AppLocalizations {
   @override
   String get ellaServerUnreachableBanner =>
       'Ella can\'t reach the server right now. Messages will send when you\'re back online.';
+
+  @override
+  String get aiConsentNeededReview => 'AI permission needed · Review';
+
+  @override
+  String get aiConsentNeededReviewBody => 'Ella will wait until you review AI permission.';
 }

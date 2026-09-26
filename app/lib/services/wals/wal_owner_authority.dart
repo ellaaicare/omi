@@ -72,11 +72,7 @@ class ActiveWalAuthority implements AccountCommitAuthority {
 }
 
 class AccountGenerationAuthority implements AccountCommitAuthority {
-  const AccountGenerationAuthority({
-    required this.preferences,
-    required this.uid,
-    required this.generation,
-  });
+  const AccountGenerationAuthority({required this.preferences, required this.uid, required this.generation});
 
   final SharedPreferencesUtil preferences;
   @override
@@ -112,8 +108,8 @@ class WalOwnerAuthority {
     final owner = WalOwner(
       uid: firebaseUid,
       profileBindingId: profileBindingId,
-      bindingRevision: bindingRevision,
-      consentReceiptId: consentReceiptId,
+      bindingRevision: bindingRevision is int ? bindingRevision : 0,
+      consentReceiptId: prefs.aiConsentReceiptId,
       authorityGenerationAtCapture: prefs.aiConsentAuthorityGeneration,
     );
     return owner.hasValidAuthorityIdentity ? owner : null;

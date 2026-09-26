@@ -247,6 +247,9 @@ List<int> physicalDeviceAudioPayload(DeviceType deviceType, List<int> frame) {
   return headerLength == 0 ? frame : frame.sublist(headerLength);
 }
 
+/// WebSocket close used when `/v4/listen` rejects a uid with no current acceptance.
+const int aiConsentRequiredListenCloseCode = 4403;
+
 @visibleForTesting
 Future<bool> ensureCaptureConsentAuthority({
   required bool Function() hasCurrentConsent,
@@ -259,22 +262,19 @@ Future<bool> ensureCaptureConsentAuthority({
   ) refreshAuthority,
   Duration gracePeriod = AiConsentActiveSessionLease.verificationGracePeriod,
 }) async {
-  if (hasCurrentConsent()) return true;
+  if (!hasCurrentConsent() || gracePeriod.isNegative) return false;
   final authority = persistedAuthority();
-  if (authority == null || !authority.isCurrent()) return false;
-  bool withinGrace() {
-    final age = lastServerConfirmationAge();
-    return age != null && age <= gracePeriod && authority.isCurrent();
+  if (authority != null) {
+    unawaited(() async {
+      try {
+        await refreshAuthority(authority.uid, authority.receiptId, authority.serverDecidedAt)
+            .timeout(const Duration(seconds: 8));
+      } catch (error) {
+        Logger.debug('Capture consent background refresh failed: ${error.runtimeType}');
+      }
+    }());
   }
-
-  try {
-    final result = await refreshAuthority(authority.uid, authority.receiptId, authority.serverDecidedAt);
-    if (result.verified) return authority.isCurrent();
-    return result.retryable && withinGrace();
-  } catch (error) {
-    Logger.debug('Capture consent refresh failed transiently: ${error.runtimeType}');
-    return withinGrace();
-  }
+  return true;
 }
 
 typedef InProgressConversationFetchCall = Future<List<ServerConversation>> Function({
@@ -3319,6 +3319,12 @@ class CaptureProvider extends ChangeNotifier
   void onClosed([int? closeCode]) {
     _transcriptionServiceStatuses = [];
     _transcriptServiceReady = false;
+
+    if (closeCode == aiConsentRequiredListenCloseCode) {
+      SharedPreferencesUtil().declineAiConsent();
+      onError(const AiConsentAuthorityLostException());
+      return;
+    }
 
     if (closeCode == 4002) {
       usageProvider?.markAsOutOfCreditsAndRefresh();

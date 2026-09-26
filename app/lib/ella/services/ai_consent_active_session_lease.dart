@@ -67,47 +67,39 @@ class AiConsentAuthoritySnapshot {
   static AiConsentAuthoritySnapshot? capture({SharedPreferencesUtil? preferences, String? expectedUid}) {
     final current = preferences ?? SharedPreferencesUtil();
     final uid = current.uid;
-    final verifiedPersonaId = current.verifiedPersonaId?.trim();
-    final receiptId = current.aiConsentReceiptId;
-    final serverDecidedAt = DateTime.tryParse(current.aiConsentServerDecidedAt);
     if (!current.getBool('aiConsentAccepted', defaultValue: false) ||
         uid.isEmpty ||
-        (expectedUid != null && uid != expectedUid) ||
-        current.aiConsentProfileBindingId.isEmpty ||
-        !receiptId.startsWith(SharedPreferencesUtil.currentAiConsentReceiptPrefix) ||
-        current.aiConsentReceiptUid != uid ||
-        serverDecidedAt == null) {
+        (expectedUid != null && uid != expectedUid)) {
       return null;
     }
+    final receiptUid = current.aiConsentReceiptUid;
+    if (receiptUid.isNotEmpty && receiptUid != uid) return null;
     return AiConsentAuthoritySnapshot(
       generation: current.aiConsentAuthorityGeneration,
       terminalAccountConsentGeneration: current.terminalAccountConsentAuthorityGeneration,
       uid: uid,
-      verifiedPersonaId: verifiedPersonaId,
+      verifiedPersonaId: current.verifiedPersonaId?.trim(),
       profileBindingId: current.aiConsentProfileBindingId,
-      receiptId: receiptId,
+      receiptId: current.aiConsentReceiptId,
       policyVersion: current.aiConsentContractVersion,
       processorSetHash: current.aiConsentProcessorSetHash,
       scopeVersion: current.aiConsentScopeVersion,
       scopeHash: current.aiConsentScopeHash,
-      serverDecidedAt: serverDecidedAt,
+      serverDecidedAt: DateTime.tryParse(current.aiConsentServerDecidedAt),
     );
   }
 
+  /// Current means the cached acceptance still belongs to this uid. Profile,
+  /// receipt, and persona rollover are not local revocations.
   bool isCurrent({SharedPreferencesUtil? preferences}) {
     final current = preferences ?? SharedPreferencesUtil();
     if (!current.getBool('aiConsentAccepted', defaultValue: false) ||
         current.terminalAccountConsentAuthorityGeneration != terminalAccountConsentGeneration ||
-        current.uid != uid ||
-        current.aiConsentReceiptUid != uid) {
+        current.uid != uid) {
       return false;
     }
-    final currentReceiptId = current.aiConsentReceiptId;
-    if (currentReceiptId == receiptId) return true;
-    final currentDecidedAt = DateTime.tryParse(current.aiConsentServerDecidedAt);
-    return currentReceiptId.startsWith(SharedPreferencesUtil.currentAiConsentReceiptPrefix) &&
-        currentDecidedAt != null &&
-        (serverDecidedAt == null || currentDecidedAt.isAfter(serverDecidedAt!));
+    final receiptUid = current.aiConsentReceiptUid;
+    return receiptUid.isEmpty || receiptUid == uid;
   }
 }
 
@@ -145,8 +137,9 @@ class AiConsentActiveSessionLease {
                   consentReceiptId: receiptId,
                 )),
         _preferences = preferences ?? SharedPreferencesUtil(),
-        _now = now ?? DateTime.now,
-        _gracePeriod = gracePeriod;
+        _now = now ?? DateTime.now {
+    assert(gracePeriod >= Duration.zero);
+  }
 
   static const Duration refreshInterval = Duration(minutes: 4);
   static const Duration refreshLeadTime = Duration(minutes: 1);
@@ -165,7 +158,6 @@ class AiConsentActiveSessionLease {
   final AiConsentProvisioningRevalidator _revalidateProvisioning;
   final SharedPreferencesUtil _preferences;
   final DateTime Function() _now;
-  final Duration _gracePeriod;
   AiConsentAuthoritySnapshot? _authority;
   String _lastServerReceiptId = '';
   DateTime? _lastServerDecidedAt;
@@ -191,26 +183,17 @@ class AiConsentActiveSessionLease {
     Duration gracePeriod = verificationGracePeriod,
   }) {
     final current = preferences ?? SharedPreferencesUtil();
-    final authority = AiConsentAuthoritySnapshot.capture(
-      preferences: current,
-      expectedUid: expectedUid,
-    );
-    if (authority == null ||
-        !authority.isCurrent(preferences: current) ||
-        current.persistedAiConsentReceiptIdForCurrentAccount != authority.receiptId) {
-      return null;
-    }
-    if (current.aiConsentAccepted) return authority;
-    final age = current.aiConsentLastServerConfirmationAge;
-    return age != null && age <= gracePeriod ? authority : null;
+    final authority = AiConsentAuthoritySnapshot.capture(preferences: current, expectedUid: expectedUid);
+    if (authority == null || !authority.isCurrent(preferences: current)) return null;
+    return current.aiConsentAccepted ? authority : null;
   }
 
   void start() {
     if (_active) return;
     _authority ??= AiConsentAuthoritySnapshot.capture(preferences: _preferences, expectedUid: uid);
     _active = true;
-    if (_authority == null || !_authority!.isCurrent(preferences: _preferences)) {
-      unawaited(_loseAuthority('invalid_start_authority'));
+    if (_preferences.uid != uid || !_preferences.getBool('aiConsentAccepted', defaultValue: false)) {
+      unawaited(_loseAuthority('explicit_not_accepted'));
       return;
     }
     _lastServerReceiptId = _authority!.receiptId;
@@ -275,8 +258,9 @@ class AiConsentActiveSessionLease {
     _scheduledRefreshDelay = null;
 
     final authority = _authority;
-    if (authority == null || !authority.isCurrent(preferences: _preferences)) {
-      await _loseAuthority('local_authority_changed');
+    if (_preferences.uid != uid || !_preferences.getBool('aiConsentAccepted', defaultValue: false)) {
+      _refreshing = false;
+      await _loseAuthority('explicit_local_revoke');
       return;
     }
 
@@ -295,11 +279,12 @@ class AiConsentActiveSessionLease {
 
     if (!_active) return;
     if (!result.verified && !result.retryable) {
+      if (_preferences.uid == uid) _preferences.declineAiConsent();
       await _loseAuthority('explicit_${result.disposition.name}');
       return;
     }
-    if (!authority.isCurrent(preferences: _preferences)) {
-      await _loseAuthority('local_authority_changed');
+    if (_preferences.uid != uid || !_preferences.getBool('aiConsentAccepted', defaultValue: false)) {
+      await _loseAuthority('explicit_local_revoke');
       return;
     }
 
@@ -346,7 +331,7 @@ class AiConsentActiveSessionLease {
       if (result.renewsStartupGrace) {
         _preferences.markAiConsentLastServerConfirmed(
           uid: uid,
-          receiptId: statusReceiptWasPersisted ? status.receiptId : authority.receiptId,
+          receiptId: statusReceiptWasPersisted ? status.receiptId : (authority?.receiptId ?? _lastServerReceiptId),
           confirmedAt: _lastConfirmedAt,
         );
       }
@@ -359,26 +344,20 @@ class AiConsentActiveSessionLease {
 
     if (result.retryable) {
       _retryableFailures++;
-      final confirmedAt = _lastConfirmedAt;
-      final elapsed = confirmedAt == null ? _gracePeriod : _now().difference(confirmedAt);
-      if (elapsed < _gracePeriod) {
-        final retryDelay = retryDelayFor(_retryableFailures);
-        _publishDiagnostics(
-          AiConsentLeasePhase.retrying,
-          supportCode: result.supportCode,
-          nextRetryAt: _now().add(retryDelay),
-        );
-        unawaited(
-          DebugLogManager.logWarning('ai_consent_active_session_refresh_retry', {
-            'attempt': _retryableFailures,
-            'retry_delay_seconds': retryDelay.inSeconds,
-            'support_code': result.supportCode,
-          }),
-        );
-        _refreshTimer = Timer(retryDelay, () => unawaited(_refresh()));
-        return;
-      }
-      await _loseAuthority('verification_grace_expired');
+      final retryDelay = retryDelayFor(_retryableFailures);
+      _publishDiagnostics(
+        AiConsentLeasePhase.retrying,
+        supportCode: result.supportCode,
+        nextRetryAt: _now().add(retryDelay),
+      );
+      unawaited(
+        DebugLogManager.logWarning('ai_consent_active_session_refresh_retry', {
+          'attempt': _retryableFailures,
+          'retry_delay_seconds': retryDelay.inSeconds,
+          'support_code': result.supportCode,
+        }),
+      );
+      _refreshTimer = Timer(retryDelay, () => unawaited(_refresh()));
       return;
     }
   }

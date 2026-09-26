@@ -391,7 +391,7 @@ void main() {
     );
     final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
-    expect(find.text(l10n.aiConsentTranscriptionReview), findsOneWidget);
+    expect(find.text(l10n.aiConsentNeededReview), findsOneWidget);
     await tester.tap(find.byKey(const Key('today-ai-consent-review')));
     expect(reviews, 1);
   });

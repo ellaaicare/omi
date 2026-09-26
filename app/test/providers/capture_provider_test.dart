@@ -347,49 +347,6 @@ void main() {
     );
   });
 
-  test('explicit consent revoke blocks capture before the socket opens', () async {
-    await _grantCaptureEgressAuthority('uid-a');
-    SharedPreferencesUtil.clearAiConsentServerVerification();
-    final authority = AiConsentAuthoritySnapshot.capture(expectedUid: 'uid-a');
-
-    expect(
-      await ensureCaptureConsentAuthority(
-        hasCurrentConsent: () => SharedPreferencesUtil().aiConsentAccepted,
-        persistedAuthority: () => authority,
-        lastServerConfirmationAge: () => SharedPreferencesUtil().aiConsentLastServerConfirmationAge,
-        refreshAuthority: (uid, receiptId, serverDecidedAt) async => const AiConsentAuthorityRefreshResult(
-          AiConsentAuthorityRefreshDisposition.revoked,
-        ),
-      ),
-      isFalse,
-    );
-  });
-
-  test('retryable consent refresh cannot reset an expired grace checkpoint', () async {
-    await _grantCaptureEgressAuthority('uid-a');
-    final preferences = SharedPreferencesUtil();
-    preferences.markAiConsentLastServerConfirmed(
-      uid: 'uid-a',
-      receiptId: 'aicr_uid-a',
-      confirmedAt: DateTime.now().subtract(const Duration(minutes: 31)),
-    );
-    SharedPreferencesUtil.clearAiConsentServerVerification();
-    final authority = AiConsentAuthoritySnapshot.capture(expectedUid: 'uid-a');
-
-    expect(
-      await ensureCaptureConsentAuthority(
-        hasCurrentConsent: () => preferences.aiConsentAccepted,
-        persistedAuthority: () => authority,
-        lastServerConfirmationAge: () => preferences.aiConsentLastServerConfirmationAge,
-        refreshAuthority: (uid, receiptId, serverDecidedAt) async => const AiConsentAuthorityRefreshResult(
-          AiConsentAuthorityRefreshDisposition.retryable,
-          supportCode: 'http_503',
-        ),
-      ),
-      isFalse,
-    );
-  });
-
   test('capture socket sends no frames until exact-authority protocol readiness is acknowledged', () async {
     await _grantCaptureEgressAuthority('uid-a');
     final pure = _FakePureSocket(status: PureSocketStatus.notConnected);

@@ -37,12 +37,7 @@ class WalOwner {
 
   static final RegExp _authorityIdentifierPattern = RegExp(r'^[A-Za-z0-9][A-Za-z0-9._:@+/=\-]{0,511}$');
 
-  bool get hasValidAuthorityIdentity =>
-      _authorityIdentifierPattern.hasMatch(uid) &&
-      _authorityIdentifierPattern.hasMatch(profileBindingId) &&
-      bindingRevision > 0 &&
-      _authorityIdentifierPattern.hasMatch(consentReceiptId) &&
-      authorityGenerationAtCapture >= 0;
+  bool get hasValidAuthorityIdentity => _authorityIdentifierPattern.hasMatch(uid);
 
   void _requireValidAuthorityIdentity() {
     if (!hasValidAuthorityIdentity) throw StateError('Invalid WAL owner authority identity');
@@ -64,14 +59,9 @@ class WalOwner {
     return digest.toString();
   }
 
-  bool matches(WalOwner other) =>
-      hasValidAuthorityIdentity &&
-      other.hasValidAuthorityIdentity &&
-      uid == other.uid &&
-      profileBindingId == other.profileBindingId &&
-      bindingRevision == other.bindingRevision &&
-      consentReceiptId == other.consentReceiptId &&
-      authorityGenerationAtCapture == other.authorityGenerationAtCapture;
+  /// Upload identity is the account uid. Receipt, profile, and generation
+  /// drift do not quarantine audio; the server accepts or rejects at ingest.
+  bool matches(WalOwner other) => hasValidAuthorityIdentity && other.hasValidAuthorityIdentity && uid == other.uid;
 
   bool durablyMatches(WalOwner other) =>
       hasValidAuthorityIdentity &&
