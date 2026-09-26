@@ -756,12 +756,21 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       if (pairedDevice?.firmwareRevision != null && pairedDevice?.firmwareRevision != 'Unknown') {
         return;
       }
-      var connection = await _deviceService.ensureConnection(connectedDevice!.id);
+      final sourceDevice = connectedDevice!;
+      final expectedDeviceId = sourceDevice.id;
+      final connection = await _deviceService.ensureConnection(expectedDeviceId);
       if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
-      final info = await connectedDevice?.getDeviceInfo(connection);
+      if (connectedDevice?.id != expectedDeviceId) return;
+      final info = await sourceDevice.getDeviceInfo(connection);
       if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
+      if (connectedDevice?.id != expectedDeviceId || info.id != expectedDeviceId) return;
       pairedDevice = info;
-      await _persistRememberedDevice(pairedDevice!, operationGeneration: operationGeneration);
+      if (connection?.device.id == expectedDeviceId) {
+        connection!.device = info;
+        connectedDevice = info;
+        captureProvider?.updateRecordingDevice(info);
+      }
+      await _persistRememberedDevice(info, operationGeneration: operationGeneration);
       if (operationGeneration != null && !_isDeviceOperationCurrent(operationGeneration)) return;
     } else {
       final rememberedDevice = _rememberedDeviceForCurrentAuthority();

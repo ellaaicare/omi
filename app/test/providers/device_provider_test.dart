@@ -12,6 +12,9 @@ import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/devices/device_connection.dart';
+import 'package:omi/services/devices/models.dart';
+import 'package:omi/services/devices/omi_connection.dart';
+import 'package:omi/services/devices/transports/device_transport.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/utils/enums.dart';
 
@@ -26,9 +29,10 @@ class _TestConnectivityPlatform extends ConnectivityPlatform {
 }
 
 class _FakeDeviceService implements IDeviceService {
-  _FakeDeviceService([this.status = DeviceServiceStatus.init]);
+  _FakeDeviceService([this.status = DeviceServiceStatus.init, this.connection]);
 
   DeviceServiceStatus status;
+  DeviceConnection? connection;
   int ensureConnectionCalls = 0;
   int disconnectCalls = 0;
   Object? disconnectError;
@@ -66,7 +70,7 @@ class _FakeDeviceService implements IDeviceService {
     ensureConnectionCalls++;
     final gate = ensureConnectionGate;
     if (gate != null) return gate.future;
-    return null;
+    return connection;
   }
 
   @override
@@ -98,6 +102,53 @@ class _FakeDeviceService implements IDeviceService {
     if (error != null) throw error;
     nativeSessionRetained = false;
   }
+}
+
+class _MetadataTransport implements DeviceTransport {
+  _MetadataTransport(this.deviceId);
+
+  @override
+  final String deviceId;
+
+  @override
+  Stream<DeviceTransportState> get connectionStateStream => const Stream.empty();
+
+  @override
+  Future<void> connect() async {}
+
+  @override
+  Future<void> disconnect() async {}
+
+  @override
+  Future<void> dispose() async {}
+
+  @override
+  Stream<List<int>> getCharacteristicStream(String serviceUuid, String characteristicUuid) => const Stream.empty();
+
+  @override
+  Future<Stream<List<int>>?> getReadyCharacteristicStream(String serviceUuid, String characteristicUuid) async {
+    return getCharacteristicStream(serviceUuid, characteristicUuid);
+  }
+
+  @override
+  Future<bool> isConnected() async => true;
+
+  @override
+  Future<bool> ping() async => true;
+
+  @override
+  Future<List<int>> readCharacteristic(String serviceUuid, String characteristicUuid) async {
+    return switch (characteristicUuid) {
+      modelNumberCharacteristicUuid => 'Omi v1'.codeUnits,
+      firmwareRevisionCharacteristicUuid => '3.0.8'.codeUnits,
+      hardwareRevisionCharacteristicUuid => 'XIAO BLE'.codeUnits,
+      manufacturerNameCharacteristicUuid => 'Based Hardware'.codeUnits,
+      _ => const [],
+    };
+  }
+
+  @override
+  Future<void> writeCharacteristic(String serviceUuid, String characteristicUuid, List<int> data) async {}
 }
 
 class _RecordingCaptureProvider extends CaptureProvider {
@@ -212,6 +263,29 @@ void main() {
 
     await provider.getDeviceInfo();
     expect(provider.pairedDevice, isNull, reason: 'storage sentinels are not Home presentation state');
+  });
+
+  test('deferred device metadata replaces scan-only active connection state', () async {
+    final necklace = BtDevice(name: 'Friend', id: 'metadata-necklace', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final connection = OmiDeviceConnection(necklace, _MetadataTransport(necklace.id));
+    final service = _FakeDeviceService(DeviceServiceStatus.ready, connection);
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(deviceService: service, automaticallyReconnectOnReady: false)
+      ..setProviders(capture)
+      ..connectedDevice = necklace
+      ..pairedDevice = necklace
+      ..setIsConnected(true);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    await provider.getDeviceInfo();
+
+    expect(provider.presentationConnectedDevice?.modelNumber, 'Omi v1');
+    expect(provider.presentationConnectedDevice?.firmwareRevision, '3.0.8');
+    expect(provider.presentationPairedDevice, same(provider.presentationConnectedDevice));
+    expect(connection.device, same(provider.presentationConnectedDevice));
+    expect(capture.recordingDevice, same(provider.presentationConnectedDevice));
   });
 
   test('a legacy UID plus consent-profile binding migrates to UID-only ownership', () async {
