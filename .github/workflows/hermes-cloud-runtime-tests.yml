@@ -685,7 +685,7 @@ jobs:
             "tests/unit/test_capture_incident_1210_regressions.py::test_capture_owner_rebind_and_rollback_are_generation_conditional"
             "tests/unit/test_capture_incident_1210_regressions.py::test_capture_photo_commit_uses_the_same_durable_owner_fence"
             "tests/unit/test_capture_incident_1210_regressions.py::test_capture_owner_transfer_fences_the_previous_firestore_generation"
-            "tests/unit/test_capture_incident_1210_regressions.py::test_capture_owner_transfer_rollback_restores_only_an_unclaimed_predecessor"
+            "tests/unit/test_capture_incident_1210_regressions.py::test_capture_owner_transfer_rollback_restores_only_its_rotation_reservation"
             "tests/unit/test_capture_incident_1210_regressions.py::test_ownership_loss_exits_old_stream_and_photos_have_no_unfenced_write_path"
             "tests/unit/test_capture_incident_1210_regressions.py::test_incident_regression_file_triggers_pull_request_and_push_ci"
             "tests/unit/test_capture_incident_1210_regressions.py::test_stock_summary_commit_rejects_transcript_appended_after_processing_snapshot"

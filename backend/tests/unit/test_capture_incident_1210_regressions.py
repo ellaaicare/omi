@@ -409,7 +409,8 @@ def _rotated_capture_consent_harness():
     }
 
     class Ref:
-        def __init__(self, data):
+        def __init__(self, ref_id, data):
+            self.id = ref_id
             self.data = data
 
         def get(self, transaction=None):
@@ -426,8 +427,8 @@ def _rotated_capture_consent_harness():
             for ref, payload in self.updates:
                 ref.data.update(payload)
 
-    predecessor_ref = Ref(predecessor)
-    successor_ref = Ref(successor)
+    predecessor_ref = Ref("conversation-a", predecessor)
+    successor_ref = Ref("conversation-b", successor)
 
     def rotate(next_owner_id):
         successor["capture_owner_id"] = next_owner_id
@@ -443,6 +444,17 @@ def _rotated_capture_consent_harness():
         transaction.apply()
         return True
 
+    def activate():
+        transaction = Transaction()
+        activated = conversations._activate_capture_conversation_processing_transaction(
+            transaction,
+            predecessor_ref,
+            successor_ref.id,
+        )
+        if activated:
+            transaction.apply()
+        return activated
+
     fallback_calls = []
     provider_dispatches = []
     processing_started = []
@@ -450,6 +462,30 @@ def _rotated_capture_consent_harness():
     state = {"authority_available": False}
 
     class Repository:
+        @staticmethod
+        def upsert_conversation(_uid, conversation_data):
+            assert conversation_data["id"] == successor["id"]
+            successor.update(conversation_data)
+
+        @staticmethod
+        def transfer_capture_conversation_owner(
+            _uid,
+            previous_conversation_id,
+            expected_previous_owner_id,
+            next_conversation_id,
+            next_owner_id,
+        ):
+            assert previous_conversation_id == predecessor["id"]
+            assert expected_previous_owner_id == "socket-a"
+            assert next_conversation_id == successor["id"]
+            return rotate(next_owner_id)
+
+        @staticmethod
+        def activate_capture_conversation_processing(_uid, conversation_id, expected_successor_id):
+            assert conversation_id == predecessor["id"]
+            assert expected_successor_id == successor["id"]
+            return activate()
+
         @staticmethod
         def get_conversation(_uid, conversation_id):
             assert conversation_id == predecessor["id"]
@@ -462,6 +498,14 @@ def _rotated_capture_consent_harness():
         @staticmethod
         def delete_conversation(*_args, **_kwargs):
             raise AssertionError("captured content must not be deleted")
+
+        @staticmethod
+        def rollback_capture_conversation_owner_transfer(*_args):
+            raise AssertionError("successful publication must not roll back")
+
+        @staticmethod
+        def abandon_capture_conversation_if_owned(*_args):
+            raise AssertionError("successful publication must not abandon the successor")
 
     async def fallback(conversation):
         fallback_calls.append(conversation["id"])
@@ -523,6 +567,8 @@ def _rotated_capture_consent_harness():
         process=process,
         processing_started=processing_started,
         provider_dispatches=provider_dispatches,
+        repository=repository,
+        activate=activate,
         rotate=rotate,
         state=state,
     )
@@ -531,6 +577,7 @@ def _rotated_capture_consent_harness():
 def test_silence_rotation_keeps_deferred_consent_predecessor_retryable_until_recovery():
     harness = _rotated_capture_consent_harness()
     harness.rotate("socket-b")
+    assert harness.activate() is True
 
     async def process_with_default(conversation_id):
         return await harness.process(conversation_id, wait_for_buffers=True)
@@ -560,14 +607,70 @@ def test_silence_rotation_keeps_deferred_consent_predecessor_retryable_until_rec
 def test_disconnect_rotation_keeps_deferred_consent_predecessor_retryable_until_recovery():
     harness = _rotated_capture_consent_harness()
 
+    class Conversation:
+        def __init__(self, **values):
+            self.values = values
+
+        def dict(self):
+            return dict(self.values)
+
+    class Redis:
+        @staticmethod
+        def rotate_in_progress_conversation_id(
+            _uid,
+            expected_conversation_id,
+            expected_owner_id,
+            new_conversation_id,
+            new_owner_id,
+        ):
+            assert expected_conversation_id == "conversation-a"
+            assert expected_owner_id == "socket-a"
+            assert new_conversation_id == "conversation-b"
+            assert new_owner_id is None
+            return True
+
+    async def publish_ready(*_args, **_kwargs):
+        raise AssertionError("disconnect rotation must not publish active socket authority")
+
+    create_stub = _nested_function(
+        "routers/transcribe.py",
+        "_create_new_in_progress_conversation",
+        {
+            "Conversation": Conversation,
+            "ConversationSource": SimpleNamespace(omi="omi", desktop="desktop"),
+            "ConversationStatus": SimpleNamespace(in_progress="in_progress"),
+            "Structured": dict,
+            "calendar_db": SimpleNamespace(get_meetings_in_time_range=lambda *_args: []),
+            "conversations_db": harness.repository,
+            "datetime": datetime,
+            "redis_db": Redis(),
+            "timedelta": timedelta,
+            "timezone": timezone,
+            "uuid": SimpleNamespace(uuid4=lambda: "conversation-b"),
+        },
+        {
+            "_latency_log": lambda *_args, **_kwargs: None,
+            "_publish_capture_protocol_ready": publish_ready,
+            "current_conversation_id": "conversation-a",
+            "language": "en",
+            "private_cloud_sync_enabled": False,
+            "session_id": "socket-a",
+            "source": None,
+            "uid": "uid-a",
+            "websocket_active": True,
+        },
+    )
+
     async def create_successor(**kwargs):
-        assert kwargs == {
-            "expected_conversation_id": "conversation-a",
-            "expected_owner_id": "socket-a",
-            "new_owner_id": None,
-            "adopt": False,
+        options = {
+            "expected_conversation_id": None,
+            "expected_owner_id": None,
+            "replace_stale_conversation_id": None,
+            "new_owner_id": "socket-a",
+            "adopt": True,
         }
-        return harness.rotate(None)
+        options.update(kwargs)
+        return await create_stub(**options)
 
     async def buffers_drained(_conversation_id, **_kwargs):
         return True
@@ -1003,6 +1106,7 @@ def test_capture_owner_is_initialized_before_reconnect_preparation_uses_it():
             "uuid": SimpleNamespace(uuid4=lambda: "stub-adopted"),
         },
         {
+            "_latency_log": lambda *_args, **_kwargs: None,
             "_publish_capture_protocol_ready": publish_capture_protocol_ready,
             "current_conversation_id": "stale",
             "language": "en",
@@ -1325,6 +1429,7 @@ def test_production_reconnect_rotates_expired_drained_candidate_behind_terminal_
     class Document:
         def __init__(self, data):
             self.data = data
+            self.id = str((data or {}).get("id") or "")
 
         def get(self, transaction=None):
             return SimpleNamespace(exists=self.data is not None, to_dict=lambda: dict(self.data or {}))
@@ -1578,6 +1683,7 @@ def test_production_reconnect_rotates_expired_drained_candidate_behind_terminal_
             "uuid": SimpleNamespace(uuid4=lambda: "fresh-capture"),
         },
         {
+            "_latency_log": lambda *_args, **_kwargs: None,
             "_publish_capture_protocol_ready": publish_ready,
             "current_conversation_id": None,
             "language": "en",
@@ -2163,23 +2269,61 @@ def test_capture_owner_transfer_fences_the_previous_firestore_generation():
         def update(self, ref, payload):
             self.updates.append((ref.id, payload))
 
+        def apply(self, refs):
+            for ref_id, payload in self.updates:
+                refs[ref_id].data.update(payload)
+
     transaction = Transaction()
+    refs = {
+        "old": Ref("old", {"status": "in_progress", "capture_owner_id": "socket-old"}),
+        "new": Ref("new", {"status": "in_progress", "capture_owner_id": "socket-new"}),
+    }
     transferred = conversations._transfer_capture_conversation_owner_transaction(
         transaction,
-        Ref("old", {"status": "in_progress", "capture_owner_id": "socket-old"}),
-        Ref("new", {"status": "in_progress", "capture_owner_id": "socket-new"}),
+        refs["old"],
+        refs["new"],
         "socket-old",
         "socket-new",
     )
 
     assert transferred is True
-    assert transaction.updates == [
-        ("old", {"capture_owner_id": None, "status": "processing"}),
-        ("new", {"capture_owner_id": "socket-new"}),
+    assert transaction.updates[0][0] == "old"
+    predecessor_update = transaction.updates[0][1]
+    assert predecessor_update["capture_owner_id"] is None
+    assert predecessor_update["status"] == "processing"
+    assert isinstance(predecessor_update["initial_processing_claimed_at"], datetime)
+    assert predecessor_update["initial_processing_claim_token"] == conversations.CAPTURE_ROTATION_PROCESSING_CLAIM_TOKEN
+    assert predecessor_update["initial_processing_release_token"] is None
+    assert predecessor_update["capture_rotation_successor_id"] == "new"
+    assert transaction.updates[1] == ("new", {"capture_owner_id": "socket-new"})
+
+    transaction.apply(refs)
+    claim_transaction = Transaction()
+    assert conversations._claim_initial_conversation_processing_transaction(
+        claim_transaction,
+        refs["old"],
+    ) == {"status": "processing_in_progress"}
+    assert claim_transaction.updates == []
+
+    activation_transaction = Transaction()
+    assert conversations._activate_capture_conversation_processing_transaction(
+        activation_transaction,
+        refs["old"],
+        "new",
+    )
+    assert activation_transaction.updates == [
+        (
+            "old",
+            {
+                "initial_processing_claimed_at": None,
+                "initial_processing_claim_token": None,
+                "capture_rotation_successor_id": None,
+            },
+        )
     ]
 
 
-def test_capture_owner_transfer_rollback_restores_only_an_unclaimed_predecessor():
+def test_capture_owner_transfer_rollback_restores_only_its_rotation_reservation():
     conversations = _load_conversations_module()
 
     class Ref:
@@ -2206,8 +2350,9 @@ def test_capture_owner_transfer_rollback_restores_only_an_unclaimed_predecessor(
         {
             "status": "processing",
             "capture_owner_id": None,
-            "initial_processing_claimed_at": None,
-            "initial_processing_claim_token": None,
+            "initial_processing_claimed_at": datetime.now(timezone.utc),
+            "initial_processing_claim_token": conversations.CAPTURE_ROTATION_PROCESSING_CLAIM_TOKEN,
+            "capture_rotation_successor_id": "new",
         },
     )
     successor = Ref("new", {"status": "in_progress", "capture_owner_id": "socket-new"})
@@ -2223,7 +2368,16 @@ def test_capture_owner_transfer_rollback_restores_only_an_unclaimed_predecessor(
 
     assert rolled_back is True
     assert transaction.updates == [
-        ("old", {"capture_owner_id": "socket-old", "status": "in_progress"}),
+        (
+            "old",
+            {
+                "capture_owner_id": "socket-old",
+                "status": "in_progress",
+                "initial_processing_claimed_at": None,
+                "initial_processing_claim_token": None,
+                "capture_rotation_successor_id": None,
+            },
+        ),
     ]
     assert transaction.deletes == ["new"]
 

@@ -15,6 +15,7 @@ from database import users as users_db
 from database import redis_db
 from database.hermes_cloud_enrichment_outbox import COLLECTION as hermes_cloud_enrichment_outbox_collection
 from models.conversation import (
+    CAPTURE_ROTATION_PROCESSING_CLAIM_TOKEN,
     ConversationPhoto,
     PostProcessingStatus,
     PostProcessingModel,
@@ -3362,11 +3363,18 @@ def _transfer_capture_conversation_owner_transaction(
     expected_owner_id = str(expected_previous_owner_id or "").strip()
     if current_owner_id and current_owner_id != expected_owner_id:
         return False
+    next_conversation_id = str(getattr(next_ref, "id", "") or "").strip()
+    if not next_conversation_id:
+        return False
     transaction.update(
         previous_ref,
         {
             "capture_owner_id": None,
             "status": ConversationStatus.processing.value,
+            "initial_processing_claimed_at": datetime.now(timezone.utc),
+            "initial_processing_claim_token": CAPTURE_ROTATION_PROCESSING_CLAIM_TOKEN,
+            "initial_processing_release_token": None,
+            "capture_rotation_successor_id": next_conversation_id,
         },
     )
     transaction.update(next_ref, {"capture_owner_id": str(next_owner_id or "").strip() or None})
@@ -3422,11 +3430,13 @@ def _rollback_capture_conversation_owner_transfer_transaction(
     previous_status = getattr(previous.get("status"), "value", previous.get("status"))
     previous_owner = str(previous.get("capture_owner_id") or "").strip()
     next_owner = str((next_snapshot.to_dict() or {}).get("capture_owner_id") or "").strip()
+    next_conversation_id = str(getattr(next_ref, "id", "") or "").strip()
     if (
         previous_status != ConversationStatus.processing.value
         or previous_owner
-        or previous.get("initial_processing_claimed_at") is not None
-        or str(previous.get("initial_processing_claim_token") or "").strip()
+        or previous.get("initial_processing_claimed_at") is None
+        or str(previous.get("initial_processing_claim_token") or "").strip() != CAPTURE_ROTATION_PROCESSING_CLAIM_TOKEN
+        or str(previous.get("capture_rotation_successor_id") or "").strip() != next_conversation_id
         or next_owner != str(expected_next_owner_id or "").strip()
     ):
         return False
@@ -3435,6 +3445,9 @@ def _rollback_capture_conversation_owner_transfer_transaction(
         {
             "capture_owner_id": str(previous_owner_id or "").strip() or None,
             "status": ConversationStatus.in_progress.value,
+            "initial_processing_claimed_at": None,
+            "initial_processing_claim_token": None,
+            "capture_rotation_successor_id": None,
         },
     )
     transaction.delete(next_ref)
@@ -3472,6 +3485,64 @@ def rollback_capture_conversation_owner_transfer(
         conversations_ref.document(next_conversation_id),
         previous_owner_id,
         expected_next_owner_id,
+    )
+
+
+def _activate_capture_conversation_processing_transaction(
+    transaction,
+    conversation_ref,
+    expected_successor_id: str,
+) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    conversation = snapshot.to_dict() or {}
+    status = getattr(conversation.get("status"), "value", conversation.get("status"))
+    if (
+        status != ConversationStatus.processing.value
+        or str(conversation.get("capture_owner_id") or "").strip()
+        or str(conversation.get("initial_processing_claim_token") or "").strip()
+        != CAPTURE_ROTATION_PROCESSING_CLAIM_TOKEN
+        or str(conversation.get("capture_rotation_successor_id") or "").strip()
+        != str(expected_successor_id or "").strip()
+    ):
+        return False
+    transaction.update(
+        conversation_ref,
+        {
+            "initial_processing_claimed_at": None,
+            "initial_processing_claim_token": None,
+            "capture_rotation_successor_id": None,
+        },
+    )
+    return True
+
+
+@transactional
+def _activate_capture_conversation_processing(
+    transaction,
+    conversation_ref,
+    expected_successor_id: str,
+) -> bool:
+    return _activate_capture_conversation_processing_transaction(
+        transaction,
+        conversation_ref,
+        expected_successor_id,
+    )
+
+
+def activate_capture_conversation_processing(
+    uid: str,
+    conversation_id: str,
+    expected_successor_id: str,
+) -> bool:
+    conversation_ref = (
+        db.collection("users").document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _activate_capture_conversation_processing(
+        db.transaction(),
+        conversation_ref,
+        expected_successor_id,
     )
 
 

@@ -1256,6 +1256,19 @@ async def _stream_handler(
             expected_conversation_id=predecessor_id,
         ):
             return False
+        if expected_conversation_id is not None and not adopt:
+            activated = conversations_db.activate_capture_conversation_processing(
+                uid,
+                expected_conversation_id,
+                new_conversation_id,
+            )
+            if not activated:
+                _latency_log(
+                    "capture_processing_activation_failed",
+                    conversation_id=expected_conversation_id,
+                    successor_id=new_conversation_id,
+                )
+                return False
 
         print(f"Created new stub conversation: {new_conversation_id}", uid, session_id)
         return True

@@ -8,6 +8,7 @@ from google.api_core.exceptions import InvalidArgument
 from google.cloud.firestore_v1 import transactional
 
 from database._client import db
+from models.conversation import CAPTURE_ROTATION_PROCESSING_CLAIM_TOKEN
 
 CAPTURE_PROTOCOL_VERSION = 2
 CAPTURE_PROTOCOL_UPGRADE_CLOSE_CODE = 1008
@@ -548,13 +549,15 @@ def _install_authority_transaction(
             and predecessor.get('capture_state') == 'drained'
             and expired_predecessor_can_handoff
         )
-        predecessor_is_unclaimed_processing = bool(
+        predecessor_has_rotation_reservation = bool(
             predecessor_status == 'processing'
             and not str(predecessor.get('capture_owner_id') or '').strip()
-            and predecessor.get('initial_processing_claimed_at') is None
-            and not str(predecessor.get('initial_processing_claim_token') or '').strip()
+            and predecessor.get('initial_processing_claimed_at') is not None
+            and str(predecessor.get('initial_processing_claim_token') or '').strip()
+            == CAPTURE_ROTATION_PROCESSING_CLAIM_TOKEN
+            and str(predecessor.get('capture_rotation_successor_id') or '').strip() == conversation_id
         )
-        if predecessor_status != 'in_progress' and not predecessor_is_unclaimed_processing:
+        if predecessor_status != 'in_progress' and not predecessor_has_rotation_reservation:
             return False
         if predecessor_is_v2 and not (active_predecessor_can_handoff or drained_predecessor_can_handoff):
             return False
@@ -585,6 +588,9 @@ def _install_authority_transaction(
                 'capture_state': 'drained',
                 'capture_drained_at': now,
                 'capture_lease_expires_at': now,
+                'initial_processing_claimed_at': None,
+                'initial_processing_claim_token': None,
+                'capture_rotation_successor_id': None,
             },
         )
     transaction.set(authority_ref, authority_data)

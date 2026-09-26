@@ -786,8 +786,9 @@ def test_rotation_installs_successor_and_drains_only_exact_predecessor(capture_p
         {
             'status': 'processing',
             'capture_owner_id': None,
-            'initial_processing_claimed_at': None,
-            'initial_processing_claim_token': None,
+            'initial_processing_claimed_at': now,
+            'initial_processing_claim_token': capture_protocol.CAPTURE_ROTATION_PROCESSING_CLAIM_TOKEN,
+            'capture_rotation_successor_id': 'capture-b',
         }
     )
     predecessor_ref = _Document(predecessor)
@@ -814,7 +815,11 @@ def test_rotation_installs_successor_and_drains_only_exact_predecessor(capture_p
     )
 
     assert installed is True
-    assert _updated(predecessor_ref.data, transaction, predecessor_ref)['capture_state'] == 'drained'
+    updated_predecessor = _updated(predecessor_ref.data, transaction, predecessor_ref)
+    assert updated_predecessor['capture_state'] == 'drained'
+    assert updated_predecessor['initial_processing_claimed_at'] is None
+    assert updated_predecessor['initial_processing_claim_token'] is None
+    assert updated_predecessor['capture_rotation_successor_id'] is None
     successor = _updated(successor_ref.data, transaction, successor_ref)
     assert successor['capture_state'] == 'active'
     assert successor['capture_generation'] == 'generation-a'
