@@ -8,7 +8,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
@@ -277,26 +279,37 @@ class _RefreshingArtworkApi extends MemoryArtworkApi {
 }
 
 class _ResponsiveArtworkApi extends MemoryArtworkApi {
-  _ResponsiveArtworkApi({this.delayedRefresh}) : super(authorityProvider: () => null);
+  _ResponsiveArtworkApi({
+    this.delayedRefresh,
+    this.provisionalCacheKey = 'responsive-provisional-cache-key',
+    this.originalCacheKey = 'responsive-original-cache-key',
+    this.compactCacheKey = 'responsive-384-cache-key',
+    this.largeCacheKey = 'responsive-768-cache-key',
+  }) : super(authorityProvider: () => null);
 
   int loadCalls = 0;
   final Completer<MemoryArtworkResult>? delayedRefresh;
+  final String provisionalCacheKey;
+  final String originalCacheKey;
+  final String compactCacheKey;
+  final String largeCacheKey;
+  bool terminal = false;
 
   MemoryArtworkResult get readyResult => MemoryArtworkResult(
         status: MemoryArtworkResultStatus.ready,
         url: Uri.parse('https://private-storage.example/original.png'),
-        cacheKey: 'responsive-original-cache-key',
+        cacheKey: originalCacheKey,
         variants: [
           MemoryArtworkVariant(
             width: 384,
             url: Uri.parse('https://private-storage.example/384.png'),
-            cacheKey: 'responsive-384-cache-key',
+            cacheKey: compactCacheKey,
             bytes: 1024,
           ),
           MemoryArtworkVariant(
             width: 768,
             url: Uri.parse('https://private-storage.example/768.png'),
-            cacheKey: 'responsive-768-cache-key',
+            cacheKey: largeCacheKey,
             bytes: 2048,
           ),
         ],
@@ -308,7 +321,7 @@ class _ResponsiveArtworkApi extends MemoryArtworkApi {
     required String styleVersion,
     required String enrichmentRevision,
   }) =>
-      'responsive-provisional-cache-key';
+      provisionalCacheKey;
 
   @override
   Future<MemoryArtworkResult> loadForDisplay(
@@ -318,6 +331,7 @@ class _ResponsiveArtworkApi extends MemoryArtworkApi {
     Duration pollInterval = const Duration(seconds: 3),
   }) {
     loadCalls += 1;
+    if (terminal) return Future.value(const MemoryArtworkResult(status: MemoryArtworkResultStatus.declined));
     if (loadCalls > 1 && delayedRefresh != null) return delayedRefresh!.future;
     return Future.value(readyResult);
   }
@@ -711,11 +725,17 @@ class _AuthoritySettlesAfterFinalRetryArtworkApi extends MemoryArtworkApi {
 }
 
 void main() {
-  setUp(() {
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    await SharedPreferencesUtil.init();
     MemoryArtworkCache.resetRuntimeTrustForTesting();
+    MemoryArtworkCache.configureTerminalEvictorForTesting((_) async {});
     MemoryArtworkImage.resetAutomaticGenerationBudgetForTesting();
   });
-  tearDown(() {
+  tearDown(() async {
+    await MemoryArtworkCache.waitForTerminalEvictionsForTesting();
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
+    MemoryArtworkCache.configureTerminalEvictorForTesting(null);
     MemoryArtworkCache.resetRuntimeTrustForTesting();
     MemoryArtworkImage.resetAutomaticGenerationBudgetForTesting();
   });
@@ -2736,6 +2756,113 @@ void main() {
     expect(image.memCacheWidth, 384);
     expect(MemoryArtworkCache.resolveDisplayCacheKey('responsive-provisional-cache-key'), 'responsive-384-cache-key');
     expect(api.loadCalls, 1, reason: 'layout-only changes must reuse the retained variant metadata');
+  });
+
+  testWidgets('terminal policy evicts every published responsive variant after recycle and restart', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    await SharedPreferencesUtil.init();
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+    addTearDown(MemoryArtworkCache.resetRuntimeTrustForTesting);
+
+    final provisionalCacheKey = '4' * 64;
+    final compactCacheKey = '5' * 64;
+    final largeCacheKey = '6' * 64;
+    final api = _ResponsiveArtworkApi(
+      provisionalCacheKey: provisionalCacheKey,
+      originalCacheKey: '7' * 64,
+      compactCacheKey: compactCacheKey,
+      largeCacheKey: largeCacheKey,
+    );
+    final evictedKeys = <String>[];
+    final conversation = ServerConversation(
+      id: 'memory-responsive-terminal-eviction',
+      createdAt: DateTime(2026, 9, 26),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(
+        status: MemoryArtworkStatus.ready,
+        styleVersion: memoryArtworkDefaultStyle,
+        enrichmentRevision: 'responsive-terminal-revision',
+      ),
+    );
+
+    Widget buildArtwork(double width, int refreshEpoch, {int authorityEpoch = 0}) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MediaQuery(
+            data: const MediaQueryData(devicePixelRatio: 2),
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: SizedBox(
+                width: width,
+                height: 180,
+                child: MemoryArtworkImage(
+                  conversation: conversation,
+                  api: api,
+                  authorityEpoch: authorityEpoch,
+                  refreshEpoch: refreshEpoch,
+                  cachedFileLookup: (_) async => null,
+                  cacheEvictor: (cacheKey) async => evictedKeys.add(cacheKey),
+                ),
+              ),
+            ),
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(150, 0));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    final publishedVariantScopeKey = jsonEncode({
+      'memory_id': conversation.id,
+      'authority_epoch': 0,
+      'display_cache_key': provisionalCacheKey,
+      'style_version': memoryArtworkDefaultStyle,
+      'enrichment_revision': 'responsive-terminal-revision',
+    });
+    expect(
+      MemoryArtworkCache.publishedVariantCacheKeys(
+        scopeKey: publishedVariantScopeKey,
+        displayCacheKey: provisionalCacheKey,
+      ),
+      contains(compactCacheKey),
+    );
+    await tester.pumpWidget(buildArtwork(300, 0));
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      MemoryArtworkCache.publishedVariantCacheKeys(
+        scopeKey: publishedVariantScopeKey,
+        displayCacheKey: provisionalCacheKey,
+      ),
+      containsAll({compactCacheKey, largeCacheKey}),
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+
+    api.terminal = true;
+    await tester.pumpWidget(buildArtwork(300, 1, authorityEpoch: 1));
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      evictedKeys,
+      containsAll({
+        provisionalCacheKey,
+        compactCacheKey,
+        largeCacheKey,
+      }),
+    );
+    expect(find.byKey(const Key('memory-generated-artwork-memory-responsive-terminal-eviction')), findsNothing);
+
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(provisionalCacheKey), isEmpty);
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(compactCacheKey), isEmpty);
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(largeCacheKey), isEmpty);
   });
 
   testWidgets('responsive variant retries after a pending cache eviction finishes', (tester) async {
