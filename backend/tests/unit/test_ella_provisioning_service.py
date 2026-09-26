@@ -3402,6 +3402,16 @@ def test_fresh_uid_relax_prefers_healthy_direct_binding_over_late_legacy_cluster
     assert runtime.provider == "hermes"
     assert runtime.runtime_target_mode == ""
 
+    with pytest.raises(ProvisioningError, match="self_hosted_runtime_target_mode_required") as unsupported:
+        asyncio.run(
+            resolve_isolated_runtime(
+                "fresh-user",
+                repository=repository,
+                target_mode="hermes-cloud-transcript",
+            )
+        )
+    assert unsupported.value.retryable is False
+
 
 def test_fresh_uid_relax_reports_missing_isolated_binding_as_provisioning(monkeypatch):
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
