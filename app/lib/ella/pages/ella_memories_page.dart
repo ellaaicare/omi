@@ -620,6 +620,7 @@ class MemoryDayGalleryCard extends StatefulWidget {
 
 class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
   MemoryArtworkDay? _dayArtwork;
+  bool _dayBatchResolved = false;
   int _loadGeneration = 0;
 
   @override
@@ -643,6 +644,12 @@ class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
     final generation = ++_loadGeneration;
     final memories = widget.memories;
     if (memories.isEmpty) return;
+    if (mounted && _usesDayBatch) {
+      setState(() {
+        _dayArtwork = null;
+        _dayBatchResolved = false;
+      });
+    }
     final localDay = memories.first.createdAt.toLocal();
     final result = await (widget.artworkApi ?? MemoryArtworkApi()).fetchDay(
       DateTime(localDay.year, localDay.month, localDay.day),
@@ -651,7 +658,10 @@ class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
       contentRevision: widget.artworkRefreshEpoch,
     );
     if (!mounted || generation != _loadGeneration) return;
-    setState(() => _dayArtwork = result);
+    setState(() {
+      _dayArtwork = result;
+      _dayBatchResolved = result != null;
+    });
   }
 
   static String _dayKey(List<ServerConversation> memories) =>
@@ -702,6 +712,7 @@ class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
               artworkAuthorityEpoch: widget.artworkAuthorityEpoch,
               automaticRepairMemoryIds: widget.automaticRepairMemoryIds,
               prefetchedArtwork: _dayArtwork?.items ?? const <String, MemoryArtworkResult>{},
+              dayBatchResolved: _dayBatchResolved,
             ),
           ),
           _dayDescription(context, titles),
@@ -725,7 +736,8 @@ class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
               authorityEpoch: widget.artworkAuthorityEpoch,
               allowManualGeneration: false,
               prefetchedResult: _dayArtwork?.items[memory.id],
-              deferRemoteFetch: _usesDayBatch,
+              prefetchResolved: _dayBatchResolved,
+              deferRemoteFetch: _usesDayBatch && !_dayBatchResolved,
             ),
           ),
           Expanded(child: _dayDescription(context, titles, compact: true)),
@@ -781,6 +793,7 @@ class _MemoryDayArtworkCollage extends StatelessWidget {
     this.artworkAuthorityEpoch = 0,
     this.automaticRepairMemoryIds = const <String>{},
     this.prefetchedArtwork = const <String, MemoryArtworkResult>{},
+    this.dayBatchResolved = false,
   });
 
   final List<ServerConversation> memories;
@@ -789,6 +802,7 @@ class _MemoryDayArtworkCollage extends StatelessWidget {
   final int artworkAuthorityEpoch;
   final Set<String> automaticRepairMemoryIds;
   final Map<String, MemoryArtworkResult> prefetchedArtwork;
+  final bool dayBatchResolved;
 
   Widget _art(ServerConversation memory) => MemoryArtworkImage(
         conversation: memory,
@@ -798,7 +812,8 @@ class _MemoryDayArtworkCollage extends StatelessWidget {
         enqueueIfMissing: automaticRepairMemoryIds.contains(memory.id),
         allowManualGeneration: true,
         prefetchedResult: prefetchedArtwork[memory.id],
-        deferRemoteFetch: (artworkApi ?? MemoryArtworkApi()).supportsDayArtworkBatch,
+        prefetchResolved: dayBatchResolved,
+        deferRemoteFetch: (artworkApi ?? MemoryArtworkApi()).supportsDayArtworkBatch && !dayBatchResolved,
       );
 
   @override

@@ -6,10 +6,11 @@ import 'package:omi/ella/services/ai_consent_policy.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 
 class _FakeTransport extends EllaAiConsentTransport {
-  _FakeTransport({this.policy, this.submitResult});
+  _FakeTransport({this.policy, this.submitResult, this.fetchResult});
 
   AiConsentPolicy? policy;
   AiConsentSubmitResult? submitResult;
+  AiConsentFetchResult? fetchResult;
   int submitCalls = 0;
 
   @override
@@ -17,6 +18,9 @@ class _FakeTransport extends EllaAiConsentTransport {
 
   @override
   Future<AiConsentStatus?> fetchStatus() async => null;
+
+  @override
+  Future<AiConsentFetchResult> fetchStatusWithDetails() async => fetchResult ?? const AiConsentFetchResult();
 
   @override
   Future<AiConsentStatus?> submit(AiConsentSubmission submission) async => (await submitWithDetails(submission)).status;
@@ -77,8 +81,10 @@ void main() {
   test('503 grant rejection surfaces server-unavailable with the backend code', () async {
     final transport = _FakeTransport(
       policy: AiConsentPolicy.bundled,
-      submitResult:
-          const AiConsentSubmitResult(httpStatus: 503, errorCode: 'managed_cloud_consent_authority_unavailable'),
+      submitResult: const AiConsentSubmitResult(
+        httpStatus: 503,
+        errorCode: 'managed_cloud_consent_authority_unavailable',
+      ),
     );
     final outcome = await _service(transport).grantCurrentConsentWithOutcome(uid: uid);
 
@@ -109,13 +115,16 @@ void main() {
     expect(outcome.supportCode, 'http_500');
   });
 
-  test('missing policy blocks the submit and reports server-unavailable', () async {
-    final transport = _FakeTransport(policy: null);
+  test('missing policy response uses the matching bundled policy for the authoritative submit', () async {
+    final transport = _FakeTransport(
+      policy: null,
+      submitResult: AiConsentSubmitResult(httpStatus: 200, status: _currentGrantStatus(uid)),
+    );
     final outcome = await _service(transport).grantCurrentConsentWithOutcome(uid: uid);
 
-    expect(outcome.failureKind, AiConsentGrantFailureKind.serverUnavailable);
-    expect(outcome.supportCode, 'consent_policy_unavailable');
-    expect(transport.submitCalls, 0);
+    expect(outcome.accepted, isTrue);
+    expect(transport.submitCalls, 1);
+    expect(SharedPreferencesUtil().aiConsentReceiptId, outcome.receiptId);
   });
 
   test('200 with a non-current grant is rejected without persisting authority', () async {
@@ -149,5 +158,79 @@ void main() {
       await _service(transport).grantCurrentConsent(uid: uid),
       '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1',
     );
+  });
+
+  test('active refresh treats backend-unavailable 503 as retryable and preserves acceptance', () async {
+    final preferences = SharedPreferencesUtil();
+    preferences.acceptAiConsent(
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1',
+      uid: uid,
+      profileBindingId: 'binding-1',
+      serverDecidedAt: '2026-08-07T00:00:00Z',
+    );
+    final transport = _FakeTransport(
+      fetchResult: const AiConsentFetchResult(
+        httpStatus: 503,
+        errorCode: 'ai_consent_authority_unavailable',
+        authorityState: 'unavailable',
+        retryable: true,
+      ),
+    );
+
+    final result = await _service(transport).refreshActiveSessionAuthority(
+      uid: uid,
+      expectedReceiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1',
+      expectedServerDecidedAt: DateTime.utc(2026, 8, 7),
+    );
+
+    expect(result.disposition, AiConsentAuthorityRefreshDisposition.retryable);
+    expect(result.supportCode, 'ai_consent_authority_unavailable');
+    expect(preferences.getBool('aiConsentAccepted', defaultValue: false), isTrue);
+    expect(preferences.aiConsentReceiptId, '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1');
+  });
+
+  test('active refresh accepts the same receipt across bundled policy drift', () async {
+    final preferences = SharedPreferencesUtil();
+    preferences.acceptAiConsent(
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1',
+      uid: uid,
+      profileBindingId: 'binding-1',
+      serverDecidedAt: '2026-08-07T00:00:00Z',
+    );
+    await preferences.saveString('aiConsentContractVersion', 'client-before-backend-deploy');
+    final transport = _FakeTransport(
+      fetchResult: AiConsentFetchResult(httpStatus: 200, status: _currentGrantStatus(uid)),
+    );
+
+    final result = await _service(transport).refreshActiveSessionAuthority(
+      uid: uid,
+      expectedReceiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1',
+      expectedServerDecidedAt: DateTime.utc(2026, 8, 7),
+    );
+
+    expect(result.disposition, AiConsentAuthorityRefreshDisposition.verified);
+    expect(preferences.aiConsentAccepted, isTrue);
+  });
+
+  test('active refresh applies an explicit revoked state immediately', () async {
+    final preferences = SharedPreferencesUtil();
+    preferences.acceptAiConsent(
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1',
+      uid: uid,
+      profileBindingId: 'binding-1',
+      serverDecidedAt: '2026-08-07T00:00:00Z',
+    );
+    final transport = _FakeTransport(
+      fetchResult: const AiConsentFetchResult(httpStatus: 200, authorityState: 'revoked'),
+    );
+
+    final result = await _service(transport).refreshActiveSessionAuthority(
+      uid: uid,
+      expectedReceiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1',
+      expectedServerDecidedAt: DateTime.utc(2026, 8, 7),
+    );
+
+    expect(result.disposition, AiConsentAuthorityRefreshDisposition.revoked);
+    expect(preferences.aiConsentAccepted, isFalse);
   });
 }

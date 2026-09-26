@@ -93,11 +93,7 @@ void main() {
 
   testWidgets('missing necklace is unavailable instead of being labelled ready', (tester) async {
     var starts = 0;
-    await _pumpRecordControl(
-      tester,
-      selectedSource: EllaCaptureSource.necklace,
-      onTap: () => starts += 1,
-    );
+    await _pumpRecordControl(tester, selectedSource: EllaCaptureSource.necklace, onTap: () => starts += 1);
     final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
     expect(find.text(l10n.todayDockNecklaceNotConnected), findsOneWidget);
@@ -223,11 +219,7 @@ void main() {
 
   testWidgets('idle source selector changes explicit capture intent and locks while recording', (tester) async {
     EllaCaptureSource? selection;
-    await _pumpRecordControl(
-      tester,
-      hasNecklace: true,
-      onSourceSelected: (source) => selection = source,
-    );
+    await _pumpRecordControl(tester, hasNecklace: true, onSourceSelected: (source) => selection = source);
 
     await tester.tap(find.byKey(const Key('today-capture-source-necklace')));
     await tester.pump();
@@ -294,6 +286,15 @@ void main() {
       hasNecklace: true,
       necklaceConnected: true,
       recordingState: RecordingState.deviceRecord,
+      transcriptionReady: true,
+      diagnostics: const CaptureDiagnostics(
+        source: CaptureDiagnosticSource.necklace,
+        phase: CaptureDiagnosticPhase.streaming,
+        physicalFrames: 2,
+        physicalBytes: 320,
+        transmittedFrames: 2,
+        transmittedBytes: 320,
+      ),
     );
     final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
@@ -302,8 +303,9 @@ void main() {
     expect(find.text(l10n.todayDockTranscriptNecklace), findsOneWidget);
   });
 
-  testWidgets('continuous necklace capture allows an explicit iPhone handoff without relabeling its transcript',
-      (tester) async {
+  testWidgets('continuous necklace capture allows an explicit iPhone handoff without relabeling its transcript', (
+    tester,
+  ) async {
     EllaCaptureSource? selection;
     await _pumpRecordControl(
       tester,
@@ -312,6 +314,15 @@ void main() {
       hasNecklace: true,
       necklaceConnected: true,
       recordingState: RecordingState.deviceRecord,
+      transcriptionReady: true,
+      diagnostics: const CaptureDiagnostics(
+        source: CaptureDiagnosticSource.necklace,
+        phase: CaptureDiagnosticPhase.streaming,
+        physicalFrames: 2,
+        physicalBytes: 320,
+        transmittedFrames: 2,
+        transmittedBytes: 320,
+      ),
       onSourceSelected: (source) => selection = source,
     );
     final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
@@ -324,6 +335,39 @@ void main() {
     await tester.tap(find.byKey(const Key('today-capture-source-necklace')));
     await tester.pump();
     expect(selection, EllaCaptureSource.necklace);
+  });
+
+  testWidgets('necklace is not labelled recording before bytes reach a ready socket', (tester) async {
+    await _pumpRecordControl(
+      tester,
+      selectedSource: EllaCaptureSource.necklace,
+      activeSource: EllaCaptureSource.necklace,
+      hasNecklace: true,
+      necklaceConnected: true,
+      recordingState: RecordingState.deviceRecord,
+      diagnostics: const CaptureDiagnostics(
+        source: CaptureDiagnosticSource.necklace,
+        phase: CaptureDiagnosticPhase.waitingForAudio,
+      ),
+    );
+    final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
+
+    expect(find.text(l10n.todayDockSaveMoment), findsNothing);
+    expect(find.text(l10n.todayDockNecklaceConnecting), findsOneWidget);
+  });
+
+  testWidgets('genuine consent loss stays visible with a review action', (tester) async {
+    var reviews = 0;
+    await _pumpRecordControl(
+      tester,
+      diagnostics: const CaptureDiagnostics(failure: CaptureDiagnosticFailure.consentUnavailable),
+      onReviewConsent: () => reviews += 1,
+    );
+    final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
+
+    expect(find.text(l10n.aiConsentTranscriptionReview), findsOneWidget);
+    await tester.tap(find.byKey(const Key('today-ai-consent-review')));
+    expect(reviews, 1);
   });
 
   testWidgets('compact dock never exposes numeric capture diagnostics', (tester) async {
@@ -393,8 +437,10 @@ Future<void> _pumpRecordControl(
   bool necklaceConnecting = false,
   RecordingState recordingState = RecordingState.stop,
   CaptureDiagnostics diagnostics = const CaptureDiagnostics(),
+  bool transcriptionReady = false,
   VoidCallback? onViewTranscript,
   ValueChanged<EllaCaptureSource>? onSourceSelected,
+  VoidCallback? onReviewConsent,
   VoidCallback? onUnavailable,
   VoidCallback? onTap,
 }) {
@@ -413,8 +459,10 @@ Future<void> _pumpRecordControl(
           necklaceConnecting: necklaceConnecting,
           recordingState: recordingState,
           diagnostics: diagnostics,
+          transcriptionReady: transcriptionReady,
           onViewTranscript: onViewTranscript ?? () {},
           onSourceSelected: onSourceSelected ?? (_) {},
+          onReviewConsent: onReviewConsent,
           onUnavailable: onUnavailable,
           onTap: onTap ?? () {},
         ),

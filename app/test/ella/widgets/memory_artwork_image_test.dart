@@ -6,14 +6,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
+import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/memory_artwork_api.dart';
 import 'package:omi/ella/services/memory_artwork_cache.dart';
 import 'package:omi/ella/widgets/memory_artwork_image.dart';
 import 'package:omi/l10n/app_localizations.dart';
+import 'package:omi/services/wals/wal.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 
 class _DelayedArtworkApi extends MemoryArtworkApi {
@@ -1096,6 +1099,89 @@ void main() {
     expect(find.byKey(const Key('memory-cached-artwork-memory-cached')), findsOneWidget);
     expect(api.loadCalls, 2, reason: 'route recreation may refresh the signed URL without blanking cached bytes');
     expect(requestedKeys, hasLength(2));
+  });
+
+  testWidgets('cold upgrade restores the exact build 865 owner key before metadata refresh', (tester) async {
+    const uid = 'owner-uid';
+    const profileBindingId = 'profile-binding';
+    const bindingRevision = 7;
+    const memoryId = 'memory-upgraded-from-865';
+    const enrichmentRevision = 'summary-revision-865';
+    final owner = WalOwner(
+      uid: uid,
+      profileBindingId: profileBindingId,
+      bindingRevision: bindingRevision,
+      consentReceiptId: 'aicr_receipt',
+      authorityGenerationAtCapture: 4,
+    );
+    final authority = ActiveWalAuthority(
+      owner: owner,
+      consent: const AiConsentAuthoritySnapshot(
+        generation: 4,
+        uid: uid,
+        verifiedPersonaId: 'persona',
+        profileBindingId: profileBindingId,
+        receiptId: 'aicr_receipt',
+        policyVersion: 'policy',
+        processorSetHash: 'processors',
+        scopeVersion: 'scope',
+        scopeHash: 'scope-hash',
+      ),
+      currentCheck: () => true,
+    );
+    final api = MemoryArtworkApi(authorityProvider: () => authority);
+    final cachedFile = File('assets/images/onboarding-bg-1.webp');
+    final requestedKeys = <String>[];
+    final ownerNamespace =
+        sha256.convert(utf8.encode('$uid\n$profileBindingId\n$bindingRevision')).toString().substring(0, 24);
+    final currentKey = sha256.convert(utf8.encode('ella-memory-artwork-cache-v2\n$uid\n$memoryId')).toString();
+    final legacyKey = sha256
+        .convert(
+          utf8.encode(
+            'ella-memory-artwork-cache-v1\n$ownerNamespace\n$memoryId\n$memoryArtworkDefaultStyle\n$enrichmentRevision',
+          ),
+        )
+        .toString();
+    final conversation = ServerConversation(
+      id: memoryId,
+      createdAt: DateTime(2026, 9, 24),
+      structured: Structured('[Ella] Saved art', '[Ella] Existing artwork survives the client upgrade.'),
+      artwork: const MemoryArtworkState(
+        status: MemoryArtworkStatus.ready,
+        styleVersion: memoryArtworkDefaultStyle,
+        enrichmentRevision: enrichmentRevision,
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          deferRemoteFetch: true,
+          cachedFileLookup: (cacheKey) async {
+            requestedKeys.add(cacheKey);
+            return cacheKey == legacyKey ? cachedFile : null;
+          },
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+        api.cacheKeyForDisplay(
+            memoryId: memoryId, styleVersion: memoryArtworkDefaultStyle, enrichmentRevision: enrichmentRevision),
+        currentKey);
+    expect(
+        api.legacyCacheKeyForDisplay(
+            memoryId: memoryId, styleVersion: memoryArtworkDefaultStyle, enrichmentRevision: enrichmentRevision),
+        legacyKey);
+    expect(requestedKeys, [currentKey, legacyKey]);
+    expect(find.byKey(const Key('memory-cached-artwork-memory-upgraded-from-865')), findsOneWidget);
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(currentKey), legacyKey);
   });
 
   testWidgets('removes only corrupted saved bytes so the stable key can download again', (tester) async {

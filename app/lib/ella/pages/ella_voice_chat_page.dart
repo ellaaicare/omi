@@ -589,7 +589,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     if (!mounted) return;
     setState(() {
       _orbState = VoiceOrbState.idle;
-      _statusText = context.l10n.aiConsentActiveAudioStopped;
+      _statusText = context.l10n.aiConsentTranscriptionReview;
       _audioLevel = 0.0;
     });
   }
@@ -1209,7 +1209,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         _v2vTurnReconciler.endSession(endedSessionId);
         setState(() {
           _orbState = VoiceOrbState.idle;
-          _statusText = context.l10n.aiConsentActiveAudioStopped;
+          _statusText = context.l10n.aiConsentTranscriptionReview;
           _audioLevel = 0.0;
         });
         break;

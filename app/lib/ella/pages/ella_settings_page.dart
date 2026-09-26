@@ -15,6 +15,7 @@ import 'package:omi/ella/pages/ella_care_team_page.dart';
 import 'package:omi/ella/pages/alert_channels_page.dart';
 import 'package:omi/ella/pages/ella_emergency_contact_page.dart';
 import 'package:omi/ella/pages/ella_profile_page.dart';
+import 'package:omi/ella/pages/ella_runtime_diagnostics_page.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/pages/guardian_alert_history_page.dart';
 import 'package:omi/ella/pages/guardian_mode_page.dart';
@@ -403,6 +404,16 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
 
             if (_developerUnlocked) ...[
               _buildSectionHeader(context.l10n.ellaMoreSection),
+              EllaSettingsRow(
+                key: const Key('ella-runtime-diagnostics-entry'),
+                icon: Icons.monitor_heart_outlined,
+                title: context.l10n.ellaRuntimeDiagnostics,
+                subtitle: context.l10n.ellaRuntimeDiagnosticsSubtitle,
+                onTap: () {
+                  Navigator.push(context, MaterialPageRoute(builder: (context) => const EllaRuntimeDiagnosticsPage()));
+                },
+              ),
+              const SizedBox(height: 8),
               EllaSettingsRow(
                 icon: Icons.developer_mode,
                 title: context.l10n.ellaAdvancedSettings,

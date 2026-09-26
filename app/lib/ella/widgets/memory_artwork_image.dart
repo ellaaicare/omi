@@ -48,6 +48,7 @@ class MemoryArtworkImage extends StatefulWidget {
     this.allowManualGeneration = false,
     this.prefetchedResult,
     this.deferRemoteFetch = false,
+    this.prefetchResolved = false,
   });
 
   final ServerConversation conversation;
@@ -98,6 +99,10 @@ class MemoryArtworkImage extends StatefulWidget {
   /// Holds network reads until the parent day batch resolves. Owner-scoped
   /// disk bytes still load immediately.
   final bool deferRemoteFetch;
+
+  /// Distinguishes a successful day response that omitted this memory from a
+  /// day request that has not completed yet.
+  final bool prefetchResolved;
 
   static const _automaticGenerationBudgetCapacity = 256;
   static const _automaticPreEgressAttemptLimit = 3;
@@ -189,7 +194,8 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         oldWidget.authorityEpoch != widget.authorityEpoch ||
         oldWidget.enqueueIfMissing != widget.enqueueIfMissing ||
         oldWidget.prefetchedResult != widget.prefetchedResult ||
-        oldWidget.deferRemoteFetch != widget.deferRemoteFetch) {
+        oldWidget.deferRemoteFetch != widget.deferRemoteFetch ||
+        oldWidget.prefetchResolved != widget.prefetchResolved) {
       _refreshRequest();
     }
   }
@@ -218,17 +224,33 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     final cacheKey = _cacheKeyForDisplay(api, artwork);
     _displayCacheKey = cacheKey;
     final resolvedCacheKey = MemoryArtworkCache.resolveDisplayCacheKey(cacheKey);
+    final legacyCacheKey = api.legacyCacheKeyForDisplay(
+      memoryId: widget.conversation.id,
+      styleVersion: artwork?.styleVersion ?? '',
+      enrichmentRevision: artwork?.enrichmentRevision ?? '',
+    );
     _remoteResult = null;
     if (_cacheKey != resolvedCacheKey) {
       _cacheKey = resolvedCacheKey;
       _cachedFile = null;
     }
     if (resolvedCacheKey.isNotEmpty) {
-      unawaited(_loadCachedFile(resolvedCacheKey, generation));
+      unawaited(_loadCachedFile(resolvedCacheKey, generation, legacyCacheKey: legacyCacheKey, api: api));
+    } else if (cacheKey.isNotEmpty && api.isDisplayAuthorityCurrent()) {
+      unawaited(
+        _restoreOwnerScopedCachedFile(
+          cacheKey,
+          generation,
+          legacyCacheKey: legacyCacheKey,
+          api: api,
+        ),
+      );
     }
     final prefetchedResult = widget.prefetchedResult;
     if (prefetchedResult != null) {
       unawaited(_loadRemoteResult(api, artwork, generation, suppliedResult: prefetchedResult));
+    } else if (widget.prefetchResolved) {
+      _remoteResult = const MemoryArtworkResult(status: MemoryArtworkResultStatus.unavailable);
     } else if (!widget.deferRemoteFetch) {
       unawaited(_loadRemoteResult(api, artwork, generation));
     }
@@ -278,13 +300,36 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     _imageDownloadRetries = 0;
   }
 
-  Future<void> _loadCachedFile(String cacheKey, int generation) async {
+  Future<void> _loadCachedFile(
+    String cacheKey,
+    int generation, {
+    String legacyCacheKey = '',
+    MemoryArtworkApi? api,
+  }) async {
     try {
       final lookup = widget.cachedFileLookup ?? _defaultCachedFileLookup;
-      final file = await lookup(cacheKey);
+      var resolvedKey = cacheKey;
+      var file = await lookup(cacheKey);
+      if ((file == null || !file.existsSync()) && legacyCacheKey.isNotEmpty && legacyCacheKey != cacheKey) {
+        final legacyFile = await lookup(legacyCacheKey);
+        if (legacyFile != null && legacyFile.existsSync() && (api?.isDisplayAuthorityCurrent() ?? false)) {
+          final migratedKey = await MemoryArtworkCache.rememberDisplayCacheKey(
+            provisionalCacheKey: _displayCacheKey,
+            authoritativeCacheKey: legacyCacheKey,
+            isAuthorityCurrent: () => api?.isDisplayAuthorityCurrent() ?? false,
+          );
+          if (migratedKey != null) {
+            resolvedKey = migratedKey;
+            file = legacyFile;
+          }
+        }
+      }
       if (file == null || !file.existsSync()) return;
       if (!mounted || generation != _requestGeneration || cacheKey != _cacheKey) return;
-      setState(() => _cachedFile = file);
+      setState(() {
+        _cacheKey = resolvedKey;
+        _cachedFile = file;
+      });
     } catch (_) {
       // A cache read failure must not block the authenticated network refresh.
     }
@@ -293,6 +338,24 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   Future<File?> _defaultCachedFileLookup(String cacheKey) async {
     final info = await MemoryArtworkCache.manager.getFileFromCache(cacheKey);
     return info?.file;
+  }
+
+  Future<void> _restoreOwnerScopedCachedFile(
+    String cacheKey,
+    int generation, {
+    required String legacyCacheKey,
+    required MemoryArtworkApi api,
+  }) async {
+    final trustedKey = await MemoryArtworkCache.rememberDisplayCacheKey(
+      provisionalCacheKey: cacheKey,
+      authoritativeCacheKey: cacheKey,
+      isAuthorityCurrent: api.isDisplayAuthorityCurrent,
+    );
+    if (trustedKey == null || !mounted || generation != _requestGeneration) return;
+    if (_cacheKey != trustedKey) {
+      setState(() => _cacheKey = trustedKey);
+    }
+    await _loadCachedFile(trustedKey, generation, legacyCacheKey: legacyCacheKey, api: api);
   }
 
   Future<void> _evictCachedFile(String cacheKey) {

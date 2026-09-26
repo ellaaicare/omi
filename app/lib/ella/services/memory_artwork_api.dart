@@ -345,6 +345,26 @@ class MemoryArtworkApi {
     );
   }
 
+  /// Build 865 stored ready artwork under this owner/profile-scoped key. The
+  /// build 866 reader probes it once so an offline upgrade can retain bytes,
+  /// then persists a V2 alias without broadening account authority.
+  String legacyCacheKeyForDisplay({
+    required String memoryId,
+    required String styleVersion,
+    required String enrichmentRevision,
+  }) {
+    final authority = _authorityProvider();
+    if (authority == null || memoryId.trim().isEmpty || !authority.isExactCurrent()) return '';
+    return _legacyCacheKey(
+      authority: authority,
+      memoryId: memoryId,
+      styleVersion: styleVersion,
+      enrichmentRevision: enrichmentRevision,
+    );
+  }
+
+  bool isDisplayAuthorityCurrent() => _authorityProvider()?.isExactCurrent() == true;
+
   String automaticGenerationKey({required String memoryId, required String sourceRevision}) {
     final authority = _authorityProvider();
     if (authority == null || memoryId.trim().isEmpty || !authority.isExactCurrent()) return '';
@@ -499,11 +519,7 @@ class MemoryArtworkApi {
     final existing = _dayRequests[requestKey];
     if (existing != null) return existing;
     late final Future<MemoryArtworkDay?> request;
-    request = _fetchDayWithAuthority(
-      authority,
-      day: day,
-      utcOffsetMinutes: utcOffsetMinutes,
-    ).whenComplete(() {
+    request = _fetchDayWithAuthority(authority, day: day, utcOffsetMinutes: utcOffsetMinutes).whenComplete(() {
       if (identical(_dayRequests[requestKey], request)) {
         _dayRequests.remove(requestKey);
       }
@@ -1075,6 +1091,22 @@ class MemoryArtworkApi {
     required String enrichmentRevision,
   }) {
     return sha256.convert(utf8.encode('ella-memory-artwork-cache-v2\n${authority.uid}\n$memoryId')).toString();
+  }
+
+  static String _legacyCacheKey({
+    required ExactAccountAuthorityVerifier authority,
+    required String memoryId,
+    required String styleVersion,
+    required String enrichmentRevision,
+  }) {
+    final ownerNamespace = authority is ActiveWalAuthority
+        ? authority.owner.storageNamespace
+        : sha256.convert(utf8.encode(authority.uid)).toString().substring(0, 24);
+    return sha256
+        .convert(
+          utf8.encode('ella-memory-artwork-cache-v1\n$ownerNamespace\n$memoryId\n$styleVersion\n$enrichmentRevision'),
+        )
+        .toString();
   }
 
   static String _contentCacheKey({

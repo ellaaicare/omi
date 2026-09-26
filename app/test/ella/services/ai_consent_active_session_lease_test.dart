@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
+import 'package:omi/ella/services/ella_ai_consent_service.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -38,7 +39,7 @@ void main() {
     final lease = AiConsentActiveSessionLease(
       uid: 'uid-a',
       preferences: preferences,
-      refreshAuthority: (uid) async {
+      refreshAuthority: (uid, receiptId, decidedAt) async {
         refreshCalls++;
         preferences.markAiConsentServerVerified(
           uid: uid,
@@ -49,7 +50,7 @@ void main() {
           scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
           scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
         );
-        return true;
+        return const AiConsentAuthorityRefreshResult(AiConsentAuthorityRefreshDisposition.verified);
       },
       onAuthorityLost: () {
         authorityLossCalls++;
@@ -80,9 +81,9 @@ void main() {
     final lease = AiConsentActiveSessionLease(
       uid: 'uid-a',
       preferences: preferences,
-      refreshAuthority: (_) async {
+      refreshAuthority: (_, __, ___) async {
         preferences.declineAiConsent();
-        return false;
+        return const AiConsentAuthorityRefreshResult(AiConsentAuthorityRefreshDisposition.revoked);
       },
       onAuthorityLost: () {
         authorityLossCalls++;
@@ -97,12 +98,15 @@ void main() {
     expect(preferences.aiConsentAccepted, isFalse);
   });
 
-  test('unavailable consent authority stops active session without extending cached grant', () async {
+  test('retryable refresh failure keeps active capture authorized during grace', () async {
     var authorityLossCalls = 0;
     final lease = AiConsentActiveSessionLease(
       uid: 'uid-a',
       preferences: preferences,
-      refreshAuthority: (_) async => false,
+      refreshAuthority: (_, __, ___) async => const AiConsentAuthorityRefreshResult(
+        AiConsentAuthorityRefreshDisposition.retryable,
+        supportCode: 'ai_consent_authority_unavailable',
+      ),
       onAuthorityLost: () {
         authorityLossCalls++;
       },
@@ -110,9 +114,65 @@ void main() {
 
     await lease.refreshNow();
 
+    expect(authorityLossCalls, 0);
+    expect(lease.isActive, isTrue);
+    expect(lease.hasCurrentAuthority, isTrue);
+    expect(preferences.aiConsentAccepted, isTrue);
+    expect(preferences.aiConsentReceiptId, 'aicr_receipt-a');
+    expect(AiConsentActiveSessionLease.diagnostics.value.phase, AiConsentLeasePhase.retrying);
+    lease.stop();
+  });
+
+  test('backend deploy drift does not invalidate an active server-confirmed receipt', () async {
+    var authorityLossCalls = 0;
+    final lease = AiConsentActiveSessionLease(
+      uid: 'uid-a',
+      preferences: preferences,
+      refreshAuthority: (_, __, ___) async => const AiConsentAuthorityRefreshResult(
+        AiConsentAuthorityRefreshDisposition.retryable,
+        supportCode: 'backend_deploy',
+      ),
+      onAuthorityLost: () {
+        authorityLossCalls++;
+      },
+    )..start();
+
+    await preferences.saveString('aiConsentContractVersion', 'server-policy-after-deploy');
+    await preferences.saveString('aiConsentProcessorSetHash', 'server-processors-after-deploy');
+    await preferences.saveString('aiConsentScopeHash', 'server-scope-after-deploy');
+    await lease.refreshNow();
+
+    expect(authorityLossCalls, 0);
+    expect(lease.isActive, isTrue);
+    expect(lease.hasCurrentAuthority, isTrue);
+    lease.stop();
+  });
+
+  test('retryable failures stop only after the thirty-minute grace expires', () async {
+    var now = DateTime(2026, 7, 27, 0, 4);
+    var authorityLossCalls = 0;
+    final lease = AiConsentActiveSessionLease(
+      uid: 'uid-a',
+      preferences: preferences,
+      now: () => now,
+      gracePeriod: const Duration(minutes: 30),
+      refreshAuthority: (_, __, ___) async => const AiConsentAuthorityRefreshResult(
+        AiConsentAuthorityRefreshDisposition.retryable,
+        supportCode: 'http_503',
+      ),
+      onAuthorityLost: () {
+        authorityLossCalls++;
+      },
+    )..start();
+
+    await lease.refreshNow();
+    expect(lease.isActive, isTrue);
+
+    now = now.add(const Duration(minutes: 31));
+    await lease.refreshNow();
+
     expect(authorityLossCalls, 1);
     expect(lease.isActive, isFalse);
-    expect(preferences.aiConsentAccepted, isFalse);
-    expect(preferences.aiConsentReceiptId, 'aicr_receipt-a');
+    expect(AiConsentActiveSessionLease.diagnostics.value.terminalReason, 'verification_grace_expired');
   });
 }

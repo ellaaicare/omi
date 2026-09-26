@@ -293,6 +293,38 @@ void main() {
     expect(artwork.displayRequests.where((request) => request.memoryId == newer.id), hasLength(1));
   });
 
+  testWidgets('successful empty day artwork response resolves to typographic cards without permanent spinners', (
+    tester,
+  ) async {
+    final artwork = _ResolvedDayArtworkApi();
+    final memory = ServerConversation(
+      id: 'resolved-without-artwork',
+      createdAt: DateTime(2026, 9, 24, 12),
+      structured: Structured('A day without generated art', 'The memory remains readable without an illustration.'),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: MemoryDayGalleryCard(
+            dayLabel: 'TODAY',
+            memories: [memory],
+            artworkApi: artwork,
+            now: DateTime(2026, 9, 24),
+            onOpen: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(artwork.fetchDayCalls, 1);
+    expect(find.byKey(const Key('memory-artwork-placeholder-resolved-without-artwork')), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-generation-progress-resolved-without-artwork')), findsNothing);
+  });
+
   testWidgets('Home retains day artwork state when midnight relabels the calendar date', (tester) async {
     final authority = await _installArtworkAuthority();
     await SharedPreferencesUtil().saveMemoryGalleryLayout(MemoryGalleryLayout.days.name);
@@ -3075,6 +3107,31 @@ Future<_MutableExactAuthority> _installArtworkAuthority({
   return _MutableExactAuthority(uid);
 }
 
+class _ResolvedDayArtworkApi extends MemoryArtworkApi {
+  _ResolvedDayArtworkApi() : super(authorityProvider: () => null);
+
+  int fetchDayCalls = 0;
+
+  @override
+  bool get supportsDayArtworkBatch => true;
+
+  @override
+  Future<MemoryArtworkDay?> fetchDay(
+    DateTime localDay, {
+    required int utcOffsetMinutes,
+    int authorityRevision = 0,
+    int contentRevision = 0,
+  }) async {
+    fetchDayCalls += 1;
+    return MemoryArtworkDay(
+      day: '${localDay.year.toString().padLeft(4, '0')}-${localDay.month.toString().padLeft(2, '0')}'
+          '-${localDay.day.toString().padLeft(2, '0')}',
+      utcOffsetMinutes: utcOffsetMinutes,
+      items: const <String, MemoryArtworkResult>{},
+    );
+  }
+}
+
 class _FakeMemoryArtworkApi extends MemoryArtworkApi {
   _FakeMemoryArtworkApi({
     List<MemoryArtworkBackfillPage> backfillPages = const [
@@ -3625,7 +3682,23 @@ class _FakeCaptureProvider extends CaptureProvider {
   int finalContentChecks = 0;
 
   @override
-  CaptureDiagnostics get captureDiagnostics => captureDiagnosticsOverride ?? super.captureDiagnostics;
+  CaptureDiagnostics get captureDiagnostics {
+    if (captureDiagnosticsOverride != null) return captureDiagnosticsOverride!;
+    if (recordingState == RecordingState.deviceRecord) {
+      return const CaptureDiagnostics(
+        source: CaptureDiagnosticSource.necklace,
+        phase: CaptureDiagnosticPhase.streaming,
+        physicalFrames: 2,
+        physicalBytes: 320,
+        transmittedFrames: 2,
+        transmittedBytes: 320,
+      );
+    }
+    return super.captureDiagnostics;
+  }
+
+  @override
+  bool get transcriptServiceReady => recordingState == RecordingState.deviceRecord || super.transcriptServiceReady;
 
   @override
   bool get hasCapturableContent => hasContent;

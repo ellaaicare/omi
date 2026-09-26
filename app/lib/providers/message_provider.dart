@@ -149,8 +149,10 @@ class MessageProvider extends ChangeNotifier {
   bool sendingMessage = false;
   double aiStreamProgress = 1.0;
   ClientApiFailure? _lastStreamFailure;
+  String? _lastFailedMessageText;
 
   ClientApiFailure? get lastStreamFailure => _lastStreamFailure;
+  bool get canRetryLastMessage => _lastFailedMessageText?.trim().isNotEmpty == true;
   bool get requiresClientUpdate => _lastStreamFailure?.kind == ClientApiFailureKind.updateRequired;
 
   String firstTimeLoadingText = '';
@@ -186,6 +188,7 @@ class MessageProvider extends ChangeNotifier {
     sendingMessage = false;
     aiStreamProgress = 1.0;
     _lastStreamFailure = null;
+    _lastFailedMessageText = null;
     firstTimeLoadingText = '';
     chatApps = [];
     isLoadingChatApps = false;
@@ -1043,7 +1046,15 @@ class MessageProvider extends ChangeNotifier {
     if (lease == null) return;
     final operationGeneration = _operationGeneration;
     try {
-      if (!await _authorizeProtectedOperation(lease, operationGeneration)) return;
+      if (!await _ensureAiConsent()) {
+        if (_canCommit(lease, operationGeneration)) {
+          _lastFailedMessageText = text;
+          _setStreamFailure(const ClientApiFailure(ClientApiFailureKind.consentRequired, retryable: true));
+          setSendingMessage(false);
+        }
+        return;
+      }
+      if (!_canCommit(lease, operationGeneration)) return;
       if (SharedPreferencesUtil().demoMode) {
         if (!_canCommit(lease, operationGeneration)) return;
         messages = DemoFixtures.chatMessages();
@@ -1055,6 +1066,7 @@ class MessageProvider extends ChangeNotifier {
       if (!_canCommit(lease, operationGeneration)) return;
       aiStreamProgress = 0.0;
       _lastStreamFailure = null;
+      _lastFailedMessageText = null;
       setShowTypingIndicator(true);
       var currentAppId = appProvider?.selectedChatAppId;
       if (currentAppId == 'no_selected') {
@@ -1132,13 +1144,16 @@ class MessageProvider extends ChangeNotifier {
             throw const ClientApiFailure(ClientApiFailureKind.invalidResponse);
           }
         }
+        if (_canCommit(lease, operationGeneration)) _lastFailedMessageText = null;
       } on ClientApiFailure catch (failure) {
         if (!_canCommit(lease, operationGeneration)) return;
         _discardAssistantAt(aiIndex);
+        _lastFailedMessageText = text;
         _setStreamFailure(failure);
       } catch (_) {
         if (!_canCommit(lease, operationGeneration)) return;
         _discardAssistantAt(aiIndex);
+        _lastFailedMessageText = text;
         _setStreamFailure(const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true));
       } finally {
         if (_canCommit(lease, operationGeneration)) {
@@ -1152,6 +1167,13 @@ class MessageProvider extends ChangeNotifier {
     } finally {
       lease.close();
     }
+  }
+
+  Future<void> retryLastFailedMessage() async {
+    final text = _lastFailedMessageText;
+    if (text == null || text.trim().isEmpty || sendingMessage) return;
+    setSendingMessage(true);
+    await sendMessageStreamToServer(text);
   }
 
   Future sendInitialAppMessage(App? app) async {

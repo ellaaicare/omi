@@ -14,7 +14,6 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/message.dart';
-import 'package:omi/ella/services/ai_consent_coordinator.dart';
 import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/pages/apps/widgets/capability_apps_page.dart';
 import 'package:omi/pages/chat/widgets/ai_message.dart';
@@ -324,7 +323,11 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                   ),
                                 ),
                 ),
-                if (provider.lastStreamFailure != null) _ClientFailureBanner(failure: provider.lastStreamFailure!),
+                if (provider.lastStreamFailure != null)
+                  _ClientFailureBanner(
+                    failure: provider.lastStreamFailure!,
+                    onRetry: provider.canRetryLastMessage ? provider.retryLastFailedMessage : null,
+                  ),
                 // Send message area - fixed at bottom
                 Container(
                   margin: const EdgeInsets.only(top: 10),
@@ -634,10 +637,8 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                           bool hasText = value.text.trim().isNotEmpty;
                                           if (!hasText) return const SizedBox.shrink();
 
-                                          bool canSend = hasText &&
-                                              !provider.sendingMessage &&
-                                              !provider.isUploadingFiles &&
-                                              connectivityProvider.isConnected;
+                                          bool canSend =
+                                              hasText && !provider.sendingMessage && !provider.isUploadingFiles;
 
                                           return GestureDetector(
                                             onTap: canSend
@@ -693,7 +694,6 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
   }
 
   Future<void> _sendMessageUtil(String text) async {
-    if (!await AiConsentCoordinator.ensure(context) || !mounted) return;
     String? currentContext = _selectedContext;
     setState(() {
       _selectedContext = null;
@@ -715,9 +715,8 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
       if (mounted) scrollToBottomOnSend();
     });
 
-    provider.sendMessageStreamToServer(text);
+    await provider.sendMessageStreamToServer(text);
     provider.clearSelectedFiles();
-    provider.setSendingMessage(false);
   }
 
   sendInitialAppMessage(App? app) async {
@@ -1343,9 +1342,10 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
 }
 
 class _ClientFailureBanner extends StatelessWidget {
-  const _ClientFailureBanner({required this.failure});
+  const _ClientFailureBanner({required this.failure, this.onRetry});
 
   final ClientApiFailure failure;
+  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -1358,7 +1358,7 @@ class _ClientFailureBanner extends StatelessWidget {
           context.l10n.ellaWorkspaceUnavailableTitle,
           context.l10n.ellaWorkspaceUnavailableBody,
         ),
-      _ => (context.l10n.ellaChatUnavailableTitle, context.l10n.ellaChatUnavailableBody),
+      _ => (context.l10n.ellaChatCouldntSend, context.l10n.ellaChatUnavailableBody),
     };
     return Semantics(
       liveRegion: true,
@@ -1380,6 +1380,14 @@ class _ClientFailureBanner extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             Text(body, style: const TextStyle(color: EllaColors.textTertiary)),
+            if (onRetry != null) ...[
+              const SizedBox(height: 4),
+              TextButton(
+                key: const Key('ella-chat-retry-last-message'),
+                onPressed: onRetry,
+                child: Text(context.l10n.retry),
+              ),
+            ],
           ],
         ),
       ),

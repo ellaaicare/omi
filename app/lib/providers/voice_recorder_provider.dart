@@ -16,13 +16,7 @@ import 'package:omi/utils/file.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
-enum VoiceRecorderState {
-  idle,
-  recording,
-  transcribing,
-  transcribeSuccess,
-  transcribeFailed,
-}
+enum VoiceRecorderState { idle, recording, transcribing, transcribeSuccess, transcribeFailed }
 
 class VoiceRecorderProvider extends ChangeNotifier {
   VoiceRecorderState _state = VoiceRecorderState.idle;
@@ -30,6 +24,8 @@ class VoiceRecorderProvider extends ChangeNotifier {
   String _transcript = '';
   bool _isProcessing = false;
   AiConsentActiveSessionLease? _aiConsentLease;
+  AiConsentAuthoritySnapshot? _activeConsentAuthority;
+  bool _consentReviewRequired = false;
 
   // Audio visualization
   final List<double> _audioLevels = List.generate(20, (_) => 0.1);
@@ -45,11 +41,9 @@ class VoiceRecorderProvider extends ChangeNotifier {
   List<double> get audioLevels => List.unmodifiable(_audioLevels);
   bool get isRecording => _state == VoiceRecorderState.recording;
   bool get isActive => _state != VoiceRecorderState.idle;
+  bool get consentReviewRequired => _consentReviewRequired;
 
-  void setCallbacks({
-    Function(String transcript)? onTranscriptReady,
-    VoidCallback? onClose,
-  }) {
+  void setCallbacks({Function(String transcript)? onTranscriptReady, VoidCallback? onClose}) {
     _onTranscriptReady = onTranscriptReady;
     _onClose = onClose;
   }
@@ -60,9 +54,15 @@ class VoiceRecorderProvider extends ChangeNotifier {
   }
 
   Future<void> startRecording() async {
-    if (!SharedPreferencesUtil().aiConsentAccepted) return;
+    final authority = AiConsentAuthoritySnapshot.capture(expectedUid: SharedPreferencesUtil().uid);
+    if (authority == null) {
+      _markConsentReviewRequired();
+      return;
+    }
     if (_state == VoiceRecorderState.recording) return;
 
+    _activeConsentAuthority = authority;
+    _consentReviewRequired = false;
     _state = VoiceRecorderState.recording;
     _audioChunks = [];
     _transcript = '';
@@ -84,14 +84,15 @@ class VoiceRecorderProvider extends ChangeNotifier {
 
     _aiConsentLease?.stop();
     _aiConsentLease = AiConsentActiveSessionLease(
-      uid: SharedPreferencesUtil().uid,
+      uid: authority.uid,
+      authority: authority,
       onAuthorityLost: _handleConsentAuthorityLost,
     )..start();
 
     try {
       await ServiceManager.instance().mic.start(
         onByteReceived: (bytes) {
-          if (_state == VoiceRecorderState.recording) {
+          if (_state == VoiceRecorderState.recording && _aiConsentLease?.hasCurrentAuthority == true) {
             _audioChunks.add(bytes.toList());
 
             // Update audio visualization based on actual audio levels
@@ -170,17 +171,21 @@ class VoiceRecorderProvider extends ChangeNotifier {
 
   Future<void> _handleConsentAuthorityLost() async {
     stopRecording();
+    _markConsentReviewRequired();
+  }
+
+  void _markConsentReviewRequired() {
     _state = VoiceRecorderState.transcribeFailed;
     _audioChunks = [];
     _isProcessing = false;
+    _consentReviewRequired = true;
     notifyListeners();
-    AppSnackbar.showSnackbarError(MyApp.navigatorKey.currentContext?.l10n.aiConsentActiveAudioStopped ??
-        'AI permission could not be verified. Recording stopped.');
   }
 
   Future<void> processRecording() async {
-    if (!SharedPreferencesUtil().aiConsentAccepted) {
-      close();
+    final authority = _activeConsentAuthority;
+    if (authority == null || !authority.isCurrent()) {
+      _markConsentReviewRequired();
       return;
     }
     if (_isProcessing) return;
@@ -237,9 +242,11 @@ class VoiceRecorderProvider extends ChangeNotifier {
       Logger.debug('Error processing recording: $e');
       _state = VoiceRecorderState.transcribeFailed;
       _isProcessing = false;
+      _consentReviewRequired = false;
       notifyListeners();
       AppSnackbar.showSnackbarError(
-          MyApp.navigatorKey.currentContext?.l10n.voiceFailedToTranscribe ?? 'Failed to transcribe audio');
+        MyApp.navigatorKey.currentContext?.l10n.voiceFailedToTranscribe ?? 'Failed to transcribe audio',
+      );
     }
   }
 
@@ -265,6 +272,8 @@ class VoiceRecorderProvider extends ChangeNotifier {
     _audioChunks = [];
     _transcript = '';
     _isProcessing = false;
+    _activeConsentAuthority = null;
+    _consentReviewRequired = false;
 
     // Reset audio levels
     for (int i = 0; i < _audioLevels.length; i++) {

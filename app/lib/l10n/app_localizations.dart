@@ -18530,6 +18530,66 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'iMessage is unavailable while Ella upgrades messaging.'**
   String get ellaAlertChannelsImessageUnavailable;
+
+  /// No description provided for @aiConsentTranscriptionReview.
+  ///
+  /// In en, this message translates to:
+  /// **'AI permission needed to transcribe · Review'**
+  String get aiConsentTranscriptionReview;
+
+  /// No description provided for @ellaChatCouldntSend.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t send'**
+  String get ellaChatCouldntSend;
+
+  /// No description provided for @ellaRuntimeDiagnostics.
+  ///
+  /// In en, this message translates to:
+  /// **'Runtime Diagnostics'**
+  String get ellaRuntimeDiagnostics;
+
+  /// No description provided for @ellaRuntimeDiagnosticsSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Internal connection, consent, and audio state'**
+  String get ellaRuntimeDiagnosticsSubtitle;
+
+  /// No description provided for @diagnosticsNetworkInterface.
+  ///
+  /// In en, this message translates to:
+  /// **'Network interface'**
+  String get diagnosticsNetworkInterface;
+
+  /// No description provided for @diagnosticsBackendProbe.
+  ///
+  /// In en, this message translates to:
+  /// **'Backend health probe'**
+  String get diagnosticsBackendProbe;
+
+  /// No description provided for @diagnosticsLastApi.
+  ///
+  /// In en, this message translates to:
+  /// **'Last API request'**
+  String get diagnosticsLastApi;
+
+  /// No description provided for @diagnosticsConsentLease.
+  ///
+  /// In en, this message translates to:
+  /// **'AI permission lease'**
+  String get diagnosticsConsentLease;
+
+  /// No description provided for @diagnosticsBleRate.
+  ///
+  /// In en, this message translates to:
+  /// **'Necklace audio rate'**
+  String get diagnosticsBleRate;
+
+  /// No description provided for @diagnosticsWsRate.
+  ///
+  /// In en, this message translates to:
+  /// **'Transcription upload rate'**
+  String get diagnosticsWsRate;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

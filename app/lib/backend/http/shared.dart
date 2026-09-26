@@ -24,6 +24,26 @@ class ApiClient {
   }
 }
 
+class ApiTransportDiagnostics {
+  ApiTransportDiagnostics._();
+
+  static DateTime? lastAttemptAt;
+  static int? lastStatusCode;
+  static String lastError = '';
+
+  static void recordResponse(int statusCode) {
+    lastAttemptAt = DateTime.now();
+    lastStatusCode = statusCode;
+    lastError = statusCode < 400 ? '' : 'http_$statusCode';
+  }
+
+  static void recordFailure(Object error) {
+    lastAttemptAt = DateTime.now();
+    lastStatusCode = null;
+    lastError = error is TimeoutException ? 'timeout' : error.runtimeType.toString();
+  }
+}
+
 typedef AuthTokenRefresher = Future<String?> Function();
 typedef AuthHeaderProvider = Future<String> Function({required bool forceRefresh});
 
@@ -205,9 +225,11 @@ Future<http.Response?> makeApiCall({
       }
     }
 
+    ApiTransportDiagnostics.recordResponse(response.statusCode);
     return response;
   } catch (e, stackTrace) {
     if (e is ExactAccountAuthorityChangedException) rethrow;
+    ApiTransportDiagnostics.recordFailure(e);
     Logger.debug('HTTP request failed: $e, $stackTrace');
     await _reportTransportFailure(e, stackTrace, url: url, method: method);
     return null;
