@@ -313,12 +313,17 @@ class DeviceService implements IDeviceService {
   @override
   Future<void> cancelPendingConnection() async {
     final connection = _connection;
-    if (connection == null) return;
-
     // Explicit selection must be able to cancel a connect that currently owns
-    // the service mutex. Fence its callbacks before bypassing that mutex.
+    // the service mutex or a discovery that has not created its connection yet.
+    // Fence both before bypassing that mutex.
     _operationGeneration++;
     _connectionGeneration++;
+    if (_status == DeviceServiceStatus.scanning) {
+      _status = DeviceServiceStatus.ready;
+      onStatusChanged(_status);
+    }
+    if (connection == null) return;
+
     _connection = null;
     try {
       await connection.disconnect();
