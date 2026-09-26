@@ -20,10 +20,18 @@ class LocalWalSyncImpl implements LocalWalSync {
   List<List<int>> _frames = [];
   List<bool> _frameSynced = [];
   List<WalOwner?> _frameOwners = [];
+  List<ActiveWalAuthority?> _frameAuthorities = [];
+  ActiveWalAuthority? _adoptedFrameAuthority;
+  WalOwner? _adoptedFrameOwner;
+  ActiveWalAuthority? _pendingRecoveryAuthority;
+  WalOwner? _pendingRecoverySourceOwner;
+  WalOwner? _pendingRecoveryTargetOwner;
 
   Timer? _chunkingTimer;
   Timer? _flushingTimer;
   Future<void>? _initializationFuture;
+  Future<void>? _activeChunkOperation;
+  bool _stopping = false;
 
   IWalSyncListener listener;
 
@@ -32,15 +40,18 @@ class LocalWalSyncImpl implements LocalWalSync {
   String? _deviceId;
   String? _deviceModel;
   final WalOwner? Function() _currentOwner;
+  final WalOwner? Function() _pendingOwner;
   final ActiveWalAuthority? Function() _activeAuthority;
   final WalUpload _upload;
 
   LocalWalSyncImpl(
     this.listener, {
     WalOwner? Function()? currentOwner,
+    WalOwner? Function()? pendingOwner,
     ActiveWalAuthority? Function()? activeAuthority,
     WalUpload? upload,
   })  : _currentOwner = currentOwner ?? WalOwnerAuthority.currentOwner,
+        _pendingOwner = pendingOwner ?? WalOwnerAuthority.pendingSameAccountOwner,
         _activeAuthority = activeAuthority ?? WalOwnerAuthority.active,
         _upload = upload ?? ((files, expectedUid) => syncLocalFiles(files, expectedAuthenticatedUid: expectedUid));
 
@@ -78,6 +89,7 @@ class LocalWalSyncImpl implements LocalWalSync {
 
   @override
   void start() {
+    _stopping = false;
     _chunkingTimer?.cancel();
     _flushingTimer?.cancel();
     _initializationFuture = _initializeWals();
@@ -93,6 +105,13 @@ class LocalWalSyncImpl implements LocalWalSync {
   Future<void> _initializeWals() async {
     final owner = _currentOwner();
     await WalFileManager.init(activeOwner: owner);
+    final authority = _activeAuthority();
+    if (owner != null && authority != null && authority.isCurrent() && authority.owner.matches(owner)) {
+      await WalFileManager.recoverInterruptedSameAccountWals(
+        targetAuthority: authority,
+        readCurrentAuthority: _activeAuthority,
+      );
+    }
     _wals = await WalFileManager.loadWals(activeOwner: owner);
     Logger.debug("wal service start: ${_wals.length}");
 
@@ -123,15 +142,29 @@ class LocalWalSyncImpl implements LocalWalSync {
 
   @override
   Future stop() async {
+    _stopping = true;
     _chunkingTimer?.cancel();
     _flushingTimer?.cancel();
 
+    final activeChunk = _activeChunkOperation;
+    if (activeChunk != null) await activeChunk;
+    await _waitForInitialization();
+    await _preparePendingWalsForCurrentAuthority();
+    _stageInterruptedRecoveryBridge(
+      capturedAuthority: _adoptedFrameAuthority,
+      sourceOwner: _adoptedFrameOwner ?? _adoptedFrameAuthority?.owner,
+    );
     await _drainForStop();
     await _flush();
+    await _persistInterruptedRecoveryBridge();
 
     _frames = [];
     _frameSynced = [];
     _frameOwners = [];
+    _frameAuthorities = [];
+    _pendingRecoveryAuthority = null;
+    _pendingRecoverySourceOwner = null;
+    _pendingRecoveryTargetOwner = null;
   }
 
   Future<void> _drainForStop() async {
@@ -148,8 +181,42 @@ class LocalWalSyncImpl implements LocalWalSync {
         groupEnd++;
       }
 
-      while (
-          _wals.any((wal) => wal.timerStart == timerStart && wal.device == device && _ownersMatch(wal.owner, owner))) {
+      final capturedAuthorities = _frameAuthorities.sublist(groupStart, groupEnd);
+      final capturedAuthority = capturedAuthorities.first;
+      final oneCaptureAuthority = capturedAuthority != null &&
+          capturedAuthorities.every((candidate) =>
+              candidate != null && candidate.isCurrent() && candidate.hasEquivalentCaptureFence(capturedAuthority)) &&
+          capturedAuthority.owner.matches(owner!);
+      WalOwner? persistedOwner;
+      if (owner != null && oneCaptureAuthority && capturedAuthority.isCurrent()) {
+        final previousOwner = _authoritiesMatch(_adoptedFrameAuthority, capturedAuthority) ? _adoptedFrameOwner : owner;
+        final exactAuthority = previousOwner == null
+            ? null
+            : await _rotateActiveSessionOwner(
+                capturedAuthority: capturedAuthority,
+                previousOwner: previousOwner,
+              );
+        if (exactAuthority != null) {
+          persistedOwner = exactAuthority.owner;
+          _adoptedFrameAuthority = capturedAuthority;
+          _adoptedFrameOwner = persistedOwner;
+        } else {
+          final currentAuthority = _activeAuthority();
+          if (capturedAuthority.isCurrent() &&
+              (currentAuthority == null || currentAuthority.uid == capturedAuthority.uid)) {
+            persistedOwner = _authoritiesMatch(_adoptedFrameAuthority, capturedAuthority) && _adoptedFrameOwner != null
+                ? _adoptedFrameOwner
+                : owner;
+            _stageInterruptedRecoveryBridge(
+              capturedAuthority: capturedAuthority,
+              sourceOwner: persistedOwner,
+            );
+          }
+        }
+      }
+
+      while (_wals.any((wal) =>
+          wal.timerStart == timerStart && wal.device == device && _ownersMatch(wal.owner, persistedOwner ?? owner))) {
         timerStart--;
       }
       final frames = _frames.sublist(groupStart, groupEnd).map(List<int>.from).toList();
@@ -158,20 +225,29 @@ class LocalWalSyncImpl implements LocalWalSync {
         syncedOffset++;
       }
       final frameCount = groupEnd - groupStart;
+      final isAuthorized = persistedOwner != null;
       _wals.add(
         Wal(
           codec: _codec,
           timerStart: timerStart,
           data: frames,
           storage: WalStorage.mem,
-          status: WalStatus.quarantined,
+          status: isAuthorized
+              ? syncedOffset == frameCount
+                  ? WalStatus.synced
+                  : WalStatus.miss
+              : WalStatus.quarantined,
           device: device,
           deviceModel: _deviceModel ?? 'Omi',
           seconds: (frameCount / _framesPerSecond).ceil(),
           totalFrames: frameCount,
           syncedFrameOffset: syncedOffset,
-          owner: owner,
-          quarantineReason: owner == null ? 'capture_without_owner' : 'account_transition_final_drain',
+          owner: persistedOwner ?? owner,
+          quarantineReason: isAuthorized
+              ? null
+              : owner == null
+                  ? 'capture_without_owner'
+                  : 'account_transition_final_drain',
         ),
       );
       listener.onWalUpdated();
@@ -182,12 +258,49 @@ class LocalWalSyncImpl implements LocalWalSync {
     _frames.clear();
     _frameSynced.clear();
     _frameOwners.clear();
+    _frameAuthorities.clear();
+  }
+
+  void _stageInterruptedRecoveryBridge({
+    required ActiveWalAuthority? capturedAuthority,
+    required WalOwner? sourceOwner,
+  }) {
+    if (_activeAuthority() != null ||
+        capturedAuthority == null ||
+        sourceOwner == null ||
+        !capturedAuthority.isCurrent() ||
+        capturedAuthority.uid != sourceOwner.uid) {
+      return;
+    }
+    final targetOwner = _pendingOwner();
+    if (targetOwner == null || targetOwner.uid != sourceOwner.uid || targetOwner.durablyMatches(sourceOwner)) {
+      return;
+    }
+    _pendingRecoveryAuthority = capturedAuthority;
+    _pendingRecoverySourceOwner = sourceOwner;
+    _pendingRecoveryTargetOwner = targetOwner;
+  }
+
+  Future<void> _persistInterruptedRecoveryBridge() async {
+    final capturedAuthority = _pendingRecoveryAuthority;
+    final sourceOwner = _pendingRecoverySourceOwner;
+    final targetOwner = _pendingRecoveryTargetOwner;
+    if (capturedAuthority == null || sourceOwner == null || targetOwner == null) return;
+    final authorized = await WalFileManager.authorizeInterruptedSameAccountRecovery(
+      sourceOwner: sourceOwner,
+      targetOwner: targetOwner,
+      capturedAuthority: capturedAuthority,
+    );
+    if (!authorized) Logger.debug('LocalWalSync: Interrupted WAL recovery bridge was not authorized');
   }
 
   bool _ownersMatch(WalOwner? left, WalOwner? right) {
     if (left == null || right == null) return left == null && right == null;
     return left.matches(right);
   }
+
+  bool _authoritiesMatch(ActiveWalAuthority? left, ActiveWalAuthority? right) =>
+      left != null && right != null && left.hasEquivalentCaptureFence(right);
 
   @override
   Future onAudioCodecChanged(BleAudioCodec codec) async {
@@ -196,10 +309,12 @@ class LocalWalSyncImpl implements LocalWalSync {
     }
 
     await _chunk();
+    if (_stopping) return;
     await _flush();
     _frames = [];
     _frameSynced = [];
     _frameOwners = [];
+    _frameAuthorities = [];
 
     _framesPerSecond = codec.getFramesPerSecond();
     _codec = codec;
@@ -211,7 +326,20 @@ class LocalWalSyncImpl implements LocalWalSync {
     _deviceModel = deviceModel;
   }
 
-  Future _chunk() async {
+  Future<void> _chunk() {
+    final active = _activeChunkOperation;
+    if (active != null) return active;
+    if (_stopping) return Future<void>.value();
+
+    late final Future<void> tracked;
+    tracked = _performChunk().whenComplete(() {
+      if (identical(_activeChunkOperation, tracked)) _activeChunkOperation = null;
+    });
+    _activeChunkOperation = tracked;
+    return tracked;
+  }
+
+  Future<void> _performChunk() async {
     await _waitForInitialization();
     if (_frames.isEmpty) {
       Logger.debug("Frames are empty");
@@ -231,14 +359,40 @@ class LocalWalSyncImpl implements LocalWalSync {
     var timerStart = timerEnd - (high - low) ~/ _framesPerSecond;
     var chunkFrameCount = high - low;
 
-    final authority = _activeAuthority();
     final capturedOwners = _frameOwners.sublist(low, high);
+    final capturedAuthorities = _frameAuthorities.sublist(low, high);
     final firstOwner = capturedOwners.first;
     final oneExactOwner =
         firstOwner != null && capturedOwners.every((candidate) => candidate?.matches(firstOwner) == true);
-    final owner = oneExactOwner && authority != null && authority.isCurrent() && firstOwner.matches(authority.owner)
-        ? firstOwner
-        : null;
+    final capturedAuthority = capturedAuthorities.first;
+    final oneCaptureAuthority = capturedAuthority != null &&
+        capturedAuthorities.every((candidate) =>
+            candidate != null && candidate.isCurrent() && candidate.hasEquivalentCaptureFence(capturedAuthority)) &&
+        capturedAuthority.owner.matches(firstOwner!);
+    WalOwner? owner;
+    if (oneExactOwner && oneCaptureAuthority && capturedAuthority.isCurrent()) {
+      final previousOwner =
+          _authoritiesMatch(_adoptedFrameAuthority, capturedAuthority) ? _adoptedFrameOwner : firstOwner;
+      final exactAuthority = previousOwner == null
+          ? null
+          : await _rotateActiveSessionOwner(
+              capturedAuthority: capturedAuthority,
+              previousOwner: previousOwner,
+            );
+      owner = exactAuthority?.owner;
+      if (owner != null) {
+        _adoptedFrameAuthority = capturedAuthority;
+        _adoptedFrameOwner = owner;
+      }
+    }
+
+    if (owner == null && oneExactOwner && oneCaptureAuthority && capturedAuthority.isCurrent()) {
+      final currentAuthority = _activeAuthority();
+      if (currentAuthority == null || (currentAuthority.isCurrent() && currentAuthority.uid == capturedAuthority.uid)) {
+        Logger.debug('LocalWalSync: Deferring authorized frames until WAL owner rollover can commit');
+        return;
+      }
+    }
 
     // Unknown, mixed, or stale-owner audio is evidence that must be retained in
     // quarantine even when it is shorter than the normal loss threshold.
@@ -319,9 +473,12 @@ class LocalWalSyncImpl implements LocalWalSync {
     _frames.removeRange(0, pivot);
     _frameSynced.removeRange(0, pivot);
     _frameOwners.removeRange(0, pivot);
+    _frameAuthorities.removeRange(0, pivot);
   }
 
-  Future _flush() async {
+  Future<void> _flush() => WalFileManager.runExclusive(_flushExclusive);
+
+  Future<void> _flushExclusive() async {
     await _waitForInitialization();
     Logger.debug("_flushing");
     for (var i = 0; i < _wals.length; i++) {
@@ -358,6 +515,85 @@ class LocalWalSyncImpl implements LocalWalSync {
     }
 
     await _saveWalsToFile();
+  }
+
+  Future<ActiveWalAuthority?> _rotateActiveSessionOwner({
+    required ActiveWalAuthority capturedAuthority,
+    required WalOwner previousOwner,
+  }) async {
+    var activeOwner = previousOwner;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      final targetAuthority = _activeAuthority();
+      if (targetAuthority == null ||
+          !capturedAuthority.isCurrent() ||
+          !targetAuthority.isCurrent() ||
+          targetAuthority.uid != capturedAuthority.uid) {
+        return null;
+      }
+      if (!activeOwner.matches(targetAuthority.owner)) {
+        final rotated = await WalFileManager.rotateActiveSessionOwner(
+          _wals,
+          previousOwner: activeOwner,
+          capturedAuthority: capturedAuthority,
+          targetAuthority: targetAuthority,
+          readCurrentAuthority: _activeAuthority,
+        );
+        if (!rotated) continue;
+        activeOwner = targetAuthority.owner;
+      }
+
+      final exactCurrent = _activeAuthority();
+      if (exactCurrent != null &&
+          exactCurrent.isCurrent() &&
+          exactCurrent.uid == capturedAuthority.uid &&
+          exactCurrent.owner.matches(activeOwner)) {
+        return exactCurrent;
+      }
+    }
+    return null;
+  }
+
+  Future<ActiveWalAuthority?> _preparePendingWalsForCurrentAuthority() async {
+    var currentAuthority = _activeAuthority();
+    final pending = _wals.where((wal) => wal.status != WalStatus.quarantined).toList();
+    if (pending.isEmpty) return currentAuthority;
+
+    final previousOwner = pending.first.owner;
+    if (previousOwner == null || !pending.every((wal) => wal.owner?.matches(previousOwner) == true)) {
+      return currentAuthority;
+    }
+    if (currentAuthority != null && currentAuthority.isCurrent() && previousOwner.matches(currentAuthority.owner)) {
+      return currentAuthority;
+    }
+
+    final capturedAuthority = _adoptedFrameAuthority;
+    if (capturedAuthority == null ||
+        !capturedAuthority.isCurrent() ||
+        capturedAuthority.uid != previousOwner.uid ||
+        (currentAuthority != null && currentAuthority.uid != capturedAuthority.uid)) {
+      return currentAuthority;
+    }
+
+    currentAuthority = await _rotateActiveSessionOwner(
+      capturedAuthority: capturedAuthority,
+      previousOwner: previousOwner,
+    );
+    if (currentAuthority != null) {
+      _adoptedFrameOwner = currentAuthority.owner;
+    }
+    return currentAuthority ?? _activeAuthority();
+  }
+
+  bool _canRetryPendingOwnerRollover(List<Wal> pending, ActiveWalAuthority? currentAuthority) {
+    if (pending.isEmpty) return false;
+    final capturedAuthority = _adoptedFrameAuthority;
+    final owner = pending.first.owner;
+    return capturedAuthority != null &&
+        capturedAuthority.isCurrent() &&
+        owner != null &&
+        owner.uid == capturedAuthority.uid &&
+        pending.every((wal) => wal.owner?.matches(owner) == true) &&
+        (currentAuthority == null || currentAuthority.uid == capturedAuthority.uid);
   }
 
   Future<void> _saveWalsToFile() async {
@@ -412,11 +648,19 @@ class LocalWalSyncImpl implements LocalWalSync {
   }
 
   @override
-  void onByteStream(List<int> value, {required WalOwner? ownerAtCapture}) {
+  void onByteStream(List<int> value, {required ActiveWalAuthority? authorityAtCapture}) {
+    if (_stopping) return;
     _frames.add(value);
     _frameSynced.add(false);
-    _frameOwners.add(ownerAtCapture);
+    _frameOwners.add(authorityAtCapture?.owner);
+    _frameAuthorities.add(authorityAtCapture);
   }
+
+  @visibleForTesting
+  Future<void> chunkForTesting() => _chunk();
+
+  @visibleForTesting
+  Future<void> flushForTesting() => _flush();
 
   @override
   void onBytesSync(List<int> value) {
@@ -437,8 +681,13 @@ class LocalWalSyncImpl implements LocalWalSync {
     IWifiConnectionListener? connectionListener,
   }) async {
     await _flush();
-    final authority = _activeAuthority();
+    final authority = await _preparePendingWalsForCurrentAuthority();
     final pending = _wals.where((w) => w.status == WalStatus.miss && w.storage == WalStorage.disk).toList();
+    if (_canRetryPendingOwnerRollover(pending, authority) &&
+        (authority == null || pending.any((wal) => wal.owner?.matches(authority.owner) != true))) {
+      Logger.debug('LocalWalSync: Deferring pending WAL upload until owner rollover can commit');
+      return null;
+    }
     for (final wal in pending) {
       if (authority == null || wal.owner == null || !wal.owner!.matches(authority.owner)) {
         await WalFileManager.quarantineWal(wal, reason: 'upload_owner_mismatch', persist: false);
@@ -552,7 +801,12 @@ class LocalWalSyncImpl implements LocalWalSync {
     IWifiConnectionListener? connectionListener,
   }) async {
     await _flush();
-    final authority = _activeAuthority();
+    final authority = await _preparePendingWalsForCurrentAuthority();
+    if (_canRetryPendingOwnerRollover([wal], authority) &&
+        (authority == null || wal.owner?.matches(authority.owner) != true)) {
+      Logger.debug('LocalWalSync: Deferring WAL upload until owner rollover can commit');
+      return null;
+    }
     if (authority == null || wal.owner == null || !wal.owner!.matches(authority.owner)) {
       await _quarantineBatch([wal], 'upload_owner_mismatch');
       return null;

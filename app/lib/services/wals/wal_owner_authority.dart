@@ -18,10 +18,18 @@ abstract interface class AccountCommitAuthority implements ExactAccountAuthority
 }
 
 class ActiveWalAuthority implements AccountCommitAuthority {
-  const ActiveWalAuthority({required this.owner, required this.consent, this.currentCheck});
+  const ActiveWalAuthority({
+    required this.owner,
+    required this.consent,
+    this.accountConsentTerminalGeneration,
+    this.provisioningTerminalGeneration,
+    this.currentCheck,
+  });
 
   final WalOwner owner;
   final AiConsentAuthoritySnapshot consent;
+  final int? accountConsentTerminalGeneration;
+  final int? provisioningTerminalGeneration;
   final bool Function()? currentCheck;
 
   @override
@@ -32,12 +40,35 @@ class ActiveWalAuthority implements AccountCommitAuthority {
     if (currentCheck != null) return currentCheck!();
     final prefs = preferences ?? SharedPreferencesUtil();
     final currentUid = authenticatedUid ?? WalOwnerAuthority.authenticatedUid;
-    final currentOwner = WalOwnerAuthority.currentOwner(preferences: prefs, authenticatedUid: currentUid);
-    return currentOwner != null && owner.matches(currentOwner) && consent.isCurrent(preferences: prefs);
+    return owner.hasValidAuthorityIdentity &&
+        consent.uid == owner.uid &&
+        currentUid == owner.uid &&
+        prefs.uid == owner.uid &&
+        (accountConsentTerminalGeneration == null ||
+            accountConsentTerminalGeneration == prefs.terminalAccountConsentAuthorityGeneration) &&
+        (provisioningTerminalGeneration == null ||
+            provisioningTerminalGeneration == prefs.ellaProvisioningTerminalAuthorityGeneration) &&
+        consent.isCurrent(preferences: prefs);
   }
 
   @override
   bool isExactCurrent() => isCurrent();
+
+  bool hasEquivalentCaptureFence(ActiveWalAuthority other) =>
+      owner.matches(other.owner) &&
+      consent.generation == other.consent.generation &&
+      consent.terminalAccountConsentGeneration == other.consent.terminalAccountConsentGeneration &&
+      consent.uid == other.consent.uid &&
+      consent.verifiedPersonaId == other.consent.verifiedPersonaId &&
+      consent.profileBindingId == other.consent.profileBindingId &&
+      consent.receiptId == other.consent.receiptId &&
+      consent.policyVersion == other.consent.policyVersion &&
+      consent.processorSetHash == other.consent.processorSetHash &&
+      consent.scopeVersion == other.consent.scopeVersion &&
+      consent.scopeHash == other.consent.scopeHash &&
+      consent.serverDecidedAt == other.consent.serverDecidedAt &&
+      accountConsentTerminalGeneration == other.accountConsentTerminalGeneration &&
+      provisioningTerminalGeneration == other.provisioningTerminalGeneration;
 }
 
 class AccountGenerationAuthority implements AccountCommitAuthority {
@@ -65,7 +96,7 @@ class AccountGenerationAuthority implements AccountCommitAuthority {
 class WalOwnerAuthority {
   const WalOwnerAuthority._();
 
-  static WalOwner? currentOwner({SharedPreferencesUtil? preferences, String? authenticatedUid}) {
+  static WalOwner? pendingSameAccountOwner({SharedPreferencesUtil? preferences, String? authenticatedUid}) {
     final prefs = preferences ?? SharedPreferencesUtil();
     final firebaseUid = authenticatedUid ?? WalOwnerAuthority.authenticatedUid;
     if (firebaseUid.isEmpty || prefs.uid != firebaseUid) return null;
@@ -77,7 +108,6 @@ class WalOwnerAuthority {
     if (profileBindingId.isEmpty || consentReceiptId.isEmpty || bindingRevision is! int || bindingRevision <= 0) {
       return null;
     }
-    if (!prefs.hasCurrentEllaProvisioningAuthority(uid: firebaseUid, bindingRevision: bindingRevision)) return null;
 
     final owner = WalOwner(
       uid: firebaseUid,
@@ -89,13 +119,31 @@ class WalOwnerAuthority {
     return owner.hasValidAuthorityIdentity ? owner : null;
   }
 
+  static WalOwner? currentOwner({SharedPreferencesUtil? preferences, String? authenticatedUid}) {
+    final prefs = preferences ?? SharedPreferencesUtil();
+    final owner = pendingSameAccountOwner(preferences: prefs, authenticatedUid: authenticatedUid);
+    if (owner == null ||
+        !prefs.hasCurrentEllaProvisioningAuthority(uid: owner.uid, bindingRevision: owner.bindingRevision)) {
+      return null;
+    }
+    return owner;
+  }
+
   static ActiveWalAuthority? active({SharedPreferencesUtil? preferences, String? authenticatedUid}) {
     final prefs = preferences ?? SharedPreferencesUtil();
     final owner = currentOwner(preferences: prefs, authenticatedUid: authenticatedUid);
     if (owner == null) return null;
-    final consent = AiConsentAuthoritySnapshot.capture(preferences: prefs, expectedUid: owner.uid);
+    final consent = AiConsentActiveSessionLease.authorityForSessionStart(
+      preferences: prefs,
+      expectedUid: owner.uid,
+    );
     if (consent == null) return null;
-    return ActiveWalAuthority(owner: owner, consent: consent);
+    return ActiveWalAuthority(
+      owner: owner,
+      consent: consent,
+      accountConsentTerminalGeneration: prefs.terminalAccountConsentAuthorityGeneration,
+      provisioningTerminalGeneration: prefs.ellaProvisioningTerminalAuthorityGeneration,
+    );
   }
 
   static AccountCommitAuthority? activeAccount({SharedPreferencesUtil? preferences, String? authenticatedUid}) {

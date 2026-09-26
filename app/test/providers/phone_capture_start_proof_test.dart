@@ -32,17 +32,7 @@ Future<AiConsentAuthoritySnapshot> _grantConsentAuthority() async {
   expect(preferences.getBool('aiConsentAccepted', defaultValue: false), isTrue);
   expect(preferences.aiConsentReceiptId, 'aicr_local-receipt');
   expect(preferences.aiConsentReceiptUid, 'owner');
-  return const AiConsentAuthoritySnapshot(
-    generation: 0,
-    uid: 'owner',
-    verifiedPersonaId: null,
-    profileBindingId: 'profile-owner',
-    receiptId: 'aicr_local-receipt',
-    policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
-    processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
-    scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
-    scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
-  );
+  return AiConsentAuthoritySnapshot.capture(expectedUid: 'owner')!;
 }
 
 void main() {

@@ -5,6 +5,7 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ai_consent_policy.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
+import 'package:omi/ella/services/ella_provisioning_service.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -12,6 +13,7 @@ void main() {
   late SharedPreferencesUtil preferences;
 
   setUp(() async {
+    EllaProvisioningAuthorityCoordinator.resetForTesting();
     SharedPreferences.setMockInitialValues({});
     await SharedPreferencesUtil.init();
     preferences = SharedPreferencesUtil();
@@ -33,6 +35,8 @@ void main() {
       scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
     );
   });
+
+  tearDown(EllaProvisioningAuthorityCoordinator.resetForTesting);
 
   test('active session refreshes before TTL and continues with renewed server authority', () async {
     var refreshCalls = 0;
@@ -194,7 +198,7 @@ void main() {
     lease.stop();
   });
 
-  test('newer server receipt remains current only for the captured profile authority', () async {
+  test('newer server receipt and local profile drift preserve same-account authority', () async {
     final authority = AiConsentAuthoritySnapshot.capture(preferences: preferences, expectedUid: 'uid-a');
     expect(authority, isNotNull);
 
@@ -207,16 +211,126 @@ void main() {
     expect(authority!.isCurrent(preferences: preferences), isTrue);
 
     await preferences.saveString('aiConsentProfileBindingId', 'profile-binding-b');
-    expect(authority.isCurrent(preferences: preferences), isFalse);
+    expect(authority.isCurrent(preferences: preferences), isTrue);
   });
 
-  test('same receipt cannot cross a verified persona transition', () async {
+  test('persisted receipt rotation triggers provisioning revalidation and adopts the new authority', () async {
+    final revalidatedReceipts = <String>[];
+    final lease = AiConsentActiveSessionLease(
+      uid: 'uid-a',
+      preferences: preferences,
+      refreshAuthority: (uid, _, __) async {
+        preferences.acceptAiConsent(
+          receiptId: 'aicr_receipt-b',
+          uid: uid,
+          profileBindingId: 'profile-binding-b',
+          serverDecidedAt: '2026-07-27T00:01:00Z',
+        );
+        preferences.markAiConsentServerVerified(
+          uid: uid,
+          receiptId: 'aicr_receipt-b',
+          policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+          processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+          profileBindingId: 'profile-binding-b',
+          scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+          scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+        );
+        return AiConsentAuthorityRefreshResult(
+          AiConsentAuthorityRefreshDisposition.verified,
+          status: AiConsentStatus(
+            subjectUid: uid,
+            authorized: true,
+            policy: AiConsentPolicy.bundled,
+            decision: AiConsentDecision.granted.wireValue,
+            receiptId: 'aicr_receipt-b',
+            policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+            processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+            appVersion: '1.0.572',
+            buildNumber: '866',
+            locale: 'en-US',
+            profileBindingId: 'profile-binding-b',
+            scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+            scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+            serverDecidedAt: DateTime.utc(2026, 7, 27, 0, 1),
+          ),
+        );
+      },
+      revalidateProvisioning: (uid, receiptId) async {
+        expect(uid, 'uid-a');
+        revalidatedReceipts.add(receiptId);
+        return true;
+      },
+      onAuthorityLost: () {},
+    )..start();
+
+    await lease.refreshNow();
+    await lease.refreshNow();
+
+    expect(revalidatedReceipts, ['aicr_receipt-b']);
+    expect(lease.isActive, isTrue);
+    expect(lease.hasCurrentAuthority, isTrue);
+    lease.stop();
+  });
+
+  test('same receipt survives a local verified persona transition', () async {
     final authority = AiConsentAuthoritySnapshot.capture(preferences: preferences, expectedUid: 'uid-a');
     expect(authority, isNotNull);
 
     preferences.verifiedPersonaId = 'persona-b';
 
+    expect(authority!.isCurrent(preferences: preferences), isTrue);
+  });
+
+  test('same receipt cannot cross an authenticated account transition', () async {
+    final authority = AiConsentAuthoritySnapshot.capture(preferences: preferences, expectedUid: 'uid-a');
+    expect(authority, isNotNull);
+
+    preferences.uid = 'uid-b';
+
     expect(authority!.isCurrent(preferences: preferences), isFalse);
+  });
+
+  test('terminal consent loss cannot be erased by a newer same-account grant', () async {
+    var refreshCalls = 0;
+    var authorityLossCalls = 0;
+    final authority = AiConsentAuthoritySnapshot.capture(preferences: preferences, expectedUid: 'uid-a');
+    final lease = AiConsentActiveSessionLease(
+      uid: 'uid-a',
+      preferences: preferences,
+      authority: authority,
+      refreshAuthority: (_, __, ___) async {
+        refreshCalls++;
+        return const AiConsentAuthorityRefreshResult(AiConsentAuthorityRefreshDisposition.verified);
+      },
+      onAuthorityLost: () {
+        authorityLossCalls++;
+      },
+    )..start();
+
+    preferences.declineAiConsent();
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-b',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-b',
+      serverDecidedAt: '2026-07-27T00:01:00Z',
+    );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: 'aicr_receipt-b',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile-binding-b',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+
+    expect(authority!.isCurrent(preferences: preferences), isFalse);
+    expect(lease.hasCurrentAuthority, isFalse);
+    await lease.refreshNow();
+
+    expect(refreshCalls, 0);
+    expect(authorityLossCalls, 1);
+    expect(lease.isActive, isFalse);
   });
 
   test('verified deploy drift schedules a normal refresh interval instead of spinning at zero delay', () async {

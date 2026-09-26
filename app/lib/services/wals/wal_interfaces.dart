@@ -1,6 +1,7 @@
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/services/wals/wal.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 
 // Re-export for convenience
 export 'package:omi/backend/http/api/conversations.dart' show syncLocalFiles;
@@ -68,7 +69,7 @@ abstract class LocalWalSync implements IWalSync {
   Future<void> addExternalWal(Wal wal);
   Future<List<Wal>> getAllWals();
   Future<void> deleteAllSyncedWals();
-  void onByteStream(List<int> value, {required WalOwner? ownerAtCapture});
+  void onByteStream(List<int> value, {required ActiveWalAuthority? authorityAtCapture});
   void onBytesSync(List<int> value);
   Future onAudioCodecChanged(BleAudioCodec codec);
   void setDeviceInfo(String? deviceId, String? deviceModel);

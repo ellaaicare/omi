@@ -73,6 +73,18 @@ class WalOwner {
       consentReceiptId == other.consentReceiptId &&
       authorityGenerationAtCapture == other.authorityGenerationAtCapture;
 
+  bool durablyMatches(WalOwner other) =>
+      hasValidAuthorityIdentity &&
+      other.hasValidAuthorityIdentity &&
+      authorityFingerprint == other.authorityFingerprint;
+
+  bool sharesDurableConsentEpoch(WalOwner other) =>
+      hasValidAuthorityIdentity &&
+      other.hasValidAuthorityIdentity &&
+      uid == other.uid &&
+      profileBindingId == other.profileBindingId &&
+      consentReceiptId == other.consentReceiptId;
+
   factory WalOwner.fromJson(Map<String, dynamic> json) => WalOwner(
         uid: json['uid'] as String? ?? '',
         profileBindingId: json['profile_binding_id'] as String? ?? '',

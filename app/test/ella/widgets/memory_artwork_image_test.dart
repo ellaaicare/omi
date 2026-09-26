@@ -1118,6 +1118,7 @@ void main() {
       owner: owner,
       consent: const AiConsentAuthoritySnapshot(
         generation: 4,
+        terminalAccountConsentGeneration: 0,
         uid: uid,
         verifiedPersonaId: 'persona',
         profileBindingId: profileBindingId,
