@@ -17,6 +17,11 @@ import 'package:omi/utils/l10n_extensions.dart';
 typedef MemoryArtworkCachedFileLookup = Future<File?> Function(String cacheKey);
 typedef MemoryArtworkCachedFileValidator = Future<bool> Function(File file);
 typedef MemoryArtworkCacheEvictor = Future<void> Function(String cacheKey);
+typedef MemoryArtworkDisplayCacheKeyRememberer = Future<String?> Function({
+  required String provisionalCacheKey,
+  required String authoritativeCacheKey,
+  required bool Function() isAuthorityCurrent,
+});
 
 enum _MemoryArtworkFallbackKind { preparing, unavailable }
 
@@ -39,6 +44,7 @@ class MemoryArtworkImage extends StatefulWidget {
     this.cachedFileLookup,
     this.cachedFileValidator,
     this.cacheEvictor,
+    this.displayCacheKeyRememberer,
     this.fit = BoxFit.cover,
     this.retryDelay = const Duration(seconds: 5),
     this.maxAuthorityUnavailableRetries = 3,
@@ -59,6 +65,7 @@ class MemoryArtworkImage extends StatefulWidget {
   final MemoryArtworkCachedFileLookup? cachedFileLookup;
   final MemoryArtworkCachedFileValidator? cachedFileValidator;
   final MemoryArtworkCacheEvictor? cacheEvictor;
+  final MemoryArtworkDisplayCacheKeyRememberer? displayCacheKeyRememberer;
   final BoxFit fit;
   final Duration retryDelay;
 
@@ -587,6 +594,11 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     int generation,
     String expectedCacheKey, {
     bool publishCurrentAlias = false,
+    MemoryArtworkResult? sourceResult,
+    String? displayCacheKey,
+    String? memoryId,
+    int? authorityEpoch,
+    bool updateRenderedResult = true,
   }) {
     if (_responsiveVariantPublishRetries >= _maxResponsiveVariantPublishRetries) {
       _resetResponsiveVariantPublication();
@@ -604,6 +616,11 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
           generation,
           expectedCacheKey,
           publishCurrentAlias: publishCurrentAlias,
+          sourceResult: sourceResult,
+          displayCacheKey: displayCacheKey,
+          memoryId: memoryId,
+          authorityEpoch: authorityEpoch,
+          updateRenderedResult: updateRenderedResult,
         ),
       );
     });
@@ -631,14 +648,87 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     );
   }
 
+  void _reconcileResponsiveVariantAfterGenerationChange({
+    required MemoryArtworkResult retainedResult,
+    required String displayCacheKey,
+    required String memoryId,
+    required int authorityEpoch,
+  }) {
+    if (!mounted ||
+        widget.conversation.id != memoryId ||
+        widget.authorityEpoch != authorityEpoch ||
+        _displayCacheKey != displayCacheKey ||
+        !retainedResult.isAuthorityCurrent ||
+        _mustSuppressCachedArtwork(_remoteResult)) {
+      return;
+    }
+
+    final latestResult = _remoteResult;
+    final source = latestResult != null &&
+            latestResult.isReady &&
+            latestResult.variants.isNotEmpty &&
+            latestResult.isAuthorityCurrent
+        ? latestResult
+        : retainedResult;
+    final selected = source.forPhysicalWidth(_physicalTargetWidth);
+    if (selected.cacheKey.isEmpty || !selected.isAuthorityCurrent) return;
+
+    final generation = _requestGeneration;
+    _responsiveVariantRetryTimer?.cancel();
+    _responsiveVariantRetryTimer = null;
+    _responsiveVariantPublishRetries = 0;
+    _pendingResponsiveVariantCacheKey = selected.cacheKey;
+    unawaited(
+      _publishResponsiveVariant(
+        generation,
+        selected.cacheKey,
+        publishCurrentAlias: true,
+        sourceResult: source,
+        displayCacheKey: displayCacheKey,
+        memoryId: memoryId,
+        authorityEpoch: authorityEpoch,
+        updateRenderedResult: false,
+      ),
+    );
+  }
+
+  Future<String?> _rememberResponsiveDisplayCacheKey({
+    required String provisionalCacheKey,
+    required String authoritativeCacheKey,
+    required bool Function() isAuthorityCurrent,
+  }) {
+    final rememberer = widget.displayCacheKeyRememberer;
+    if (rememberer != null) {
+      return rememberer(
+        provisionalCacheKey: provisionalCacheKey,
+        authoritativeCacheKey: authoritativeCacheKey,
+        isAuthorityCurrent: isAuthorityCurrent,
+      );
+    }
+    return MemoryArtworkCache.rememberDisplayCacheKey(
+      provisionalCacheKey: provisionalCacheKey,
+      authoritativeCacheKey: authoritativeCacheKey,
+      isAuthorityCurrent: isAuthorityCurrent,
+    );
+  }
+
   Future<void> _publishResponsiveVariant(
     int generation,
     String expectedCacheKey, {
     bool publishCurrentAlias = false,
+    MemoryArtworkResult? sourceResult,
+    String? displayCacheKey,
+    String? memoryId,
+    int? authorityEpoch,
+    bool updateRenderedResult = true,
   }) async {
     if (!mounted || generation != _requestGeneration || _pendingResponsiveVariantCacheKey != expectedCacheKey) return;
-    final current = _remoteResult;
+    final current = sourceResult ?? _remoteResult;
     if (current == null || !current.isReady || !current.isAuthorityCurrent) return;
+
+    final publicationDisplayCacheKey = displayCacheKey ?? _displayCacheKey;
+    final publicationMemoryId = memoryId ?? widget.conversation.id;
+    final publicationAuthorityEpoch = authorityEpoch ?? widget.authorityEpoch;
 
     final selected = current.forPhysicalWidth(_physicalTargetWidth);
     if (selected.cacheKey != expectedCacheKey || !selected.isAuthorityCurrent) return;
@@ -649,16 +739,29 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       return;
     }
 
-    final publishedCacheKey = await MemoryArtworkCache.rememberDisplayCacheKey(
-      provisionalCacheKey: _displayCacheKey,
+    final publishedCacheKey = await _rememberResponsiveDisplayCacheKey(
+      provisionalCacheKey: publicationDisplayCacheKey,
       authoritativeCacheKey: selected.cacheKey,
       isAuthorityCurrent: () =>
           mounted &&
           generation == _requestGeneration &&
           _pendingResponsiveVariantCacheKey == expectedCacheKey &&
+          widget.conversation.id == publicationMemoryId &&
+          widget.authorityEpoch == publicationAuthorityEpoch &&
+          _displayCacheKey == publicationDisplayCacheKey &&
+          !_mustSuppressCachedArtwork(_remoteResult) &&
           selected.isAuthorityCurrent,
     );
-    if (!mounted || generation != _requestGeneration) {
+    if (!mounted) {
+      return;
+    }
+    if (generation != _requestGeneration) {
+      _reconcileResponsiveVariantAfterGenerationChange(
+        retainedResult: current,
+        displayCacheKey: publicationDisplayCacheKey,
+        memoryId: publicationMemoryId,
+        authorityEpoch: publicationAuthorityEpoch,
+      );
       return;
     }
     if (_pendingResponsiveVariantCacheKey != expectedCacheKey) {
@@ -674,12 +777,17 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         generation,
         expectedCacheKey,
         publishCurrentAlias: publishCurrentAlias,
+        sourceResult: current,
+        displayCacheKey: publicationDisplayCacheKey,
+        memoryId: publicationMemoryId,
+        authorityEpoch: publicationAuthorityEpoch,
+        updateRenderedResult: updateRenderedResult,
       );
       return;
     }
 
     setState(() {
-      _remoteResult = selected;
+      if (updateRenderedResult) _remoteResult = selected;
       _cacheKey = publishedCacheKey;
       _resetResponsiveVariantPublication();
     });

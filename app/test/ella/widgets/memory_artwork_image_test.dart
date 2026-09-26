@@ -277,9 +277,30 @@ class _RefreshingArtworkApi extends MemoryArtworkApi {
 }
 
 class _ResponsiveArtworkApi extends MemoryArtworkApi {
-  _ResponsiveArtworkApi() : super(authorityProvider: () => null);
+  _ResponsiveArtworkApi({this.delayedRefresh}) : super(authorityProvider: () => null);
 
   int loadCalls = 0;
+  final Completer<MemoryArtworkResult>? delayedRefresh;
+
+  MemoryArtworkResult get readyResult => MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.ready,
+        url: Uri.parse('https://private-storage.example/original.png'),
+        cacheKey: 'responsive-original-cache-key',
+        variants: [
+          MemoryArtworkVariant(
+            width: 384,
+            url: Uri.parse('https://private-storage.example/384.png'),
+            cacheKey: 'responsive-384-cache-key',
+            bytes: 1024,
+          ),
+          MemoryArtworkVariant(
+            width: 768,
+            url: Uri.parse('https://private-storage.example/768.png'),
+            cacheKey: 'responsive-768-cache-key',
+            bytes: 2048,
+          ),
+        ],
+      );
 
   @override
   String cacheKeyForDisplay({
@@ -295,27 +316,10 @@ class _ResponsiveArtworkApi extends MemoryArtworkApi {
     bool enqueueIfMissing = false,
     int pollAttempts = 10,
     Duration pollInterval = const Duration(seconds: 3),
-  }) async {
+  }) {
     loadCalls += 1;
-    return MemoryArtworkResult(
-      status: MemoryArtworkResultStatus.ready,
-      url: Uri.parse('https://private-storage.example/original.png'),
-      cacheKey: 'responsive-original-cache-key',
-      variants: [
-        MemoryArtworkVariant(
-          width: 384,
-          url: Uri.parse('https://private-storage.example/384.png'),
-          cacheKey: 'responsive-384-cache-key',
-          bytes: 1024,
-        ),
-        MemoryArtworkVariant(
-          width: 768,
-          url: Uri.parse('https://private-storage.example/768.png'),
-          cacheKey: 'responsive-768-cache-key',
-          bytes: 2048,
-        ),
-      ],
-    );
+    if (loadCalls > 1 && delayedRefresh != null) return delayedRefresh!.future;
+    return Future.value(readyResult);
   }
 }
 
@@ -2870,6 +2874,97 @@ void main() {
     expect(image.memCacheWidth, 768);
     expect(MemoryArtworkCache.resolveDisplayCacheKey('responsive-provisional-cache-key'), 'responsive-768-cache-key');
     expect(api.loadCalls, 1, reason: 'stale resize reconciliation must reuse retained variant metadata');
+  });
+
+  testWidgets('obsolete responsive publication restores the latest alias across a parent refresh', (tester) async {
+    final delayedRefresh = Completer<MemoryArtworkResult>();
+    final api = _ResponsiveArtworkApi(delayedRefresh: delayedRefresh);
+    final obsoletePublicationRelease = Completer<void>();
+    final obsoletePublicationStarted = Completer<void>();
+    final rememberedVariants = <String>[];
+    final conversation = ServerConversation(
+      id: 'memory-responsive-generation-reconciliation',
+      createdAt: DateTime(2026, 9, 26),
+      structured: Structured('[Ella] A memory', '[Ella] A useful enriched summary.'),
+      artwork: const MemoryArtworkState(status: MemoryArtworkStatus.ready),
+    );
+
+    Future<String?> rememberDisplayCacheKey({
+      required String provisionalCacheKey,
+      required String authoritativeCacheKey,
+      required bool Function() isAuthorityCurrent,
+    }) async {
+      final remembered = await MemoryArtworkCache.rememberDisplayCacheKey(
+        provisionalCacheKey: provisionalCacheKey,
+        authoritativeCacheKey: authoritativeCacheKey,
+        isAuthorityCurrent: isAuthorityCurrent,
+      );
+      rememberedVariants.add(authoritativeCacheKey);
+      if (authoritativeCacheKey == 'responsive-384-cache-key' && !obsoletePublicationStarted.isCompleted) {
+        obsoletePublicationStarted.complete();
+        await obsoletePublicationRelease.future;
+      }
+      return remembered;
+    }
+
+    Widget buildArtwork(double width, int refreshEpoch) => MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MediaQuery(
+            data: const MediaQueryData(devicePixelRatio: 2),
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: SizedBox(
+                width: width,
+                height: 180,
+                child: MemoryArtworkImage(
+                  conversation: conversation,
+                  api: api,
+                  cachedFileLookup: (_) async => null,
+                  displayCacheKeyRememberer: rememberDisplayCacheKey,
+                  refreshEpoch: refreshEpoch,
+                  maxTransientRetries: 0,
+                ),
+              ),
+            ),
+          ),
+        );
+
+    await tester.pumpWidget(buildArtwork(300, 0));
+    await tester.pump();
+    await tester.pump();
+    expect(MemoryArtworkCache.resolveDisplayCacheKey('responsive-provisional-cache-key'), 'responsive-768-cache-key');
+
+    await tester.pumpWidget(buildArtwork(150, 0));
+    await tester.pump();
+    await tester.pump();
+    expect(obsoletePublicationStarted.isCompleted, isTrue);
+    expect(MemoryArtworkCache.resolveDisplayCacheKey('responsive-provisional-cache-key'), 'responsive-384-cache-key');
+
+    await tester.pumpWidget(buildArtwork(300, 1));
+    await tester.pump();
+    expect(api.loadCalls, 2);
+    expect(delayedRefresh.isCompleted, isFalse);
+
+    obsoletePublicationRelease.complete();
+    await tester.pump();
+    await tester.pump();
+
+    expect(rememberedVariants, ['responsive-384-cache-key', 'responsive-768-cache-key']);
+    expect(MemoryArtworkCache.resolveDisplayCacheKey('responsive-provisional-cache-key'), 'responsive-768-cache-key');
+
+    delayedRefresh.complete(
+      const MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.unavailable,
+        failureCode: 'memory_artwork_transport_unavailable',
+      ),
+    );
+    await tester.pump();
+    expect(
+      MemoryArtworkCache.resolveDisplayCacheKey('responsive-provisional-cache-key'),
+      'responsive-768-cache-key',
+      reason: 'a failed replacement read must not strand the durable alias at the obsolete width',
+    );
   });
 
   testWidgets('provider decode failure removes only proven-corrupt persisted bytes before retry', (tester) async {
