@@ -18590,6 +18590,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Transcription upload rate'**
   String get diagnosticsWsRate;
+
+  /// No description provided for @ellaServerUnreachableBanner.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella can\'t reach the server right now. Messages will send when you\'re back online.'**
+  String get ellaServerUnreachableBanner;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

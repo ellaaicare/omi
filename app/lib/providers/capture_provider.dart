@@ -35,6 +35,7 @@ import 'package:omi/providers/usage_provider.dart';
 import 'package:omi/services/connectivity_service.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/services/sockets/transcription_service.dart';
+import 'package:omi/services/sockets/transcription_socket_recovery.dart';
 import 'package:omi/services/wals.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
@@ -598,6 +599,16 @@ class CaptureProvider extends ChangeNotifier
   int _metricsListenersCount = 0;
 
   double get bleReceiveRateKbps => _bleReceiveRateKbps;
+
+  /// Necklace audio in bytes per second, derived from the BLE rate counter.
+  double get bleBytesPerSecond => _bleReceiveRateKbps * 1000 / 8;
+
+  String get transcriptionSocketState {
+    final state = _socket?.state;
+    if (state == null) return 'none';
+    return state.name;
+  }
+
   double get wsSendRateKbps => _wsSendRateKbps;
 
   @visibleForTesting
@@ -1557,7 +1568,12 @@ class CaptureProvider extends ChangeNotifier
 
     unawaited(
       _sendDeviceFrame(session, session.socket, frame, startProof: startProof).then((sent) {
-        if (!sent && _isDeviceCaptureCurrent(session)) {
+        if (!sent &&
+            _isDeviceCaptureCurrent(session) &&
+            shouldOpenReplacementListenSocket(
+              socketConnected: session.socket.state == SocketServiceState.connected,
+              hasSessionAuthority: session.socket.hasActiveSessionAuthority,
+            )) {
           _recoverDeviceCaptureSocket(
             session,
             frame,

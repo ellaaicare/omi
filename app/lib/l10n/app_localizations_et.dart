@@ -10060,4 +10060,8 @@ class AppLocalizationsEt extends AppLocalizations {
 
   @override
   String get diagnosticsWsRate => 'Transcription upload rate';
+
+  @override
+  String get ellaServerUnreachableBanner =>
+      'Ella can\'t reach the server right now. Messages will send when you\'re back online.';
 }

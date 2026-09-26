@@ -16,6 +16,7 @@ import 'package:omi/ella/models/capture_source.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
+import 'package:omi/ella/pages/ella_runtime_diagnostics_page.dart';
 import 'package:omi/ella/pages/ella_voice_chat_page.dart';
 import 'package:omi/ella/pages/guardian_alert_history_page.dart';
 import 'package:omi/ella/services/ai_consent_coordinator.dart';
@@ -126,6 +127,20 @@ EllaCaptureSource todaySelectedCaptureSource({
 String whisperStatusLead(bool enabled) => enabled ? 'Whispers are on' : 'Whispers are off';
 
 bool canReadDailyNote({required bool loading, required String text}) => !loading && text.trim().isNotEmpty;
+
+/// "Recording with your necklace" is only true once audio bytes are flowing
+/// and the transcription socket has accepted them.
+bool todayDockShowsLiveNecklaceRecording({
+  required bool deviceRecording,
+  required bool transcriptionReady,
+  required CaptureDiagnostics diagnostics,
+}) =>
+    deviceRecording &&
+    transcriptionReady &&
+    diagnostics.source == CaptureDiagnosticSource.necklace &&
+    diagnostics.hasPhysicalAudio &&
+    diagnostics.hasTranscriptionDelivery &&
+    diagnostics.failure == CaptureDiagnosticFailure.none;
 
 bool todayNecklaceFailureRequiresFreshSession(CaptureDiagnosticFailure? failure) => switch (failure) {
       CaptureDiagnosticFailure.physicalAudioUnavailable ||
@@ -2004,7 +2019,16 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               slivers: [
                 SliverPadding(
                   padding: const EdgeInsets.fromLTRB(EllaSizes.screenPadding, 14, EllaSizes.screenPadding, 0),
-                  sliver: SliverToBoxAdapter(child: _TodayHeader(now: now)),
+                  sliver: SliverToBoxAdapter(
+                    child: _TodayHeader(
+                      now: now,
+                      onGreetingLongPress: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(builder: (_) => const EllaRuntimeDiagnosticsPage()),
+                        );
+                      },
+                    ),
+                  ),
                 ),
                 if (visibleConversations.isNotEmpty)
                   SliverPadding(
@@ -2372,9 +2396,10 @@ class _TodayCardDetailSheet extends StatelessWidget {
 }
 
 class _TodayHeader extends StatelessWidget {
-  const _TodayHeader({required this.now});
+  const _TodayHeader({required this.now, this.onGreetingLongPress});
 
   final DateTime now;
+  final VoidCallback? onGreetingLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -2396,7 +2421,11 @@ class _TodayHeader extends StatelessWidget {
       children: [
         Text(date, style: EllaTextStyles.eyebrow),
         const SizedBox(height: 8),
-        Text(greeting, style: EllaTextStyles.noteBody.copyWith(fontSize: 24, height: 1.14)),
+        GestureDetector(
+          key: const Key('today-greeting'),
+          onLongPress: onGreetingLongPress,
+          child: Text(greeting, style: EllaTextStyles.noteBody.copyWith(fontSize: 24, height: 1.14)),
+        ),
       ],
     );
   }
@@ -3077,12 +3106,11 @@ class TodayRecordMomentControl extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final rawNecklaceRecording = recordingState == RecordingState.deviceRecord;
-    final necklaceRecording = rawNecklaceRecording &&
-        transcriptionReady &&
-        diagnostics.source == CaptureDiagnosticSource.necklace &&
-        diagnostics.hasPhysicalAudio &&
-        diagnostics.hasTranscriptionDelivery &&
-        diagnostics.failure == CaptureDiagnosticFailure.none;
+    final necklaceRecording = todayDockShowsLiveNecklaceRecording(
+      deviceRecording: rawNecklaceRecording,
+      transcriptionReady: transcriptionReady,
+      diagnostics: diagnostics,
+    );
     final necklaceTransportStarting = rawNecklaceRecording && !necklaceRecording;
     final initialising = starting || recordingState == RecordingState.initialising || necklaceTransportStarting;
     final phoneRecording = recordingState == RecordingState.record;

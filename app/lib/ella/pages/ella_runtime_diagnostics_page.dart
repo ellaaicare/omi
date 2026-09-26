@@ -7,6 +7,7 @@ import 'package:omi/backend/http/shared.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/providers/capture_provider.dart';
+import 'package:omi/providers/device_provider.dart';
 import 'package:omi/services/connectivity_service.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
@@ -48,10 +49,17 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
 
   String _time(DateTime? value) => value?.toLocal().toIso8601String() ?? context.l10n.unknown;
 
+  String _transcriptionSocketState(String state) => switch (state) {
+        'connected' => context.l10n.connected,
+        'disconnected' => context.l10n.disconnected,
+        _ => context.l10n.unknown,
+      };
+
   @override
   Widget build(BuildContext context) {
     final connectivity = ConnectivityService();
     final capture = context.watch<CaptureProvider>();
+    final bleConnected = context.watch<DeviceProvider>().presentationIsConnected;
     return Scaffold(
       backgroundColor: EllaColors.bgPrimary,
       appBar: AppBar(
@@ -99,11 +107,13 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
               ),
               _DiagnosticRow(
                 label: context.l10n.diagnosticsBleRate,
-                value: '${capture.bleReceiveRateKbps.toStringAsFixed(2)} kbps',
+                value:
+                    '${bleConnected ? context.l10n.yes : context.l10n.no} · ${capture.bleBytesPerSecond.toStringAsFixed(0)} B/s',
               ),
               _DiagnosticRow(
                 label: context.l10n.diagnosticsWsRate,
-                value: '${capture.wsSendRateKbps.toStringAsFixed(2)} kbps',
+                value:
+                    '${_transcriptionSocketState(capture.transcriptionSocketState)} · ${capture.wsSendRateKbps.toStringAsFixed(2)} kbps',
               ),
             ],
           );

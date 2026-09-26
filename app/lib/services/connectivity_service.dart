@@ -1,7 +1,14 @@
 import 'dart:async';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+
+/// A `/v1/health` status below 500 means this backend answered. Reachability
+/// is that response alone. Build 865 also required a HEAD to 1.1.1.1, so a
+/// 200 from `/v1/health` left the app offline whenever the second host failed,
+/// and every feature then refused to call the API.
+bool healthStatusIsReachable(int statusCode) => statusCode > 0 && statusCode < 500;
 
 class ConnectivityService {
   static final ConnectivityService _instance = ConnectivityService._internal();
@@ -19,6 +26,11 @@ class ConnectivityService {
 
   final _connectionChangeController = StreamController<bool>.broadcast();
   Stream<bool> get onConnectionChange => _connectionChangeController.stream;
+  final _probeController = StreamController<bool?>.broadcast();
+
+  /// Passive probe updates. Listeners may show a banner. They must not
+  /// refuse API calls based on this stream.
+  Stream<bool?> get onBackendProbe => _probeController.stream;
 
   bool _isConnected = true;
   bool get isConnected => _isConnected;
@@ -50,6 +62,39 @@ class ConnectivityService {
     _connectivitySubscription?.cancel();
     _backendProbeTimer?.cancel();
     _connectionChangeController.close();
+    _probeController.close();
+  }
+
+  /// Records a health probe without changing [isConnected]. A 200 therefore
+  /// cannot be held offline by any other host, and a failed probe cannot
+  /// block chat, consent, or any other request.
+  @visibleForTesting
+  void applyHealthProbeForTest({int? statusCode, Object? error}) {
+    final interfaceWasUp = _isConnected;
+    if (error != null || statusCode == null) {
+      _recordProbe(
+        reachable: false,
+        statusCode: null,
+        error: error is TimeoutException ? 'timeout' : error.runtimeType.toString(),
+      );
+    } else {
+      final reachable = healthStatusIsReachable(statusCode);
+      _recordProbe(
+        reachable: reachable,
+        statusCode: statusCode,
+        error: reachable ? '' : 'http_$statusCode',
+      );
+    }
+    _isConnected = interfaceWasUp;
+  }
+
+  /// Records the same no-interface probe the connectivity listener writes,
+  /// without touching the network-interface flag.
+  @visibleForTesting
+  void applyMissingInterfaceProbeForTest() {
+    final interfaceWasUp = _isConnected;
+    _recordProbe(reachable: false, statusCode: null, error: 'no_network_interface');
+    _isConnected = interfaceWasUp;
   }
 
   static bool _hasNetworkInterface(List<ConnectivityResult> results) =>
@@ -61,26 +106,34 @@ class ConnectivityService {
     if (available) {
       unawaited(_probeBackend());
     } else {
-      _backendReachable = false;
-      _lastBackendProbeAt = DateTime.now();
-      _lastBackendProbeStatus = null;
-      _lastBackendProbeError = 'no_network_interface';
+      _recordProbe(reachable: false, statusCode: null, error: 'no_network_interface');
     }
   }
 
   Future<void> _probeBackend() async {
     try {
       final response = await http.head(_healthUri).timeout(_probeTimeout);
-      _lastBackendProbeStatus = response.statusCode;
-      _backendReachable = response.statusCode < 500;
-      _lastBackendProbeError = _backendReachable == true ? '' : 'http_${response.statusCode}';
+      final reachable = healthStatusIsReachable(response.statusCode);
+      _recordProbe(
+        reachable: reachable,
+        statusCode: response.statusCode,
+        error: reachable ? '' : 'http_${response.statusCode}',
+      );
     } catch (error) {
-      _lastBackendProbeStatus = null;
-      _backendReachable = false;
-      _lastBackendProbeError = error is TimeoutException ? 'timeout' : error.runtimeType.toString();
-    } finally {
-      _lastBackendProbeAt = DateTime.now();
+      _recordProbe(
+        reachable: false,
+        statusCode: null,
+        error: error is TimeoutException ? 'timeout' : error.runtimeType.toString(),
+      );
     }
+  }
+
+  void _recordProbe({required bool reachable, required int? statusCode, required String error}) {
+    _backendReachable = reachable;
+    _lastBackendProbeStatus = statusCode;
+    _lastBackendProbeError = error;
+    _lastBackendProbeAt = DateTime.now();
+    if (!_probeController.isClosed) _probeController.add(reachable);
   }
 
   void _updateConnectionState(bool newIsConnected) {

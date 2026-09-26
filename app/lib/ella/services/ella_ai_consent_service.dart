@@ -367,6 +367,7 @@ class EllaAiConsentService {
 
   final EllaAiConsentTransport _transport;
   final SharedPreferencesUtil _preferences;
+  AiConsentPolicy? _cachedAcceptedPolicy;
   final String Function() _requestIdFactory;
   final String Function() _clientVersionFactory;
   final String Function() _localeFactory;
@@ -718,9 +719,20 @@ class EllaAiConsentService {
   }
 
   Future<AiConsentPolicy?> _fetchAcceptedPolicy() async {
-    final policy = await _transport.fetchPolicy();
-    if (policy == null) return AiConsentPolicy.bundled;
-    return policy.isBundledCurrent ? policy : null;
+    try {
+      final policy = await _transport.fetchPolicy();
+      if (policy != null && policy.isBundledCurrent) {
+        _cachedAcceptedPolicy = policy;
+        return policy;
+      }
+      // A missing response reuses the last accepted policy, then the bundled
+      // copy. A server policy that does not match the bundled contract stays
+      // a mismatch so Agree does not post the wrong version.
+      if (policy == null) return _cachedAcceptedPolicy ?? AiConsentPolicy.bundled;
+      return null;
+    } catch (_) {
+      return _cachedAcceptedPolicy ?? AiConsentPolicy.bundled;
+    }
   }
 
   _AiConsentAuthority? _captureAuthority(String uid) {
