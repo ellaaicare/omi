@@ -12,6 +12,7 @@ import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/devices/device_connection.dart';
+import 'package:omi/services/devices/discovery/device_discoverer.dart';
 import 'package:omi/services/devices/models.dart';
 import 'package:omi/services/devices/omi_connection.dart';
 import 'package:omi/services/devices/transports/device_transport.dart';
@@ -151,6 +152,73 @@ class _MetadataTransport implements DeviceTransport {
   Future<void> writeCharacteristic(String serviceUuid, String characteristicUuid, List<int> data) async {}
 }
 
+class _ReplacementDiscoverer extends DeviceDiscoverer {
+  _ReplacementDiscoverer(this.devices);
+
+  final List<BtDevice> devices;
+
+  @override
+  bool get isSupported => true;
+
+  @override
+  String get name => 'replacement';
+
+  @override
+  Future<DeviceDiscoveryResult> discover({int timeout = 5}) async => DeviceDiscoveryResult(devices: devices);
+
+  @override
+  Future<void> stop() async {}
+}
+
+class _ReplacementTransport implements DeviceTransport {
+  _ReplacementTransport(this.deviceId, {this.failConnect = false});
+
+  @override
+  final String deviceId;
+  final bool failConnect;
+  final StreamController<DeviceTransportState> _states = StreamController<DeviceTransportState>.broadcast(sync: true);
+  bool connected = false;
+
+  @override
+  Stream<DeviceTransportState> get connectionStateStream => _states.stream;
+
+  @override
+  Future<void> connect() async {
+    if (failConnect) throw StateError('synthetic replacement failure');
+    connected = true;
+    _states.add(DeviceTransportState.connected);
+  }
+
+  @override
+  Future<void> disconnect() async {
+    connected = false;
+    _states.add(DeviceTransportState.disconnected);
+  }
+
+  @override
+  Future<void> dispose() async => _states.close();
+
+  @override
+  Stream<List<int>> getCharacteristicStream(String serviceUuid, String characteristicUuid) => const Stream.empty();
+
+  @override
+  Future<Stream<List<int>>?> getReadyCharacteristicStream(String serviceUuid, String characteristicUuid) async {
+    return getCharacteristicStream(serviceUuid, characteristicUuid);
+  }
+
+  @override
+  Future<bool> isConnected() async => connected;
+
+  @override
+  Future<bool> ping() async => connected;
+
+  @override
+  Future<List<int>> readCharacteristic(String serviceUuid, String characteristicUuid) async => const [];
+
+  @override
+  Future<void> writeCharacteristic(String serviceUuid, String characteristicUuid, List<int> data) async {}
+}
+
 class _RecordingCaptureProvider extends CaptureProvider {
   _RecordingCaptureProvider({
     this.startGate,
@@ -159,6 +227,7 @@ class _RecordingCaptureProvider extends CaptureProvider {
     this.onDeviceStart,
     this.forcedDiagnosticFailure,
     this.requireConsent = false,
+    this.stopOnDisconnect = false,
   });
 
   final Completer<void>? startGate;
@@ -167,6 +236,7 @@ class _RecordingCaptureProvider extends CaptureProvider {
   final void Function(int attempt)? onDeviceStart;
   final CaptureDiagnosticFailure? forcedDiagnosticFailure;
   final bool requireConsent;
+  final bool stopOnDisconnect;
   int deviceStarts = 0;
   CaptureDiagnosticFailure? simulatedFailure;
   final List<String> disconnectedDeviceIds = [];
@@ -200,6 +270,7 @@ class _RecordingCaptureProvider extends CaptureProvider {
   @override
   Future<bool> handleRecordingDeviceDisconnected(String deviceId) async {
     disconnectedDeviceIds.add(deviceId);
+    if (stopOnDisconnect) updateRecordingState(RecordingState.stop);
     await disconnectGate?.future;
     return true;
   }
@@ -899,6 +970,50 @@ void main() {
 
     expect(provider.presentationIsConnected, isTrue);
     expect(capture.disconnectedDeviceIds, hasLength(disconnectsBeforeStaleCallback));
+  });
+
+  test('failed device replacement clears the old connected presentation and capture', () async {
+    final necklaceA = BtDevice(name: 'Ella A', id: 'necklace-a', type: DeviceType.omi, rssi: -30);
+    final necklaceB = BtDevice(name: 'Ella B', id: 'necklace-b', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklaceA);
+    final transportA = _ReplacementTransport(necklaceA.id);
+    final transportB = _ReplacementTransport(necklaceB.id, failConnect: true);
+    addTearDown(transportA.dispose);
+    addTearDown(transportB.dispose);
+    final connections = <DeviceConnection>[
+      OmiDeviceConnection(necklaceA, transportA),
+      OmiDeviceConnection(necklaceB, transportB),
+    ];
+    final service = DeviceService(
+      discoverers: [
+        _ReplacementDiscoverer([necklaceA, necklaceB])
+      ],
+      connectionCreator: (_) => connections.removeAt(0),
+    )..start();
+    final capture = _RecordingCaptureProvider(stopOnDisconnect: true);
+    final provider = DeviceProvider(deviceService: service, automaticallyReconnectOnReady: false)
+      ..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    await service.discover();
+    expect(await service.ensureConnection(necklaceA.id, force: true), isNotNull);
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    await pumpEventQueue();
+    expect(provider.presentationConnectedDevice?.id, necklaceA.id);
+    expect(provider.presentationIsConnected, isTrue);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+
+    expect(await service.ensureConnection(necklaceB.id, force: true), isNull);
+    await Future<void>.delayed(const Duration(milliseconds: 650));
+    await pumpEventQueue();
+
+    expect(provider.presentationIsConnected, isFalse);
+    expect(provider.presentationConnectedDevice, isNull);
+    expect(capture.disconnectedDeviceIds, contains(necklaceA.id));
+    expect(capture.recordingState, isNot(RecordingState.deviceRecord));
+    expect(transportA.connected, isFalse);
+    expect(transportB.connected, isFalse);
   });
 
   test('device connection cannot start necklace capture while phone owns audio', () async {

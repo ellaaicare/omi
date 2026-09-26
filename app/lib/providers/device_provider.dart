@@ -1263,7 +1263,11 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     ServiceManager.instance().wal.getSyncs().sdcard.setDevice(null);
     ServiceManager.instance().wal.getSyncs().flashPage.setDevice(null);
 
-    PlatformManager.instance.crashReporter.logInfo('Omi Device Disconnected');
+    try {
+      PlatformManager.instance.crashReporter.logInfo('Omi Device Disconnected');
+    } catch (error) {
+      Logger.debug('Could not log device disconnect telemetry: $error');
+    }
     _disconnectNotificationTimer?.cancel();
     _disconnectNotificationTimer = Timer(const Duration(seconds: 30), () {
       final ctx = MyApp.navigatorKey.currentContext;

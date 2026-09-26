@@ -138,9 +138,22 @@ class DeviceService implements IDeviceService {
     // fence and tear down the previous transport before replacing it.
     final previousConnection = _connection;
     if (previousConnection != null) {
+      final previousConnectionGeneration = _connectionGeneration;
       _connectionGeneration++;
       _connection = null;
-      await previousConnection.disconnect();
+      try {
+        await previousConnection.disconnect();
+      } finally {
+        // The connection callback is deliberately fenced before disconnecting
+        // so it cannot race a replacement session. Publish one authoritative
+        // terminal event with the old generation so provider/capture state is
+        // reconciled if the replacement never becomes connected.
+        onDeviceConnectionStateChanged(
+          previousConnection.device.id,
+          DeviceConnectionState.disconnected,
+          connectionGeneration: previousConnectionGeneration,
+        );
+      }
     }
 
     var device = _devices.firstWhereOrNull((f) => f.id == id);
