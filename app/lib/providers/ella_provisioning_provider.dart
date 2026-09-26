@@ -177,6 +177,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _generation++;
     _requestContextEpoch++;
     _cancelPoll();
+    _endProvisioningOwnership();
     _activeUid = '';
     _requestContext = null;
     _pollAttempts = 0;
@@ -387,6 +388,11 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _pollHandle = null;
   }
 
+  void _endProvisioningOwnership() {
+    if (_activeUid.isEmpty) return;
+    _preferences.invalidateEllaProvisioningTerminalAuthority();
+  }
+
   bool _isCurrentRequest(int generation, int requestContextEpoch) =>
       generation == _generation && requestContextEpoch == _requestContextEpoch;
 
@@ -404,6 +410,8 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _generation++;
     _requestContextEpoch++;
     _cancelPoll();
+    _endProvisioningOwnership();
+    _activeUid = '';
     _preferences.invalidateEllaProvisioningServerVerification();
     super.dispose();
   }

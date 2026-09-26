@@ -517,6 +517,46 @@ void main() {
     provider.dispose();
   });
 
+  test('reset fences a held active authority exactly once when provisioning ownership ends', () async {
+    final preferences = await _prepareOperationalConsent();
+    final provider = EllaProvisioningProvider(
+      transport: _ReadyThenRevalidationTransport(),
+      preferences: preferences,
+      scheduler: _discardedPollScheduler,
+    );
+
+    await provider.start(uid: 'uid-a', requestContext: _requestContext);
+    final activeAuthority = WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a');
+    final initialTerminalGeneration = preferences.ellaProvisioningTerminalAuthorityGeneration;
+    expect(activeAuthority, isNotNull);
+
+    provider.reset();
+
+    expect(preferences.ellaProvisioningTerminalAuthorityGeneration, initialTerminalGeneration + 1);
+    expect(activeAuthority!.isCurrent(preferences: preferences, authenticatedUid: 'uid-a'), isFalse);
+    provider.dispose();
+    expect(preferences.ellaProvisioningTerminalAuthorityGeneration, initialTerminalGeneration + 1);
+  });
+
+  test('dispose fences a held active authority exactly once when provisioning ownership ends', () async {
+    final preferences = await _prepareOperationalConsent();
+    final provider = EllaProvisioningProvider(
+      transport: _ReadyThenRevalidationTransport(),
+      preferences: preferences,
+      scheduler: _discardedPollScheduler,
+    );
+
+    await provider.start(uid: 'uid-a', requestContext: _requestContext);
+    final activeAuthority = WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a');
+    final initialTerminalGeneration = preferences.ellaProvisioningTerminalAuthorityGeneration;
+    expect(activeAuthority, isNotNull);
+
+    provider.dispose();
+
+    expect(preferences.ellaProvisioningTerminalAuthorityGeneration, initialTerminalGeneration + 1);
+    expect(activeAuthority!.isCurrent(preferences: preferences, authenticatedUid: 'uid-a'), isFalse);
+  });
+
   test('hard auth and update failures close operational authority', () async {
     for (final statusCode in const [401, 403, 409, 426]) {
       SharedPreferences.setMockInitialValues({});
