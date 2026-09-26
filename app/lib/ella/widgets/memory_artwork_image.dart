@@ -583,7 +583,11 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     _pendingResponsiveVariantCacheKey = null;
   }
 
-  void _retryResponsiveVariantPublication(int generation, String expectedCacheKey) {
+  void _retryResponsiveVariantPublication(
+    int generation,
+    String expectedCacheKey, {
+    bool publishCurrentAlias = false,
+  }) {
     if (_responsiveVariantPublishRetries >= _maxResponsiveVariantPublishRetries) {
       _resetResponsiveVariantPublication();
       return;
@@ -595,18 +599,52 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       if (!mounted || generation != _requestGeneration || _pendingResponsiveVariantCacheKey != expectedCacheKey) {
         return;
       }
-      unawaited(_publishResponsiveVariant(generation, expectedCacheKey));
+      unawaited(
+        _publishResponsiveVariant(
+          generation,
+          expectedCacheKey,
+          publishCurrentAlias: publishCurrentAlias,
+        ),
+      );
     });
   }
 
-  Future<void> _publishResponsiveVariant(int generation, String expectedCacheKey) async {
+  void _reconcileResponsiveVariantAfterStalePublication(int generation) {
+    if (!mounted || generation != _requestGeneration) return;
+    final current = _remoteResult;
+    if (current == null || !current.isReady || current.variants.isEmpty || !current.isAuthorityCurrent) return;
+
+    final selected = current.forPhysicalWidth(_physicalTargetWidth);
+    if (selected.cacheKey.isEmpty || !selected.isAuthorityCurrent) return;
+    if (_pendingResponsiveVariantCacheKey == selected.cacheKey) return;
+
+    _responsiveVariantRetryTimer?.cancel();
+    _responsiveVariantRetryTimer = null;
+    _responsiveVariantPublishRetries = 0;
+    _pendingResponsiveVariantCacheKey = selected.cacheKey;
+    unawaited(
+      _publishResponsiveVariant(
+        generation,
+        selected.cacheKey,
+        publishCurrentAlias: true,
+      ),
+    );
+  }
+
+  Future<void> _publishResponsiveVariant(
+    int generation,
+    String expectedCacheKey, {
+    bool publishCurrentAlias = false,
+  }) async {
     if (!mounted || generation != _requestGeneration || _pendingResponsiveVariantCacheKey != expectedCacheKey) return;
     final current = _remoteResult;
     if (current == null || !current.isReady || !current.isAuthorityCurrent) return;
 
     final selected = current.forPhysicalWidth(_physicalTargetWidth);
     if (selected.cacheKey != expectedCacheKey || !selected.isAuthorityCurrent) return;
-    if (selected.cacheKey == current.cacheKey && selected.selectedVariantWidth == current.selectedVariantWidth) {
+    if (!publishCurrentAlias &&
+        selected.cacheKey == current.cacheKey &&
+        selected.selectedVariantWidth == current.selectedVariantWidth) {
       _pendingResponsiveVariantCacheKey = null;
       return;
     }
@@ -620,7 +658,11 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
           _pendingResponsiveVariantCacheKey == expectedCacheKey &&
           selected.isAuthorityCurrent,
     );
-    if (!mounted || generation != _requestGeneration || _pendingResponsiveVariantCacheKey != expectedCacheKey) {
+    if (!mounted || generation != _requestGeneration) {
+      return;
+    }
+    if (_pendingResponsiveVariantCacheKey != expectedCacheKey) {
+      _reconcileResponsiveVariantAfterStalePublication(generation);
       return;
     }
     if (!selected.isAuthorityCurrent) {
@@ -628,7 +670,11 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       return;
     }
     if (publishedCacheKey == null) {
-      _retryResponsiveVariantPublication(generation, expectedCacheKey);
+      _retryResponsiveVariantPublication(
+        generation,
+        expectedCacheKey,
+        publishCurrentAlias: publishCurrentAlias,
+      );
       return;
     }
 
