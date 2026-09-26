@@ -13,10 +13,13 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     await SharedPreferencesUtil.init();
     await MemoryArtworkCache.clear();
+    MemoryArtworkCache.configureTerminalEvictorForTesting((_) async {});
   });
 
   tearDown(() async {
+    await MemoryArtworkCache.waitForTerminalEvictionsForTesting();
     await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
+    MemoryArtworkCache.configureTerminalEvictorForTesting(null);
     MemoryArtworkCache.configurePublishedVariantPersistenceForTesting();
     await MemoryArtworkCache.clear();
     MemoryArtworkCache.resetRuntimeTrustForTesting();
@@ -140,17 +143,18 @@ void main() {
       {compactVariant, largeVariant, replacementVariant},
     );
     MemoryArtworkCache.suppressDisplayCacheKeys(terminalKeys);
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(terminalKeys, (_) async {});
     await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
-
-    MemoryArtworkCache.resetRuntimeTrustForTesting();
     expect(
       MemoryArtworkCache.publishedVariantCacheKeysForTerminalCleanup(displayCacheKey: provisional),
       {compactVariant, largeVariant, replacementVariant},
+      reason: 'same-process cleanup retains discovery until stale writers cannot survive',
     );
-    MemoryArtworkCache.suppressDisplayCacheKeys(terminalKeys);
-    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys(terminalKeys, (_) async {});
-    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
 
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+    MemoryArtworkCache.publishedVariantCacheKeysForTerminalCleanup(displayCacheKey: provisional);
+    await MemoryArtworkCache.waitForTerminalEvictionsForTesting();
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
     MemoryArtworkCache.resetRuntimeTrustForTesting();
     expect(MemoryArtworkCache.publishedVariantCacheKeysForTerminalCleanup(displayCacheKey: provisional), isEmpty);
   });
@@ -230,16 +234,21 @@ void main() {
     await secondEvictionStarted.future;
     expect(diskHasVariant, isTrue);
 
-    MemoryArtworkCache.resetRuntimeTrustForTesting();
+    releaseSecondEviction.complete();
+    await MemoryArtworkCache.waitForTerminalEvictionsForTesting();
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
+
+    expect(evictionCalls, 2);
+    expect(diskHasVariant, isFalse);
     expect(
       MemoryArtworkCache.publishedVariantCacheKeysForTerminalCleanup(displayCacheKey: displayCacheKey),
       {variantCacheKey},
     );
 
-    releaseSecondEviction.complete();
-    await Future<void>.delayed(Duration.zero);
-    MemoryArtworkCache.suppressDisplayCacheKeys({variantCacheKey});
-    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys({variantCacheKey}, evict);
+    MemoryArtworkCache.configureTerminalEvictorForTesting(evict);
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+    MemoryArtworkCache.publishedVariantCacheKeysForTerminalCleanup(displayCacheKey: displayCacheKey);
+    await MemoryArtworkCache.waitForTerminalEvictionsForTesting();
     await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
 
     expect(evictionCalls, 3);
@@ -249,6 +258,78 @@ void main() {
       MemoryArtworkCache.publishedVariantCacheKeysForTerminalCleanup(displayCacheKey: displayCacheKey),
       isEmpty,
     );
+  });
+
+  test('a restart deletes a variant rewritten after same-process terminal cleanup', () async {
+    final displayCacheKey = 'e' * 64;
+    final variantCacheKey = 'f' * 64;
+    var diskHasVariant = true;
+    var inheritedEvictionCalls = 0;
+
+    MemoryArtworkCache.rememberPublishedVariantCacheKeys(
+      scopeKey: 'memory-a:authority-1:artwork-1',
+      displayCacheKey: displayCacheKey,
+      cacheKeys: {variantCacheKey},
+    );
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
+
+    MemoryArtworkCache.suppressDisplayCacheKeys({variantCacheKey});
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys({variantCacheKey}, (_) async {
+      diskHasVariant = false;
+    });
+    diskHasVariant = true; // A request already in flight rewrites the old key after removeFile returns.
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
+
+    expect(
+      MemoryArtworkCache.publishedVariantCacheKeysForTerminalCleanup(displayCacheKey: displayCacheKey),
+      {variantCacheKey},
+    );
+
+    MemoryArtworkCache.configureTerminalEvictorForTesting((cacheKey) async {
+      expect(cacheKey, variantCacheKey);
+      inheritedEvictionCalls++;
+      diskHasVariant = false;
+    });
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+    expect(
+      MemoryArtworkCache.publishedVariantCacheKeysForTerminalCleanup(displayCacheKey: displayCacheKey),
+      {variantCacheKey},
+      reason: 'the inherited tombstone remains discoverable until the restart cleanup succeeds',
+    );
+    MemoryArtworkCache.suppressDisplayCacheKeys({variantCacheKey});
+    await MemoryArtworkCache.waitForTerminalEvictionsForTesting();
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
+
+    expect(inheritedEvictionCalls, 1);
+    expect(diskHasVariant, isFalse);
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+    expect(
+      MemoryArtworkCache.publishedVariantCacheKeysForTerminalCleanup(displayCacheKey: displayCacheKey),
+      isEmpty,
+    );
+  });
+
+  test('restart cleanup durably retires a terminal key after its memory scope is gone', () async {
+    const orphanedCacheKey = 'orphaned-terminal-cache-key';
+    var inheritedEvictionCalls = 0;
+
+    MemoryArtworkCache.suppressDisplayCacheKeys({orphanedCacheKey});
+    await MemoryArtworkCache.evictSuppressedDisplayCacheKeys({orphanedCacheKey}, (_) async {});
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
+
+    MemoryArtworkCache.configureTerminalEvictorForTesting((cacheKey) async {
+      expect(cacheKey, orphanedCacheKey);
+      inheritedEvictionCalls++;
+    });
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(orphanedCacheKey), isEmpty);
+    await MemoryArtworkCache.waitForTerminalEvictionsForTesting();
+    await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
+
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+    expect(MemoryArtworkCache.resolveDisplayCacheKey(orphanedCacheKey), isEmpty);
+    await MemoryArtworkCache.waitForTerminalEvictionsForTesting();
+    expect(inheritedEvictionCalls, 1);
   });
 
   test('explicit clear is bounded and removes a late stale ledger write', () async {

@@ -729,10 +729,13 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     await SharedPreferencesUtil.init();
     MemoryArtworkCache.resetRuntimeTrustForTesting();
+    MemoryArtworkCache.configureTerminalEvictorForTesting((_) async {});
     MemoryArtworkImage.resetAutomaticGenerationBudgetForTesting();
   });
   tearDown(() async {
+    await MemoryArtworkCache.waitForTerminalEvictionsForTesting();
     await MemoryArtworkCache.waitForPublishedVariantPersistenceForTesting();
+    MemoryArtworkCache.configureTerminalEvictorForTesting(null);
     MemoryArtworkCache.resetRuntimeTrustForTesting();
     MemoryArtworkImage.resetAutomaticGenerationBudgetForTesting();
   });

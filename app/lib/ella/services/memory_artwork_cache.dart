@@ -22,16 +22,20 @@ class MemoryArtworkCache {
   static const Duration _publishedVariantPersistenceCancellationTimeout = Duration(seconds: 1);
   static const String _displayAliasesPreferenceKey = 'ellaMemoryArtworkDisplayAliasesV2';
   static const String _publishedVariantKeysPreferenceKey = 'ellaMemoryArtworkPublishedVariantKeysV1';
+  static const String _terminalEvictionsMetadataKey = '__terminal_evictions_v1__';
   static CacheManager? _manager;
   static final LinkedHashMap<String, String> _displayAliases = LinkedHashMap();
   static final LinkedHashMap<String, Set<String>> _publishedVariantKeys = LinkedHashMap();
   static final Map<String, String> _publishedVariantDisplayKeys = {};
+  static final LinkedHashMap<String, String> _terminalEvictionProcessIds = LinkedHashMap();
   static final LinkedHashSet<String> _trustedDisplayKeys = LinkedHashSet();
   static final LinkedHashSet<String> _suppressedDisplayKeys = LinkedHashSet();
   static final Map<String, int> _suppressionGenerations = {};
   static final Map<String, int> _completedEvictionGenerations = {};
   static final Map<String, Future<bool>> _pendingEvictions = {};
+  static Future<void>? _pendingTerminalResume;
   static int _nextSuppressionGeneration = 0;
+  static int _evictionAuthorityGeneration = 0;
   static int _nextRecoveryCacheGeneration = 0;
   static final String _networkOnlyCacheNamespace = _createNetworkOnlyCacheNamespace();
   static bool _diskReadsDisabled = false;
@@ -42,6 +46,8 @@ class MemoryArtworkCache {
   static Duration? _publishedVariantRetryDelayForTesting;
   static Duration? _publishedVariantCancellationTimeoutForTesting;
   static int _publishedVariantPersistenceGeneration = 0;
+  static Future<void> Function(String cacheKey)? _terminalEvictorForTesting;
+  static String _terminalEvictionProcessId = _createNetworkOnlyCacheNamespace();
 
   static CacheManager get manager => _manager ??= CacheManager(
         Config('ellaMemoryArtworkCacheV1', stalePeriod: const Duration(days: 30), maxNrOfCacheObjects: 1000),
@@ -230,6 +236,11 @@ class MemoryArtworkCache {
       _suppressedDisplayKeys.add(cacheKey);
       _suppressionGenerations[cacheKey] = ++_nextSuppressionGeneration;
       _completedEvictionGenerations.remove(cacheKey);
+      if (_isPersistentPublishedCacheKey(cacheKey)) {
+        // Preserve an inherited process id so a repeated terminal response in
+        // the new process cannot postpone retirement for another launch.
+        _terminalEvictionProcessIds.putIfAbsent(cacheKey, () => _terminalEvictionProcessId);
+      }
     }
     if (_suppressedDisplayKeys.length > _maxSuppressedDisplayKeys) {
       _enterFailClosedDiskMode();
@@ -243,6 +254,10 @@ class MemoryArtworkCache {
     Future<void> Function(String cacheKey) evict, {
     Duration waitTimeout = _evictionTimeout,
   }) async {
+    _loadPersistentAliases();
+    // The durable tombstone must land before bytes are removed. Otherwise a
+    // process exit followed by a late cache write can make the key undiscoverable.
+    await _waitForPublishedVariantPersistence();
     final evictions = <Future<bool>>[];
     for (final cacheKey in cacheKeys.where((cacheKey) => cacheKey.isNotEmpty).toSet()) {
       evictions.add(_evictSuppressedDisplayCacheKey(cacheKey, evict, waitTimeout));
@@ -264,6 +279,7 @@ class MemoryArtworkCache {
     final suppressionGeneration = _suppressionGenerations[cacheKey];
     if (suppressionGeneration == null) return false;
     if (_completedEvictionGenerations[cacheKey] == suppressionGeneration) return true;
+    final evictionAuthorityGeneration = _evictionAuthorityGeneration;
     late final Future<bool> eviction;
     eviction = () async {
       try {
@@ -273,21 +289,30 @@ class MemoryArtworkCache {
         // terminal cleanup or authoritative ready response.
         return false;
       }
-      final completedCurrentGeneration =
-          !_diskReadsDisabled && _suppressionGenerations[cacheKey] == suppressionGeneration;
+      final completedCurrentGeneration = evictionAuthorityGeneration == _evictionAuthorityGeneration &&
+          !_diskReadsDisabled &&
+          _suppressionGenerations[cacheKey] == suppressionGeneration;
       if (completedCurrentGeneration) {
         // Keep the tombstone authoritative. A stale in-flight image download
         // can rewrite the old key after deletion, so a later ready response
         // publishes under a new cache generation instead of trusting it.
         _completedEvictionGenerations[cacheKey] = suppressionGeneration;
-        _forgetEvictedPublishedVariantCacheKey(cacheKey);
+        final terminalProcessId = _terminalEvictionProcessIds[cacheKey];
+        if (terminalProcessId != null && terminalProcessId != _terminalEvictionProcessId) {
+          _terminalEvictionProcessIds.remove(cacheKey);
+          _forgetEvictedPublishedVariantCacheKey(cacheKey);
+          // A key may outlive its scope entry (for example after a deleted
+          // memory). Persist tombstone retirement even when no ledger changed.
+          _schedulePublishedVariantPersistence();
+        }
       }
       return completedCurrentGeneration;
     }()
         .whenComplete(() {
       if (identical(_pendingEvictions[cacheKey], eviction)) _pendingEvictions.remove(cacheKey);
       final currentGeneration = _suppressionGenerations[cacheKey];
-      if (!_diskReadsDisabled &&
+      if (evictionAuthorityGeneration == _evictionAuthorityGeneration &&
+          !_diskReadsDisabled &&
           _suppressedDisplayKeys.contains(cacheKey) &&
           currentGeneration != null &&
           currentGeneration != suppressionGeneration) {
@@ -344,14 +369,18 @@ class MemoryArtworkCache {
   /// the exact account/profile key in the new process.
   @visibleForTesting
   static void resetRuntimeTrustForTesting() {
+    _evictionAuthorityGeneration++;
+    _terminalEvictionProcessId = _createNetworkOnlyCacheNamespace();
     _displayAliases.clear();
     _publishedVariantKeys.clear();
     _publishedVariantDisplayKeys.clear();
+    _terminalEvictionProcessIds.clear();
     _trustedDisplayKeys.clear();
     _suppressedDisplayKeys.clear();
     _suppressionGenerations.clear();
     _completedEvictionGenerations.clear();
     _pendingEvictions.clear();
+    _pendingTerminalResume = null;
     _diskReadsDisabled = false;
     _persistentAliasesLoaded = false;
   }
@@ -369,7 +398,22 @@ class MemoryArtworkCache {
   }
 
   @visibleForTesting
+  static void configureTerminalEvictorForTesting(Future<void> Function(String cacheKey)? evictor) {
+    _terminalEvictorForTesting = evictor;
+  }
+
+  @visibleForTesting
   static Future<void> waitForPublishedVariantPersistenceForTesting() => _waitForPublishedVariantPersistence();
+
+  @visibleForTesting
+  static Future<void> waitForTerminalEvictionsForTesting() async {
+    while (_pendingTerminalResume != null || _pendingEvictions.isNotEmpty) {
+      final terminalResume = _pendingTerminalResume;
+      if (terminalResume != null) await terminalResume;
+      if (_pendingEvictions.isEmpty) continue;
+      await Future.wait(_pendingEvictions.values);
+    }
+  }
 
   static Future<void> _waitForPublishedVariantPersistence() async {
     while (_pendingPublishedVariantSnapshot != null || _publishedVariantPersistenceWorker != null) {
@@ -385,9 +429,11 @@ class MemoryArtworkCache {
   static void revokeRuntimeTrust({bool preserveDisplayAliases = false}) {
     _loadPersistentAliases();
     if (!preserveDisplayAliases) {
+      _evictionAuthorityGeneration++;
       _displayAliases.clear();
       _publishedVariantKeys.clear();
       _publishedVariantDisplayKeys.clear();
+      _terminalEvictionProcessIds.clear();
       _suppressedDisplayKeys.clear();
       _suppressionGenerations.clear();
       _completedEvictionGenerations.clear();
@@ -401,6 +447,7 @@ class MemoryArtworkCache {
   }
 
   static void _enterFailClosedDiskMode() {
+    _evictionAuthorityGeneration++;
     _diskReadsDisabled = true;
     _displayAliases.clear();
     _publishedVariantKeys.clear();
@@ -415,14 +462,17 @@ class MemoryArtworkCache {
   }
 
   static Future<void> clear() async {
+    _evictionAuthorityGeneration++;
     _displayAliases.clear();
     _publishedVariantKeys.clear();
     _publishedVariantDisplayKeys.clear();
+    _terminalEvictionProcessIds.clear();
     _trustedDisplayKeys.clear();
     _suppressedDisplayKeys.clear();
     _suppressionGenerations.clear();
     _completedEvictionGenerations.clear();
     _pendingEvictions.clear();
+    _pendingTerminalResume = null;
     _diskReadsDisabled = false;
     _persistentAliasesLoaded = true;
     _nextRecoveryCacheGeneration = 0;
@@ -458,25 +508,42 @@ class MemoryArtworkCache {
 
     final encodedVariantKeys = SharedPreferencesUtil().getString(_publishedVariantKeysPreferenceKey);
     try {
-      if (encodedVariantKeys.isEmpty) return;
-      final decoded = jsonDecode(encodedVariantKeys);
-      if (decoded is! Map) return;
-      for (final entry in decoded.entries) {
-        final scopeKey = entry.key.toString();
-        final value = entry.value;
-        if (!_isPersistentVariantScope(scopeKey) || value is! Map) continue;
-        final displayCacheKey = value['display_cache_key']?.toString() ?? '';
-        final values = value['cache_keys'];
-        if (!_isPersistentPublishedCacheKey(displayCacheKey) || values is! List) continue;
-        final keys = LinkedHashSet<String>.from(
-          values.map((value) => value.toString()).where(_isPersistentPublishedCacheKey),
-        );
-        while (keys.length > _maxPublishedVariantKeysPerScope) {
-          keys.remove(keys.first);
-        }
-        if (keys.isNotEmpty) {
-          _publishedVariantKeys[scopeKey] = keys;
-          _publishedVariantDisplayKeys[scopeKey] = displayCacheKey;
+      if (encodedVariantKeys.isNotEmpty) {
+        final decoded = jsonDecode(encodedVariantKeys);
+        if (decoded is Map) {
+          final terminalMetadata = decoded[_terminalEvictionsMetadataKey];
+          if (terminalMetadata is Map) {
+            final terminalProcessIds = terminalMetadata['process_ids'];
+            if (terminalProcessIds is Map) {
+              for (final entry in terminalProcessIds.entries) {
+                final cacheKey = entry.key.toString();
+                final processId = entry.value?.toString() ?? '';
+                if (_isPersistentPublishedCacheKey(cacheKey) && _isPersistentTerminalProcessId(processId)) {
+                  _terminalEvictionProcessIds[cacheKey] = processId;
+                }
+              }
+            }
+          }
+          for (final entry in decoded.entries) {
+            final scopeKey = entry.key.toString();
+            final value = entry.value;
+            if (scopeKey == _terminalEvictionsMetadataKey || !_isPersistentVariantScope(scopeKey) || value is! Map) {
+              continue;
+            }
+            final displayCacheKey = value['display_cache_key']?.toString() ?? '';
+            final values = value['cache_keys'];
+            if (!_isPersistentPublishedCacheKey(displayCacheKey) || values is! List) continue;
+            final keys = LinkedHashSet<String>.from(
+              values.map((value) => value.toString()).where(_isPersistentPublishedCacheKey),
+            );
+            while (keys.length > _maxPublishedVariantKeysPerScope) {
+              keys.remove(keys.first);
+            }
+            if (keys.isNotEmpty) {
+              _publishedVariantKeys[scopeKey] = keys;
+              _publishedVariantDisplayKeys[scopeKey] = displayCacheKey;
+            }
+          }
         }
       }
       while (_publishedVariantKeys.length > _maxPublishedVariantScopes) {
@@ -487,7 +554,9 @@ class MemoryArtworkCache {
     } catch (_) {
       _publishedVariantKeys.clear();
       _publishedVariantDisplayKeys.clear();
+      _terminalEvictionProcessIds.clear();
     }
+    _resumePersistedTerminalEvictions();
   }
 
   static Future<void> _persistDisplayAliases() async {
@@ -510,7 +579,41 @@ class MemoryArtworkCache {
             'cache_keys': entry.value.where(_isPersistentPublishedCacheKey).toList(growable: false),
           },
     };
+    if (_terminalEvictionProcessIds.isNotEmpty) {
+      publishedVariantKeys[_terminalEvictionsMetadataKey] = {
+        'process_ids': <String, String>{
+          for (final entry in _terminalEvictionProcessIds.entries)
+            if (_isPersistentPublishedCacheKey(entry.key) && _isPersistentTerminalProcessId(entry.value))
+              entry.key: entry.value,
+        },
+      };
+    }
     return jsonEncode(publishedVariantKeys);
+  }
+
+  static void _resumePersistedTerminalEvictions() {
+    final inheritedKeys = _terminalEvictionProcessIds.entries
+        .where((entry) => entry.value != _terminalEvictionProcessId)
+        .map((entry) => entry.key)
+        .toSet();
+    if (inheritedKeys.isEmpty) return;
+    for (final cacheKey in inheritedKeys) {
+      _trustedDisplayKeys.remove(cacheKey);
+      _suppressedDisplayKeys.add(cacheKey);
+      _suppressionGenerations[cacheKey] = ++_nextSuppressionGeneration;
+      _completedEvictionGenerations.remove(cacheKey);
+    }
+    late final Future<void> resume;
+    resume = evictSuppressedDisplayCacheKeys(inheritedKeys, _evictPersistedTerminalCacheFile).whenComplete(() {
+      if (identical(_pendingTerminalResume, resume)) _pendingTerminalResume = null;
+    });
+    _pendingTerminalResume = resume;
+    unawaited(resume);
+  }
+
+  static Future<void> _evictPersistedTerminalCacheFile(String cacheKey) {
+    final evictor = _terminalEvictorForTesting;
+    return evictor != null ? evictor(cacheKey) : manager.removeFile(cacheKey);
   }
 
   static void _schedulePublishedVariantPersistence() {
@@ -606,8 +709,11 @@ class MemoryArtworkCache {
 
   static final RegExp _persistentCacheKey = RegExp(r'^[a-f0-9]{64}$');
   static final RegExp _persistentPublishedCacheKey = RegExp(r'^[A-Za-z0-9._:-]{1,512}$');
+  static final RegExp _persistentTerminalProcessId = RegExp(r'^[a-f0-9]{32}$');
 
   static bool _isPersistentPublishedCacheKey(String cacheKey) => _persistentPublishedCacheKey.hasMatch(cacheKey);
+
+  static bool _isPersistentTerminalProcessId(String processId) => _persistentTerminalProcessId.hasMatch(processId);
 
   static bool _isPersistentVariantScope(String scopeKey) =>
       scopeKey.isNotEmpty && scopeKey.length <= 2048 && !scopeKey.contains(RegExp(r'[\x00-\x1F]'));
