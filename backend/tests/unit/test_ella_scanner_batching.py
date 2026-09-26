@@ -2,9 +2,13 @@ from utils.ella import scanner
 
 
 class _FakeResponse:
-    def __init__(self, status_code=200, headers=None):
+    def __init__(self, status_code=200, headers=None, payload=None):
         self.status_code = status_code
         self.headers = headers or {}
+        self._payload = payload or {}
+
+    def json(self):
+        return self._payload
 
 
 def _disable_trace(monkeypatch):
@@ -77,12 +81,22 @@ def test_wake_word_bypasses_ambient_batching(monkeypatch):
 def test_emergency_bypasses_ambient_batching(monkeypatch):
     posts = []
 
-    def fake_post(_url, json, timeout):
-        posts.append(json)
+    def fake_post(url, json, timeout, **kwargs):
+        posts.append((url, json, kwargs))
+        if url == scanner.ESCALATION_EVALUATE_URL:
+            return _FakeResponse(
+                200,
+                payload={
+                    "ok": True,
+                    "decision": "notify_now",
+                    "delivery_plan": [{"target": "user", "channel": "guardian_audio"}],
+                },
+            )
         return _FakeResponse(200)
 
     _disable_trace(monkeypatch)
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner, "ESCALATION_WEBHOOK_KEY", "configured-escalation-key")
     monkeypatch.setattr(scanner.requests, "post", fake_post)
     monkeypatch.setattr(scanner, "SCANNER_AMBIENT_BATCH_WORDS", 100)
 
@@ -93,8 +107,133 @@ def test_emergency_bypasses_ambient_batching(monkeypatch):
     )
 
     assert status == 200
+    assert len(posts) == 2
+    policy_url, policy_payload, policy_kwargs = posts[0]
+    assert policy_url == scanner.ESCALATION_EVALUATE_URL
+    assert policy_payload["event_type"] == "emergency"
+    assert policy_payload["severity"] == "critical"
+    assert policy_payload["evidence"]["scanner_category"] == "credible_emergency"
+    assert policy_payload["evidence"]["deterministic_reason"] == "chest_pain"
+    assert "chest pain" not in str(policy_payload).lower()
+    assert policy_kwargs["headers"]["X-Escalation-Key"] == "configured-escalation-key"
+    scanner_payload = posts[1][1]
+    assert scanner_payload["scanner_batch"]["flush_reason"] == "immediate_emergency"
+    assert scanner_payload["deterministic_emergency"]["routed"] is True
+    assert scanner_payload["deterministic_emergency"]["status"] == "planned"
+    assert scanner_payload["deterministic_emergency"]["plan"]["decision"] == "notify_now"
+
+
+def test_credible_emergency_dry_run_reaches_policy_without_user_content(monkeypatch):
+    posts = []
+
+    def fake_post(url, json, **kwargs):
+        posts.append((url, json, kwargs))
+        if url == scanner.ESCALATION_EVALUATE_URL:
+            return _FakeResponse(200, payload={"ok": True, "decision": "log_only", "delivery_plan": []})
+        return _FakeResponse(200)
+
+    _disable_trace(monkeypatch)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner, "ESCALATION_WEBHOOK_KEY", "configured-escalation-key")
+    monkeypatch.setattr(scanner.requests, "post", fake_post)
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-dry-emergency",
+        [{"text": "Someone call 911 right now", "speaker": "SPEAKER_1"}],
+        dry_run=True,
+    )
+
+    assert status == 200
+    policy_payload = posts[0][1]
+    assert policy_payload["evidence"]["dry_run"] is True
+    assert policy_payload["evidence"]["traffic_class"] == "dry_run"
+    assert "911" not in str(policy_payload)
+    scanner_payload = posts[1][1]
+    assert scanner_payload["dry_run"] is True
+    assert scanner_payload["deterministic_emergency"]["dry_run"] is True
+
+
+def test_routine_help_does_not_trigger_deterministic_emergency_policy(monkeypatch):
+    posts = []
+
+    def fake_post(url, json, **kwargs):
+        posts.append((url, json, kwargs))
+        return _FakeResponse(200)
+
+    _disable_trace(monkeypatch)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner, "ESCALATION_WEBHOOK_KEY", "configured-escalation-key")
+    monkeypatch.setattr(scanner.requests, "post", fake_post)
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-routine-help",
+        [{"text": "Ella, help me find my glasses", "speaker": "SPEAKER_1"}],
+    )
+
+    assert status == 200
     assert len(posts) == 1
-    assert posts[0]["scanner_batch"]["flush_reason"] == "immediate_emergency"
+    assert posts[0][0] == scanner.ELLA_CONFIG.scanner_url
+    assert "deterministic_emergency" not in posts[0][1]
+
+
+def test_policy_failure_does_not_block_scanner_and_exposes_only_error_class(monkeypatch):
+    posts = []
+
+    def fake_post(url, json, **kwargs):
+        posts.append((url, json, kwargs))
+        if url == scanner.ESCALATION_EVALUATE_URL:
+            raise scanner.requests.Timeout("private transport detail")
+        return _FakeResponse(200)
+
+    _disable_trace(monkeypatch)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner, "ESCALATION_WEBHOOK_KEY", "configured-escalation-key")
+    monkeypatch.setattr(scanner.requests, "post", fake_post)
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-policy-timeout",
+        [{"text": "I cannot breathe", "speaker": "SPEAKER_1"}],
+    )
+
+    assert status == 200
+    assert len(posts) == 2
+    scanner_payload = posts[1][1]
+    assert scanner_payload["deterministic_emergency"]["routed"] is False
+    assert scanner_payload["deterministic_emergency"]["status"] == "policy_timeout"
+    assert "private transport detail" not in str(scanner_payload)
+
+
+def test_classifier_failure_cannot_prevent_deterministic_emergency_policy_plan(monkeypatch):
+    posts = []
+
+    def fake_post(url, json, **kwargs):
+        posts.append((url, json, kwargs))
+        if url == scanner.ESCALATION_EVALUATE_URL:
+            return _FakeResponse(
+                200,
+                payload={"ok": True, "decision": "notify_now", "delivery_plan": [{"channel": "email"}]},
+            )
+        return _FakeResponse(503)
+
+    _disable_trace(monkeypatch)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner, "ESCALATION_WEBHOOK_KEY", "configured-escalation-key")
+    monkeypatch.setattr(scanner.requests, "post", fake_post)
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-classifier-outage",
+        [{"text": "I fell and cannot get up", "speaker": "SPEAKER_1"}],
+    )
+
+    assert status == 503
+    assert posts[0][0] == scanner.ESCALATION_EVALUATE_URL
+    assert posts[1][0] == scanner.ELLA_CONFIG.scanner_url
+    assert posts[1][1]["deterministic_emergency"]["routed"] is True
+    assert posts[1][1]["deterministic_emergency"]["plan"]["decision"] == "notify_now"
 
 
 def test_ambient_chunks_batch_until_word_threshold(monkeypatch):

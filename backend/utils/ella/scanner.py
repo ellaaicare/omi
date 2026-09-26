@@ -30,6 +30,16 @@ ELLA_POSTGRES_PASSWORD = authority_credential("ELLA_POSTGRES_PASSWORD", default=
 ELLA_POSTGRES_DATABASE = os.getenv("ELLA_POSTGRES_DATABASE", "ella_ai")
 GUARDIAN_ENQUEUE_URL = os.getenv("ELLA_GUARDIAN_ENQUEUE_URL", "http://127.0.0.1:8000/v1/ella/guardian/enqueue")
 GUARDIAN_WEBHOOK_KEY = authority_credential("GUARDIAN_WEBHOOK_KEY", strip=False)
+ESCALATION_EVALUATE_URL = os.getenv(
+    "ELLA_ESCALATION_EVALUATE_URL",
+    "http://127.0.0.1:8000/v1/ella/escalations/evaluate",
+)
+ESCALATION_WEBHOOK_KEY = authority_credential(
+    "ELLA_ESCALATION_WEBHOOK_KEY",
+    "GUARDIAN_WEBHOOK_KEY",
+    strip=False,
+)
+ESCALATION_EVALUATE_TIMEOUT_S = float(os.getenv("ELLA_ESCALATION_EVALUATE_TIMEOUT_S", "3.0"))
 GUARDIAN_WAKE_ACK_AUDIO_URL = os.getenv(
     "ELLA_GUARDIAN_WAKE_ACK_AUDIO_URL",
     "https://ella-ai-care.com/audio/system/wake_ack_pulse.mp3",
@@ -109,6 +119,22 @@ _EMERGENCY_PATTERN = re.compile(
     r"fell|fallen|falling|bleeding|choking|overdose|"
     r"suicidal|kill myself|hurt myself|fire|break in|burglar"
     r")\b",
+    re.IGNORECASE,
+)
+_CREDIBLE_EMERGENCY_PATTERNS = (
+    ("emergency_services", re.compile(r"\b(?:someone\s+)?call\s+911\b", re.IGNORECASE)),
+    ("breathing", re.compile(r"\bi\s+(?:can\s*not|cannot|can't)\s+breathe\b", re.IGNORECASE)),
+    ("fall", re.compile(r"\bi\s+(?:fell|(?:have|'ve)\s+fallen)\b", re.IGNORECASE)),
+    ("immobile", re.compile(r"\bi\s+(?:can\s*not|cannot|can't)\s+get\s+up\b", re.IGNORECASE)),
+    ("chest_pain", re.compile(r"\b(?:chest\s+pain|my\s+chest\s+hurts)\b", re.IGNORECASE)),
+    ("fire", re.compile(r"\b(?:fire|smoke\s+in\s+the\s+house)\b", re.IGNORECASE)),
+    ("seizure", re.compile(r"\bseizure\b", re.IGNORECASE)),
+    ("severe_bleeding", re.compile(r"\bbleeding\s+out\b", re.IGNORECASE)),
+    ("intruder", re.compile(r"\bintruder\b", re.IGNORECASE)),
+)
+_CREDIBLE_HELP_PATTERN = re.compile(r"\b(?:help\s+me|i\s+need\s+help)\b", re.IGNORECASE)
+_ROUTINE_HELP_PATTERN = re.compile(
+    r"\b(?:help\s+me|i\s+need\s+help)\s+(?:find|remember|figure|with)\b",
     re.IGNORECASE,
 )
 _DURATION_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)(?P<unit>ms|s|m|h)")
@@ -213,6 +239,17 @@ def contains_wake_phrase(text: str) -> bool:
 
 def contains_emergency_phrase(text: str) -> bool:
     return bool(_EMERGENCY_PATTERN.search(text or ""))
+
+
+def credible_emergency_reason(text: str) -> Optional[str]:
+    """Return an allowlisted deterministic reason for credible emergency language."""
+    candidate = text or ""
+    for reason, pattern in _CREDIBLE_EMERGENCY_PATTERNS:
+        if pattern.search(candidate):
+            return reason
+    if _CREDIBLE_HELP_PATTERN.search(candidate) and not _ROUTINE_HELP_PATTERN.search(candidate):
+        return "explicit_help"
+    return None
 
 
 def scanner_immediate_reason(text: str, *, wake_prefix_recent: Optional[bool] = None) -> Optional[str]:
@@ -642,6 +679,152 @@ def _log_trace_event(
         pass
 
 
+def _evaluate_credible_emergency_plan(
+    uid: str,
+    trace_id: str,
+    reason: str,
+    *,
+    dry_run: bool,
+    traffic_class: str,
+) -> dict:
+    """Evaluate a deterministic emergency through policy without dispatching it."""
+    if not ESCALATION_WEBHOOK_KEY:
+        result = {
+            "routed": False,
+            "status": "authority_unavailable",
+            "reason": reason,
+            "dry_run": dry_run,
+            "traffic_class": traffic_class,
+        }
+        _log_trace_event(
+            trace_id=trace_id,
+            uid=uid,
+            stage="deterministic_emergency_policy",
+            status="error",
+            metadata=result,
+        )
+        return result
+
+    payload = {
+        "uid": uid,
+        "trace_id": trace_id,
+        "source": "omi_backend_deterministic_scanner",
+        "event_type": "emergency",
+        "severity": "critical",
+        "confidence": 1.0,
+        "ambiguity": 0.0,
+        "summary": "Credible emergency phrase detected by deterministic backend policy.",
+        "evidence": {
+            "emergency": True,
+            "safety_critical": True,
+            "scanner_category": "credible_emergency",
+            "deterministic_reason": reason,
+            "dry_run": dry_run,
+            "traffic_class": traffic_class,
+        },
+    }
+    started_at = time.time()
+    try:
+        response = requests.post(
+            ESCALATION_EVALUATE_URL,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "X-Escalation-Key": ESCALATION_WEBHOOK_KEY,
+                "X-Ella-Subject-Uid": uid,
+            },
+            timeout=ESCALATION_EVALUATE_TIMEOUT_S,
+        )
+        latency_ms = int((time.time() - started_at) * 1000)
+        if not 200 <= response.status_code < 300:
+            result = {
+                "routed": False,
+                "status": "policy_http_error",
+                "status_code": response.status_code,
+                "reason": reason,
+                "dry_run": dry_run,
+                "traffic_class": traffic_class,
+            }
+            _log_trace_event(
+                trace_id=trace_id,
+                uid=uid,
+                stage="deterministic_emergency_policy",
+                status="error",
+                latency_ms=latency_ms,
+                metadata=result,
+            )
+            return result
+        try:
+            plan = response.json()
+        except (TypeError, ValueError):
+            result = {
+                "routed": False,
+                "status": "policy_invalid_response",
+                "status_code": response.status_code,
+                "reason": reason,
+                "dry_run": dry_run,
+                "traffic_class": traffic_class,
+            }
+            _log_trace_event(
+                trace_id=trace_id,
+                uid=uid,
+                stage="deterministic_emergency_policy",
+                status="error",
+                latency_ms=latency_ms,
+                metadata=result,
+            )
+            return result
+
+        result = {
+            "routed": True,
+            "status": "planned",
+            "reason": reason,
+            "dry_run": dry_run,
+            "traffic_class": traffic_class,
+            "plan": plan,
+        }
+        _log_trace_event(
+            trace_id=trace_id,
+            uid=uid,
+            stage="deterministic_emergency_policy",
+            status="success",
+            latency_ms=latency_ms,
+            metadata={
+                "routed": True,
+                "status": "planned",
+                "reason": reason,
+                "dry_run": dry_run,
+                "traffic_class": traffic_class,
+                "decision": plan.get("decision"),
+                "delivery_step_count": len(plan.get("delivery_plan") or []),
+            },
+        )
+        return result
+    except requests.Timeout:
+        status = "policy_timeout"
+    except requests.RequestException:
+        status = "policy_transport_error"
+    except Exception:
+        status = "policy_unexpected_error"
+
+    result = {
+        "routed": False,
+        "status": status,
+        "reason": reason,
+        "dry_run": dry_run,
+        "traffic_class": traffic_class,
+    }
+    _log_trace_event(
+        trace_id=trace_id,
+        uid=uid,
+        stage="deterministic_emergency_policy",
+        status="error",
+        latency_ms=int((time.time() - started_at) * 1000),
+        metadata=result,
+    )
+    return result
+
+
 def _wake_turn_id(trace_id: str, text: str) -> str:
     digest = hashlib.sha1(f"{trace_id}:{_normalize_text(text)}".encode("utf-8")).hexdigest()[:12]
     return f"wake_{digest}"
@@ -845,6 +1028,8 @@ def send_to_scanner(
     scanner_window_text: Optional[str] = None,
     wake_prefix_recent: Optional[bool] = None,
     latency_metadata: Optional[dict] = None,
+    dry_run: bool = False,
+    traffic_class: str = "live",
 ) -> Optional[int]:
     """
     Send transcript segments to Ella scanner agent.
@@ -956,6 +1141,23 @@ def send_to_scanner(
         },
         "scanner_batch": batch_metadata,
     }
+    normalized_traffic_class = str(traffic_class or "live").strip().lower()
+    if normalized_traffic_class not in {"live", "dry_run", "synthetic"}:
+        normalized_traffic_class = "dry_run"
+    if dry_run:
+        normalized_traffic_class = "dry_run"
+    effective_dry_run = bool(dry_run or normalized_traffic_class != "live")
+    payload["dry_run"] = effective_dry_run
+    payload["traffic_class"] = normalized_traffic_class
+    emergency_reason = credible_emergency_reason(_combined_segment_text(scanner_segments))
+    if emergency_reason:
+        payload["deterministic_emergency"] = _evaluate_credible_emergency_plan(
+            uid,
+            trace_id,
+            emergency_reason,
+            dry_run=effective_dry_run,
+            traffic_class=normalized_traffic_class,
+        )
     if latency_metadata:
         payload["latency"] = latency_metadata
     if recent_segments is not None:
