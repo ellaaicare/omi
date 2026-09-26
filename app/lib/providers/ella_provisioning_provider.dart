@@ -231,8 +231,23 @@ class EllaProvisioningProvider extends ChangeNotifier {
 
   Future<void> _applyResponse(EllaProvisioningResponse response, int generation, int requestContextEpoch) async {
     if (!_isCurrentRequest(generation, requestContextEpoch)) return;
-    _preferences.invalidateEllaProvisioningServerVerification();
     final nextReceipt = response.receipt;
+    final rejectedTerminal = !response.isAccepted &&
+        (response.statusCode == 401 ||
+            response.statusCode == 403 ||
+            response.statusCode == 409 ||
+            response.statusCode == 426 ||
+            (nextReceipt?.state == EllaProvisioningState.blocked && nextReceipt?.retryable != true));
+    final acceptedTerminal = response.isAccepted &&
+        nextReceipt != null &&
+        ((nextReceipt.state == EllaProvisioningState.ready && !nextReceipt.isOperational) ||
+            (nextReceipt.state == EllaProvisioningState.blocked && nextReceipt.retryable != true));
+    final terminalResponse = rejectedTerminal || acceptedTerminal;
+    if (terminalResponse) {
+      _preferences.invalidateEllaProvisioningTerminalAuthority();
+    } else {
+      _preferences.invalidateEllaProvisioningServerVerification();
+    }
     if (!response.isAccepted || nextReceipt == null) {
       if (nextReceipt != null) {
         await _preferences.saveEllaProvisioningReceipt(_activeUid, nextReceipt.toCacheJson());
@@ -254,7 +269,12 @@ class EllaProvisioningProvider extends ChangeNotifier {
           response.statusCode == 409 ||
           response.statusCode == 426 ||
           (nextReceipt?.state == EllaProvisioningState.blocked && nextReceipt?.retryable != true);
-      _setFailure(code, blocked: blocked, preserveOperationalReceipt: !blocked);
+      _setFailure(
+        code,
+        blocked: blocked,
+        preserveOperationalReceipt: !blocked,
+        terminalAlreadyFenced: terminalResponse,
+      );
       if (_shouldPoll) _schedulePoll(generation, _backoffDelay);
       return;
     }
@@ -265,11 +285,9 @@ class EllaProvisioningProvider extends ChangeNotifier {
     errorCode = nextReceipt.errorCode;
 
     if (nextReceipt.state == EllaProvisioningState.ready && !nextReceipt.isOperational) {
-      _preferences.invalidateEllaProvisioningTerminalAuthority();
       state = EllaProvisioningState.blocked;
       errorCode = 'incomplete_ready_receipt';
     } else if (nextReceipt.state == EllaProvisioningState.blocked && nextReceipt.retryable != true) {
-      _preferences.invalidateEllaProvisioningTerminalAuthority();
       state = EllaProvisioningState.blocked;
     } else if (_pollAttempts >= maxPollAttempts &&
         (nextReceipt.state == EllaProvisioningState.queued ||
@@ -301,15 +319,20 @@ class EllaProvisioningProvider extends ChangeNotifier {
     }
   }
 
-  void _setFailure(String code, {bool blocked = false, bool preserveOperationalReceipt = false}) {
+  void _setFailure(
+    String code, {
+    bool blocked = false,
+    bool preserveOperationalReceipt = false,
+    bool terminalAlreadyFenced = false,
+  }) {
     // A transient foreground refresh must not replace an already-working Home
     // with setup UI. The provider still reports isOperational=false, so
     // protected operations remain fail-closed until fresh authority succeeds.
     _revalidatingOperationalReceipt =
         !blocked && preserveOperationalReceipt && _revalidatingOperationalReceipt && receipt?.isOperational == true;
-    if (blocked) {
+    if (blocked && !terminalAlreadyFenced) {
       _preferences.invalidateEllaProvisioningTerminalAuthority();
-    } else {
+    } else if (!blocked) {
       _preferences.invalidateEllaProvisioningServerVerification();
     }
     errorCode = code;

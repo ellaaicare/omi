@@ -358,6 +358,37 @@ void main() {
     expect(preferences.aiConsentAccepted, isFalse);
   });
 
+  test('terminal refresh survives benign persona and profile drift while in flight', () async {
+    final preferences = SharedPreferencesUtil();
+    const receiptId = '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1';
+    preferences.acceptAiConsent(
+      receiptId: receiptId,
+      uid: uid,
+      profileBindingId: 'binding-1',
+      serverDecidedAt: '2026-08-07T00:00:00Z',
+    );
+    final fetchCompleter = Completer<AiConsentFetchResult>();
+    final refresh = _service(_FakeTransport(fetchCompleter: fetchCompleter)).refreshActiveSessionAuthority(
+      uid: uid,
+      expectedReceiptId: receiptId,
+      expectedServerDecidedAt: DateTime.utc(2026, 8, 7),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    preferences.verifiedPersonaId = 'persona-2';
+    preferences.acceptAiConsent(
+      receiptId: receiptId,
+      uid: uid,
+      profileBindingId: 'binding-2',
+      serverDecidedAt: '2026-08-07T00:00:00Z',
+    );
+    fetchCompleter.complete(const AiConsentFetchResult(httpStatus: 200, authorityState: 'revoked'));
+
+    final result = await refresh;
+    expect(result.disposition, AiConsentAuthorityRefreshDisposition.revoked);
+    expect(preferences.aiConsentAccepted, isFalse);
+  });
+
   test('stale terminal refresh cannot erase a newer same-account grant', () async {
     final preferences = SharedPreferencesUtil();
     const firstReceipt = '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1';

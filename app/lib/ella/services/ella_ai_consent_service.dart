@@ -403,7 +403,7 @@ class EllaAiConsentService {
       response.authorityState.isNotEmpty ? response.authorityState : response.errorCode,
     );
     if (terminalFromCode != null) {
-      if (!_isExpectedRefreshAuthorityCurrent(
+      if (!_isExpectedTerminalRefreshAuthorityCurrent(
         persistenceAuthority,
         expectedReceiptId: expectedReceiptId,
         expectedServerDecidedAt: expectedServerDecidedAt,
@@ -434,7 +434,7 @@ class EllaAiConsentService {
       status.authorityState.isNotEmpty ? status.authorityState : status.decision,
     );
     if (terminalFromStatus != null) {
-      if (!_isExpectedRefreshAuthorityCurrent(
+      if (!_isExpectedTerminalRefreshAuthorityCurrent(
         persistenceAuthority,
         expectedReceiptId: expectedReceiptId,
         expectedServerDecidedAt: expectedServerDecidedAt,
@@ -512,12 +512,15 @@ class EllaAiConsentService {
     }
   }
 
-  bool _isExpectedRefreshAuthorityCurrent(
+  bool _isExpectedTerminalRefreshAuthorityCurrent(
     _AiConsentAuthority? authority, {
     required String expectedReceiptId,
     required DateTime? expectedServerDecidedAt,
   }) {
-    if (authority == null || !_isCurrentAuthority(authority) || _preferences.aiConsentReceiptId != expectedReceiptId) {
+    if (authority == null ||
+        _preferences.uid != authority.uid ||
+        _preferences.terminalAccountConsentAuthorityGeneration != authority.terminalGeneration ||
+        _preferences.aiConsentReceiptId != expectedReceiptId) {
       return false;
     }
     if (expectedServerDecidedAt == null) return true;
@@ -728,6 +731,7 @@ class EllaAiConsentService {
     }
     return _AiConsentAuthority(
       generation: _preferences.aiConsentAuthorityGeneration,
+      terminalGeneration: _preferences.terminalAccountConsentAuthorityGeneration,
       uid: uid,
       verifiedPersonaId: _preferences.verifiedPersonaId,
       profileBindingId: _preferences.aiConsentProfileBindingId,
@@ -783,12 +787,14 @@ class EllaAiConsentService {
 class _AiConsentAuthority {
   const _AiConsentAuthority({
     required this.generation,
+    required this.terminalGeneration,
     required this.uid,
     required this.verifiedPersonaId,
     required this.profileBindingId,
   });
 
   final int generation;
+  final int terminalGeneration;
   final String uid;
   final String? verifiedPersonaId;
   final String profileBindingId;
