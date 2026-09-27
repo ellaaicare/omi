@@ -270,8 +270,11 @@ Future<bool> ensureCaptureConsentAuthority({
   if (authority != null) {
     unawaited(() async {
       try {
-        await refreshAuthority(authority.uid, authority.receiptId, authority.serverDecidedAt)
-            .timeout(const Duration(seconds: 8));
+        await refreshAuthority(
+          authority.uid,
+          authority.receiptId,
+          authority.serverDecidedAt,
+        ).timeout(const Duration(seconds: 8));
       } catch (error) {
         Logger.debug('Capture consent background refresh failed: ${error.runtimeType}');
       }
@@ -353,6 +356,7 @@ class _DeviceCaptureSession {
   StreamSubscription? photoStream;
   Timer? physicalFrameWatchdog;
   _DeviceSocketReplacementBuffer? socketReplacementBuffer;
+  bool geolocationQueued = false;
 }
 
 class _BufferedDeviceCaptureFrame {
@@ -882,6 +886,14 @@ class CaptureProvider extends ChangeNotifier
     _notifyCaptureDiagnosticsForFrame(force: firstFrame);
   }
 
+  void _holdReadyDeviceTransportWithoutAudio() {
+    updateRecordingState(RecordingState.deviceRecord);
+    _failCaptureDiagnostics(CaptureDiagnosticFailure.physicalAudioUnavailable);
+  }
+
+  @visibleForTesting
+  void holdReadyDeviceTransportWithoutAudioForTesting() => _holdReadyDeviceTransportWithoutAudio();
+
   void _recordTransmittedCaptureFrame(List<int> bytes) {
     if (bytes.isEmpty) return;
     final firstFrame = _captureDiagnostics.transmittedFrames == 0;
@@ -1268,10 +1280,7 @@ class CaptureProvider extends ChangeNotifier
     bool force = false,
     String? source,
   }) async {
-    if (AiConsentActiveSessionLease.authorityForSessionStart(
-          expectedUid: WalOwnerAuthority.authenticatedUid,
-        ) ==
-        null) {
+    if (AiConsentActiveSessionLease.authorityForSessionStart(expectedUid: WalOwnerAuthority.authenticatedUid) == null) {
       _transcriptServiceReady = false;
       return;
     }
@@ -1529,6 +1538,7 @@ class CaptureProvider extends ChangeNotifier
     if (physicalPayload.isNotEmpty) {
       startProof?.acceptPhysicalFrame(physicalPayload);
       _recordPhysicalCaptureFrame(physicalPayload);
+      _queueDeviceCaptureGeolocation(session);
       _armDevicePhysicalFrameWatchdog(session);
     }
 
@@ -1650,6 +1660,9 @@ class CaptureProvider extends ChangeNotifier
       await socket.send(frame.socketPayload);
       startProof?.acceptTransmittedFrame(frame.socketPayload);
       _recordTransmittedCaptureFrame(frame.socketPayload);
+      if (_captureDiagnostics.failure == CaptureDiagnosticFailure.physicalAudioUnavailable) {
+        _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.streaming, clearFailure: true);
+      }
       _wsSocketBytesSent += frame.socketPayload.length;
       if (frame.persistedToWal) _wal.getSyncs().phone.onBytesSync(frame.walFrame);
       return true;
@@ -1898,6 +1911,13 @@ class CaptureProvider extends ChangeNotifier
         await _closeDeviceCaptureSession(session, stopSocket: false);
         return false;
       }
+      if (error is TimeoutException &&
+          !startProof.hasPhysicalAudio &&
+          session.socket.state == SocketServiceState.connected) {
+        Logger.debug('Necklace socket is ready; keeping it open while waiting for physical audio');
+        _holdReadyDeviceTransportWithoutAudio();
+        return true;
+      }
       Logger.error('Necklace physical capture start proof failed: $error');
       _failCaptureDiagnostics(
         startProof.hasPhysicalAudio
@@ -1926,6 +1946,12 @@ class CaptureProvider extends ChangeNotifier
       await _initiateDevicePhotoStreaming(session);
     }
     return _isDeviceCaptureCurrent(session);
+  }
+
+  void _queueDeviceCaptureGeolocation(_DeviceCaptureSession session) {
+    if (session.geolocationQueued || !_isDeviceCaptureCurrent(session)) return;
+    session.geolocationQueued = true;
+    unawaited(_queueCaptureGeolocation(session.accountGeneration, session.authority));
   }
 
   Future<void> _initiateDevicePhotoStreaming(_DeviceCaptureSession session) async {
@@ -2202,9 +2228,7 @@ class CaptureProvider extends ChangeNotifier
       _captureConsentAuthorityEnsurer?.call() ??
       ensureCaptureConsentAuthority(
         hasCurrentConsent: () => SharedPreferencesUtil().aiConsentAccepted,
-        persistedAuthority: () => AiConsentAuthoritySnapshot.capture(
-          expectedUid: WalOwnerAuthority.authenticatedUid,
-        ),
+        persistedAuthority: () => AiConsentAuthoritySnapshot.capture(expectedUid: WalOwnerAuthority.authenticatedUid),
         lastServerConfirmationAge: () => SharedPreferencesUtil().aiConsentLastServerConfirmationAge,
         refreshAuthority: (uid, receiptId, serverDecidedAt) => EllaAiConsentService().refreshActiveSessionAuthority(
           uid: uid,
@@ -2612,6 +2636,15 @@ class CaptureProvider extends ChangeNotifier
     if (phoneCaptureOwnsMobileAudio) {
       return;
     }
+    final pendingAttempt = _deviceCaptureAttempt;
+    final pendingStart = _deviceCaptureStartFuture;
+    if (pendingStart != null &&
+        pendingAttempt?.deviceId == targetDevice.id &&
+        pendingAttempt?.accountGeneration == _captureGeneration &&
+        pendingAttempt?.cancelled.isCompleted == false) {
+      await pendingStart;
+      return;
+    }
     final activeSession = _deviceCaptureSession;
     if (activeSession != null &&
         activeSession.deviceId == targetDevice.id &&
@@ -2763,7 +2796,9 @@ class CaptureProvider extends ChangeNotifier
 
     // Location is protected capture context. Emit it only after physical BLE
     // capture is proven under the same exact account/capture authority.
-    unawaited(_queueCaptureGeolocation(attempt.accountGeneration, captureAuthority));
+    if (_captureDiagnostics.failure != CaptureDiagnosticFailure.physicalAudioUnavailable) {
+      _queueDeviceCaptureGeolocation(session);
+    }
 
     if (wasPaused) {
       await pauseDeviceRecording();

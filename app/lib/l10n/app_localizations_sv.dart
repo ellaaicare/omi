@@ -9387,8 +9387,7 @@ class AppLocalizationsSv extends AppLocalizations {
       'Your necklace is connected, but its audio channel could not start. Keep it nearby and try again.';
 
   @override
-  String get todayNecklaceAudioSilent =>
-      'Your necklace is connected, but it did not send audio. Keep it nearby and try again.';
+  String get todayNecklaceAudioSilent => 'No audio from necklace';
 
   @override
   String get todayMicrophonePermissionDenied =>

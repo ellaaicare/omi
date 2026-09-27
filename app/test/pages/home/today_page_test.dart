@@ -13,11 +13,7 @@ void main() {
   test('necklace recording copy requires audio bytes and a delivered transcript socket', () {
     const silent = CaptureDiagnostics(source: CaptureDiagnosticSource.necklace);
     expect(
-      todayDockShowsLiveNecklaceRecording(
-        deviceRecording: true,
-        transcriptionReady: true,
-        diagnostics: silent,
-      ),
+      todayDockShowsLiveNecklaceRecording(deviceRecording: true, transcriptionReady: true, diagnostics: silent),
       isFalse,
     );
     expect(
@@ -353,7 +349,8 @@ void main() {
     );
     final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
 
-    expect(find.text(l10n.todayDockNecklaceActivePhoneSelected), findsOneWidget);
+    expect(find.text(l10n.todayDockRecordingNecklace), findsOneWidget);
+    expect(find.text(l10n.todayDockNecklaceActivePhoneSelected), findsNothing);
     expect(find.text(l10n.todayDockRecord), findsOneWidget);
     expect(find.text(l10n.todayDockSaveMoment), findsNothing);
     expect(find.text(l10n.todayDockTranscriptNecklace), findsOneWidget);
@@ -380,6 +377,28 @@ void main() {
 
     expect(find.text(l10n.todayDockSaveMoment), findsNothing);
     expect(find.text(l10n.todayDockNecklaceConnecting), findsOneWidget);
+  });
+
+  testWidgets('ready necklace socket without frames reports no audio instead of reconnecting', (tester) async {
+    await _pumpRecordControl(
+      tester,
+      selectedSource: EllaCaptureSource.necklace,
+      activeSource: EllaCaptureSource.necklace,
+      hasNecklace: true,
+      necklaceConnected: true,
+      recordingState: RecordingState.deviceRecord,
+      transcriptionReady: true,
+      diagnostics: const CaptureDiagnostics(
+        source: CaptureDiagnosticSource.necklace,
+        phase: CaptureDiagnosticPhase.failed,
+        failure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+      ),
+    );
+    final l10n = AppLocalizations.of(tester.element(find.byType(TodayRecordMomentControl)));
+
+    expect(find.text(l10n.todayNecklaceAudioSilent), findsOneWidget);
+    expect(find.text(l10n.todayDockNecklaceConnecting), findsNothing);
+    expect(find.text(l10n.todayDockRecordingNecklace), findsNothing);
   });
 
   testWidgets('genuine consent loss stays visible with a review action', (tester) async {

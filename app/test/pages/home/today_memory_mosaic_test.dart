@@ -716,7 +716,7 @@ void main() {
     addTearDown(harness.dispose);
     device.capture = harness.capture;
 
-    expect(find.text('Necklace is recording · iPhone selected'), findsOneWidget);
+    expect(find.text('Recording with your necklace'), findsOneWidget);
     await tester.tap(find.byKey(const Key('today-record-moment')));
     await tester.pump();
 
@@ -1334,7 +1334,7 @@ void main() {
     expect(device.reconnects, 1);
     expect(harness.capture.deviceStarts, 1);
     expect(harness.capture.recordingState, RecordingState.deviceRecord);
-    expect(find.text('Necklace is recording · iPhone selected'), findsOneWidget);
+    expect(find.text('Recording with your necklace'), findsOneWidget);
   });
 
   testWidgets('day-one state is useful and reduced motion removes capture transitions', (tester) async {
@@ -3024,10 +3024,7 @@ class _ReconnectTrackingDeviceProvider extends DeviceProvider {
   int freshSessionReconnects = 0;
 
   @override
-  Future<bool> connectDeviceForCurrentUser(
-    BtDevice device, {
-    bool requireFreshSession = false,
-  }) async {
+  Future<bool> connectDeviceForCurrentUser(BtDevice device, {bool requireFreshSession = false}) async {
     reconnects++;
     if (requireFreshSession) freshSessionReconnects++;
     await capture?.streamDeviceRecording(device: presentationConnectedDevice);
@@ -3048,10 +3045,7 @@ class _LiveDockDeviceProvider extends DeviceProvider {
   bool get connectionAttemptFailed => _failed;
 
   @override
-  Future<bool> connectDeviceForCurrentUser(
-    BtDevice device, {
-    bool requireFreshSession = false,
-  }) async {
+  Future<bool> connectDeviceForCurrentUser(BtDevice device, {bool requireFreshSession = false}) async {
     connects++;
     return false;
   }
