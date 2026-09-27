@@ -1583,12 +1583,22 @@ class CaptureProvider extends ChangeNotifier
 
     unawaited(
       _sendDeviceFrame(session, session.socket, frame, startProof: startProof).then((sent) {
+        // A replacement already in flight (buffer exists) always gets this
+        // frame appended: shouldOpenReplacementListenSocket exists to decide
+        // whether to START a new replacement, not to gate buffering into one
+        // already underway. Without this, a frame that fails to send after
+        // the old socket has already been stopped (which now correctly drops
+        // hasActiveSessionAuthority for that socket the instant its consent
+        // lease is torn down, per the ella-ai#1280 P1 fail-closed fix) reads
+        // as "connected but only waiting on its lease" and is silently
+        // dropped instead of replayed once the replacement completes.
         if (!sent &&
             _isDeviceCaptureCurrent(session) &&
-            shouldOpenReplacementListenSocket(
-              socketConnected: session.socket.state == SocketServiceState.connected,
-              hasSessionAuthority: session.socket.hasActiveSessionAuthority,
-            )) {
+            (session.socketReplacementBuffer != null ||
+                shouldOpenReplacementListenSocket(
+                  socketConnected: session.socket.state == SocketServiceState.connected,
+                  hasSessionAuthority: session.socket.hasActiveSessionAuthority,
+                ))) {
           _recoverDeviceCaptureSocket(
             session,
             frame,
