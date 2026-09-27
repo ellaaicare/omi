@@ -7,12 +7,12 @@ import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
-Future<CreateConversationResponse?> processInProgressConversation() async {
+Future<CreateConversationResponse?> processInProgressConversation({bool explicitKeep = true}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations',
     headers: {},
     method: 'POST',
-    body: jsonEncode({}),
+    body: jsonEncode({'explicit_keep': explicitKeep}),
   );
   if (response == null) return null;
   Logger.debug('createConversationServer: ${response.body}');
@@ -20,8 +20,11 @@ Future<CreateConversationResponse?> processInProgressConversation() async {
     return CreateConversationResponse.fromJson(jsonDecode(response.body));
   } else {
     // TODO: Server returns 304 doesn't recover
-    PlatformManager.instance.crashReporter.reportCrash(Exception('Failed to create conversation'), StackTrace.current,
-        userAttributes: {'response': response.body});
+    PlatformManager.instance.crashReporter.reportCrash(
+      Exception('Failed to create conversation'),
+      StackTrace.current,
+      userAttributes: {'response': response.body},
+    );
   }
   return null;
 }
@@ -58,8 +61,9 @@ Future<List<ServerConversation>> getConversations({
   if (response.statusCode == 200) {
     // decode body bytes to utf8 string and then parse json so as to avoid utf8 char issues
     var body = utf8.decode(response.bodyBytes);
-    var memories =
-        (jsonDecode(body) as List<dynamic>).map((conversation) => ServerConversation.fromJson(conversation)).toList();
+    var memories = (jsonDecode(body) as List<dynamic>)
+        .map((conversation) => ServerConversation.fromJson(conversation))
+        .toList();
     Logger.debug('getConversations length: ${memories.length}');
     return memories;
   } else {
@@ -102,12 +106,13 @@ class ConversationProcessingRetryResult {
 
   factory ConversationProcessingRetryResult.fromJson(Map<String, dynamic> json) {
     return ConversationProcessingRetryResult(
-      outcome: ConversationProcessingRetryOutcome.values.asNameMap()[json['outcome']] ??
+      outcome:
+          ConversationProcessingRetryOutcome.values.asNameMap()[json['outcome']] ??
           ConversationProcessingRetryOutcome.failed,
       recoveryMode: json['recovery_mode'] == 'enrichment_only'
           ? ConversationProcessingRecoveryMode.enrichmentOnly
           : ConversationProcessingRecoveryMode.values.asNameMap()[json['recovery_mode']] ??
-              ConversationProcessingRecoveryMode.none,
+                ConversationProcessingRecoveryMode.none,
       phase: json['phase'],
       genericStatus: json['generic_status'],
       genericVectorStatus: json['generic_vector_status'],
@@ -258,8 +263,9 @@ class TranscriptsResponse {
       deepgram: (json['deepgram'] as List<dynamic>).map((segment) => TranscriptSegment.fromJson(segment)).toList(),
       soniox: (json['soniox'] as List<dynamic>).map((segment) => TranscriptSegment.fromJson(segment)).toList(),
       whisperx: (json['whisperx'] as List<dynamic>).map((segment) => TranscriptSegment.fromJson(segment)).toList(),
-      speechmatics:
-          (json['speechmatics'] as List<dynamic>).map((segment) => TranscriptSegment.fromJson(segment)).toList(),
+      speechmatics: (json['speechmatics'] as List<dynamic>)
+          .map((segment) => TranscriptSegment.fromJson(segment))
+          .toList(),
     );
   }
 }
@@ -315,11 +321,7 @@ Future<bool> assignBulkConversationTranscriptSegments(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/segments/assign-bulk',
     headers: {},
     method: 'PATCH',
-    body: jsonEncode({
-      'segment_ids': segmentIds,
-      'assign_type': assignType,
-      'value': value,
-    }),
+    body: jsonEncode({'segment_ids': segmentIds, 'assign_type': assignType, 'value': value}),
   );
   if (response == null) return false;
   Logger.debug('assignBulkConversationTranscriptSegments: ${response.body}');
@@ -350,47 +352,26 @@ Future<bool> setConversationStarred(String conversationId, bool starred) async {
   return response.statusCode == 200;
 }
 
-Future<bool> setConversationEventsState(
-  String conversationId,
-  List<int> eventsIdx,
-  List<bool> values,
-) async {
-  print(jsonEncode({
-    'events_idx': eventsIdx,
-    'values': values,
-  }));
+Future<bool> setConversationEventsState(String conversationId, List<int> eventsIdx, List<bool> values) async {
+  print(jsonEncode({'events_idx': eventsIdx, 'values': values}));
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/events',
     headers: {},
     method: 'PATCH',
-    body: jsonEncode({
-      'events_idx': eventsIdx,
-      'values': values,
-    }),
+    body: jsonEncode({'events_idx': eventsIdx, 'values': values}),
   );
   if (response == null) return false;
   Logger.debug('setConversationEventsState: ${response.body}');
   return response.statusCode == 200;
 }
 
-Future<bool> setConversationActionItemState(
-  String conversationId,
-  List<int> actionItemsIdx,
-  List<bool> values,
-) async {
-  print(jsonEncode({
-    'items_idx': actionItemsIdx,
-    'values': values,
-    'conversation_id': conversationId,
-  }));
+Future<bool> setConversationActionItemState(String conversationId, List<int> actionItemsIdx, List<bool> values) async {
+  print(jsonEncode({'items_idx': actionItemsIdx, 'values': values, 'conversation_id': conversationId}));
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/action-items',
     headers: {},
     method: 'PATCH',
-    body: jsonEncode({
-      'items_idx': actionItemsIdx,
-      'values': values,
-    }),
+    body: jsonEncode({'items_idx': actionItemsIdx, 'values': values}),
   );
   if (response == null) return false;
   Logger.debug('setConversationActionItemState: ${response.body}');
@@ -398,11 +379,12 @@ Future<bool> setConversationActionItemState(
 }
 
 Future<bool> updateActionItemDescription(
-    String conversationId, String oldDescription, String newDescription, int idx) async {
-  var body = {
-    'old_description': oldDescription,
-    'description': newDescription,
-  };
+  String conversationId,
+  String oldDescription,
+  String newDescription,
+  int idx,
+) async {
+  var body = {'old_description': oldDescription, 'description': newDescription};
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/action-items/$idx',
     headers: {},
@@ -419,10 +401,7 @@ Future<bool> deleteConversationActionItem(String conversationId, ActionItem item
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/action-items',
     headers: {},
     method: 'DELETE',
-    body: jsonEncode({
-      'completed': item.completed,
-      'description': item.description,
-    }),
+    body: jsonEncode({'completed': item.completed, 'description': item.description}),
   );
   if (response == null) return false;
   Logger.debug('deleteConversationActionItem: ${response.body}');
@@ -459,10 +438,7 @@ Future<List<ServerConversation>> sendStorageToBackend(File file, String sdCardDa
 
 Future<SyncLocalFilesResponse> syncLocalFiles(List<File> files) async {
   try {
-    var response = await makeMultipartApiCall(
-      url: '${Env.apiBaseUrl}v1/sync-local-files',
-      files: files,
-    );
+    var response = await makeMultipartApiCall(url: '${Env.apiBaseUrl}v1/sync-local-files', files: files);
 
     if (response.statusCode == 200) {
       Logger.debug('syncLocalFile Response body: ${jsonDecode(response.body)}');
@@ -493,8 +469,12 @@ Future<(List<ServerConversation>, int, int)> searchConversationsServer(
     url: '${Env.apiBaseUrl}v1/conversations/search',
     headers: {},
     method: 'POST',
-    body:
-        jsonEncode({'query': query, 'page': page ?? 1, 'per_page': limit ?? 10, 'include_discarded': includeDiscarded}),
+    body: jsonEncode({
+      'query': query,
+      'page': page ?? 1,
+      'per_page': limit ?? 10,
+      'include_discarded': includeDiscarded,
+    }),
   );
   if (response == null) return (<ServerConversation>[], 0, 0);
   if (response.statusCode == 200) {
@@ -512,9 +492,7 @@ Future<String> testConversationPrompt(String prompt, String conversationId) asyn
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/test-prompt',
     headers: {},
     method: 'POST',
-    body: jsonEncode({
-      'prompt': prompt,
-    }),
+    body: jsonEncode({'prompt': prompt}),
   );
   if (response == null) return '';
   if (response.statusCode == 200) {
@@ -544,12 +522,7 @@ Future<ActionItemsResponse> getActionItems({
     url += '&end_date=${endDate.toIso8601String()}';
   }
 
-  var response = await makeApiCall(
-    url: url,
-    headers: {},
-    method: 'GET',
-    body: '',
-  );
+  var response = await makeApiCall(url: url, headers: {}, method: 'GET', body: '');
 
   if (response == null) return ActionItemsResponse(actionItems: [], hasMore: false);
 
@@ -579,11 +552,7 @@ Future<List<App>> getConversationSuggestedApps(String conversationId) async {
   return [];
 }
 
-Future<bool> updateActionItemStateByMetadata(
-  String conversationId,
-  int itemIndex,
-  bool newState,
-) async {
+Future<bool> updateActionItemStateByMetadata(String conversationId, int itemIndex, bool newState) async {
   return await setConversationActionItemState(conversationId, [itemIndex], [newState]);
 }
 
@@ -616,10 +585,7 @@ class MergeConversationsResponse {
 }
 
 /// Initiate merging of multiple conversations
-Future<MergeConversationsResponse?> mergeConversations(
-  List<String> conversationIds, {
-  bool reprocess = true,
-}) async {
+Future<MergeConversationsResponse?> mergeConversations(List<String> conversationIds, {bool reprocess = true}) async {
   if (conversationIds.length < 2) {
     Logger.debug('mergeConversations: At least 2 conversations required');
     return null;
@@ -629,10 +595,7 @@ Future<MergeConversationsResponse?> mergeConversations(
     url: '${Env.apiBaseUrl}v1/conversations/merge',
     headers: {},
     method: 'POST',
-    body: jsonEncode({
-      'conversation_ids': conversationIds,
-      'reprocess': reprocess,
-    }),
+    body: jsonEncode({'conversation_ids': conversationIds, 'reprocess': reprocess}),
   );
 
   if (response == null) return null;

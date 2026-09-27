@@ -79,6 +79,7 @@ class ProcessConversationRequest(BaseModel):
     generation: Optional[str] = None
     owner_token: Optional[str] = None
     transport_lost: bool = False
+    explicit_keep: bool = True
 
 
 @router.post(
@@ -128,6 +129,8 @@ def process_in_progress_conversation(
         if capture_outcome != 'claimed':
             raise HTTPException(status_code=409, detail="Conversation finalization claim was not acquired")
         capture_finalization_claimed = True
+
+    explicit_keep = request.explicit_keep if request else True
 
     processing_fence_token = f'conversation-processing:{uuid.uuid4()}'
     if is_capture_v2 and request and request.transport_lost:
@@ -226,6 +229,8 @@ def process_in_progress_conversation(
             raise HTTPException(status_code=404, detail="Conversation in progress not found")
 
         conversation = Conversation(**conversation)
+        conversation.explicit_keep = explicit_keep
+        conversation.explicit_keep_requested_at = datetime.now(timezone.utc) if explicit_keep else None
 
         claim_result = conversations_db.claim_initial_conversation_processing(uid, conversation_id)
         claim_status = str(claim_result.get('status') or '')
@@ -238,6 +243,16 @@ def process_in_progress_conversation(
             raise HTTPException(status_code=404, detail="Conversation in progress not found")
         if claim_status not in {'processing_claimed', 'already_completed', 'processing_in_progress'}:
             raise RuntimeError(f"conversation processing claim unavailable: {claim_status}")
+
+        if claim_status == 'processing_claimed':
+            conversations_db.update_conversation(
+                uid,
+                conversation.id,
+                {
+                    'explicit_keep': conversation.explicit_keep,
+                    'explicit_keep_requested_at': conversation.explicit_keep_requested_at,
+                },
+            )
 
         processing_fence_held = not redis_db.release_capture_commit_lease(uid, processing_fence_token)
 
@@ -257,7 +272,7 @@ def process_in_progress_conversation(
             uid,
             conversation.language,
             conversation,
-            force_process=True,
+            force_process=explicit_keep,
             _claim_already_held=claim_status == 'processing_claimed',
             _initial_processing_claim_token=str(claim_result.get('claim_token') or '') or None,
             capture_finalization=(

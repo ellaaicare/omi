@@ -61,6 +61,8 @@ capture_protocol_version = 2
 capture_finalization_lost = 'capture_finalization_lost'
 
 _STOCK_SUMMARY_RESULT_UPDATE_FIELDS = {
+    'discard_classifier_provenance',
+    'discard_reason',
     'discarded',
     'external_data',
     'geolocation',

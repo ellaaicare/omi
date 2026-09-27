@@ -103,6 +103,7 @@ ROUTE_GROUPS = (
         "firebase_exact_owner",
         "staged_public",
         ("GET", "/v1/ella/chat/history", "ella_chat_history"),
+        ("GET", "/v1/ella/chat/turns/{client_message_id}", "ella_chat_turn_lookup"),
     ),
     _group(
         "corrections",
