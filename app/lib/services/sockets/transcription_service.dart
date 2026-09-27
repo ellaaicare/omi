@@ -7,6 +7,7 @@ import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/message_event.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
+import 'package:omi/ella/services/ella_audio_emission_gate.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/models/custom_stt_config.dart';
 import 'package:omi/models/stt_provider.dart';
@@ -302,8 +303,10 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
     return;
   }
 
-  bool get _hasProtectedSendAuthority =>
-      _aiConsentLease?.hasCurrentAuthority ?? SharedPreferencesUtil().aiConsentAccepted;
+  bool get _hasProtectedSendAuthority => mayEmitAudio(
+        boundUid: SharedPreferencesUtil().uid,
+        hasConsentAuthority: _aiConsentLease?.hasCurrentAuthority ?? SharedPreferencesUtil().aiConsentAccepted,
+      );
 
   @override
   void onClosed([int? closeCode]) {
