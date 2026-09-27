@@ -871,6 +871,10 @@ def send_to_scanner(
     if not segments:
         return None
 
+    if not SCANNER_WEBHOOK_KEY:
+        print("Scanner authority unavailable", flush=True)
+        return None
+
     timeout = timeout or ELLA_CONFIG.scanner_timeout
     trace_id = _trace_id_for(str(conversation_id))
 
@@ -911,10 +915,6 @@ def send_to_scanner(
             f"preview={scanner_payload_preview(scanner_segments)}",
             flush=True,
         )
-        return None
-
-    if not SCANNER_WEBHOOK_KEY:
-        print(f"📡 Scanner authority unavailable trace={trace_id}", flush=True)
         return None
 
     scanner_segments, batch_metadata = _apply_ambient_batching(

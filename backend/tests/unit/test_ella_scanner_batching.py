@@ -238,7 +238,13 @@ def test_scanner_payload_preserves_stt_identity_and_latency_metadata(monkeypatch
 def test_scanner_fails_before_webhook_egress_without_authority(monkeypatch):
     posts = []
     wake_acks = []
+    echo_inspections = []
     monkeypatch.setattr(scanner, "_enqueue_wake_ack", lambda *args, **kwargs: wake_acks.append((args, kwargs)))
+    monkeypatch.setattr(
+        scanner,
+        "should_suppress_guardian_echo",
+        lambda *args, **kwargs: echo_inspections.append((args, kwargs)) or True,
+    )
     monkeypatch.setattr(
         scanner,
         "_apply_ambient_batching",
@@ -259,4 +265,5 @@ def test_scanner_fails_before_webhook_egress_without_authority(monkeypatch):
 
     assert status is None
     assert wake_acks == []
+    assert echo_inspections == []
     assert posts == []
