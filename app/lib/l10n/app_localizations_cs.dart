@@ -10065,4 +10065,7 @@ class AppLocalizationsCs extends AppLocalizations {
 
   @override
   String get aiConsentNeededReviewBody => 'Ella will wait until you review AI permission.';
+
+  @override
+  String get transcriptionPausedReconnecting => 'Stále se nahrává — připojování k přepisu…';
 }

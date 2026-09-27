@@ -9936,4 +9936,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get aiConsentNeededReviewBody => 'Ella will wait until you review AI permission.';
+
+  @override
+  String get transcriptionPausedReconnecting => '録音は継続中 — 文字起こしに再接続しています…';
 }

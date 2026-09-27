@@ -10102,4 +10102,7 @@ class AppLocalizationsBg extends AppLocalizations {
 
   @override
   String get aiConsentNeededReviewBody => 'Ella will wait until you review AI permission.';
+
+  @override
+  String get transcriptionPausedReconnecting => 'Все още се записва — свързване с транскрипцията…';
 }

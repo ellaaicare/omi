@@ -10093,4 +10093,7 @@ class AppLocalizationsMs extends AppLocalizations {
 
   @override
   String get aiConsentNeededReviewBody => 'Ella will wait until you review AI permission.';
+
+  @override
+  String get transcriptionPausedReconnecting => 'Masih merakam — menyambung semula ke transkripsi…';
 }

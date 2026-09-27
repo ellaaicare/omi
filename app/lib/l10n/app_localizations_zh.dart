@@ -9926,4 +9926,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get aiConsentNeededReviewBody => 'Ella will wait until you review AI permission.';
+
+  @override
+  String get transcriptionPausedReconnecting => '仍在录音 — 正在重新连接转录…';
 }

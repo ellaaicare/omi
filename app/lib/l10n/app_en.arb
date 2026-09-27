@@ -11079,5 +11079,6 @@
   "diagnosticsWsRate": "Transcription upload rate",
   "ellaServerUnreachableBanner": "Ella can't reach the server right now. Messages will send when you're back online.",
   "aiConsentNeededReview": "AI permission needed · Review",
-  "aiConsentNeededReviewBody": "Ella will wait until you review AI permission."
+  "aiConsentNeededReviewBody": "Ella will wait until you review AI permission.",
+  "transcriptionPausedReconnecting": "Still recording — reconnecting to transcription…"
 }

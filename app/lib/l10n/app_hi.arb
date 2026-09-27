@@ -2600,5 +2600,6 @@
   "ellaAlertChannelsEnabled": "Enabled",
   "ellaAlertChannelsDisabled": "Disabled",
   "ellaGuardianOffTooltip": "Guardian OFF: Audio and non-critical check-ins disabled. Emergency alerts to your contact remain active.",
-  "ellaGuardianOnTooltip": "Guardian ON: Audio monitoring and care features active."
+  "ellaGuardianOnTooltip": "Guardian ON: Audio monitoring and care features active.",
+  "transcriptionPausedReconnecting": "अभी भी रिकॉर्ड हो रहा है — ट्रांसक्रिप्शन से पुनः कनेक्ट हो रहा है…"
 }

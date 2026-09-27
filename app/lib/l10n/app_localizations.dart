@@ -18608,6 +18608,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Ella will wait until you review AI permission.'**
   String get aiConsentNeededReviewBody;
+
+  /// No description provided for @transcriptionPausedReconnecting.
+  ///
+  /// In en, this message translates to:
+  /// **'Still recording — reconnecting to transcription…'**
+  String get transcriptionPausedReconnecting;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {
