@@ -11,7 +11,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
 import requests
 
@@ -400,8 +400,8 @@ def credible_emergency_reason(text: str) -> Optional[str]:
     return None
 
 
-def _credible_emergency_match_for_segments(segments: List[dict]) -> tuple[Optional[str], int, int]:
-    """Return the first credible reason and its contiguous speaker-group bounds."""
+def _iter_credible_emergency_matches_for_segments(segments: List[dict]) -> Iterator[tuple[str, int, int]]:
+    """Yield every credible reason and its contiguous speaker-group bounds, in order."""
     active_speaker: Optional[str] = None
     active_text: list[str] = []
     active_start = 0
@@ -420,7 +420,7 @@ def _credible_emergency_match_for_segments(segments: List[dict]) -> tuple[Option
         if active_speaker is not None and speaker != active_speaker:
             reason = match_active_text()
             if reason:
-                return reason, active_start, index
+                yield reason, active_start, index
             active_text = []
             active_start = index
         elif active_speaker is None:
@@ -430,7 +430,13 @@ def _credible_emergency_match_for_segments(segments: List[dict]) -> tuple[Option
 
     reason = match_active_text()
     if reason:
-        return reason, active_start, len(segments)
+        yield reason, active_start, len(segments)
+
+
+def _credible_emergency_match_for_segments(segments: List[dict]) -> tuple[Optional[str], int, int]:
+    """Return the first credible reason and its contiguous speaker-group bounds."""
+    for reason, start, end in _iter_credible_emergency_matches_for_segments(segments):
+        return reason, start, end
     return None, -1, -1
 
 
@@ -457,19 +463,21 @@ def _credible_emergency_match_with_context(
     context_segments: List[dict], current_segments: List[dict]
 ) -> tuple[Optional[str], List[dict], List[dict]]:
     """Return a reason and only the retained/current segments that authorized it."""
-    current_reason, current_start, current_end = _credible_emergency_match_for_segments(current_segments)
-    if current_reason:
-        matched_current_segments = current_segments[current_start:current_end]
+    current_matches = list(_iter_credible_emergency_matches_for_segments(current_segments))
+    if current_matches:
         context_speaker = _single_explicit_speaker(context_segments)
-        current_speaker = _single_explicit_speaker(matched_current_segments)
         context_text = " ".join(str(segment.get("text") or "") for segment in context_segments)
-        if (
-            context_speaker is not None
-            and context_speaker == current_speaker
-            and _CONTEXTUAL_REPORTED_SPEECH_SUFFIX.search(context_text)
-        ):
-            return None, [], []
-        return current_reason, [], matched_current_segments
+        for current_reason, current_start, current_end in current_matches:
+            matched_current_segments = current_segments[current_start:current_end]
+            current_speaker = _single_explicit_speaker(matched_current_segments)
+            if (
+                context_speaker is not None
+                and context_speaker == current_speaker
+                and _CONTEXTUAL_REPORTED_SPEECH_SUFFIX.search(context_text)
+            ):
+                continue
+            return current_reason, [], matched_current_segments
+        return None, [], []
     if not context_segments or credible_emergency_reason_for_segments(context_segments):
         return None, [], []
 
