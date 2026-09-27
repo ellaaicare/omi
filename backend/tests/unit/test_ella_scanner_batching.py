@@ -631,6 +631,61 @@ def test_credible_emergency_bypass_rejects_negative_or_absent_subjects():
     ) == (None, False)
 
 
+def test_credible_emergency_match_with_context_scans_all_current_speaker_groups():
+    # Disqualified same-speaker group first, then an independent qualifying group:
+    # the second group must still be found instead of short-circuiting on the first.
+    assert scanner.credible_emergency_reason_with_context(
+        [{"text": "She said.", "speaker": "SPEAKER_1"}],
+        [
+            {"text": "I cannot breathe", "speaker": "SPEAKER_1"},
+            {"text": "I cannot breathe", "speaker": "SPEAKER_2"},
+        ],
+    ) == ("breathing", False)
+
+    # All current groups disqualified by their own speaker's retained context => no match.
+    assert scanner.credible_emergency_reason_with_context(
+        [{"text": "She said.", "speaker": "SPEAKER_1"}],
+        [{"text": "I cannot breathe", "speaker": "SPEAKER_1"}],
+    ) == (None, False)
+
+    # Qualifying group first: behavior is unchanged from before the fix.
+    assert scanner.credible_emergency_reason_with_context(
+        [{"text": "She said.", "speaker": "SPEAKER_1"}],
+        [
+            {"text": "I cannot breathe", "speaker": "SPEAKER_2"},
+            {"text": "I cannot breathe", "speaker": "SPEAKER_1"},
+        ],
+    ) == ("breathing", False)
+
+
+def test_scanner_off_mode_dispatches_independent_speaker_after_reported_speech_group(monkeypatch):
+    posts = []
+
+    def fake_post(_url, json, timeout):
+        posts.append(json)
+        return _FakeResponse(200)
+
+    _disable_trace(monkeypatch)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner.requests, "post", fake_post)
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-multigroup-boundary",
+        [
+            {"text": "I cannot breathe", "speaker": "SPEAKER_1"},
+            {"text": "I cannot breathe", "speaker": "SPEAKER_2"},
+        ],
+        recent_segments=[{"text": "She said.", "speaker": "SPEAKER_1"}],
+        guardian_mode="off",
+    )
+
+    assert status == 200
+    assert len(posts) == 1
+    assert [segment["speaker"] for segment in posts[0]["segments"]] == ["SPEAKER_2"]
+    assert [segment["text"] for segment in posts[0]["segments"]] == ["I cannot breathe"]
+
+
 def test_scanner_off_mode_does_not_join_emergency_phrase_across_segments(monkeypatch):
     posts = []
     _disable_trace(monkeypatch)
