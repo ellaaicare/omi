@@ -48,6 +48,7 @@ extension FlutterError: Error {}
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     GeneratedPluginRegistrant.register(with: self)
+    EllaUpstreamCaptureRegistration.registerIfEnabled()
     clearScopedGuardianNotifications()
 
     // Observe route state without taking ownership of the system audio session.
