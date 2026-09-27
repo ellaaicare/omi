@@ -144,6 +144,10 @@ _CREDIBLE_HELP_PATTERN = re.compile(
     r"^\s*(?:please\s+)?(?:help\s+me|i\s+need\s+help)(?:\s+(?:now|please|right\s+now))?[.!?]*\s*$",
     re.IGNORECASE,
 )
+_CREDIBLE_HELP_WAKE_PREFIX_PATTERN = re.compile(
+    r"^\s*(?:(?:hey|hi|hello)\s+)?ella[\s,.:;!?-]*",
+    re.IGNORECASE,
+)
 _ALLOWED_POLICY_DECISIONS = {"notify_now", "ask_user_first", "queue_for_report", "log_only", "suppress"}
 _ALLOWED_POLICY_TARGETS = {"user", "emergency_caregiver"}
 _ALLOWED_POLICY_CHANNELS = {
@@ -154,10 +158,10 @@ _ALLOWED_POLICY_CHANNELS = {
     "twilio_voice",
     "ios_voice_call",
 }
-_ALLOWED_POLICY_PRIORITIES = {"critical", "high", "medium", "low", "cyborg", "daily_recap"}
+_ALLOWED_POLICY_PRIORITIES = {"urgent", "critical", "high", "medium", "low", "cyborg", "daily_recap"}
 _MAX_POLICY_DELIVERY_STEPS = 8
 _DURATION_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)(?P<unit>ms|s|m|h)")
-_SCANNER_BATCHES: dict[tuple[str, str, str], dict] = {}
+_SCANNER_BATCHES: dict[tuple[str, str, str, str], dict] = {}
 _SCANNER_RATE_LIMIT_UNTIL = {
     "global": 0.0,
     "users": {},
@@ -266,7 +270,8 @@ def credible_emergency_reason(text: str) -> Optional[str]:
     for reason, pattern in _CREDIBLE_EMERGENCY_PATTERNS:
         if pattern.search(candidate):
             return reason
-    if _CREDIBLE_HELP_PATTERN.search(candidate):
+    help_candidate = _CREDIBLE_HELP_WAKE_PREFIX_PATTERN.sub("", candidate, count=1)
+    if _CREDIBLE_HELP_PATTERN.search(help_candidate):
         return "explicit_help"
     return None
 
@@ -491,8 +496,13 @@ def scanner_model_name() -> str:
     )
 
 
-def _scanner_batch_key(uid: str, conversation_id: str, device_type: str) -> tuple[str, str, str]:
-    return (str(uid), str(conversation_id), str(device_type or "omi"))
+def _scanner_batch_key(
+    uid: str,
+    conversation_id: str,
+    device_type: str,
+    traffic_class: str,
+) -> tuple[str, str, str, str]:
+    return (str(uid), str(conversation_id), str(device_type or "omi"), str(traffic_class))
 
 
 def _new_ambient_batch(now: float) -> dict:
@@ -612,6 +622,7 @@ def _apply_ambient_batching(
     scanner_segments: List[dict],
     device_type: str,
     trace_id: str,
+    traffic_class: str,
     *,
     wake_prefix_recent: Optional[bool] = None,
     now: Optional[float] = None,
@@ -625,6 +636,7 @@ def _apply_ambient_batching(
         "batch_target_seconds": SCANNER_AMBIENT_BATCH_SECONDS,
         "batch_target_words": SCANNER_AMBIENT_BATCH_WORDS,
         "immediate_reason": immediate_reason,
+        "traffic_class": traffic_class,
     }
 
     if not SCANNER_AMBIENT_BATCHING_ENABLED:
@@ -645,7 +657,7 @@ def _apply_ambient_batching(
             "rate_limit_status": "bypassed_for_immediate",
         }
 
-    key = _scanner_batch_key(uid, conversation_id, device_type)
+    key = _scanner_batch_key(uid, conversation_id, device_type, traffic_class)
     with _SCANNER_STATE_LOCK:
         batch = _SCANNER_BATCHES.get(key)
         if not batch:
@@ -1194,12 +1206,20 @@ def send_to_scanner(
         )
         return None
 
+    normalized_traffic_class = str(traffic_class or "live").strip().lower()
+    if normalized_traffic_class not in {"live", "dry_run", "synthetic"}:
+        normalized_traffic_class = "dry_run"
+    if dry_run:
+        normalized_traffic_class = "dry_run"
+    effective_dry_run = bool(dry_run or normalized_traffic_class != "live")
+
     scanner_segments, batch_metadata = _apply_ambient_batching(
         uid,
         str(conversation_id),
         scanner_segments,
         device_type,
         trace_id,
+        normalized_traffic_class,
         wake_prefix_recent=wake_prefix_recent,
     )
     if not scanner_segments:
@@ -1223,12 +1243,6 @@ def send_to_scanner(
         )
         return None
 
-    normalized_traffic_class = str(traffic_class or "live").strip().lower()
-    if normalized_traffic_class not in {"live", "dry_run", "synthetic"}:
-        normalized_traffic_class = "dry_run"
-    if dry_run:
-        normalized_traffic_class = "dry_run"
-    effective_dry_run = bool(dry_run or normalized_traffic_class != "live")
     if not effective_dry_run:
         _enqueue_wake_ack(uid, str(conversation_id), trace_id, scanner_segments)
 

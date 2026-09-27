@@ -96,7 +96,7 @@ def test_emergency_bypasses_ambient_batching(monkeypatch):
                         {
                             "target": "user",
                             "channel": "guardian_audio",
-                            "priority": "critical",
+                            "priority": "urgent",
                             "untrusted": "drop-me",
                         }
                     ],
@@ -132,7 +132,7 @@ def test_emergency_bypasses_ambient_batching(monkeypatch):
     assert scanner_payload["deterministic_emergency"]["status"] == "planned"
     assert scanner_payload["deterministic_emergency"]["plan"]["decision"] == "notify_now"
     assert scanner_payload["deterministic_emergency"]["plan"]["delivery_plan"] == [
-        {"target": "user", "channel": "guardian_audio", "priority": "critical"}
+        {"target": "user", "channel": "guardian_audio", "priority": "urgent"}
     ]
 
 
@@ -233,6 +233,80 @@ def test_synthetic_wake_traffic_never_enqueues_audible_ack(monkeypatch):
     assert acks == []
     assert posts[-1][1]["traffic_class"] == "synthetic"
     assert posts[-1][1]["dry_run"] is True
+
+
+def test_live_and_synthetic_ambient_batches_are_partitioned_before_buffering(monkeypatch):
+    posts = []
+
+    def fake_post(_url, json, **_kwargs):
+        posts.append(json)
+        return _FakeResponse(200)
+
+    _disable_trace(monkeypatch)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner.requests, "post", fake_post)
+    monkeypatch.setattr(scanner, "SCANNER_AMBIENT_BATCH_SECONDS", 999)
+    monkeypatch.setattr(scanner, "SCANNER_AMBIENT_BATCH_WORDS", 4)
+
+    live_first = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-mixed-traffic",
+        [{"text": "live one", "speaker": "SPEAKER_1"}],
+    )
+    synthetic = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-mixed-traffic",
+        [{"text": "synthetic two three", "speaker": "SPEAKER_1"}],
+        traffic_class="synthetic",
+    )
+    live_second = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-mixed-traffic",
+        [{"text": "live four", "speaker": "SPEAKER_1"}],
+    )
+
+    assert live_first is None
+    assert synthetic is None
+    assert live_second == 200
+    assert len(posts) == 1
+    assert posts[0]["traffic_class"] == "live"
+    assert posts[0]["dry_run"] is False
+    assert [segment["text"] for segment in posts[0]["segments"]] == ["live one", "live four"]
+
+
+@pytest.mark.parametrize("text", ["Hey Ella, help me", "Ella, I need help now"])
+def test_wake_prefixed_explicit_help_keeps_deterministic_policy_path(monkeypatch, text):
+    posts = []
+
+    def fake_post(url, json, **_kwargs):
+        posts.append((url, json))
+        if url == scanner.ESCALATION_EVALUATE_URL:
+            return _FakeResponse(
+                200,
+                payload={
+                    "ok": True,
+                    "trace_id": "conversation-wake-help",
+                    "decision": "log_only",
+                    "delivery_plan": [],
+                },
+            )
+        return _FakeResponse(503)
+
+    _disable_trace(monkeypatch)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner, "ESCALATION_WEBHOOK_KEY", "configured-escalation-key")
+    monkeypatch.setattr(scanner.requests, "post", fake_post)
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-wake-help",
+        [{"text": text, "speaker": "SPEAKER_1"}],
+    )
+
+    assert status == 503
+    assert posts[0][0] == scanner.ESCALATION_EVALUATE_URL
+    assert posts[1][1]["deterministic_emergency"]["reason"] == "explicit_help"
+    assert posts[1][1]["deterministic_emergency"]["status"] == "planned"
 
 
 @pytest.mark.parametrize(
