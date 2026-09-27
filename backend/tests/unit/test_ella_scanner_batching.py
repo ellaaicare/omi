@@ -1,3 +1,8 @@
+import sys
+import types
+
+import pytest
+
 from utils.ella import scanner
 
 
@@ -10,6 +15,7 @@ class _FakeResponse:
 def _disable_trace(monkeypatch):
     monkeypatch.setattr(scanner, "_log_trace_event", lambda *args, **kwargs: None)
     monkeypatch.setattr(scanner, "_enqueue_wake_ack", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scanner, "_load_authoritative_guardian_mode", lambda _uid: ("active_support", None))
 
 
 def setup_function():
@@ -38,6 +44,7 @@ def test_guardian_trace_service_caller_uses_scoped_key(monkeypatch):
         "X-Guardian-Key": "configured-guardian-service-key",
         "X-Ella-Subject-Uid": "uid-a",
     }
+    assert posts[0][1]["timeout"] == scanner.GUARDIAN_TRACE_LOG_TIMEOUT_S
 
 
 def test_guardian_trace_service_caller_fails_closed_without_configured_key(monkeypatch):
@@ -221,3 +228,115 @@ def test_scanner_payload_preserves_stt_identity_and_latency_metadata(monkeypatch
     assert posts[0]["segments"][0]["person_id"] == "person-1"
     assert posts[0]["segments"][0]["speech_profile_processed"] is True
     assert posts[0]["latency"]["first_audio_frame_at"] == "2026-05-09T18:00:00+00:00"
+    assert posts[0]["guardian_mode"] == "active_support"
+    assert posts[0]["guardian_mode_source"] == "users.guardian_mode"
+    assert posts[0]["guardian_mode_enabled"] is True
+    assert posts[0]["emergency_only_dispatch"] is False
+
+
+@pytest.mark.parametrize("mode", [None, "", "OFF", "none", "disabled", "null", "guardian_off"])
+def test_scanner_suppresses_all_off_equivalent_modes(monkeypatch, mode):
+    posts = []
+    _disable_trace(monkeypatch)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner.requests, "post", lambda *args, **kwargs: posts.append((args, kwargs)))
+    monkeypatch.setattr(scanner, "_load_authoritative_guardian_mode", lambda _uid: (mode, None))
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-off",
+        [{"text": "Hey Ella, are you there?", "speaker": "SPEAKER_1"}],
+    )
+
+    assert status is None
+    assert posts == []
+
+
+def test_scanner_preserves_emergency_only_dispatch_when_guardian_is_off(monkeypatch):
+    posts = []
+
+    def fake_post(_url, json, timeout):
+        posts.append(json)
+        return _FakeResponse(200)
+
+    _disable_trace(monkeypatch)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner.requests, "post", fake_post)
+    monkeypatch.setattr(scanner, "_load_authoritative_guardian_mode", lambda _uid: ("off", None))
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-emergency-off",
+        [{"text": "I cannot breathe and need an ambulance", "speaker": "SPEAKER_1"}],
+    )
+
+    assert status == 200
+    assert len(posts) == 1
+    assert posts[0]["guardian_mode"] == "off"
+    assert posts[0]["guardian_mode_enabled"] is False
+    assert posts[0]["emergency_only_dispatch"] is True
+
+
+def test_scanner_fails_closed_when_mode_authority_is_unavailable(monkeypatch):
+    posts = []
+    trace_events = []
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner.requests, "post", lambda *args, **kwargs: posts.append((args, kwargs)))
+    monkeypatch.setattr(scanner, "_enqueue_wake_ack", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scanner, "_load_authoritative_guardian_mode", lambda _uid: ("off", "lookup_unavailable"))
+    monkeypatch.setattr(scanner, "_log_trace_event", lambda **kwargs: trace_events.append(kwargs))
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-unavailable",
+        [{"text": "Hey Ella, are you there?", "speaker": "SPEAKER_1"}],
+    )
+
+    assert status is None
+    assert posts == []
+    assert trace_events[-1]["stage"] == "scanner_mode_authority"
+    assert trace_events[-1]["status"] == "error"
+    assert trace_events[-1]["metadata"] == {"reason": "lookup_unavailable"}
+
+
+@pytest.mark.parametrize("mode", [None, "", "OFF", "none", "disabled", "null", "guardian_off"])
+def test_direct_wake_ack_skips_all_off_equivalent_modes(monkeypatch, mode):
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, *_args):
+            return None
+
+        def fetchone(self):
+            return (mode,)
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return Cursor()
+
+        def close(self):
+            return None
+
+    monkeypatch.setitem(sys.modules, "psycopg2", types.SimpleNamespace(connect=lambda **_kwargs: Connection()))
+
+    result = scanner._insert_wake_ack_direct(
+        "uid-1",
+        "trace-1",
+        {
+            "id": "wake-1",
+            "url": "https://example.invalid/wake.mp3",
+            "metadata": {},
+        },
+    )
+
+    assert result == {"method": "direct_db", "status": "skipped", "reason": "guardian_mode_off"}

@@ -172,6 +172,9 @@ class _AiConsentSyncCheckRejected(RuntimeError):
         self.authority_error = authority_error
 
 
+_SCANNER_DISPATCH_TASKS: set[asyncio.Task] = set()
+
+
 class AiConsentSessionAuthority:
     """Bound provider egress to a periodically refreshed session authority."""
 
@@ -302,6 +305,38 @@ async def _run_sync_provider_with_current_consent(
         return await run_in_threadpool(invoke)
     except _AiConsentSyncCheckRejected as exc:
         raise await reject_consent(exc.authority_error) from exc
+
+
+async def _dispatch_scanner_with_current_consent(
+    subject_uid: str,
+    consent_checker: Callable[[str], str],
+    reject_consent: Callable[[HTTPException], Awaitable[AiConsentWebSocketRejected]],
+    provider_call: Callable,
+    *,
+    on_consent_rejected: Callable[[], None],
+    on_failure: Callable[[], None],
+    provider_kwargs: dict,
+) -> None:
+    try:
+        await _run_sync_provider_with_current_consent(
+            subject_uid,
+            consent_checker,
+            reject_consent,
+            provider_call,
+            **provider_kwargs,
+        )
+    except AiConsentWebSocketRejected:
+        on_consent_rejected()
+    except Exception:
+        on_failure()
+
+
+def _schedule_scanner_dispatch(coroutine: Awaitable[None]) -> asyncio.Task:
+    """Keep best-effort scanner work alive without delaying transcript delivery."""
+    task = safe_create_task(coroutine)
+    _SCANNER_DISPATCH_TASKS.add(task)
+    task.add_done_callback(_SCANNER_DISPATCH_TASKS.discard)
+    return task
 
 
 async def _require_current_ai_consent_for_websocket(
@@ -2864,30 +2899,37 @@ async def _stream_handler(
                 try:
                     from utils.ella import send_to_scanner
 
-                    await _run_sync_provider_with_current_consent(
-                        uid,
-                        assert_current_ai_consent,
-                        reject_stt_egress,
-                        send_to_scanner,
-                        uid=uid,
-                        conversation_id=batch_conversation_id,
-                        segments=[s.dict() for s in transcript_segments],
-                        latency_metadata=_latency_metadata(),
+                    _schedule_scanner_dispatch(
+                        _dispatch_scanner_with_current_consent(
+                            uid,
+                            assert_current_ai_consent,
+                            reject_stt_egress,
+                            send_to_scanner,
+                            on_consent_rejected=lambda: _delivery_log(
+                                "scanner_dispatch_suppressed",
+                                terminal_reason="ai_consent_egress_rejected",
+                            ),
+                            on_failure=lambda: _delivery_log(
+                                "scanner_dispatch_failed",
+                                failure_class="unexpected",
+                            ),
+                            provider_kwargs={
+                                "uid": uid,
+                                "conversation_id": batch_conversation_id,
+                                "segments": [s.dict() for s in transcript_segments],
+                                "latency_metadata": _latency_metadata(),
+                            },
+                        )
                     )
                     if first_transcript_dispatched_at is None:
                         first_transcript_dispatched_at = time.time()
                         _latency_log(
-                            "transcript_dispatched",
+                            "scanner_dispatch_queued",
                             dispatch_target="scanner",
                             transcript_segment_count=len(transcript_segments),
                             since_first_audio_ms=_elapsed_ms(first_audio_frame_at, first_transcript_dispatched_at),
                             since_first_stt_result_ms=_elapsed_ms(first_stt_result_at, first_transcript_dispatched_at),
                         )
-                except AiConsentWebSocketRejected:
-                    _delivery_log(
-                        "scanner_dispatch_suppressed",
-                        terminal_reason="ai_consent_egress_rejected",
-                    )
                 except ImportError:
                     pass
 

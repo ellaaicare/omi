@@ -395,17 +395,27 @@ def test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary():
     assert stream_source.count("await send_pusher_payload(data)") == 5
     assert "lambda: stt_egress_consent_guard(refresh=True)" in stream_source
     assert "segment_buffers.clear()" in stream_source
-    assert stream_source.count("await _run_sync_provider_with_current_consent(") == 3
+    assert stream_source.count("await _run_sync_provider_with_current_consent(") == 2
+    assert "_schedule_scanner_dispatch(" in stream_source
+    assert "_dispatch_scanner_with_current_consent(" in stream_source
+    assert stream_source.index("_schedule_scanner_dispatch(") < stream_source.index(
+        "await websocket.send_json([segment.dict() for segment in updated_segments])"
+    )
     translate_source = _function_source(BACKEND / "routers" / "transcribe.py", "translate")
     speaker_source = _function_source(BACKEND / "routers" / "transcribe.py", "_match_speaker_embedding")
-    scanner_source = _function_source(BACKEND / "routers" / "transcribe.py", "stream_transcript_process")
     for source, provider_name in (
         (translate_source, "translation_service.translate_text_by_sentence"),
         (speaker_source, "extract_embedding_from_bytes"),
-        (scanner_source, "send_to_scanner"),
     ):
         assert source.index("_run_sync_provider_with_current_consent(") < source.rindex(provider_name)
         assert source.index("assert_current_ai_consent") < source.rindex(provider_name)
+    scanner_source = _function_source(
+        BACKEND / "routers" / "transcribe.py",
+        "_dispatch_scanner_with_current_consent",
+    )
+    assert "await _run_sync_provider_with_current_consent(" in scanner_source
+    assert "except AiConsentWebSocketRejected" in scanner_source
+    assert "except Exception" in scanner_source
     assert "audio_bytes_send(data, last_audio_received_time)" in stream_source
     assert "except AiConsentWebSocketRejected" in stream_source
     assert "not ai_consent_egress_rejected.is_set()" in stream_source

@@ -36,6 +36,10 @@ GUARDIAN_WAKE_ACK_AUDIO_URL = os.getenv(
 )
 GUARDIAN_WAKE_ACK_TIMEOUT_S = float(os.getenv("ELLA_GUARDIAN_WAKE_ACK_TIMEOUT_S", "2.0"))
 GUARDIAN_WAKE_ACK_DIRECT_DB = os.getenv("ELLA_GUARDIAN_WAKE_ACK_DIRECT_DB", "true").lower() == "true"
+GUARDIAN_TRACE_LOG_TIMEOUT_S = min(
+    5.0,
+    max(0.25, float(os.getenv("ELLA_GUARDIAN_TRACE_LOG_TIMEOUT_S", "2.0"))),
+)
 WAKE_WORD_PREFIX_MAX_WORDS = 4
 WAKE_WORD_PENDING_WINDOW_S = float(os.getenv("ELLA_WAKE_WORD_PENDING_WINDOW_S", "12.0"))
 SCANNER_CONTEXT_WINDOW_S = float(os.getenv("ELLA_SCANNER_CONTEXT_WINDOW_S", "12.0"))
@@ -118,6 +122,16 @@ _SCANNER_RATE_LIMIT_UNTIL = {
     "users": {},
 }
 _SCANNER_STATE_LOCK = threading.Lock()
+_GUARDIAN_OFF_MODES = {"", "off", "none", "disabled", "null", "guardian_off"}
+_GUARDIAN_ACTIVE_MODES = {
+    "active_support",
+    "emergency_only",
+    "memory_support",
+    "maximum_awareness",
+    "cyborg",
+    "chatbot",
+    "demo",
+}
 
 
 def _trace_id_for(conversation_id: str) -> str:
@@ -130,6 +144,55 @@ def _trace_id_for(conversation_id: str) -> str:
 
 def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())).strip()
+
+
+def _normalize_guardian_mode(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in _GUARDIAN_OFF_MODES:
+        return "off"
+    if normalized in {"active", "support"}:
+        return "active_support"
+    if normalized in {"emergency", "alert", "alerts_only"}:
+        return "emergency_only"
+    if normalized in {"memory"}:
+        return "memory_support"
+    if normalized in {"maximum", "max_awareness", "max"}:
+        return "maximum_awareness"
+    if normalized in {"chat"}:
+        return "chatbot"
+    return normalized
+
+
+def _load_authoritative_guardian_mode(uid: str) -> tuple[str, Optional[str]]:
+    """Read the single Whispers mode authority without exposing database errors."""
+    try:
+        import psycopg2
+    except Exception:
+        return "off", "driver_unavailable"
+
+    conn = None
+    try:
+        conn = psycopg2.connect(
+            host=ELLA_POSTGRES_HOST,
+            port=ELLA_POSTGRES_PORT,
+            user=ELLA_POSTGRES_USER,
+            password=ELLA_POSTGRES_PASSWORD,
+            dbname=ELLA_POSTGRES_DATABASE,
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT guardian_mode FROM users WHERE omi_uid = %s",
+                (uid,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return "off", "user_not_found"
+        return _normalize_guardian_mode(row[0]), None
+    except Exception:
+        return "off", "lookup_unavailable"
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _word_count(text: str) -> int:
@@ -636,7 +699,7 @@ def _log_trace_event(
                 "metadata": metadata or {},
             },
             headers={"X-Guardian-Key": GUARDIAN_WEBHOOK_KEY, "X-Ella-Subject-Uid": uid},
-            timeout=0.25,
+            timeout=GUARDIAN_TRACE_LOG_TIMEOUT_S,
         )
     except Exception:
         pass
@@ -788,8 +851,8 @@ def _insert_wake_ack_direct(uid: str, trace_id: str, payload: dict) -> dict:
                     (uid,),
                 )
                 row = cur.fetchone()
-                mode = str(row[0] if row and row[0] is not None else "").strip().lower()
-                if mode == "off":
+                mode = _normalize_guardian_mode(row[0] if row else None)
+                if mode not in _GUARDIAN_ACTIVE_MODES:
                     return {"method": "direct_db", "status": "skipped", "reason": "guardian_mode_off"}
 
                 cur.execute(
@@ -845,6 +908,7 @@ def send_to_scanner(
     scanner_window_text: Optional[str] = None,
     wake_prefix_recent: Optional[bool] = None,
     latency_metadata: Optional[dict] = None,
+    guardian_mode: Optional[str] = None,
 ) -> Optional[int]:
     """
     Send transcript segments to Ella scanner agent.
@@ -888,6 +952,34 @@ def send_to_scanner(
     ]
 
     if not scanner_segments:
+        return None
+
+    authoritative_mode = _normalize_guardian_mode(guardian_mode)
+    mode_error = None
+    if guardian_mode is None:
+        authoritative_mode, mode_error = _load_authoritative_guardian_mode(uid)
+    if mode_error is not None:
+        _log_trace_event(
+            trace_id=trace_id,
+            uid=uid,
+            stage="scanner_mode_authority",
+            status="error",
+            metadata={"reason": mode_error},
+        )
+        print(f"Scanner dispatch skipped: Guardian mode authority {mode_error}", flush=True)
+        return None
+    guardian_mode_enabled = authoritative_mode in _GUARDIAN_ACTIVE_MODES
+    emergency_only_dispatch = not guardian_mode_enabled and contains_emergency_phrase(
+        _combined_segment_text(scanner_segments)
+    )
+    if not guardian_mode_enabled and not emergency_only_dispatch:
+        _log_trace_event(
+            trace_id=trace_id,
+            uid=uid,
+            stage="scanner_mode_authority",
+            status="skipped",
+            metadata={"reason": "guardian_mode_off"},
+        )
         return None
 
     if should_suppress_guardian_echo(uid, scanner_segments):
@@ -955,6 +1047,10 @@ def send_to_scanner(
             "contract": "ella-ai#600",
         },
         "scanner_batch": batch_metadata,
+        "guardian_mode": authoritative_mode,
+        "guardian_mode_source": "users.guardian_mode",
+        "guardian_mode_enabled": guardian_mode_enabled,
+        "emergency_only_dispatch": emergency_only_dispatch,
     }
     if latency_metadata:
         payload["latency"] = latency_metadata
