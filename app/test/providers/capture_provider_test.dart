@@ -214,6 +214,13 @@ class _FakeTranscriptSocket {
       requireCaptureProtocol: requireCaptureProtocol,
       captureProtocolTimeout: const Duration(milliseconds: 100),
     );
+    // This fixture hands back an already-"connected" fake transport without
+    // going through the real start() handshake, so it needs its own consent
+    // lease established the same way production's _initiateWebsocket ->
+    // socket.start() flow would (see ella-ai#1280 P1 review on #589: sends
+    // require an active lease, not just cached aiConsentAccepted). A no-op
+    // when the current SharedPreferencesUtil() uid has no consent granted.
+    service.grantActiveConsentForTesting();
   }
 
   final _FakePureSocket pure;
