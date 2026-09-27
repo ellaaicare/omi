@@ -194,6 +194,32 @@ def test_guardian_off_direct_emergency_omits_unmatched_retained_history(monkeypa
     assert posts[0]["recent_segments"] == []
 
 
+def test_guardian_off_direct_emergency_sends_only_matching_current_speaker_group(monkeypatch):
+    posts = []
+
+    def fake_post(_url, json, timeout):
+        posts.append(json)
+        return _FakeResponse(200)
+
+    _disable_trace(monkeypatch)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner.requests, "post", fake_post)
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-current-boundary",
+        [
+            {"text": "My bank PIN is 1234", "speaker": "SPEAKER_1"},
+            {"text": "I cannot breathe", "speaker": "SPEAKER_2"},
+        ],
+        guardian_mode="off",
+    )
+
+    assert status == 200
+    assert len(posts) == 1
+    assert [segment["text"] for segment in posts[0]["segments"]] == ["I cannot breathe"]
+
+
 def test_guardian_enabled_context_does_not_rewrite_active_segments(monkeypatch):
     posts = []
 

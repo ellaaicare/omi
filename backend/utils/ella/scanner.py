@@ -400,10 +400,11 @@ def credible_emergency_reason(text: str) -> Optional[str]:
     return None
 
 
-def credible_emergency_reason_for_segments(segments: List[dict]) -> Optional[str]:
-    """Match contiguous speech from one speaker without crossing speaker boundaries."""
+def _credible_emergency_match_for_segments(segments: List[dict]) -> tuple[Optional[str], int, int]:
+    """Return the first credible reason and its contiguous speaker-group bounds."""
     active_speaker: Optional[str] = None
     active_text: list[str] = []
+    active_start = 0
 
     def match_active_text() -> Optional[str]:
         if not active_text:
@@ -419,12 +420,24 @@ def credible_emergency_reason_for_segments(segments: List[dict]) -> Optional[str
         if active_speaker is not None and speaker != active_speaker:
             reason = match_active_text()
             if reason:
-                return reason
+                return reason, active_start, index
             active_text = []
+            active_start = index
+        elif active_speaker is None:
+            active_start = index
         active_speaker = speaker
         active_text.append(text)
 
-    return match_active_text()
+    reason = match_active_text()
+    if reason:
+        return reason, active_start, len(segments)
+    return None, -1, -1
+
+
+def credible_emergency_reason_for_segments(segments: List[dict]) -> Optional[str]:
+    """Match contiguous speech from one speaker without crossing speaker boundaries."""
+    reason, _, _ = _credible_emergency_match_for_segments(segments)
+    return reason
 
 
 def _single_explicit_speaker(segments: List[dict]) -> Optional[str]:
@@ -442,30 +455,34 @@ def _single_explicit_speaker(segments: List[dict]) -> Optional[str]:
 
 def _credible_emergency_match_with_context(
     context_segments: List[dict], current_segments: List[dict]
-) -> tuple[Optional[str], List[dict]]:
-    """Return a newly completed reason and only the retained context that authorized it."""
-    current_reason = credible_emergency_reason_for_segments(current_segments)
+) -> tuple[Optional[str], List[dict], List[dict]]:
+    """Return a reason and only the retained/current segments that authorized it."""
+    current_reason, current_start, current_end = _credible_emergency_match_for_segments(current_segments)
     if current_reason:
+        matched_current_segments = current_segments[current_start:current_end]
         context_speaker = _single_explicit_speaker(context_segments)
-        current_speaker = _single_explicit_speaker(current_segments)
+        current_speaker = _single_explicit_speaker(matched_current_segments)
         context_text = " ".join(str(segment.get("text") or "") for segment in context_segments)
         if (
             context_speaker is not None
             and context_speaker == current_speaker
             and _CONTEXTUAL_REPORTED_SPEECH_SUFFIX.search(context_text)
         ):
-            return None, []
-        return current_reason, []
+            return None, [], []
+        return current_reason, [], matched_current_segments
     if not context_segments or credible_emergency_reason_for_segments(context_segments):
-        return None, []
+        return None, [], []
 
     for start in range(len(context_segments) - 1, -1, -1):
         candidate_segments = context_segments[start:] + current_segments
-        candidate_speaker = _single_explicit_speaker(candidate_segments)
-        if candidate_speaker is None:
-            continue
-        combined_reason = credible_emergency_reason_for_segments(candidate_segments)
+        combined_reason, match_start, match_end = _credible_emergency_match_for_segments(candidate_segments)
         if not combined_reason:
+            continue
+        context_count = len(context_segments) - start
+        matched_context_segments = candidate_segments[match_start : min(match_end, context_count)]
+        matched_current_segments = candidate_segments[max(match_start, context_count) : match_end]
+        candidate_speaker = _single_explicit_speaker(matched_context_segments + matched_current_segments)
+        if candidate_speaker is None:
             continue
 
         preceding_segments = context_segments[:start]
@@ -476,16 +493,16 @@ def _credible_emergency_match_with_context(
             and preceding_speaker == candidate_speaker
             and _CONTEXTUAL_REPORTED_SPEECH_SUFFIX.search(preceding_text)
         ):
-            return None, []
-        return combined_reason, context_segments[start:]
-    return None, []
+            return None, [], []
+        return combined_reason, matched_context_segments, matched_current_segments
+    return None, [], []
 
 
 def credible_emergency_reason_with_context(
     context_segments: List[dict], current_segments: List[dict]
 ) -> tuple[Optional[str], bool]:
     """Return a newly completed reason and whether prior context was required."""
-    reason, matched_context = _credible_emergency_match_with_context(context_segments, current_segments)
+    reason, matched_context, _ = _credible_emergency_match_with_context(context_segments, current_segments)
     return reason, bool(matched_context)
 
 
@@ -1191,7 +1208,7 @@ def send_to_scanner(
         for s in (recent_segments or [])
         if s.get("text")
     ]
-    emergency_reason, emergency_context_segments = _credible_emergency_match_with_context(
+    emergency_reason, emergency_context_segments, emergency_current_segments = _credible_emergency_match_with_context(
         formatted_recent_segments,
         scanner_segments,
     )
@@ -1201,8 +1218,7 @@ def send_to_scanner(
     emergency_only_dispatch = not guardian_mode_enabled and emergency_reason is not None
     if emergency_only_dispatch:
         formatted_recent_segments = emergency_context_segments
-        if emergency_context_segments:
-            scanner_segments = emergency_context_segments + scanner_segments
+        scanner_segments = emergency_context_segments + emergency_current_segments
     if not guardian_mode_enabled and not emergency_only_dispatch:
         _log_trace_event(
             trace_id=trace_id,
