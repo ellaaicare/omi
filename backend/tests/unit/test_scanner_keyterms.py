@@ -259,10 +259,32 @@ def test_isolated_scanner_uses_hermes_workspace_and_drops_legacy_cache(monkeypat
     assert requests == [
         (
             "http://hermes-provision/workspace/omi-isolated/files/scanner-tuning.md",
-            {"Authorization": "Bearer hermes-token"},
+            {
+                "Authorization": "Bearer hermes-token",
+                "X-Ella-Owner-Uid": "uid-isolated",
+            },
         )
     ]
     assert scanner_keyterms._cache["uid-isolated"].source == "isolated:hermes"
+
+
+def test_isolated_scanner_fails_before_request_without_bound_authority(monkeypatch):
+    async def authority_enabled(_uid):
+        return True
+
+    class ForbiddenClient:
+        def __init__(self, **_kwargs):
+            raise AssertionError("Missing isolated authority must fail before network egress")
+
+    monkeypatch.setattr(scanner_keyterms, "runtime_authority_enabled", authority_enabled)
+    monkeypatch.setattr(scanner_keyterms, "_provision_token", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(scanner_keyterms.httpx, "AsyncClient", ForbiddenClient)
+
+    with pytest.raises(scanner_keyterms.ProvisioningError) as raised:
+        asyncio.run(scanner_keyterms._fetch_scanner_tuning("omi-isolated", uid="uid-isolated"))
+
+    assert raised.value.code == "hermes_provision_authority_unavailable"
+    assert raised.value.retryable is True
 
 
 def test_cloud_scanner_never_calls_mini_or_returns_retained_cache(monkeypatch):

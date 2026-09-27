@@ -397,7 +397,14 @@ async def _fetch_scanner_tuning(agent_id: str, uid: str = "") -> str:
         )
     isolated = await runtime_authority_enabled(uid) if uid else False
     token = _provision_token(uid, isolated=isolated)
+    if isolated and not token:
+        raise ProvisioningError(
+            "hermes_provision_authority_unavailable",
+            retryable=True,
+        )
     headers = {"Authorization": f"Bearer {token}"} if token else {}
+    if isolated:
+        headers["X-Ella-Owner-Uid"] = uid
     provision_url = _provision_url(uid, isolated=isolated)
     url = f"{provision_url}/workspace/{agent_id}/files/scanner-tuning.md"
     async with httpx.AsyncClient(timeout=_timeout_seconds()) as client:
