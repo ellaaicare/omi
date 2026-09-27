@@ -912,20 +912,15 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     _lastBatteryNotifyTime = null;
   }
 
-  Future periodicConnect(
-    String printer, {
-    bool boundDeviceOnly = false,
-    int? operationGeneration,
-    bool explicitSelection = false,
-  }) async {
+  Future periodicConnect(String printer, {bool boundDeviceOnly = false, int? operationGeneration}) async {
     final generation = operationGeneration ?? _deviceOperationGeneration;
     if (!_isDeviceOperationCurrent(generation)) return;
     _reconnectionTimer?.cancel();
-    if (!explicitSelection && captureProvider?.phoneCaptureOwnsMobileAudio == true) {
+    if (captureProvider?.phoneCaptureOwnsMobileAudio == true) {
       _reconnectDeferredForPhoneCapture = true;
       return;
     }
-    if (!explicitSelection && SharedPreferencesUtil().ellaCaptureSource == EllaCaptureSource.phone.name) return;
+    if (SharedPreferencesUtil().ellaCaptureSource == EllaCaptureSource.phone.name) return;
     if (_hasPendingFreshBleSessionRequirement()) return;
     _automaticReconnectAttempts = 0;
     _automaticReconnectExhausted = false;
@@ -935,12 +930,12 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         t.cancel();
         return;
       }
-      if (!explicitSelection && captureProvider?.phoneCaptureOwnsMobileAudio == true) {
+      if (captureProvider?.phoneCaptureOwnsMobileAudio == true) {
         _reconnectDeferredForPhoneCapture = true;
         t.cancel();
         return;
       }
-      if (!explicitSelection && SharedPreferencesUtil().ellaCaptureSource == EllaCaptureSource.phone.name) {
+      if (SharedPreferencesUtil().ellaCaptureSource == EllaCaptureSource.phone.name) {
         t.cancel();
         return;
       }
@@ -1217,6 +1212,8 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
 
   Future<void> resumeKnownDeviceConnection({required String reason}) async {
     if (!_deviceServiceReady) return;
+    final capture = captureProvider;
+    if (capture?.isPaused == true || capture?.recordingState == RecordingState.pause) return;
     if (isConnected) {
       final device = connectedDevice;
       if (device != null) await _resumeCaptureForConnectedDevice(device, _deviceOperationGeneration);
@@ -1239,6 +1236,8 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         !_isCurrentOwnerBoundDevice(device.id) ||
         _hasPendingFreshBleSessionRequirement() ||
         capture == null ||
+        capture.isPaused ||
+        capture.recordingState == RecordingState.pause ||
         capture.phoneCaptureOwnsMobileAudio ||
         SharedPreferencesUtil().ellaCaptureSource == EllaCaptureSource.phone.name ||
         (capture.recordingState == RecordingState.error &&

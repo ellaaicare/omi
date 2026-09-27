@@ -108,6 +108,7 @@ class _RecordingCaptureProvider extends CaptureProvider {
     this.onDeviceStart,
     this.forcedDiagnosticFailure,
     this.requireConsent = false,
+    this.explicitlyPaused = false,
   });
 
   final Completer<void>? startGate;
@@ -116,9 +117,15 @@ class _RecordingCaptureProvider extends CaptureProvider {
   final void Function(int attempt)? onDeviceStart;
   final CaptureDiagnosticFailure? forcedDiagnosticFailure;
   final bool requireConsent;
+  final bool explicitlyPaused;
   int deviceStarts = 0;
+  int transportStartAttempts = 0;
+  int socketOpenAttempts = 0;
   CaptureDiagnosticFailure? simulatedFailure;
   final List<String> disconnectedDeviceIds = [];
+
+  @override
+  bool get isPaused => explicitlyPaused || super.isPaused;
 
   @override
   CaptureDiagnostics get captureDiagnostics => forcedDiagnosticFailure == null && simulatedFailure == null
@@ -128,6 +135,8 @@ class _RecordingCaptureProvider extends CaptureProvider {
   @override
   Future<void> streamDeviceRecording({BtDevice? device}) async {
     deviceStarts++;
+    transportStartAttempts++;
+    socketOpenAttempts++;
     if (requireConsent && !SharedPreferencesUtil().aiConsentAccepted) {
       simulatedFailure = CaptureDiagnosticFailure.consentUnavailable;
       updateRecordingState(RecordingState.error);
@@ -1655,26 +1664,6 @@ void main() {
     expect(provider.isConnecting, isFalse);
   });
 
-  test('saved iPhone source still permits explicit necklace discovery', () async {
-    await SharedPreferencesUtil().saveEllaCaptureSource('phone');
-    addTearDown(() => SharedPreferencesUtil().saveEllaCaptureSource(''));
-    var scanCalls = 0;
-    final provider = DeviceProvider(
-      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
-      scanConnector: () async {
-        scanCalls++;
-        return null;
-      },
-      reconnectionInterval: const Duration(hours: 1),
-      automaticallyReconnectOnReady: false,
-    );
-    addTearDown(provider.dispose);
-
-    await provider.periodicConnect('explicit pairing scan', explicitSelection: true);
-
-    expect(scanCalls, 1);
-  });
-
   test('a connected owner-bound necklace starts capture on resume without a manual Record tap', () async {
     final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await bindRememberedDeviceForCurrentTestAuthority(necklace);
@@ -1694,6 +1683,28 @@ void main() {
 
     expect(capture.deviceStarts, 1);
     expect(capture.recordingState, RecordingState.deviceRecord);
+  });
+
+  test('foreground resume preserves explicit pause without transport or socket startup', () async {
+    final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider(explicitlyPaused: true)..updateRecordingState(RecordingState.pause);
+    final provider = DeviceProvider(deviceService: service, automaticallyReconnectOnReady: false)
+      ..setProviders(capture)
+      ..connectedDevice = necklace
+      ..pairedDevice = necklace
+      ..setIsConnected(true);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.didChangeAppLifecycleState(AppLifecycleState.resumed);
+    await pumpEventQueue();
+
+    expect(service.ensureConnectionCalls, 0, reason: 'foreground resume must not reopen BLE transport');
+    expect(capture.transportStartAttempts, 0);
+    expect(capture.socketOpenAttempts, 0);
+    expect(capture.recordingState, RecordingState.pause);
   });
 
   test('failed explicit replacement restores the remembered necklace', () async {
