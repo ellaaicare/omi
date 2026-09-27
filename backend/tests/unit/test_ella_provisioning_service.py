@@ -279,6 +279,16 @@ class FakeRepository:
     async def has_active_retained_runtime(self, _uid):
         return self.active_retained
 
+    async def resolve_self_hosted_active_direct(self, uid):
+        if self.binding and self.binding.get("omi_uid") == uid:
+            return self.binding
+        return None
+
+    async def get_job(self, _uid, target_schema_version):
+        if self.job.get("target_schema_version") != target_schema_version:
+            return None
+        return dict(self.job)
+
     async def ensure_omi_user_document(self, **kwargs):
         if self.omi_identity_error:
             raise self.omi_identity_error
@@ -3363,7 +3373,47 @@ def test_fresh_uid_relax_preserves_exact_active_retained_runtime(monkeypatch):
     assert repository.job_calls == []
 
 
-def test_fresh_uid_relax_still_rejects_missing_isolated_binding(monkeypatch):
+def test_fresh_uid_relax_prefers_healthy_direct_binding_over_late_legacy_cluster(monkeypatch):
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+    monkeypatch.setenv("ELLA_HERMES_GATEWAY_KEY_USER_A", "test-runtime-credential")
+    binding = {
+        **_extract(_runtime_receipt()),
+        "id": "44444444-4444-4444-4444-444444444444",
+        "omi_uid": "fresh-user",
+        "active": True,
+        "status": "active",
+        "revision": 2,
+        "user_status": "ACTIVE",
+    }
+    repository = FakeRepository(binding=binding, active_retained=True)
+
+    runtime = asyncio.run(
+        resolve_isolated_runtime(
+            "fresh-user",
+            repository=repository,
+            target_mode="hermes-cloud-chat",
+        )
+    )
+
+    assert runtime.uid == "fresh-user"
+    assert runtime.provider == "hermes"
+    assert runtime.runtime_target_mode == ""
+
+    with pytest.raises(ProvisioningError, match="self_hosted_runtime_target_mode_required") as unsupported:
+        asyncio.run(
+            resolve_isolated_runtime(
+                "fresh-user",
+                repository=repository,
+                target_mode="hermes-cloud-transcript",
+            )
+        )
+    assert unsupported.value.retryable is False
+
+
+def test_fresh_uid_relax_reports_missing_isolated_binding_as_provisioning(monkeypatch):
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
     monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
@@ -3374,7 +3424,7 @@ def test_fresh_uid_relax_still_rejects_missing_isolated_binding(monkeypatch):
         active_retained=False,
     )
 
-    with pytest.raises(ProvisioningError, match="self_hosted_invitation_runtime_not_provisioned"):
+    with pytest.raises(ProvisioningError, match="runtime_provisioning") as error:
         asyncio.run(
             resolve_isolated_runtime(
                 "fresh-user",
@@ -3382,6 +3432,44 @@ def test_fresh_uid_relax_still_rejects_missing_isolated_binding(monkeypatch):
                 target_mode="hermes-chat",
             )
         )
+    assert error.value.retryable is True
+
+
+def test_fresh_uid_relax_ready_job_without_binding_still_fails_closed(monkeypatch):
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+    repository = FakeRepository(
+        self_hosted_admission=None,
+        self_hosted_owned=False,
+        active_retained=False,
+    )
+    repository.job.update(state="ready", stage="active", retryable=False)
+
+    with pytest.raises(ProvisioningError, match="self_hosted_invitation_runtime_not_provisioned") as error:
+        asyncio.run(
+            resolve_isolated_runtime(
+                "fresh-user",
+                repository=repository,
+                target_mode="hermes-chat",
+            )
+        )
+    assert error.value.retryable is False
+
+    # Normal claim_job transitions increment attempts. A zero-attempt
+    # provisioning row cannot prove that setup is running and must not mask
+    # an inactive or authority-drifted binding as a retryable setup state.
+    repository.job.update(state="provisioning", stage="smoke_passed", retryable=True, attempts=0)
+    with pytest.raises(ProvisioningError, match="self_hosted_invitation_runtime_not_provisioned") as error:
+        asyncio.run(
+            resolve_isolated_runtime(
+                "fresh-user",
+                repository=repository,
+                target_mode="hermes-chat",
+            )
+        )
+    assert error.value.retryable is False
 
 
 def test_fresh_uid_relax_activation_does_not_require_invitation_target(monkeypatch):

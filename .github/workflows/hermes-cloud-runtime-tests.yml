@@ -790,6 +790,7 @@ jobs:
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_post_auth_chat_output_never_contains_caller_selected_header_values"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_chat_caller_metadata_is_fixed_before_canonical_and_cloud_sinks"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_unbound_non_owner_chat_fails_before_trace_or_provider"
+            "tests/unit/test_ella_incident_1182_route_isolation.py::test_provisioning_chat_returns_retryable_service_unavailable_before_provider"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_retained_owner_chat_requires_exact_subject_and_complete_server_configuration"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_legacy_routing_is_never_returned_for_non_owner_without_binding"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_real_smoke_multichannel_payload_uses_exact_uid_with_ledger_authority"
@@ -841,7 +842,7 @@ jobs:
           for required_id in "${required_incident_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$incident_ids"
           done
-          test "$(grep -c '::' <<<"$incident_ids")" -eq 61
+          test "$(grep -c '::' <<<"$incident_ids")" -eq 62
           pytest \
             tests/unit/test_ella_incident_1182_route_isolation.py \
             tests/unit/test_ella_incident_1182_callback_auth.py \
@@ -941,7 +942,9 @@ jobs:
             "tests/unit/test_ella_provisioning_service.py::test_retained_owner_identity_is_exact_and_requires_server_configuration"
             "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_activation_does_not_require_invitation_target"
             "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_preserves_exact_active_retained_runtime"
-            "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_still_rejects_missing_isolated_binding"
+            "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_prefers_healthy_direct_binding_over_late_legacy_cluster"
+            "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_reports_missing_isolated_binding_as_provisioning"
+            "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_ready_job_without_binding_still_fails_closed"
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_proxy_re_resolves_exact_voice_target"
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_accept_drift_fails_before_session_or_provider_call[authority_digest-voice_runtime_authority_changed]"
             "tests/unit/test_voice_proxy_auth.py::test_self_hosted_voice_accept_drift_fails_before_session_or_provider_call[session-voice_session_claim_mismatch]"
@@ -992,7 +995,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 21
-          test "$collected" -eq 589
+          test "$collected" -eq 591
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
