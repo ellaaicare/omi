@@ -30,6 +30,8 @@ ELLA_POSTGRES_PASSWORD = authority_credential("ELLA_POSTGRES_PASSWORD", default=
 ELLA_POSTGRES_DATABASE = os.getenv("ELLA_POSTGRES_DATABASE", "ella_ai")
 GUARDIAN_ENQUEUE_URL = os.getenv("ELLA_GUARDIAN_ENQUEUE_URL", "http://127.0.0.1:8000/v1/ella/guardian/enqueue")
 GUARDIAN_WEBHOOK_KEY = authority_credential("GUARDIAN_WEBHOOK_KEY", strip=False)
+SCANNER_WEBHOOK_KEY = authority_credential("ELLA_SCANNER_WEBHOOK_KEY", strip=False)
+SCANNER_WEBHOOK_KEY_HEADER = "X-Ella-Scanner-Webhook-Key"
 GUARDIAN_WAKE_ACK_AUDIO_URL = os.getenv(
     "ELLA_GUARDIAN_WAKE_ACK_AUDIO_URL",
     "https://ella-ai-care.com/audio/system/wake_ack_pulse.mp3",
@@ -869,6 +871,10 @@ def send_to_scanner(
     if not segments:
         return None
 
+    if not SCANNER_WEBHOOK_KEY:
+        print("Scanner authority unavailable", flush=True)
+        return None
+
     timeout = timeout or ELLA_CONFIG.scanner_timeout
     trace_id = _trace_id_for(str(conversation_id))
 
@@ -979,7 +985,12 @@ def send_to_scanner(
 
     try:
         start = time.time()
-        resp = requests.post(ELLA_CONFIG.scanner_url, json=payload, timeout=timeout)
+        resp = requests.post(
+            ELLA_CONFIG.scanner_url,
+            json=payload,
+            headers={SCANNER_WEBHOOK_KEY_HEADER: SCANNER_WEBHOOK_KEY},
+            timeout=timeout,
+        )
         latency_ms = int((time.time() - start) * 1000)
         rate_limit_status = rate_limit_status_from_response(resp)
         _record_scanner_backpressure(uid, rate_limit_status, time.time())
