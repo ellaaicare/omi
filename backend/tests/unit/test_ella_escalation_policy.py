@@ -7,6 +7,8 @@ from ella.services.escalation_policy import (
     DECISION_NOTIFY_NOW,
     DECISION_QUEUE_FOR_REPORT,
     DECISION_SUPPRESS,
+    MAX_DELIVERY_PLAN_STEPS,
+    MAX_ESCALATION_CAREGIVERS,
     REASON_CAREGIVER_NOT_ACTIVE,
     REASON_CAREGIVER_PERMISSION_DENIED,
     REASON_CHANNEL_DISABLED_BY_USER,
@@ -83,6 +85,25 @@ def test_critical_event_notifies_user_audio_and_emergency_caregiver_imessage():
     payload = decision.to_dict()
     assert payload["selected_channels"] == payload["delivery_plan"]
     assert payload["policy_snapshot"]["mode"] == "maximum_awareness"
+
+
+def test_critical_delivery_plan_is_bounded_to_user_plus_eight_caregivers():
+    caregivers = [
+        _caregiver(caregiver_id=f"caregiver-{index}", phone=f"+1555000{index:04d}")
+        for index in range(MAX_ESCALATION_CAREGIVERS + 1)
+    ]
+
+    decision = evaluate_escalation_policy(
+        _event(severity="critical"),
+        _user(guardian_mode="maximum_awareness"),
+        caregivers,
+    )
+
+    assert len(decision.delivery_plan) == MAX_DELIVERY_PLAN_STEPS
+    assert decision.delivery_plan[0].target == "user"
+    assert [step.caregiver_id for step in decision.delivery_plan[1:]] == [
+        f"caregiver-{index}" for index in range(MAX_ESCALATION_CAREGIVERS)
+    ]
 
 
 def test_guardian_off_critical_suppresses_audio_but_allows_user_and_caregiver_fallbacks():

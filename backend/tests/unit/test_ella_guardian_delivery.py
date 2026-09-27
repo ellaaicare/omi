@@ -104,11 +104,13 @@ class _FakePool:
         self.caregiver_rows = caregiver_rows or []
         self.existing_rows = existing_rows or []
         self.executed = []
+        self.fetches = []
 
     async def fetchrow(self, *_args):
         return self.user_row
 
-    async def fetch(self, query, *_args):
+    async def fetch(self, query, *args):
+        self.fetches.append((query, args))
         if "FROM caregivers" in query:
             return self.caregiver_rows
         if "FROM guardian_delivery_log" in query:
@@ -231,6 +233,18 @@ def test_load_delivery_context_prefers_identities_phone(monkeypatch):
     user, _caregivers = asyncio.run(guardian._load_delivery_context("uid-1"))
 
     assert user.user_phone == "+15550000099"
+
+
+def test_load_delivery_context_caps_caregivers_to_shared_policy_bound(monkeypatch):
+    pool = _FakePool(user_row=_user_row(), caregiver_rows=[_caregiver_row()])
+    monkeypatch.setattr(guardian, "_pool", pool)
+
+    _user_context, caregivers = asyncio.run(guardian._load_delivery_context("uid-1"))
+
+    caregiver_query, caregiver_args = next(item for item in pool.fetches if "FROM caregivers" in item[0])
+    assert "LIMIT $2" in caregiver_query
+    assert caregiver_args == ("user-1", policy.MAX_ESCALATION_CAREGIVERS)
+    assert len(caregivers) == 1
 
 
 def test_reserve_delivery_steps_treats_success_as_already_sent(monkeypatch):
