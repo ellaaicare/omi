@@ -219,7 +219,8 @@ _CREDIBLE_EMERGENCY_PATTERNS = (
     (
         "intruder",
         re.compile(
-            r"^\s*(?:there\s+is\s+(?:an?\s+)?intruder|(?:an?\s+)?intruder\s+is\s+(?:in|inside)\s+"
+            r"^\s*(?:there\s+is\s+(?:an?\s+)?intruder(?:\s+(?:in|inside)\s+(?:my|the)\s+(?:house|home))?|"
+            r"(?:an?\s+)?intruder\s+is\s+(?:in|inside)\s+"
             r"(?:my|the)\s+(?:house|home))\b",
             re.IGNORECASE,
         ),
@@ -239,6 +240,17 @@ _CONTEXTUAL_REPORTED_SPEECH_SUFFIX = re.compile(
         r"\b(?:said|says|quote(?:s|d)?|reported|reports|"
         r"told\s+(?:me|us|you|him|her|them)|heard|read)(?:\s+that)?\s*[.!?,;:]*\s*$"
     ),
+    re.IGNORECASE,
+)
+_CREDIBLE_WAKE_PREFIX = re.compile(
+    r"^\s*(?:hey\s+(?:ella|ela|ellah|ellaa|el|ell|elle|eleve|eleven)\b[\s,;:!?-]*|"
+    r"(?:ella|ela|ellah|ellaa)\b\s*[,;:!?-]+\s*)",
+    re.IGNORECASE,
+)
+_CREDIBLE_EMERGENCY_TAIL = re.compile(
+    r"^\s*[,;:!?-]*\s*(?:(?:right\s+)?now|today|tonight|(?:please\s+)?help(?:\s+me)?|"
+    r"and\s+(?:i\s+)?need\s+(?:help|an?\s+ambulance)|"
+    rf"and\s+(?:i\s+)?{_CANNOT_PHRASE}\s+breathe|please)?\s*[.!?]*\s*$",
     re.IGNORECASE,
 )
 _DURATION_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)(?P<unit>ms|s|m|h)")
@@ -375,11 +387,12 @@ def contains_emergency_phrase(text: str) -> bool:
 
 def credible_emergency_reason(text: str) -> Optional[str]:
     """Return a conservative reason suitable for dispatch while Guardian is off."""
-    candidate = text or ""
+    candidate = _CREDIBLE_WAKE_PREFIX.sub("", text or "", count=1)
     if _NEGATED_CURRENT_SUBJECT_PATTERN.search(candidate):
         return None
     for reason, pattern in _CREDIBLE_EMERGENCY_PATTERNS:
-        if pattern.search(candidate):
+        match = pattern.search(candidate)
+        if match and _CREDIBLE_EMERGENCY_TAIL.fullmatch(candidate[match.end() :]):
             return reason
     if _CREDIBLE_HELP_PATTERN.search(candidate):
         return "explicit_help"

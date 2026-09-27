@@ -359,6 +359,8 @@ def test_scanner_off_mode_does_not_leak_ambiguous_routine_speech(monkeypatch, te
 def test_credible_emergency_bypass_requires_current_context_for_sensitive_terms():
     assert scanner.credible_emergency_reason("Please call 911") == "emergency_services"
     assert scanner.credible_emergency_reason("Someone please call 911") == "emergency_services"
+    assert scanner.credible_emergency_reason("Hey Ella, call 911") == "emergency_services"
+    assert scanner.credible_emergency_reason("Hey Ella, I can't breathe") == "breathing"
     assert scanner.credible_emergency_reason("I am having chest pain") == "chest_pain"
     assert scanner.credible_emergency_reason("I'm having chest pain") == "chest_pain"
     assert scanner.credible_emergency_reason("I can’t breathe") == "breathing"
@@ -366,6 +368,7 @@ def test_credible_emergency_bypass_requires_current_context_for_sensitive_terms(
     assert scanner.credible_emergency_reason("My husband cannot breathe") == "breathing"
     assert scanner.credible_emergency_reason("We can't breathe") == "breathing"
     assert scanner.credible_emergency_reason("You cannot breathe") == "breathing"
+    assert scanner.credible_emergency_reason("She cannot breathe, please help me") == "breathing"
     assert scanner.credible_emergency_reason("She is having a seizure") == "seizure"
     assert scanner.credible_emergency_reason("She's having a seizure") == "seizure"
     assert scanner.credible_emergency_reason("My husband is having a seizure") == "seizure"
@@ -419,6 +422,9 @@ def test_credible_emergency_bypass_rejects_negative_or_absent_subjects():
         "ChatGPT is overdosing",
         "She said he cannot breathe",
         "The article says my husband can't breathe",
+        "I am having a stroke of luck",
+        "Dad is choking back tears",
+        "I cannot breathe, she said",
     ):
         assert scanner.credible_emergency_reason(text) is None
 
