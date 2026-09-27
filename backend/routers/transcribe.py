@@ -97,7 +97,7 @@ from utils.capture_buffer import (
 from utils.ella.memory_artwork_storage import acquire_memory_artwork_publication_lock
 from utils.ella.scanner_keyterms import cache_status as scanner_keyterm_cache_status
 from utils.ella.scanner_keyterms import combine_deepgram_keyterms, get_scanner_keyterms
-from utils.ella.scanner import credible_emergency_reason_with_context
+from utils.ella.scanner import credible_emergency_reason_with_context, send_to_scanner
 from utils.notifications import send_credit_limit_notification, send_silent_user_notification
 from utils.other import endpoints as auth
 from utils.other.storage import get_profile_audio_if_exists, get_user_has_speech_profile
@@ -1744,10 +1744,6 @@ async def _stream_handler(
         )
 
     async def dispatch_scanner_item(provider_kwargs: dict) -> None:
-        try:
-            from utils.ella import send_to_scanner
-        except ImportError:
-            return
         await _dispatch_scanner_with_current_consent(
             uid,
             assert_current_ai_consent,

@@ -368,6 +368,14 @@ def test_credible_emergency_bypass_requires_current_context_for_sensitive_terms(
     assert scanner.credible_emergency_reason("They're bleeding out") == "severe_bleeding"
     assert scanner.credible_emergency_reason("I am bleeding out") == "severe_bleeding"
     assert scanner.credible_emergency_reason("There is an intruder in my home") == "intruder"
+    assert scanner.credible_emergency_reason("I am having a heart attack") == "heart_attack"
+    assert scanner.credible_emergency_reason("My wife is having a stroke") == "stroke"
+    assert scanner.credible_emergency_reason("Dad's choking") == "choking"
+    assert scanner.credible_emergency_reason("My friend is overdosing") == "overdose"
+    assert scanner.credible_emergency_reason("I want to kill myself") == "self_harm"
+    assert scanner.credible_emergency_reason("I am suicidal") == "self_harm"
+    assert scanner.credible_emergency_reason("I'm suicidal") == "self_harm"
+    assert scanner.credible_emergency_reason("I’m going to hurt myself") == "self_harm"
 
 
 @pytest.mark.parametrize(
@@ -377,6 +385,10 @@ def test_credible_emergency_bypass_requires_current_context_for_sensitive_terms(
         "The article quotes I am having chest pain",
         "She said he is bleeding out",
         "Yesterday I was having chest pain",
+        "The article says I am having a heart attack",
+        "The movie says she is choking",
+        "Yesterday I had a stroke",
+        "She said I want to kill myself",
     ],
 )
 def test_credible_emergency_bypass_rejects_reported_quoted_and_historical_speech(text):

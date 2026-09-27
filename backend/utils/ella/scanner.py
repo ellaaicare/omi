@@ -148,6 +148,42 @@ _CREDIBLE_EMERGENCY_PATTERNS = (
         ),
     ),
     (
+        "heart_attack",
+        re.compile(
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+having\s+(?:a\s+)?heart\s+attack\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "stroke",
+        re.compile(
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+having\s+(?:a\s+)?stroke\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "choking",
+        re.compile(
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+choking\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "overdose",
+        re.compile(
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+overdosing\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "self_harm",
+        re.compile(
+            r"^\s*(?:i(?:\s+am|\s*['’]m)\s+(?:suicidal|going\s+to\s+(?:kill|hurt)\s+myself)|"
+            r"i\s+(?:want|plan|intend)\s+to\s+(?:kill|hurt)\s+myself)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
         "fire",
         re.compile(
             r"^\s*(?:there\s+is\s+(?:a\s+)?fire|(?:my|the)\s+(?:house|home)\s+is\s+on\s+fire|"
