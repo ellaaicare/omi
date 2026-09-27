@@ -72,11 +72,7 @@ class ActiveWalAuthority implements AccountCommitAuthority {
 }
 
 class AccountGenerationAuthority implements AccountCommitAuthority {
-  const AccountGenerationAuthority({
-    required this.preferences,
-    required this.uid,
-    required this.generation,
-  });
+  const AccountGenerationAuthority({required this.preferences, required this.uid, required this.generation});
 
   final SharedPreferencesUtil preferences;
   @override

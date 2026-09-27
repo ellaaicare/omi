@@ -138,7 +138,7 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
                   children: [
                     Expanded(
                       child: Text(
-                        context.l10n.aiConsentTranscriptionReview,
+                        context.l10n.aiConsentNeededReview,
                         style: const TextStyle(color: EllaColors.textPrimary, fontWeight: FontWeight.w600),
                       ),
                     ),

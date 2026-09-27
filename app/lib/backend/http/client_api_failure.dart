@@ -25,11 +25,13 @@ class ClientApiFailure implements Exception {
 
   factory ClientApiFailure.fromHttp({required int statusCode, String body = ''}) {
     final code = _extractBackendCode(body);
+    final kind = _kindFor(statusCode: statusCode, backendCode: code);
     return ClientApiFailure(
-      _kindFor(statusCode: statusCode, backendCode: code),
+      kind,
       statusCode: statusCode,
       backendCode: code,
-      retryable: statusCode == 408 || statusCode == 429 || statusCode >= 500,
+      retryable: kind != ClientApiFailureKind.consentRequired &&
+          (_bodySaysRetryable(body) || statusCode == 408 || statusCode == 429 || statusCode >= 500),
     );
   }
 
@@ -38,16 +40,21 @@ class ClientApiFailure implements Exception {
     if (separator < 0) return null;
     final field = line.substring(0, separator).trim().toLowerCase();
     final payload = line.substring(separator + 1).trim();
-    if (field == 'error') {
-      final code = _extractBackendCode(payload);
-      return ClientApiFailure(_kindFor(statusCode: null, backendCode: code), backendCode: code, retryable: true);
+    ClientApiFailure failureFor(String? code) {
+      final kind = _kindFor(statusCode: null, backendCode: code);
+      return ClientApiFailure(
+        kind,
+        backendCode: code,
+        retryable: kind != ClientApiFailureKind.consentRequired,
+      );
     }
+
+    if (field == 'error') return failureFor(_extractBackendCode(payload));
     if (field != 'data') return null;
 
     final lower = payload.toLowerCase();
     if (lower.startsWith('error:') || lower.startsWith('error ')) {
-      final code = _extractBackendCode(payload);
-      return ClientApiFailure(_kindFor(statusCode: null, backendCode: code), backendCode: code, retryable: true);
+      return failureFor(_extractBackendCode(payload));
     }
 
     if (!payload.startsWith('{')) return null;
@@ -60,12 +67,20 @@ class ClientApiFailure implements Exception {
     } catch (_) {
       return null;
     }
-    final code = _extractBackendCode(payload);
-    return ClientApiFailure(_kindFor(statusCode: null, backendCode: code), backendCode: code, retryable: true);
+    return failureFor(_extractBackendCode(payload));
   }
 
   @override
   String toString() => 'ClientApiFailure(kind: $kind, statusCode: $statusCode, retryable: $retryable)';
+}
+
+bool _bodySaysRetryable(String body) {
+  if (body.trim().isEmpty) return false;
+  try {
+    final decoded = jsonDecode(body);
+    if (decoded is Map<String, dynamic>) return decoded['retryable'] == true;
+  } catch (_) {}
+  return false;
 }
 
 String? _extractBackendCode(String body) {
@@ -103,6 +118,7 @@ String? _normalizeCode(String value) {
     'forbidden',
     'consent_required',
     'ai_consent_required',
+    'ai_consent_authority_unavailable',
   };
   return allowed.contains(candidate) ? candidate : null;
 }
@@ -119,6 +135,7 @@ ClientApiFailureKind _kindFor({required int? statusCode, required String? backen
   }.contains(backendCode)) {
     return ClientApiFailureKind.workspaceRequired;
   }
+  if (backendCode == 'ai_consent_authority_unavailable') return ClientApiFailureKind.unavailable;
   if (const {'consent_required', 'ai_consent_required'}.contains(backendCode)) {
     return ClientApiFailureKind.consentRequired;
   }

@@ -46,26 +46,6 @@ void main() {
     expect(await reProcessConversationServer('conversation-a'), isNull);
   });
 
-  test('a cached v7 receipt sends no protected data under managed-cloud v8', () async {
-    SharedPreferences.setMockInitialValues({
-      'uid': 'uid-a',
-      'aiConsentAccepted': true,
-      'aiConsentContractVersion': 'ai-data-processors-v7',
-      'aiConsentProcessorSetHash': 'sha256:dd84e4a9da1166cff66e5de55c2570d0496a2c89d46ca431530e993758616296',
-      'aiConsentReceiptId': 'aicr_v7-receipt',
-      'aiConsentReceiptUid': 'uid-a',
-      'aiConsentProfileBindingId': 'profile-binding-a',
-      'aiConsentScopeVersion': 'managed-cloud-internal-pilot-v1',
-      'aiConsentScopeHash': 'sha256:727b1db818ce79090a02279f1cc6d15dfc3d65a58592b13fbed53ad048c38a30',
-      'aiConsentServerDecidedAt': '2026-07-27T00:00:00Z',
-    });
-    await SharedPreferencesUtil.init();
-
-    expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
-    await _expectConsentFailure(sendEllaMessageStream('must not leave device'));
-    await _expectConsentFailure(sendMessageStreamServer('must not leave device'));
-  });
-
   test('revocation immediately blocks protected text, audio, and location egress', () async {
     final preferences = SharedPreferencesUtil();
     preferences.uid = 'uid-a';

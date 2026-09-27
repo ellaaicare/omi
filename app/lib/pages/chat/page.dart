@@ -1359,6 +1359,10 @@ class _ClientFailureBanner extends StatelessWidget {
           context.l10n.ellaWorkspaceUnavailableTitle,
           context.l10n.ellaWorkspaceUnavailableBody,
         ),
+      ClientApiFailureKind.consentRequired => (
+          context.l10n.aiConsentNeededReview,
+          context.l10n.aiConsentNeededReviewBody,
+        ),
       _ => (context.l10n.ellaChatCouldntSend, context.l10n.ellaChatUnavailableBody),
     };
     return Semantics(

@@ -11077,5 +11077,7 @@
   "diagnosticsConsentLease": "AI permission lease",
   "diagnosticsBleRate": "Necklace audio rate",
   "diagnosticsWsRate": "Transcription upload rate",
-  "ellaServerUnreachableBanner": "Ella can't reach the server right now. Messages will send when you're back online."
+  "ellaServerUnreachableBanner": "Ella can't reach the server right now. Messages will send when you're back online.",
+  "aiConsentNeededReview": "AI permission needed · Review",
+  "aiConsentNeededReviewBody": "Ella will wait until you review AI permission."
 }

@@ -41,6 +41,9 @@ class _FakeArtworkApi extends MemoryArtworkApi {
         _queueStatuses = List<MemoryArtworkQueueStatus?>.of(queueStatuses ?? const []),
         super(baseUrl: '', authorityProvider: () => null);
 
+  @override
+  bool get supportsDayArtworkBatch => false;
+
   final bool releaseEnabled;
   String selectedStyle = memoryArtworkDefaultStyle;
   int backfillCalls = 0;

@@ -18596,6 +18596,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Ella can\'t reach the server right now. Messages will send when you\'re back online.'**
   String get ellaServerUnreachableBanner;
+
+  /// No description provided for @aiConsentNeededReview.
+  ///
+  /// In en, this message translates to:
+  /// **'AI permission needed · Review'**
+  String get aiConsentNeededReview;
+
+  /// No description provided for @aiConsentNeededReviewBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella will wait until you review AI permission.'**
+  String get aiConsentNeededReviewBody;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

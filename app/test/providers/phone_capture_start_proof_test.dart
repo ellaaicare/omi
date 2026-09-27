@@ -40,10 +40,7 @@ void main() {
     final proof = PhoneCaptureStartProof();
 
     expect(proof.acceptFrame(const []), isFalse);
-    await expectLater(
-      proof.waitForAudio(timeout: const Duration(milliseconds: 1)),
-      throwsA(isA<TimeoutException>()),
-    );
+    await expectLater(proof.waitForAudio(timeout: const Duration(milliseconds: 1)), throwsA(isA<TimeoutException>()));
   });
 
   test('native recorder receipt does not replace physical phone audio proof', () async {
@@ -51,10 +48,7 @@ void main() {
 
     proof.acceptNativeRecorderStart();
     await proof.waitForNativeRecorder(timeout: const Duration(milliseconds: 50));
-    await expectLater(
-      proof.waitForAudio(timeout: const Duration(milliseconds: 1)),
-      throwsA(isA<TimeoutException>()),
-    );
+    await expectLater(proof.waitForAudio(timeout: const Duration(milliseconds: 1)), throwsA(isA<TimeoutException>()));
   });
 
   test('phone physical capture and transcription delivery remain separate facts', () async {
@@ -86,19 +80,13 @@ void main() {
   test('physical BLE audio proves necklace capture independently of transcription', () async {
     final proof = DeviceCaptureStartProof();
 
-    expect(
-      proof.acceptPhysicalFrame(physicalDeviceAudioPayload(DeviceType.omi, const [1, 2, 3])),
-      isFalse,
-    );
+    expect(proof.acceptPhysicalFrame(physicalDeviceAudioPayload(DeviceType.omi, const [1, 2, 3])), isFalse);
     await expectLater(
       proof.waitForPhysicalAudio(timeout: const Duration(milliseconds: 1)),
       throwsA(isA<TimeoutException>()),
     );
 
-    expect(
-      proof.acceptPhysicalFrame(physicalDeviceAudioPayload(DeviceType.omi, const [1, 2, 3, 4])),
-      isTrue,
-    );
+    expect(proof.acceptPhysicalFrame(physicalDeviceAudioPayload(DeviceType.omi, const [1, 2, 3, 4])), isTrue);
     await proof.waitForPhysicalAudio(timeout: const Duration(milliseconds: 50));
     await expectLater(
       proof.waitForTransmittedAudio(timeout: const Duration(milliseconds: 1)),
@@ -144,6 +132,7 @@ void main() {
     );
 
     expect(accepted, isTrue);
+    await Future<void>.delayed(Duration.zero);
     expect(refreshCalls, 1);
   });
 

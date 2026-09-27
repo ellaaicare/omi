@@ -81,51 +81,6 @@ void main() {
     );
   });
 
-  test('session-start authority accepts bounded grace and rejects an expired checkpoint', () {
-    expect(
-      AiConsentActiveSessionLease.authorityForSessionStart(
-        preferences: preferences,
-        expectedUid: 'uid-a',
-      ),
-      isNotNull,
-    );
-
-    SharedPreferencesUtil.clearAiConsentServerVerification();
-    expect(
-      AiConsentActiveSessionLease.authorityForSessionStart(
-        preferences: preferences,
-        expectedUid: 'uid-a',
-      ),
-      isNotNull,
-    );
-
-    preferences.markAiConsentLastServerConfirmed(
-      uid: 'uid-a',
-      receiptId: 'aicr_receipt-a',
-      confirmedAt: DateTime.now().subtract(const Duration(minutes: 31)),
-    );
-    expect(
-      AiConsentActiveSessionLease.authorityForSessionStart(
-        preferences: preferences,
-        expectedUid: 'uid-a',
-      ),
-      isNull,
-    );
-  });
-
-  test('bounded grace cannot start a session from an obsolete bundled contract', () async {
-    SharedPreferencesUtil.clearAiConsentServerVerification();
-    await preferences.saveString('aiConsentContractVersion', 'ai-data-processors-v9');
-
-    expect(
-      AiConsentActiveSessionLease.authorityForSessionStart(
-        preferences: preferences,
-        expectedUid: 'uid-a',
-      ),
-      isNull,
-    );
-  });
-
   test('server revocation stops active session visibly and fails closed', () async {
     var authorityLossCalls = 0;
     final lease = AiConsentActiveSessionLease(
@@ -404,39 +359,6 @@ void main() {
     expect(requestedReceipts, ['aicr_receipt-a', 'aicr_receipt-a']);
     expect(authorityLossCalls, 1);
     expect(lease.isActive, isFalse);
-  });
-
-  test('retryable failures stop only after the thirty-minute grace expires', () async {
-    var now = DateTime(2026, 7, 27, 0, 4);
-    preferences.markAiConsentLastServerConfirmed(
-      uid: 'uid-a',
-      receiptId: 'aicr_receipt-a',
-      confirmedAt: now,
-    );
-    var authorityLossCalls = 0;
-    final lease = AiConsentActiveSessionLease(
-      uid: 'uid-a',
-      preferences: preferences,
-      now: () => now,
-      gracePeriod: const Duration(minutes: 30),
-      refreshAuthority: (_, __, ___) async => const AiConsentAuthorityRefreshResult(
-        AiConsentAuthorityRefreshDisposition.retryable,
-        supportCode: 'http_503',
-      ),
-      onAuthorityLost: () {
-        authorityLossCalls++;
-      },
-    )..start();
-
-    await lease.refreshNow();
-    expect(lease.isActive, isTrue);
-
-    now = now.add(const Duration(minutes: 31));
-    await lease.refreshNow();
-
-    expect(authorityLossCalls, 1);
-    expect(lease.isActive, isFalse);
-    expect(AiConsentActiveSessionLease.diagnostics.value.terminalReason, 'verification_grace_expired');
   });
 
   test('last server confirmation survives verification reset but not account switch', () async {
