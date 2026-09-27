@@ -13,6 +13,7 @@ import 'package:omi/ella/demo/demo_fixtures.dart';
 import 'package:omi/ella/services/ella_service_result.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
+import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
@@ -32,12 +33,25 @@ typedef EllaChatHistoryTransport = Future<http.Response?> Function({
   required ExactAccountAuthorityVerifier exactAuthority,
 });
 
+typedef EllaChatTurnLookupTransport = Future<http.Response?> Function({
+  required String url,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+});
+
 typedef EllaVoiceTurnTransport = Future<http.Response?> Function({
   required String url,
   required String body,
   required String expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier exactAuthority,
 });
+
+class EllaChatHistoryPage {
+  const EllaChatHistoryPage({required this.messages, required this.hasMore});
+
+  final List<ServerMessage> messages;
+  final bool hasMore;
+}
 
 const ellaChatInactivityTimeout = Duration(seconds: 75);
 
@@ -61,6 +75,23 @@ Future<http.Response?> _defaultHistoryTransport({
       method: 'GET',
       body: '',
       timeout: const Duration(seconds: 10),
+      requireAuthCheck: true,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+
+Future<http.Response?> _defaultTurnLookupTransport({
+  required String url,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+}) =>
+    makeApiCall(
+      url: url,
+      headers: _ellaDebugHeaders(routeSource: 'chat-turn-lookup'),
+      method: 'GET',
+      body: '',
+      timeout: const Duration(seconds: 10),
+      retries: 0,
       requireAuthCheck: true,
       expectedAuthenticatedUid: expectedAuthenticatedUid,
       exactAuthority: exactAuthority,
@@ -203,21 +234,75 @@ Future<EllaServiceResult<List<ServerMessage>>> persistEllaV2VTurn({
   }
 }
 
-/// Fetch chat history from the VPS proxy endpoint.
-/// Returns messages in chronological order (oldest first). A failed read is
-/// distinct from a verified empty history so callers can preserve their cache.
-Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
+/// Check whether the authenticated owner already has this exact canonical user turn.
+Future<EllaServiceResult<bool>> lookupEllaChatTurn({
+  required String clientMessageId,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+  EllaChatTurnLookupTransport? transport,
+}) async {
+  final turnId = clientMessageId.trim();
+  if (turnId.isEmpty || turnId.length > 128) {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
+  }
+  if (!exactAuthority.isExactCurrent() || exactAuthority.uid != expectedAuthenticatedUid) {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.accountChanged));
+  }
+  if (SharedPreferencesUtil().demoMode) return const EllaServiceResult.success(false);
+
+  try {
+    final url = '${Env.apiBaseUrl}v1/ella/chat/turns/${Uri.encodeComponent(turnId)}';
+    final response = await (transport ?? _defaultTurnLookupTransport)(
+      url: url,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+    if (!exactAuthority.isExactCurrent() || exactAuthority.uid != expectedAuthenticatedUid) {
+      return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.accountChanged));
+    }
+    if (response == null || response.statusCode != 200) {
+      Logger.debug('[EllaChat] Exact turn lookup failed: ${response?.statusCode}');
+      return EllaServiceResult.failure(
+        response == null
+            ? const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true)
+            : ClientApiFailure.fromHttp(statusCode: response.statusCode, body: response.body),
+      );
+    }
+
+    final payload = jsonDecode(response.body);
+    if (payload is! Map<String, dynamic> || payload['exists'] is! bool) {
+      return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
+    }
+    return EllaServiceResult.success(payload['exists'] as bool);
+  } on ClientApiFailure catch (failure) {
+    return EllaServiceResult.failure(failure);
+  } on ExactAccountAuthorityChangedException {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.accountChanged));
+  } catch (error) {
+    Logger.debug('[EllaChat] Exact turn lookup response rejected: ${error.runtimeType}');
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
+  }
+}
+
+/// Fetch one owner-bound chat history page from the VPS proxy endpoint.
+/// Messages are chronological (oldest first); [hasMore] is the server's
+/// pagination authority and must be honored before proving a turn absent.
+Future<EllaServiceResult<EllaChatHistoryPage>> fetchEllaChatHistoryPage({
   int limit = 50,
+  DateTime? before,
   required String expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier exactAuthority,
   EllaChatHistoryTransport? transport,
 }) async {
   if (SharedPreferencesUtil().demoMode) {
-    return EllaServiceResult.success(DemoFixtures.chatMessages());
+    return EllaServiceResult.success(EllaChatHistoryPage(messages: DemoFixtures.chatMessages(), hasMore: false));
   }
 
   try {
-    final query = <String, String>{'limit': '$limit'};
+    final query = <String, String>{
+      'limit': '$limit',
+      if (before != null) 'before': before.toUtc().toIso8601String(),
+    };
     final url = Uri.parse('${Env.apiBaseUrl}v1/ella/chat/history').replace(queryParameters: query).toString();
     final response = await (transport ?? _defaultHistoryTransport)(
       url: url,
@@ -236,20 +321,32 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
 
     final data = jsonDecode(response.body) as Map<String, dynamic>;
     final rawMessages = data['messages'] as List<dynamic>? ?? [];
+    final hasMore = data['hasMore'];
+    if (hasMore is! bool) {
+      return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
+    }
 
     final result = <ServerMessage>[];
     var recognizedHistoryShape = rawMessages.isEmpty;
     for (final m in rawMessages) {
       if (m is! Map<String, dynamic>) continue;
+      final metadata =
+          m['metadata'] is Map ? Map<String, dynamic>.from(m['metadata'] as Map) : const <String, dynamic>{};
       final rawSender = (m['sender'] ?? m['role']) as String? ?? '';
       final content = (m['content'] ?? m['text']) as String? ?? '';
       final ts = (m['timestamp'] ?? m['created_at']) as String?;
       final id = m['id'] as String? ?? const Uuid().v4();
-      final messageSender = switch (rawSender) {
+      final parsedSender = switch (rawSender) {
         'human' || 'user' => MessageSender.human,
         'ai' || 'assistant' => MessageSender.ai,
         _ => null,
       };
+      final isCanonicalOmiMemory = parsedSender == MessageSender.human &&
+          metadata['source'] == 'canonical_timeline' &&
+          metadata['channel'] == 'omi' &&
+          metadata['provider'] == 'omi-backend' &&
+          parseEllaDisplayValue(content).isEllaGenerated;
+      final messageSender = isCanonicalOmiMemory ? MessageSender.ai : parsedSender;
       recognizedHistoryShape =
           recognizedHistoryShape || ((m.containsKey('content') || m.containsKey('text')) && messageSender != null);
       if (content.isEmpty) continue;
@@ -262,7 +359,7 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
         ServerMessage(
           id,
           ts != null ? DateTime.parse(ts).toLocal() : DateTime.now(),
-          content,
+          isCanonicalOmiMemory ? stripEllaDisplayPrefix(content) : content,
           messageSender,
           MessageType.text,
           null,
@@ -271,10 +368,10 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
           [],
           [],
           askForNps: false,
-          canonicalConversationId: (m['metadata'] as Map?)?['conversation_id']?.toString(),
-          canonicalTurnId: (m['metadata'] as Map?)?['turn_id']?.toString(),
-          canonicalTurnOrdinal: parseCanonicalTurnOrdinal((m['metadata'] as Map?)?['turn_ordinal']),
-          canonicalEventSequence: parseCanonicalEventSequence((m['metadata'] as Map?)?['event_sequence']),
+          canonicalConversationId: metadata['conversation_id']?.toString(),
+          canonicalTurnId: metadata['turn_id']?.toString(),
+          canonicalTurnOrdinal: parseCanonicalTurnOrdinal(metadata['turn_ordinal']),
+          canonicalEventSequence: parseCanonicalEventSequence(metadata['event_sequence']),
         ),
       );
     }
@@ -287,7 +384,7 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
     // API returns newest first; reverse for chronological UI order
     result.sort(compareServerMessagesChronologically);
     Logger.debug('[EllaChat] Fetched ${result.length} messages from history');
-    return EllaServiceResult.success(result);
+    return EllaServiceResult.success(EllaChatHistoryPage(messages: result, hasMore: hasMore));
   } on ClientApiFailure catch (failure) {
     return EllaServiceResult.failure(failure);
   } on ExactAccountAuthorityChangedException {
@@ -298,12 +395,35 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
   }
 }
 
+/// Fetch the newest owner-bound history page for normal Chat hydration.
+Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
+  int limit = 50,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+  EllaChatHistoryTransport? transport,
+}) async {
+  final result = await fetchEllaChatHistoryPage(
+    limit: limit,
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
+    transport: transport,
+  );
+  if (result.isFailure) {
+    return EllaServiceResult.failure(
+      result.failure ?? const ClientApiFailure(ClientApiFailureKind.invalidResponse),
+    );
+  }
+  return EllaServiceResult.success(result.value?.messages ?? const <ServerMessage>[]);
+}
+
 /// Main entry point for Ella chat streaming.
 ///
 /// Yields the same [ServerMessageChunk] types as [sendEllaMessageStream],
 /// so callers (MessageProvider, EllaVoiceChatPage) need no logic changes.
 Stream<ServerMessageChunk> sendEllaChatStream(
   String text, {
+  String? clientMessageId,
+  DateTime? clientSentAt,
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
 }) async* {
@@ -325,8 +445,8 @@ Stream<ServerMessageChunk> sendEllaChatStream(
     sendEllaMessageStream(
       text,
       headers: _ellaDebugHeaders(routeSource: 'proxy-canonical'),
-      clientMessageId: const Uuid().v4(),
-      clientSentAt: DateTime.now().toUtc(),
+      clientMessageId: clientMessageId ?? const Uuid().v4(),
+      clientSentAt: (clientSentAt ?? DateTime.now()).toUtc(),
       expectedAuthenticatedUid: expectedAuthenticatedUid,
       exactAuthority: exactAuthority,
     ),

@@ -3,6 +3,8 @@ import 'package:uuid/uuid.dart';
 
 enum MessageSender { ai, human }
 
+enum ClientMessageDeliveryState { pending, failed }
+
 const int maxCanonicalTurnOrdinal = 0x7FFFFFFFFFFFFFFF;
 const int maxCanonicalEventSequence = 0x7FFFFFFF;
 final RegExp _canonicalOrderingDecimalPattern = RegExp(r'^(0|[1-9][0-9]*)$');
@@ -233,6 +235,10 @@ class ServerMessage {
   int? canonicalTurnOrdinal;
   int? canonicalEventSequence;
 
+  /// Client-only state for an outgoing message that has not reached the
+  /// canonical server timeline yet. Persisted in the owner-scoped chat cache.
+  ClientMessageDeliveryState? clientDeliveryState;
+
   List<String> thinkings = [];
   ChartData? chartData;
 
@@ -255,6 +261,7 @@ class ServerMessage {
     this.canonicalTurnId,
     this.canonicalTurnOrdinal,
     this.canonicalEventSequence,
+    this.clientDeliveryState,
   });
 
   static ServerMessage fromJson(Map<String, dynamic> json) {
@@ -279,6 +286,9 @@ class ServerMessage {
       canonicalTurnId: metadata['turn_id']?.toString(),
       canonicalTurnOrdinal: parseCanonicalTurnOrdinal(metadata['turn_ordinal']),
       canonicalEventSequence: parseCanonicalEventSequence(metadata['event_sequence']),
+      clientDeliveryState: ClientMessageDeliveryState.values.firstWhereOrNull(
+        (state) => state.name == json['client_delivery_state'],
+      ),
     );
   }
 
@@ -307,6 +317,7 @@ class ServerMessage {
           if (canonicalTurnOrdinal != null) 'turn_ordinal': canonicalTurnOrdinal,
           if (canonicalEventSequence != null) 'event_sequence': canonicalEventSequence,
         },
+      if (clientDeliveryState != null) 'client_delivery_state': clientDeliveryState!.name,
     };
   }
 

@@ -310,6 +310,10 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                                 )
                                               : HumanMessage(
                                                   message: message,
+                                                  onRetry:
+                                                      message.clientDeliveryState == ClientMessageDeliveryState.failed
+                                                          ? () => provider.retryFailedMessage(message.id)
+                                                          : null,
                                                   onAskOmi: (text) {
                                                     setState(() {
                                                       _selectedContext = text;
@@ -709,14 +713,14 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
 
     var provider = context.read<MessageProvider>();
     provider.setSendingMessage(true);
-    provider.addMessageLocally(text);
+    final outgoing = provider.addMessageLocally(text);
     textController.clear();
 
     Future.delayed(const Duration(milliseconds: 300), () {
       if (mounted) scrollToBottomOnSend();
     });
 
-    await provider.sendMessageStreamToServer(text);
+    await provider.sendMessageStreamToServer(text, localMessageId: outgoing.id);
     provider.clearSelectedFiles();
   }
 

@@ -3,14 +3,16 @@ import 'package:flutter/material.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/pages/chat/widgets/files_handler_widget.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/widgets/extensions/string.dart';
 import 'package:omi/widgets/text_selection_controls.dart';
 
 class HumanMessage extends StatelessWidget {
   final ServerMessage message;
   final Function(String)? onAskOmi;
+  final VoidCallback? onRetry;
 
-  const HumanMessage({super.key, required this.message, this.onAskOmi});
+  const HumanMessage({super.key, required this.message, this.onAskOmi, this.onRetry});
 
   @override
   Widget build(BuildContext context) {
@@ -89,6 +91,22 @@ class HumanMessage extends StatelessWidget {
               ),
             ),
           ),
+          if (message.clientDeliveryState == ClientMessageDeliveryState.failed)
+            Padding(
+              key: Key('chat-send-failed-${message.id}'),
+              padding: const EdgeInsets.only(top: 6, right: 4),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  Text(
+                    context.l10n.ellaChatCouldntSend,
+                    style: EllaTextStyles.caption.copyWith(color: EllaColors.error),
+                  ),
+                  const SizedBox(width: 8),
+                  TextButton(onPressed: onRetry, child: Text(context.l10n.retry)),
+                ],
+              ),
+            ),
         ],
       ),
     );

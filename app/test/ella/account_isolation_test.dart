@@ -272,7 +272,13 @@ void main() {
     final started = Completer<void>();
     final provider = MessageProvider(
       activeAuthority: () => _activeAuthority('uid-a', () => prefs.uid == 'uid-a'),
-      ellaChatStreamSender: (text, {expectedAuthenticatedUid, exactAuthority}) {
+      ellaChatStreamSender: (
+        text, {
+        required clientMessageId,
+        required clientSentAt,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) {
         started.complete();
         return controller.stream;
       },
@@ -290,22 +296,31 @@ void main() {
     expect(prefs.cachedMessages, isEmpty);
   });
 
-  test('typed backend failure is never rendered or persisted as Ella content', () async {
+  test('typed backend failure retains only the owner-scoped user turn for retry', () async {
     final prefs = SharedPreferencesUtil()..uid = 'uid-a';
     await _grantAuthority(prefs, 'uid-a');
     final provider = MessageProvider(
       activeAuthority: () => _activeAuthority('uid-a', () => true),
       aiConsentEnsurer: () async => true,
-      ellaChatStreamSender: (text, {expectedAuthenticatedUid, exactAuthority}) async* {
+      ellaChatStreamSender: (
+        text, {
+        required clientMessageId,
+        required clientSentAt,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async* {
         throw const ClientApiFailure(ClientApiFailureKind.workspaceRequired);
       },
     );
 
     await provider.sendMessageStreamToServer('private question');
 
-    expect(provider.messages, isEmpty);
-    expect(prefs.cachedMessages, isEmpty);
-    expect(provider.lastStreamFailure?.kind, ClientApiFailureKind.workspaceRequired);
+    expect(provider.messages, hasLength(1));
+    expect(provider.messages.single.sender, MessageSender.human);
+    expect(provider.messages.single.text, 'private question');
+    expect(provider.messages.single.clientDeliveryState, ClientMessageDeliveryState.failed);
+    expect(prefs.cachedMessages.single.id, provider.messages.single.id);
+    expect(provider.lastStreamFailure, isNull);
   });
 
   test('failed V2V canonical write has no plausible local success', () async {
@@ -733,7 +748,7 @@ void main() {
     expect(prefs.cachedMessages, isEmpty);
   });
 
-  test('premature chat EOF cannot render cache or haptically present partial assistant content', () async {
+  test('premature chat EOF retains only the user turn without presenting partial assistant content', () async {
     final prefs = SharedPreferencesUtil()..uid = 'uid-a';
     await _grantAuthority(prefs, 'uid-a');
     var haptics = 0;
@@ -753,16 +768,25 @@ void main() {
     final provider = MessageProvider(
       activeAuthority: () => _activeAuthority('uid-a', () => true),
       aiConsentEnsurer: () async => true,
-      ellaChatStreamSender: (text, {expectedAuthenticatedUid, exactAuthority}) async* {
+      ellaChatStreamSender: (
+        text, {
+        required clientMessageId,
+        required clientSentAt,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async* {
         yield ServerMessageChunk('partial-a', 'must never appear', MessageChunkType.data);
       },
     );
 
     await provider.sendMessageStreamToServer('private question');
 
-    expect(provider.messages, isEmpty);
-    expect(prefs.cachedMessages, isEmpty);
-    expect(provider.lastStreamFailure?.kind, ClientApiFailureKind.incompleteStream);
+    expect(provider.messages, hasLength(1));
+    expect(provider.messages.single.sender, MessageSender.human);
+    expect(provider.messages.single.text, 'private question');
+    expect(provider.messages.single.clientDeliveryState, ClientMessageDeliveryState.failed);
+    expect(prefs.cachedMessages.single.id, provider.messages.single.id);
+    expect(provider.lastStreamFailure, isNull);
     expect(haptics, 0);
   });
 

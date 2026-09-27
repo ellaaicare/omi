@@ -6,7 +6,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/http/http_pool_manager.dart';
 import 'package:omi/backend/preferences.dart';
@@ -72,7 +71,7 @@ void main() {
     await SharedPreferencesUtil.init();
   });
 
-  test('Ella stream sends no caller-selected UID or legacy session authority', () async {
+  test('Ella stream sends the stable client turn identity without legacy session authority', () async {
     final preferences = SharedPreferencesUtil();
     preferences.authToken = 'test-bearer';
     preferences.tokenExpirationTime = DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch;
@@ -96,6 +95,8 @@ void main() {
       _InspectingClient((request) async {
         final body = jsonDecode(await request.finalize().bytesToString()) as Map<String, dynamic>;
         expect(body, isNot(contains('uid')));
+        expect(body['client_message_id'], 'stable-client-turn-a');
+        expect(body['client_sent_at'], '2026-08-04T00:00:00.000Z');
         expect(request.headers, isNot(contains('X-Ella-Session-Key')));
         expect(request.headers, isNot(contains('X-TTS-Provider')));
         expect(request.headers['authorization'], 'Bearer test-bearer');
@@ -104,9 +105,64 @@ void main() {
     );
 
     await expectLater(
-      sendEllaMessageStream('hello').toList(),
+      sendEllaChatStream(
+        'hello',
+        clientMessageId: 'stable-client-turn-a',
+        clientSentAt: DateTime.utc(2026, 8, 4),
+      ).toList(),
       throwsA(isA<ClientApiFailure>().having((failure) => failure.kind, 'kind', ClientApiFailureKind.unavailable)),
     );
+  });
+
+  test('turn lookup uses the owner-bound exact route and returns canonical existence', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final result = await lookupEllaChatTurn(
+      clientMessageId: 'stable-client-turn-a',
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: authority,
+      transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async {
+        final uri = Uri.parse(url);
+        expect(uri.path, '/v1/ella/chat/turns/stable-client-turn-a');
+        expect(uri.queryParameters, isEmpty);
+        expect(expectedAuthenticatedUid, 'uid-a');
+        expect(exactAuthority, same(authority));
+        return http.Response('{"exists":true}', 200);
+      },
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(result.value, isTrue);
+  });
+
+  test('turn lookup preserves retryable storage failure instead of treating it as absence', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final result = await lookupEllaChatTurn(
+      clientMessageId: 'stable-client-turn-a',
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: authority,
+      transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async => http.Response(
+        '{"detail":{"code":"canonical_turn_lookup_unavailable","retryable":true}}',
+        503,
+      ),
+    );
+
+    expect(result.isFailure, isTrue);
+    expect(result.failure?.kind, ClientApiFailureKind.unavailable);
+    expect(result.failure?.retryable, isTrue);
+  });
+
+  test('turn lookup rejects malformed success instead of treating it as absence', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final result = await lookupEllaChatTurn(
+      clientMessageId: 'stable-client-turn-a',
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: authority,
+      transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async =>
+          http.Response('{"exists":"false"}', 200),
+    );
+
+    expect(result.isFailure, isTrue);
+    expect(result.failure?.kind, ClientApiFailureKind.invalidResponse);
   });
 
   test('history uses the first-party owner-bound route and preserves failed state', () async {
@@ -129,6 +185,43 @@ void main() {
     expect(result.failure?.kind, ClientApiFailureKind.updateRequired);
   });
 
+  test('history page sends the UTC cursor and preserves server pagination authority', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final result = await fetchEllaChatHistoryPage(
+      before: DateTime.parse('2026-08-09T03:00:00-07:00'),
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: authority,
+      transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async {
+        final uri = Uri.parse(url);
+        expect(uri.path, '/v1/ella/chat/history');
+        expect(uri.queryParameters, {
+          'limit': '50',
+          'before': '2026-08-09T10:00:00.000Z',
+        });
+        expect(expectedAuthenticatedUid, 'uid-a');
+        expect(exactAuthority, same(authority));
+        return http.Response(
+          jsonEncode({
+            'messages': [
+              {
+                'id': 'canonical-0',
+                'sender': 'human',
+                'text': 'Older persisted question',
+                'created_at': '2026-08-09T02:59:00Z',
+              },
+            ],
+            'hasMore': true,
+          }),
+          200,
+        );
+      },
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(result.value?.hasMore, isTrue);
+    expect(result.value?.messages.single.id, 'canonical-0');
+  });
+
   test('history preserves canonical sender roles after hydration', () async {
     const authority = _CurrentAuthority('uid-a');
     final result = await fetchEllaChatHistory(
@@ -146,6 +239,7 @@ void main() {
               },
               {'id': 'canonical-1', 'sender': 'ai', 'text': 'Persisted answer', 'created_at': '2026-08-09T03:00:00Z'},
             ],
+            'hasMore': false,
           }),
           200,
         );
@@ -161,6 +255,46 @@ void main() {
     expect(result.value![1].sender, MessageSender.ai);
     expect(result.value![1].text, 'Persisted answer');
     expect(result.value![1].createdAt.toUtc(), DateTime.parse('2026-08-09T03:00:00Z'));
+  });
+
+  test('canonical Omi memory summaries render as Ella messages without rewriting user chat', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final result = await fetchEllaChatHistory(
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: authority,
+      transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async => http.Response(
+        jsonEncode({
+          'messages': [
+            {
+              'id': 'memory-summary',
+              'sender': 'human',
+              'text': '[Ella] You compared design options.',
+              'created_at': '2026-08-09T02:59:00Z',
+              'metadata': {
+                'source': 'canonical_timeline',
+                'channel': 'omi',
+                'provider': 'omi-backend',
+                'source_identity': 'omi:memory-1',
+              },
+            },
+            {
+              'id': 'literal-user-message',
+              'sender': 'human',
+              'text': '[Ella] is the name I typed.',
+              'created_at': '2026-08-09T03:00:00Z',
+            },
+          ],
+          'hasMore': false,
+        }),
+        200,
+      ),
+    );
+
+    expect(result.value, hasLength(2));
+    expect(result.value![0].sender, MessageSender.ai);
+    expect(result.value![0].text, 'You compared design options.');
+    expect(result.value![1].sender, MessageSender.human);
+    expect(result.value![1].text, '[Ella] is the name I typed.');
   });
 
   test('history preserves equal-time turn pairs instead of grouping by role', () async {
@@ -188,6 +322,7 @@ void main() {
               message('turn-000002', 'human', 0),
               message('turn-000001', 'human', 0),
             ],
+            'hasMore': false,
           }),
           200,
         );
@@ -213,6 +348,7 @@ void main() {
             'messages': [
               {'id': 'unknown-1', 'role': 'assistant', 'body': 'Not a supported contract'},
             ],
+            'hasMore': false,
           }),
           200,
         );
@@ -349,6 +485,7 @@ void main() {
             message(secondTurn, 'human', 0, 1),
             message(firstTurn, 'human', 0, 0),
           ],
+          'hasMore': false,
         }),
         200,
       ),
