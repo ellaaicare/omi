@@ -38,6 +38,7 @@ import asyncpg
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.concurrency import run_in_threadpool
 
 import database.conversations as conversations_db
 import database.memories as memories_db
@@ -62,6 +63,11 @@ from ella.services.canonical_summary_source import (
     conversation_data_payload,
 )
 from ella.services.memory_artwork import enqueue_after_terminal_enrichment
+from ella.services.escalation_policy import (
+    CaregiverPolicyContext,
+    SEVERITY_CRITICAL,
+    _caregiver_alert_allowed,
+)
 from ella.services.runtime_resolver import (
     resolve_isolated_runtime,
     runtime_authority_enabled,
@@ -866,20 +872,36 @@ class EmergencyResponse(BaseModel):
 
 def _server_owned_emergency_contacts(uid: str) -> List[dict]:
     contacts = []
-    for contact in get_contacts(uid):
-        permissions = contact.get("permissions") or {}
-        if permissions.get("emergency_contact", True) is not True:
+    for caregiver in get_caregivers(uid):
+        if str(caregiver.get("uid") or "").strip() != uid:
             continue
-        phone = str(contact.get("phone") or "").strip()
-        email = str(contact.get("email") or "").strip()
+        context = CaregiverPolicyContext(
+            caregiver_id=str(caregiver.get("id") or ""),
+            status=str(caregiver.get("status") or ""),
+            is_emergency_contact=caregiver.get("is_emergency_contact") is True,
+            name=caregiver.get("name"),
+            relationship=caregiver.get("relationship"),
+            email=caregiver.get("email"),
+            phone=caregiver.get("phone"),
+            permissions=dict(caregiver.get("permissions") or {}),
+        )
+        allowed, _reason = _caregiver_alert_allowed(
+            context,
+            {"emergency_contact_only": True, "allow_high": False},
+            SEVERITY_CRITICAL,
+        )
+        if not allowed:
+            continue
+        phone = str(context.phone or "").strip()
+        email = str(context.email or "").strip()
         if not phone and not email:
             continue
         contacts.append(
             {
-                "name": str(contact.get("name") or "Emergency contact")[:200],
+                "name": str(context.name or "Emergency contact")[:200],
                 "phone": phone[:20] or None,
                 "email": email[:254] or None,
-                "relationship": str(contact.get("relationship") or "other")[:100],
+                "relationship": str(context.relationship or "other")[:100],
             }
         )
     return contacts
@@ -921,13 +943,6 @@ async def ella_emergency(
     sms_available = False
     delivery_error: Optional[str] = None
 
-    try:
-        emergency_contacts = _server_owned_emergency_contacts(request.uid)
-    except Exception:
-        logger.exception("[Ella] Emergency contact authority lookup failed")
-        emergency_contacts = []
-        delivery_error = "emergency_contact_authority_unavailable"
-
     # Step 1: Send immediate push notification to elder's device
     try:
         data = {
@@ -945,6 +960,13 @@ async def ella_emergency(
         logger.info(f"[Ella] Emergency push sent to elder: uid={request.uid}")
     except Exception as e:
         logger.error(f"[Ella] Emergency push to elder failed: {e}")
+
+    try:
+        emergency_contacts = await run_in_threadpool(_server_owned_emergency_contacts, request.uid)
+    except Exception:
+        logger.exception("[Ella] Emergency caregiver authority lookup failed")
+        emergency_contacts = []
+        delivery_error = "emergency_contact_authority_unavailable"
 
     # Step 2: Dispatch to n8n for SMS/call alerts (non-blocking)
     n8n_payload = {

@@ -1,6 +1,7 @@
 import sys
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -108,8 +109,15 @@ def test_emergency_contact_exact_owner_positive_control(monkeypatch):
         "phone": "+15555550100",
         "email": None,
         "relationship": "friend",
-        "permissions": {"emergency_contact": True},
+        "status": "active",
+        "is_emergency_contact": True,
+        "permissions": {"receive_emergency_alerts": True},
     }
+    monkeypatch.setattr(
+        callbacks,
+        "get_caregivers",
+        lambda uid: [server_contact] if uid == "uid-a" else (_ for _ in ()).throw(AssertionError()),
+    )
     monkeypatch.setattr(
         callbacks,
         "get_contacts",
@@ -159,12 +167,16 @@ def test_emergency_webhook_fails_closed_without_authority(monkeypatch):
     effects = []
     monkeypatch.setattr(
         callbacks,
-        "get_contacts",
+        "get_caregivers",
         lambda _uid: [
             {
+                "id": "caregiver-a",
+                "uid": "uid-a",
                 "name": "Server contact",
                 "phone": "+15555550100",
-                "permissions": {"emergency_contact": True},
+                "status": "active",
+                "is_emergency_contact": True,
+                "permissions": {"receive_emergency_alerts": True},
             }
         ],
     )
@@ -188,6 +200,99 @@ def test_emergency_webhook_fails_closed_without_authority(monkeypatch):
     assert response.json()["contacts_notified"] == []
     assert response.json()["error"] == "emergency_webhook_authority_unavailable"
     assert effects[0][1]["body"] == "Your emergency request was received."
+
+
+@pytest.mark.parametrize(
+    "caregiver",
+    [
+        {
+            "id": "caregiver-cleared",
+            "uid": "uid-a",
+            "status": "active",
+            "is_emergency_contact": False,
+            "phone": "+15555550101",
+            "permissions": {"receive_emergency_alerts": True},
+        },
+        {
+            "id": "caregiver-inactive",
+            "uid": "uid-a",
+            "status": "invited",
+            "is_emergency_contact": True,
+            "phone": "+15555550102",
+            "permissions": {"receive_emergency_alerts": True},
+        },
+        {
+            "id": "caregiver-denied",
+            "uid": "uid-a",
+            "status": "active",
+            "is_emergency_contact": True,
+            "phone": "+15555550103",
+            "permissions": {"receive_emergency_alerts": False},
+        },
+        {
+            "id": "caregiver-cross-owner",
+            "uid": "uid-b",
+            "status": "active",
+            "is_emergency_contact": True,
+            "phone": "+15555550104",
+            "permissions": {"receive_emergency_alerts": True},
+        },
+    ],
+)
+def test_emergency_delivery_excludes_cleared_inactive_denied_and_cross_owner_caregivers(monkeypatch, caregiver):
+    monkeypatch.setattr(callbacks, "get_caregivers", lambda uid: [caregiver] if uid == "uid-a" else [])
+
+    assert callbacks._server_owned_emergency_contacts("uid-a") == []
+
+
+def test_emergency_delivery_uses_selected_active_owner_caregiver(monkeypatch):
+    caregiver = {
+        "id": "caregiver-selected",
+        "uid": "uid-a",
+        "name": "Selected caregiver",
+        "relationship": "family",
+        "status": "ACTIVE",
+        "is_emergency_contact": True,
+        "phone": "+15555550105",
+        "email": "caregiver@example.test",
+        "permissions": {"receive_emergency_alerts": True},
+    }
+    monkeypatch.setattr(callbacks, "get_caregivers", lambda uid: [caregiver] if uid == "uid-a" else [])
+
+    assert callbacks._server_owned_emergency_contacts("uid-a") == [
+        {
+            "name": "Selected caregiver",
+            "phone": "+15555550105",
+            "email": "caregiver@example.test",
+            "relationship": "family",
+        }
+    ]
+
+
+def test_emergency_owner_receipt_precedes_offloaded_caregiver_lookup(monkeypatch):
+    effects = []
+
+    monkeypatch.setattr(
+        callbacks,
+        "send_notification",
+        lambda **_kwargs: effects.append("owner_receipt"),
+    )
+    monkeypatch.setattr(
+        callbacks,
+        "get_caregivers",
+        lambda _uid: effects.append("caregiver_lookup") or [],
+    )
+    monkeypatch.setattr(callbacks, "EMERGENCY_WEBHOOK_KEY", "configured-emergency-webhook-key")
+    client = _client(monkeypatch)
+
+    response = client.post(
+        "/v1/ella/emergency",
+        headers={"Authorization": "Bearer token-a"},
+        json={"uid": "uid-a"},
+    )
+
+    assert response.status_code == 200
+    assert effects == ["owner_receipt", "caregiver_lookup"]
 
 
 def test_first_party_caregiver_routes_derive_owner_and_reject_caller_uid(monkeypatch):
