@@ -50,7 +50,7 @@ def _set_caregiver_pool(monkeypatch, rows):
     async def get_pool():
         return pool
 
-    monkeypatch.setattr(callbacks, "_get_resolve_pool", get_pool)
+    monkeypatch.setattr(callbacks, "get_ella_postgres_pool", get_pool)
     return pool
 
 
@@ -76,6 +76,20 @@ def _contact_body(uid):
         "phone": "+15555550100",
         "relationship": "friend",
     }
+
+
+def test_emergency_contacts_use_configured_shared_ella_postgres_pool(monkeypatch):
+    pool = _set_caregiver_pool(monkeypatch, [_server_caregiver()])
+    monkeypatch.setattr(
+        callbacks,
+        "_get_resolve_pool",
+        lambda: (_ for _ in ()).throw(AssertionError("legacy hard-coded pool must not be used")),
+    )
+
+    contacts = asyncio.run(callbacks._server_owned_emergency_contacts("uid-a"))
+
+    assert len(contacts) == 1
+    assert pool.fetches[0][1] == ("uid-a",)
 
 
 def test_emergency_contact_crud_rejects_unauthenticated_and_cross_owner_before_storage(monkeypatch):

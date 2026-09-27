@@ -44,6 +44,7 @@ import database.memories as memories_db
 import database.users as users_db
 from database._client import db
 from database.honcho_attestation import authority_credential
+from database.ella_postgres import get_ella_postgres_pool
 from models.conversation import CategoryEnum
 from database.ella_caregivers import (
     create_caregiver,
@@ -873,7 +874,7 @@ _CONFIRMED_EMERGENCY_DELIVERY_STATUSES = {"sent", "queued", "delivered"}
 
 
 async def _server_owned_emergency_contacts(uid: str) -> List[dict]:
-    pool = await _get_resolve_pool()
+    pool = await get_ella_postgres_pool()
     caregiver_rows = await pool.fetch(
         """
         SELECT
