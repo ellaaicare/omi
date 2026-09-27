@@ -1,3 +1,4 @@
+import asyncio
 import sys
 from unittest.mock import MagicMock
 
@@ -15,6 +16,42 @@ sys.modules.setdefault("utils.other.storage", MagicMock())
 
 from ella.routers import callbacks
 from utils.ella import exact_firebase_auth
+
+
+class _CaregiverPool:
+    def __init__(self, rows):
+        self.rows = rows
+        self.fetches = []
+
+    async def fetch(self, query, *args):
+        self.fetches.append((query, args))
+        return self.rows
+
+
+def _server_caregiver(**overrides):
+    caregiver = {
+        "id": "caregiver-selected",
+        "owner_uid": "uid-a",
+        "name": "Selected caregiver",
+        "relationship": "family",
+        "status": "ACTIVE",
+        "is_emergency_contact": True,
+        "phone": "+15555550105",
+        "email": "caregiver@example.test",
+        "permissions": {"receive_emergency_alerts": True},
+    }
+    caregiver.update(overrides)
+    return caregiver
+
+
+def _set_caregiver_pool(monkeypatch, rows):
+    pool = _CaregiverPool(rows)
+
+    async def get_pool():
+        return pool
+
+    monkeypatch.setattr(callbacks, "_get_resolve_pool", get_pool)
+    return pool
 
 
 def _verify_firebase(token):
@@ -102,26 +139,12 @@ def test_emergency_contact_exact_owner_positive_control(monkeypatch):
             outbound.append((args, kwargs))
             return Response()
 
-    server_contact = {
-        "id": "contact-a",
-        "uid": "uid-a",
-        "name": "Server contact",
-        "phone": "+15555550100",
-        "email": None,
-        "relationship": "friend",
-        "status": "active",
-        "is_emergency_contact": True,
-        "permissions": {"receive_emergency_alerts": True},
-    }
-    monkeypatch.setattr(
-        callbacks,
-        "get_caregivers",
-        lambda uid: [server_contact] if uid == "uid-a" else (_ for _ in ()).throw(AssertionError()),
-    )
+    server_contact = _server_caregiver(name="Server contact", phone="+15555550100", email=None, relationship="friend")
+    pool = _set_caregiver_pool(monkeypatch, [server_contact])
     monkeypatch.setattr(
         callbacks,
         "get_contacts",
-        lambda uid: [server_contact] if uid == "uid-a" else (_ for _ in ()).throw(AssertionError()),
+        lambda uid: [{**server_contact, "uid": "uid-a"}] if uid == "uid-a" else (_ for _ in ()).throw(AssertionError()),
     )
     monkeypatch.setattr(callbacks, "EMERGENCY_WEBHOOK_KEY", "configured-emergency-webhook-key")
     monkeypatch.setattr(callbacks, "send_notification", lambda **kwargs: kwargs["user_id"] == "uid-a")
@@ -161,25 +184,15 @@ def test_emergency_contact_exact_owner_positive_control(monkeypatch):
         }
     ]
     assert "audio_context_url" not in outbound[0][1]["json"]
+    caregiver_query, caregiver_args = pool.fetches[0]
+    assert "JOIN caregivers c ON c.user_id = u.id" in caregiver_query
+    assert "WHERE u.omi_uid = $1" in caregiver_query
+    assert caregiver_args == ("uid-a",)
 
 
 def test_emergency_webhook_fails_closed_without_authority(monkeypatch):
     effects = []
-    monkeypatch.setattr(
-        callbacks,
-        "get_caregivers",
-        lambda _uid: [
-            {
-                "id": "caregiver-a",
-                "uid": "uid-a",
-                "name": "Server contact",
-                "phone": "+15555550100",
-                "status": "active",
-                "is_emergency_contact": True,
-                "permissions": {"receive_emergency_alerts": True},
-            }
-        ],
-    )
+    _set_caregiver_pool(monkeypatch, [_server_caregiver(name="Server contact", phone="+15555550100")])
     monkeypatch.setattr(callbacks, "EMERGENCY_WEBHOOK_KEY", "")
     monkeypatch.setattr(callbacks, "send_notification", lambda **kwargs: effects.append(("notify", kwargs)))
     monkeypatch.setattr(
@@ -203,11 +216,68 @@ def test_emergency_webhook_fails_closed_without_authority(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("delivery_statuses", "expected_status", "expected_error"),
+    [
+        (["failed", "error"], "partial", "emergency_delivery_unconfirmed"),
+        (["failed", "queued"], "success", None),
+    ],
+)
+def test_emergency_status_requires_confirmed_caregiver_delivery(
+    monkeypatch,
+    delivery_statuses,
+    expected_status,
+    expected_error,
+):
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "sms_available": True,
+                "contacts_notified": [
+                    {
+                        "name": f"Caregiver {index}",
+                        "method": "sms",
+                        "status": status,
+                    }
+                    for index, status in enumerate(delivery_statuses)
+                ],
+            }
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return Response()
+
+    _set_caregiver_pool(monkeypatch, [_server_caregiver()])
+    monkeypatch.setattr(callbacks, "EMERGENCY_WEBHOOK_KEY", "configured-emergency-webhook-key")
+    monkeypatch.setattr(callbacks, "send_notification", lambda **_kwargs: None)
+    monkeypatch.setattr(callbacks.httpx, "AsyncClient", lambda **_kwargs: Client())
+
+    response = _client(monkeypatch).post(
+        "/v1/ella/emergency",
+        headers={"Authorization": "Bearer token-a"},
+        json={"uid": "uid-a"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == expected_status
+    assert response.json()["error"] == expected_error
+    assert [contact["status"] for contact in response.json()["contacts_notified"]] == delivery_statuses
+
+
+@pytest.mark.parametrize(
     "caregiver",
     [
         {
             "id": "caregiver-cleared",
-            "uid": "uid-a",
+            "owner_uid": "uid-a",
             "status": "active",
             "is_emergency_contact": False,
             "phone": "+15555550101",
@@ -215,7 +285,7 @@ def test_emergency_webhook_fails_closed_without_authority(monkeypatch):
         },
         {
             "id": "caregiver-inactive",
-            "uid": "uid-a",
+            "owner_uid": "uid-a",
             "status": "invited",
             "is_emergency_contact": True,
             "phone": "+15555550102",
@@ -223,7 +293,7 @@ def test_emergency_webhook_fails_closed_without_authority(monkeypatch):
         },
         {
             "id": "caregiver-denied",
-            "uid": "uid-a",
+            "owner_uid": "uid-a",
             "status": "active",
             "is_emergency_contact": True,
             "phone": "+15555550103",
@@ -231,7 +301,7 @@ def test_emergency_webhook_fails_closed_without_authority(monkeypatch):
         },
         {
             "id": "caregiver-cross-owner",
-            "uid": "uid-b",
+            "owner_uid": "uid-b",
             "status": "active",
             "is_emergency_contact": True,
             "phone": "+15555550104",
@@ -240,26 +310,15 @@ def test_emergency_webhook_fails_closed_without_authority(monkeypatch):
     ],
 )
 def test_emergency_delivery_excludes_cleared_inactive_denied_and_cross_owner_caregivers(monkeypatch, caregiver):
-    monkeypatch.setattr(callbacks, "get_caregivers", lambda uid: [caregiver] if uid == "uid-a" else [])
+    _set_caregiver_pool(monkeypatch, [caregiver])
 
-    assert callbacks._server_owned_emergency_contacts("uid-a") == []
+    assert asyncio.run(callbacks._server_owned_emergency_contacts("uid-a")) == []
 
 
 def test_emergency_delivery_uses_selected_active_owner_caregiver(monkeypatch):
-    caregiver = {
-        "id": "caregiver-selected",
-        "uid": "uid-a",
-        "name": "Selected caregiver",
-        "relationship": "family",
-        "status": "ACTIVE",
-        "is_emergency_contact": True,
-        "phone": "+15555550105",
-        "email": "caregiver@example.test",
-        "permissions": {"receive_emergency_alerts": True},
-    }
-    monkeypatch.setattr(callbacks, "get_caregivers", lambda uid: [caregiver] if uid == "uid-a" else [])
+    _set_caregiver_pool(monkeypatch, [_server_caregiver()])
 
-    assert callbacks._server_owned_emergency_contacts("uid-a") == [
+    assert asyncio.run(callbacks._server_owned_emergency_contacts("uid-a")) == [
         {
             "name": "Selected caregiver",
             "phone": "+15555550105",
@@ -269,7 +328,7 @@ def test_emergency_delivery_uses_selected_active_owner_caregiver(monkeypatch):
     ]
 
 
-def test_emergency_owner_receipt_precedes_offloaded_caregiver_lookup(monkeypatch):
+def test_emergency_owner_receipt_precedes_async_caregiver_lookup(monkeypatch):
     effects = []
 
     monkeypatch.setattr(
@@ -277,11 +336,12 @@ def test_emergency_owner_receipt_precedes_offloaded_caregiver_lookup(monkeypatch
         "send_notification",
         lambda **_kwargs: effects.append("owner_receipt"),
     )
-    monkeypatch.setattr(
-        callbacks,
-        "get_caregivers",
-        lambda _uid: effects.append("caregiver_lookup") or [],
-    )
+
+    async def load_contacts(_uid):
+        effects.append("caregiver_lookup")
+        return []
+
+    monkeypatch.setattr(callbacks, "_server_owned_emergency_contacts", load_contacts)
     monkeypatch.setattr(callbacks, "EMERGENCY_WEBHOOK_KEY", "configured-emergency-webhook-key")
     client = _client(monkeypatch)
 

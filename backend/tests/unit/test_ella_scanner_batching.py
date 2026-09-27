@@ -238,7 +238,6 @@ def test_scanner_payload_preserves_stt_identity_and_latency_metadata(monkeypatch
 def test_scanner_fails_before_webhook_egress_without_authority(monkeypatch):
     posts = []
     wake_acks = []
-    monkeypatch.setattr(scanner, "_log_trace_event", lambda *args, **kwargs: None)
     monkeypatch.setattr(scanner, "_enqueue_wake_ack", lambda *args, **kwargs: wake_acks.append((args, kwargs)))
     monkeypatch.setattr(
         scanner,
@@ -249,6 +248,7 @@ def test_scanner_fails_before_webhook_egress_without_authority(monkeypatch):
     )
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
     monkeypatch.setattr(scanner, "SCANNER_WEBHOOK_KEY", "")
+    monkeypatch.setattr(scanner, "GUARDIAN_WEBHOOK_KEY", "configured-guardian-trace-key")
     monkeypatch.setattr(scanner.requests, "post", lambda *args, **kwargs: posts.append((args, kwargs)))
 
     status = scanner.send_to_scanner(

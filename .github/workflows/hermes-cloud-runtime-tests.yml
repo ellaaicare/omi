@@ -805,6 +805,9 @@ jobs:
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_contact_crud_rejects_unauthenticated_and_cross_owner_before_storage"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_contact_exact_owner_positive_control"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_webhook_fails_closed_without_authority"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_status_requires_confirmed_caregiver_delivery[delivery_statuses0-partial-emergency_delivery_unconfirmed]"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_status_requires_confirmed_caregiver_delivery[delivery_statuses1-success-None]"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_delivery_uses_selected_active_owner_caregiver"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_first_party_caregiver_routes_derive_owner_and_reject_caller_uid"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_caregiver_routes_reject_unauth_admin_and_service_before_storage"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_internal_callback_service_fails_closed_and_positive_control_is_scoped"
@@ -848,7 +851,7 @@ jobs:
           for required_id in "${required_incident_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$incident_ids"
           done
-          test "$(grep -c '::' <<<"$incident_ids")" -eq 69
+          test "$(grep -c '::' <<<"$incident_ids")" -eq 71
           pytest \
             tests/unit/test_ella_incident_1182_route_isolation.py \
             tests/unit/test_ella_incident_1182_callback_auth.py \

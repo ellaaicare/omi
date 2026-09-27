@@ -38,7 +38,6 @@ import asyncpg
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
-from starlette.concurrency import run_in_threadpool
 
 import database.conversations as conversations_db
 import database.memories as memories_db
@@ -870,11 +869,44 @@ class EmergencyResponse(BaseModel):
     error: Optional[str] = None
 
 
-def _server_owned_emergency_contacts(uid: str) -> List[dict]:
+_CONFIRMED_EMERGENCY_DELIVERY_STATUSES = {"sent", "queued", "delivered"}
+
+
+async def _server_owned_emergency_contacts(uid: str) -> List[dict]:
+    pool = await _get_resolve_pool()
+    caregiver_rows = await pool.fetch(
+        """
+        SELECT
+            c.id,
+            u.omi_uid AS owner_uid,
+            c.status::text AS status,
+            c.is_emergency_contact,
+            c.name,
+            c.relationship,
+            c.email,
+            c.phone,
+            c.permissions
+        FROM users u
+        JOIN caregivers c ON c.user_id = u.id
+        WHERE u.omi_uid = $1
+          AND c.is_emergency_contact = TRUE
+        ORDER BY c.created_at ASC
+        """,
+        uid,
+    )
     contacts = []
-    for caregiver in get_caregivers(uid):
-        if str(caregiver.get("uid") or "").strip() != uid:
+    for row in caregiver_rows:
+        caregiver = dict(row)
+        if str(caregiver.get("owner_uid") or "").strip() != uid:
             continue
+        permissions = caregiver.get("permissions") or {}
+        if isinstance(permissions, str):
+            try:
+                permissions = json.loads(permissions)
+            except json.JSONDecodeError:
+                permissions = {}
+        if not isinstance(permissions, dict):
+            permissions = {}
         context = CaregiverPolicyContext(
             caregiver_id=str(caregiver.get("id") or ""),
             status=str(caregiver.get("status") or ""),
@@ -883,7 +915,7 @@ def _server_owned_emergency_contacts(uid: str) -> List[dict]:
             relationship=caregiver.get("relationship"),
             email=caregiver.get("email"),
             phone=caregiver.get("phone"),
-            permissions=dict(caregiver.get("permissions") or {}),
+            permissions=permissions,
         )
         allowed, _reason = _caregiver_alert_allowed(
             context,
@@ -942,6 +974,7 @@ async def ella_emergency(
     push_sent = False
     sms_available = False
     delivery_error: Optional[str] = None
+    confirmed_delivery_count = 0
 
     # Step 1: Send immediate push notification to elder's device
     try:
@@ -962,7 +995,7 @@ async def ella_emergency(
         logger.error(f"[Ella] Emergency push to elder failed: {e}")
 
     try:
-        emergency_contacts = await run_in_threadpool(_server_owned_emergency_contacts, request.uid)
+        emergency_contacts = await _server_owned_emergency_contacts(request.uid)
     except Exception:
         logger.exception("[Ella] Emergency caregiver authority lookup failed")
         emergency_contacts = []
@@ -1003,20 +1036,22 @@ async def ella_emergency(
                     sms_available = result.get("sms_available", False)
 
                     for contact in result.get("contacts_notified", []):
-                        contacts_notified.append(
-                            ContactResult(
-                                name=contact.get("name", "Unknown"),
-                                method=contact.get("method", "unknown"),
-                                status=contact.get("status", "unknown"),
-                                error=contact.get("error"),
-                            )
+                        contact_result = ContactResult(
+                            name=contact.get("name", "Unknown"),
+                            method=contact.get("method", "unknown"),
+                            status=contact.get("status", "unknown"),
+                            error=contact.get("error"),
                         )
+                        contacts_notified.append(contact_result)
+                        if contact_result.status.strip().lower() in _CONFIRMED_EMERGENCY_DELIVERY_STATUSES:
+                            confirmed_delivery_count += 1
 
                     logger.info(
                         f"[Ella] Emergency n8n dispatch success: "
-                        f"{len(contacts_notified)} contacts, sms={sms_available}"
+                        f"{len(contacts_notified)} contacts, confirmed={confirmed_delivery_count}, "
+                        f"sms={sms_available}"
                     )
-                    if not contacts_notified:
+                    if confirmed_delivery_count == 0:
                         delivery_error = "emergency_delivery_unconfirmed"
                 else:
                     delivery_error = "emergency_delivery_unavailable"
@@ -1029,7 +1064,7 @@ async def ella_emergency(
             delivery_error = "emergency_delivery_unavailable"
             logger.exception("[Ella] Emergency n8n dispatch failed")
 
-    status = "success" if contacts_notified else "partial"
+    status = "success" if confirmed_delivery_count > 0 else "partial"
 
     logger.info(
         f"[Ella] Emergency alert complete: alert_id={alert_id}, "

@@ -914,18 +914,6 @@ def send_to_scanner(
         return None
 
     if not SCANNER_WEBHOOK_KEY:
-        _log_trace_event(
-            trace_id=trace_id,
-            uid=uid,
-            stage="scanner_dispatched",
-            status="error",
-            metadata={
-                "conversation_id": str(conversation_id),
-                "device_type": device_type,
-                "segment_count": len(scanner_segments),
-                "reason": "scanner_webhook_authority_unavailable",
-            },
-        )
         print(f"📡 Scanner authority unavailable trace={trace_id}", flush=True)
         return None
 
