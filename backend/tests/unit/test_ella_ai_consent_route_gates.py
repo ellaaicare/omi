@@ -642,6 +642,23 @@ def test_live_scanner_queue_uses_server_owned_emergency_predicate():
             ]
         }
     )
+    # A disqualified same-speaker group (reported speech) must not shadow an
+    # independent qualifying group later in the same batch.
+    assert predicate(
+        {
+            "segments": [
+                {"text": "I cannot breathe", "speaker": "SPEAKER_1"},
+                {"text": "I cannot breathe", "speaker": "SPEAKER_2"},
+            ],
+            "recent_segments": [{"text": "She said.", "speaker": "SPEAKER_1"}],
+        }
+    )
+    assert not predicate(
+        {
+            "segments": [{"text": "I cannot breathe", "speaker": "SPEAKER_1"}],
+            "recent_segments": [{"text": "She said.", "speaker": "SPEAKER_1"}],
+        }
+    )
 
 
 def test_scanner_mode_authority_uses_shared_async_pool_and_fails_closed():
