@@ -123,6 +123,7 @@ _CURRENT_PERSON_SUBJECT = (
     r"(?!(?:the|this|that|an?|documentary|article|movie|film|song|podcast|book|story|report|news|"
     r"video|show|character)\b)[a-z][a-z'’-]{1,30}(?:\s+[a-z][a-z'’-]{1,30})?)"
 )
+_CURRENT_PERSON_COPULA = r"(?:\s+(?:am|is|are)|\s*['’](?:m|s|re))"
 _CREDIBLE_EMERGENCY_PATTERNS = (
     ("emergency_services", re.compile(r"^\s*(?:someone\s+)?call\s+911\b", re.IGNORECASE)),
     ("breathing", re.compile(r"^\s*i\s+(?:can\s*not|cannot|can't)\s+breathe\b", re.IGNORECASE)),
@@ -140,7 +141,7 @@ _CREDIBLE_EMERGENCY_PATTERNS = (
         "chest_pain",
         re.compile(
             rf"^\s*(?:i\s+have\s+chest\s+pain|"
-            rf"(?:{_CURRENT_PERSON_SUBJECT})\s+(?:am|is|are|'m|'s|'re)\s+having\s+chest\s+pain|"
+            rf"(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+having\s+chest\s+pain|"
             r"my\s+chest\s+hurts)\b",
             re.IGNORECASE,
         ),
@@ -157,14 +158,14 @@ _CREDIBLE_EMERGENCY_PATTERNS = (
     (
         "seizure",
         re.compile(
-            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT})\s+(?:am|is|are|'m|'s|'re)\s+having\s+(?:a\s+)?seizure\b",
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+having\s+(?:a\s+)?seizure\b",
             re.IGNORECASE,
         ),
     ),
     (
         "severe_bleeding",
         re.compile(
-            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT})\s+(?:am|is|are|'m|'s|'re)\s+bleeding\s+out\b",
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+bleeding\s+out\b",
             re.IGNORECASE,
         ),
     ),

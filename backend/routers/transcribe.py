@@ -193,7 +193,7 @@ def _scanner_dispatch_item_is_credible_emergency(item: dict) -> bool:
 
 
 class ScannerDispatchQueue:
-    """Bounded, ordered scanner work with one slot reserved for emergencies."""
+    """Bounded scanner work with emergency priority and FIFO within each class."""
 
     def __init__(
         self,
@@ -206,10 +206,11 @@ class ScannerDispatchQueue:
         self._dispatcher = dispatcher
         self._maxsize = max(2, maxsize)
         self._routine_capacity = self._maxsize - 1
-        self._queue: asyncio.Queue = asyncio.Queue(maxsize=self._maxsize)
+        self._queue: asyncio.PriorityQueue = asyncio.PriorityQueue(maxsize=self._maxsize)
         self._drain_timeout_seconds = max(0.1, drain_timeout_seconds)
         self._emergency_predicate = emergency_predicate
         self._queued_routine = 0
+        self._sequence = 0
         self._worker: asyncio.Task | None = None
         self._closed = False
 
@@ -226,8 +227,10 @@ class ScannerDispatchQueue:
             is_emergency = False
         if not is_emergency and self._queued_routine >= self._routine_capacity:
             return False
+        sequence = self._sequence
+        self._sequence += 1
         try:
-            self._queue.put_nowait((item, is_emergency))
+            self._queue.put_nowait((0 if is_emergency else 1, sequence, item, is_emergency))
         except asyncio.QueueFull:
             return False
         if not is_emergency:
@@ -242,7 +245,9 @@ class ScannerDispatchQueue:
             return
 
         async def drain() -> None:
-            await self._queue.put(_SCANNER_DISPATCH_STOP)
+            sequence = self._sequence
+            self._sequence += 1
+            await self._queue.put((2, sequence, _SCANNER_DISPATCH_STOP, False))
             await self._worker
 
         try:
@@ -256,11 +261,10 @@ class ScannerDispatchQueue:
 
     async def _run(self) -> None:
         while True:
-            queued_item = await self._queue.get()
+            _priority, _sequence, item, is_emergency = await self._queue.get()
             try:
-                if queued_item is _SCANNER_DISPATCH_STOP:
+                if item is _SCANNER_DISPATCH_STOP:
                     return
-                item, is_emergency = queued_item
                 if not is_emergency:
                     self._queued_routine -= 1
                 await self._dispatcher(item)

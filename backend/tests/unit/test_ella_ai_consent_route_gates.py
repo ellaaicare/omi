@@ -466,9 +466,9 @@ def test_scanner_dispatch_queue_is_bounded_ordered_and_drains_on_close():
         await queue.close()
         assert dispatched == [
             ("uid-1", "session-1", 1),
+            ("uid-1", "session-1", 99),
             ("uid-1", "session-1", 2),
             ("uid-1", "session-1", 3),
-            ("uid-1", "session-1", 99),
         ]
         assert queue.enqueue({"uid": "uid-2", "session": "session-2", "sequence": 5}) is False
 
