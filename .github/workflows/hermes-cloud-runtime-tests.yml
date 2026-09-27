@@ -804,6 +804,7 @@ jobs:
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_affected_background_boundaries_are_exact_and_trace_has_no_detached_task"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_contact_crud_rejects_unauthenticated_and_cross_owner_before_storage"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_contact_exact_owner_positive_control"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_webhook_fails_closed_without_authority"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_first_party_caregiver_routes_derive_owner_and_reject_caller_uid"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_caregiver_routes_reject_unauth_admin_and_service_before_storage"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_internal_callback_service_fails_closed_and_positive_control_is_scoped"
@@ -847,7 +848,7 @@ jobs:
           for required_id in "${required_incident_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$incident_ids"
           done
-          test "$(grep -c '::' <<<"$incident_ids")" -eq 62
+          test "$(grep -c '::' <<<"$incident_ids")" -eq 63
           pytest \
             tests/unit/test_ella_incident_1182_route_isolation.py \
             tests/unit/test_ella_incident_1182_callback_auth.py \
@@ -1350,7 +1351,7 @@ jobs:
           pytest tests/unit/test_memory_reinterpretation_outbox.py -v
           test "$(pytest --collect-only -q tests/unit/test_scanner_keyterms.py | grep -c '::')" -eq 10
           pytest tests/unit/test_scanner_keyterms.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_scanner_batching.py | grep -c '::')" -eq 8
+          test "$(pytest --collect-only -q tests/unit/test_ella_scanner_batching.py | grep -c '::')" -eq 9
           pytest tests/unit/test_ella_scanner_batching.py -v
 
       - name: Run real Firestore summary CAS contention gate

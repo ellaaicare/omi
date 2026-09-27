@@ -110,6 +110,8 @@ PROVISION_API_KEY = authority_credential("ELLA_PROVISION_API_KEY", "ELLA_PROVISI
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_URL", "http://100.76.138.56:8200")
 CALLBACK_SERVICE_HEADER = "X-Ella-Callback-Service-Key"
 CAREGIVER_SERVICE_HEADER = "X-Ella-Caregiver-Service-Key"
+EMERGENCY_WEBHOOK_KEY_HEADER = "X-Ella-Emergency-Webhook-Key"
+EMERGENCY_WEBHOOK_KEY = authority_credential("ELLA_EMERGENCY_WEBHOOK_KEY", strip=False)
 SUMMARY_CAS_MODE_ENV = "ELLA_SUMMARY_CAS_MODE"
 SUMMARY_CAS_OPTIONAL = "optional"
 SUMMARY_CAS_REQUIRED = "required"
@@ -862,6 +864,27 @@ class EmergencyResponse(BaseModel):
     error: Optional[str] = None
 
 
+def _server_owned_emergency_contacts(uid: str) -> List[dict]:
+    contacts = []
+    for contact in get_contacts(uid):
+        permissions = contact.get("permissions") or {}
+        if permissions.get("emergency_contact", True) is not True:
+            continue
+        phone = str(contact.get("phone") or "").strip()
+        email = str(contact.get("email") or "").strip()
+        if not phone and not email:
+            continue
+        contacts.append(
+            {
+                "name": str(contact.get("name") or "Emergency contact")[:200],
+                "phone": phone[:20] or None,
+                "email": email[:254] or None,
+                "relationship": str(contact.get("relationship") or "other")[:100],
+            }
+        )
+    return contacts
+
+
 # ============================================================================
 # Emergency Alert Endpoint
 # ============================================================================
@@ -896,6 +919,14 @@ async def ella_emergency(
     contacts_notified: List[ContactResult] = []
     push_sent = False
     sms_available = False
+    delivery_error: Optional[str] = None
+
+    try:
+        emergency_contacts = _server_owned_emergency_contacts(request.uid)
+    except Exception:
+        logger.exception("[Ella] Emergency contact authority lookup failed")
+        emergency_contacts = []
+        delivery_error = "emergency_contact_authority_unavailable"
 
     # Step 1: Send immediate push notification to elder's device
     try:
@@ -906,8 +937,8 @@ async def ella_emergency(
         }
         send_notification(
             user_id=request.uid,
-            title="Ella - Emergency Alert Sent",
-            body="Your emergency contacts are being notified.",
+            title="Ella - Emergency Request Received",
+            body="Your emergency request was received.",
             data=data,
         )
         push_sent = True
@@ -922,46 +953,61 @@ async def ella_emergency(
         "message": request.message,
         "timestamp": timestamp,
         "location": request.location.model_dump() if request.location else None,
-        "audio_context_url": request.audio_context_url,
-        "contacts": request.contacts,
+        "contacts": emergency_contacts,
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                ELLA_CONFIG.emergency_url,
-                json=n8n_payload,
-                headers={"Content-Type": "application/json"},
-            )
+    if delivery_error is not None:
+        logger.warning("[Ella] Emergency delivery skipped: server-owned contacts unavailable")
+    elif not EMERGENCY_WEBHOOK_KEY:
+        delivery_error = "emergency_webhook_authority_unavailable"
+        logger.error("[Ella] Emergency delivery skipped: webhook authority unavailable")
+    elif not emergency_contacts:
+        delivery_error = "emergency_contacts_unavailable"
+        logger.warning("[Ella] Emergency delivery skipped: no eligible server-owned contacts")
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    ELLA_CONFIG.emergency_url,
+                    json=n8n_payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        EMERGENCY_WEBHOOK_KEY_HEADER: EMERGENCY_WEBHOOK_KEY,
+                    },
+                )
 
-            if response.status_code == 200:
-                result = response.json()
-                sms_available = result.get("sms_available", False)
+                if response.status_code == 200:
+                    result = response.json()
+                    sms_available = result.get("sms_available", False)
 
-                for contact in result.get("contacts_notified", []):
-                    contacts_notified.append(
-                        ContactResult(
-                            name=contact.get("name", "Unknown"),
-                            method=contact.get("method", "unknown"),
-                            status=contact.get("status", "unknown"),
-                            error=contact.get("error"),
+                    for contact in result.get("contacts_notified", []):
+                        contacts_notified.append(
+                            ContactResult(
+                                name=contact.get("name", "Unknown"),
+                                method=contact.get("method", "unknown"),
+                                status=contact.get("status", "unknown"),
+                                error=contact.get("error"),
+                            )
                         )
+
+                    logger.info(
+                        f"[Ella] Emergency n8n dispatch success: "
+                        f"{len(contacts_notified)} contacts, sms={sms_available}"
                     )
+                    if not contacts_notified:
+                        delivery_error = "emergency_delivery_unconfirmed"
+                else:
+                    delivery_error = "emergency_delivery_unavailable"
+                    logger.warning("[Ella] Emergency n8n dispatch returned status=%s", response.status_code)
 
-                logger.info(
-                    f"[Ella] Emergency n8n dispatch success: " f"{len(contacts_notified)} contacts, sms={sms_available}"
-                )
-            else:
-                logger.warning(
-                    f"[Ella] Emergency n8n dispatch returned {response.status_code}: " f"{response.text[:200]}"
-                )
+        except httpx.TimeoutException:
+            delivery_error = "emergency_delivery_outcome_unknown"
+            logger.warning("[Ella] Emergency n8n dispatch timed out; delivery outcome is unknown")
+        except Exception:
+            delivery_error = "emergency_delivery_unavailable"
+            logger.exception("[Ella] Emergency n8n dispatch failed")
 
-    except httpx.TimeoutException:
-        logger.warning("[Ella] Emergency n8n dispatch timed out (10s) - SMS may still be processing")
-    except Exception as e:
-        logger.error(f"[Ella] Emergency n8n dispatch failed: {e}")
-
-    status = "success" if push_sent or contacts_notified else "partial"
+    status = "success" if contacts_notified else "partial"
 
     logger.info(
         f"[Ella] Emergency alert complete: alert_id={alert_id}, "
@@ -974,6 +1020,7 @@ async def ella_emergency(
         contacts_notified=contacts_notified,
         push_sent=push_sent,
         sms_available=sms_available,
+        error=delivery_error,
     )
 
 

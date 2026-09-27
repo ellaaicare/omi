@@ -81,6 +81,8 @@ def test_emergency_contact_crud_rejects_unauthenticated_and_cross_owner_before_s
 
 
 def test_emergency_contact_exact_owner_positive_control(monkeypatch):
+    outbound = []
+
     class Response:
         status_code = 200
 
@@ -95,12 +97,25 @@ def test_emergency_contact_exact_owner_positive_control(monkeypatch):
         async def __aexit__(self, *_args):
             return None
 
-        async def post(self, *_args, **_kwargs):
+        async def post(self, *args, **kwargs):
+            outbound.append((args, kwargs))
             return Response()
 
+    server_contact = {
+        "id": "contact-a",
+        "uid": "uid-a",
+        "name": "Server contact",
+        "phone": "+15555550100",
+        "email": None,
+        "relationship": "friend",
+        "permissions": {"emergency_contact": True},
+    }
     monkeypatch.setattr(
-        callbacks, "get_contacts", lambda uid: [] if uid == "uid-a" else (_ for _ in ()).throw(AssertionError())
+        callbacks,
+        "get_contacts",
+        lambda uid: [server_contact] if uid == "uid-a" else (_ for _ in ()).throw(AssertionError()),
     )
+    monkeypatch.setattr(callbacks, "EMERGENCY_WEBHOOK_KEY", "configured-emergency-webhook-key")
     monkeypatch.setattr(callbacks, "send_notification", lambda **kwargs: kwargs["user_id"] == "uid-a")
     monkeypatch.setattr(callbacks.httpx, "AsyncClient", lambda **_kwargs: Client())
     client = _client(monkeypatch)
@@ -109,15 +124,70 @@ def test_emergency_contact_exact_owner_positive_control(monkeypatch):
         headers={"Authorization": "Bearer token-a"},
     )
     assert response.status_code == 200
-    assert response.json() == []
+    assert response.json()[0]["name"] == "Server contact"
 
     emergency = client.post(
         "/v1/ella/emergency",
         headers={"Authorization": "Bearer token-a"},
-        json={"uid": "uid-a", "trigger_source": "manual_button", "audio_context_seconds": 0},
+        json={
+            "uid": "uid-a",
+            "contacts": [{"name": "Caller supplied", "phone": "+15555550999"}],
+            "audio_context_url": "https://caller.invalid/audio.mp3",
+        },
     )
     assert emergency.status_code == 200
     assert emergency.json()["push_sent"] is True
+    assert emergency.json()["status"] == "partial"
+    assert emergency.json()["error"] == "emergency_delivery_unconfirmed"
+    assert len(outbound) == 1
+    assert outbound[0][1]["headers"] == {
+        "Content-Type": "application/json",
+        callbacks.EMERGENCY_WEBHOOK_KEY_HEADER: "configured-emergency-webhook-key",
+    }
+    assert outbound[0][1]["json"]["contacts"] == [
+        {
+            "name": "Server contact",
+            "phone": "+15555550100",
+            "email": None,
+            "relationship": "friend",
+        }
+    ]
+    assert "audio_context_url" not in outbound[0][1]["json"]
+
+
+def test_emergency_webhook_fails_closed_without_authority(monkeypatch):
+    effects = []
+    monkeypatch.setattr(
+        callbacks,
+        "get_contacts",
+        lambda _uid: [
+            {
+                "name": "Server contact",
+                "phone": "+15555550100",
+                "permissions": {"emergency_contact": True},
+            }
+        ],
+    )
+    monkeypatch.setattr(callbacks, "EMERGENCY_WEBHOOK_KEY", "")
+    monkeypatch.setattr(callbacks, "send_notification", lambda **kwargs: effects.append(("notify", kwargs)))
+    monkeypatch.setattr(
+        callbacks.httpx,
+        "AsyncClient",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("missing authority must fail before egress")),
+    )
+    client = _client(monkeypatch)
+
+    response = client.post(
+        "/v1/ella/emergency",
+        headers={"Authorization": "Bearer token-a"},
+        json={"uid": "uid-a"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "partial"
+    assert response.json()["contacts_notified"] == []
+    assert response.json()["error"] == "emergency_webhook_authority_unavailable"
+    assert effects[0][1]["body"] == "Your emergency request was received."
 
 
 def test_first_party_caregiver_routes_derive_owner_and_reject_caller_uid(monkeypatch):
