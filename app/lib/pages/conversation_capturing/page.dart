@@ -133,7 +133,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
           await provider.stopSystemAudioRecording();
         }
         // Then process the conversation
-        provider.forceProcessingCurrentConversation();
+        provider.forceProcessingCurrentConversation(explicitKeep: true);
       }
 
       if (!showSummarizeConfirmation) {

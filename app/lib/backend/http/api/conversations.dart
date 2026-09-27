@@ -7,12 +7,12 @@ import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
-Future<CreateConversationResponse?> processInProgressConversation() async {
+Future<CreateConversationResponse?> processInProgressConversation({bool explicitKeep = true}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations',
     headers: {},
     method: 'POST',
-    body: jsonEncode({}),
+    body: jsonEncode({'explicit_keep': explicitKeep}),
   );
   if (response == null) return null;
   Logger.debug('createConversationServer: ${response.body}');
