@@ -29,7 +29,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
@@ -44,6 +44,7 @@ from ella.services.hermes_session import canonical_omi_session_key, safe_session
 from ella.services.hermes_cloud_runtime import (
     HermesCloudRuntimeService,
     HermesCloudTurnRequest,
+    hermes_cloud_event_identity,
 )
 from ella.services.ai_consent import (
     AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE,
@@ -254,6 +255,11 @@ def _canonical_turn_id(uid: str, request: EllaChatRequest, started_at: datetime)
     return f"server-{digest}"
 
 
+def _ios_chat_event_identity(uid: str, turn_id: str, role: str) -> tuple[str, str]:
+    source_identity = f"ios_chat:{uid}:{turn_id}"
+    return source_identity, f"{source_identity}:{role}"
+
+
 def _ios_chat_event(
     *,
     uid: str,
@@ -265,11 +271,11 @@ def _ios_chat_event(
     ended_at: datetime = None,
     client_info: dict = None,
 ) -> CanonicalEventIn:
-    source_identity = f"ios_chat:{uid}:{turn_id}"
+    source_identity, event_id = _ios_chat_event_identity(uid, turn_id, role)
     return CanonicalEventIn(
         uid=uid,
         canonical_identity=uid,
-        event_id=f"{source_identity}:{role}",
+        event_id=event_id,
         session_id=session_key,
         channel="ios_chat",
         provider="omi-ios-chat",
@@ -1385,8 +1391,51 @@ class EllaChatHistoryRequest(BaseModel):
     pass
 
 
+class EllaChatTurnLookupResponse(BaseModel):
+    exists: bool
+
+
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
 PROVISION_API_TOKEN = authority_credential("ELLA_PROVISION_API_TOKEN", strip=False)
+
+
+@router.get("/chat/turns/{client_message_id}", response_model=EllaChatTurnLookupResponse)
+async def ella_chat_turn_lookup(
+    response: Response,
+    client_message_id: str = Path(min_length=1, max_length=128),
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+) -> EllaChatTurnLookupResponse:
+    """Return whether this owner has the exact canonical iOS user turn."""
+    response.headers["Cache-Control"] = "private, no-store"
+    source_identity, event_id = _ios_chat_event_identity(
+        authenticated_uid,
+        client_message_id,
+        "user",
+    )
+    cloud_source_identity, cloud_event_id, _ = hermes_cloud_event_identity(
+        uid=authenticated_uid,
+        channel="ios_chat",
+        client_interaction_id=client_message_id,
+    )
+    try:
+        exists = await _canonical_event_store.any_event_exists(
+            uid=authenticated_uid,
+            identities=(
+                (event_id, source_identity),
+                (cloud_event_id, cloud_source_identity),
+            ),
+        )
+    except Exception as exc:
+        logger.warning(
+            "[FLOW:CHAT-TURN-LOOKUP] canonical_store_unavailable error_type=%s",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "canonical_turn_lookup_unavailable", "retryable": True},
+            headers={"Cache-Control": "private, no-store"},
+        ) from exc
+    return EllaChatTurnLookupResponse(exists=exists)
 
 
 @router.get("/chat/history")

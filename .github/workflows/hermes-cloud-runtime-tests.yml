@@ -1023,7 +1023,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 21
-          test "$collected" -eq 619
+          test "$collected" -eq 626
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
@@ -1121,6 +1121,9 @@ jobs:
             "tests/unit/test_conversation_processing_callers.py::test_pusher_dispatches_external_integrations_once_for_winning_outcome"
             "tests/unit/test_conversation_processing_callers.py::test_workflow_does_not_dispatch_external_integrations_for_non_dispatch_outcome"
             "tests/unit/test_conversation_processing_callers.py::test_integration_does_not_dispatch_external_integrations_for_non_dispatch_outcome"
+            "tests/unit/test_conversation_processing_failures.py::test_explicit_multi_utterance_keep_bypasses_trivial_classifier"
+            "tests/unit/test_conversation_processing_failures.py::test_process_now_contract_defaults_to_explicit_keep_and_allows_automatic_filtering"
+            "tests/unit/test_conversation_processing_failures.py::test_home_day_query_excludes_discarded_but_diagnostics_return_reason"
             "tests/postgres/test_today_card_lifecycle_postgres.py::test_deleted_source_is_tombstoned_removed_and_excluded_after_stale_reinsert"
             "tests/postgres/test_today_card_lifecycle_postgres.py::test_source_less_card_watermark_detects_delayed_canonical_evidence"
             "tests/postgres/test_today_card_lifecycle_postgres.py::test_same_version_safety_tightening_invalidates_ready_source_fingerprint"
@@ -1134,7 +1137,7 @@ jobs:
               exit 1
             fi
           done
-          test "$(grep -c '::' <<<"$today_card_ids")" -eq 231
+          test "$(grep -c '::' <<<"$today_card_ids")" -eq 236
           pytest \
             tests/unit/test_today_card.py \
             tests/unit/test_today_card_api.py \
@@ -1263,6 +1266,7 @@ jobs:
           )"
           required_conversation_summary_cas_ids=(
             "tests/unit/test_conversation_summary_cas.py::test_stock_summary_commit_preserves_concurrent_capture_fields_and_merges_process_metadata"
+            "tests/unit/test_conversation_summary_cas.py::test_stock_summary_commit_persists_discard_diagnostics"
             "tests/unit/test_conversation_summary_cas.py::test_stock_summary_commit_does_not_clear_durable_metadata_with_process_nulls"
             "tests/unit/test_conversation_summary_cas.py::test_stock_summary_two_processors_from_empty_source_produce_one_winner"
             "tests/unit/test_conversation_summary_cas.py::test_stock_summary_missing_persisted_conversation_does_not_resurrect_without_create_authority"
@@ -1286,7 +1290,7 @@ jobs:
           for required_id in "${required_conversation_summary_cas_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$conversation_summary_cas_ids"
           done
-          test "$(grep -c '::' <<<"$conversation_summary_cas_ids")" -eq 50
+          test "$(grep -c '::' <<<"$conversation_summary_cas_ids")" -eq 51
           pytest tests/unit/test_conversation_summary_cas.py -k "$baseline_summary_cas_selector" -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 85
           pytest tests/unit/test_ella_conversation_corrections.py -v

@@ -12,7 +12,13 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from models.conversation import Conversation, ConversationStatus, Structured
+from models.conversation import (
+    Conversation,
+    ConversationDiscardClassifierProvenance,
+    ConversationDiscardReason,
+    ConversationStatus,
+    Structured,
+)
 from models.transcript_segment import TranscriptSegment
 
 os.environ.setdefault("FIRESTORE_EMULATOR_HOST", "localhost:9999")
@@ -276,6 +282,22 @@ def _committed_processing_result(payload, *, dispatched=True):
     }
 
 
+def _short_conversation(
+    text: str = "Run zero zero five. The heron carried seven blue kites over the bridge.",
+) -> Conversation:
+    conversation = _long_conversation()
+    conversation.id = "short-transcript"
+    conversation.transcript_segments = (
+        [TranscriptSegment(text=text, speaker="SPEAKER_00", is_user=True, start=0, end=12)] if text else []
+    )
+    return conversation
+
+
+def _prepare_structuring_dependencies(monkeypatch):
+    monkeypatch.setattr(conversation_processor.notification_db, "get_user_time_zone", lambda uid: "UTC")
+    monkeypatch.setattr(conversation_processor.action_items_db, "get_action_items", lambda **kwargs: [])
+
+
 def test_processing_failure_helper_preserves_long_transcript_and_retryable_state():
     conversation = _long_conversation()
 
@@ -369,7 +391,16 @@ def test_process_conversation_intentional_discard_stays_completed_discarded(monk
     monkeypatch.setattr(
         conversation_processor,
         "_get_structured",
-        lambda *args, **kwargs: (Structured(), True),
+        lambda *args, **kwargs: (
+            Structured(),
+            True,
+            ConversationDiscardReason.trivial,
+            ConversationDiscardClassifierProvenance(
+                classifier="short_content",
+                version="v1",
+                decision_source="model",
+            ),
+        ),
     )
     monkeypatch.setattr(
         conversation_processor.conversations_db,
@@ -385,6 +416,12 @@ def test_process_conversation_intentional_discard_stays_completed_discarded(monk
     assert result.discarded is True
     assert result.status == ConversationStatus.completed
     assert commits[-1][2]["discarded"] is True
+    assert commits[-1][2]["discard_reason"] == ConversationDiscardReason.trivial
+    assert commits[-1][2]["discard_classifier_provenance"] == {
+        "classifier": "short_content",
+        "version": "v1",
+        "decision_source": "model",
+    }
     assert commits[-1][2]["status"] == ConversationStatus.completed
     assert commits[-1][2].get("processing_error") is None
     assert outcome.dispatched is True
@@ -404,6 +441,8 @@ def test_process_commits_summary_authority_before_apps_and_postprocess_webhook(m
         lambda *args, **kwargs: (
             Structured(title="Durable summary", overview="Committed before dispatch."),
             False,
+            None,
+            None,
         ),
     )
     monkeypatch.setattr(
@@ -506,6 +545,8 @@ def test_process_cas_loser_returns_durable_authority_without_dispatch(monkeypatc
         lambda *args, **kwargs: (
             Structured(title="Losing processor", overview="This must not dispatch."),
             False,
+            None,
+            None,
         ),
     )
     monkeypatch.setattr(
@@ -566,7 +607,7 @@ def test_process_retries_latest_transcript_after_capture_cas_loss(monkeypatch):
         conversation_processor,
         "_get_structured",
         lambda _uid, _language, current, *_args, **_kwargs: summaries.append(len(current.transcript_segments))
-        or (Structured(title="Latest", overview="Latest transcript."), False),
+        or (Structured(title="Latest", overview="Latest transcript."), False, None, None),
     )
 
     def commit(_uid, _conversation_id, payload, **_kwargs):
@@ -618,7 +659,7 @@ def test_completed_duplicate_initial_processing_returns_explicit_no_dispatch(mon
     monkeypatch.setattr(
         conversation_processor,
         "_get_structured",
-        lambda *args, **kwargs: calls.append("summary") or (Structured(), False),
+        lambda *args, **kwargs: calls.append("summary") or (Structured(), False, None, None),
     )
 
     outcome = conversation_processor.process_conversation_with_outcome("uid-1", "en", conversation)
@@ -648,7 +689,7 @@ def test_inflight_duplicate_initial_processing_returns_explicit_no_dispatch(monk
     monkeypatch.setattr(
         conversation_processor,
         "_get_structured",
-        lambda *args, **kwargs: calls.append("summary") or (Structured(), False),
+        lambda *args, **kwargs: calls.append("summary") or (Structured(), False, None, None),
     )
 
     outcome = conversation_processor.process_conversation_with_outcome("uid-1", "en", conversation)
@@ -668,7 +709,7 @@ def test_explicit_reprocess_of_completed_conversation_remains_authorized(monkeyp
     monkeypatch.setattr(
         conversation_processor,
         "_get_structured",
-        lambda *args, **kwargs: (Structured(title="Reprocessed", overview="Explicit request."), False),
+        lambda *args, **kwargs: (Structured(title="Reprocessed", overview="Explicit request."), False, None, None),
     )
     monkeypatch.setattr(
         conversation_processor.conversations_db,
@@ -870,7 +911,7 @@ def test_post_commit_app_failure_does_not_rollback_or_suppress_hermes_dispatch(m
     monkeypatch.setattr(
         conversation_processor,
         "_get_structured",
-        lambda *args, **kwargs: (Structured(title="Durable", overview="Committed summary."), False),
+        lambda *args, **kwargs: (Structured(title="Durable", overview="Committed summary."), False, None, None),
     )
     monkeypatch.setattr(
         conversation_processor.conversations_db,
@@ -1186,6 +1227,8 @@ def test_capture_transport_lost_route_resumes_missing_effect_after_lost_ack(monk
         lambda *args, **kwargs: (
             Structured(title="Durable result", overview="This summary is durable before downstream delivery."),
             False,
+            None,
+            None,
         ),
     )
     monkeypatch.setattr(conversation_processor.folders_db, "get_folders", lambda _uid: [{"id": "existing"}])
@@ -1640,7 +1683,7 @@ def test_cloud_selected_processing_atomically_queues_hermes_before_post_commit_e
     monkeypatch.setattr(
         conversation_processor,
         "_get_structured",
-        lambda *args, **kwargs: (Structured(title="Durable", overview="Queued atomically."), False),
+        lambda *args, **kwargs: (Structured(title="Durable", overview="Queued atomically."), False, None, None),
     )
     monkeypatch.setattr(
         conversation_processor.conversations_db,
@@ -1948,6 +1991,7 @@ def test_manual_conversation_processing_rejects_live_capture_owner(monkeypatch):
 def test_manual_conversation_processing_targets_exact_closed_conversation(monkeypatch):
     conversation = _long_conversation()
     processed = []
+    durable_updates = []
     processing_fences = []
     released_fences = []
     monkeypatch.setattr(
@@ -1964,6 +2008,11 @@ def test_manual_conversation_processing_targets_exact_closed_conversation(monkey
             "status": "processing_claimed",
             "claim_token": "durable-processing-claim",
         },
+    )
+    monkeypatch.setattr(
+        conversations_router.conversations_db,
+        "update_conversation",
+        lambda uid, conversation_id, update: durable_updates.append((uid, conversation_id, update)),
     )
     monkeypatch.setattr(
         conversations_router.redis_db,
@@ -2006,6 +2055,65 @@ def test_manual_conversation_processing_targets_exact_closed_conversation(monkey
     assert len(processing_fences) == 1
     assert processing_fences[0][:2] == ("uid-1", conversation.id)
     assert released_fences == [("uid-1", processing_fences[0][2])]
+    assert durable_updates[0][0:2] == ("uid-1", conversation.id)
+    assert durable_updates[0][2]["explicit_keep"] is True
+    assert durable_updates[0][2]["explicit_keep_requested_at"] is not None
+
+
+def test_explicit_multi_utterance_keep_bypasses_trivial_classifier(monkeypatch):
+    conversation = _short_conversation(
+        "Run zero zero five. The heron carried seven blue kites over the bridge. "
+        "This user-finished capture must be kept."
+    )
+    _prepare_structuring_dependencies(monkeypatch)
+    monkeypatch.setattr(
+        conversation_processor,
+        "should_discard_conversation",
+        lambda *args, **kwargs: pytest.fail("explicit keep must bypass the trivial-content classifier"),
+    )
+    monkeypatch.setattr(
+        conversation_processor,
+        "get_reprocess_transcript_structure",
+        lambda *args, **kwargs: Structured(title="Kept", overview="Explicit user-finished capture."),
+    )
+
+    structured, discarded, reason, provenance = conversation_processor._get_structured(
+        "uid-1", "en", conversation, force_process=True
+    )
+
+    assert structured.title == "Kept"
+    assert discarded is False
+    assert reason is None
+    assert provenance is None
+
+
+@pytest.mark.parametrize(
+    ("transcript", "expected_reason", "expected_classifier", "expected_source"),
+    [
+        ("", ConversationDiscardReason.empty, "empty_content", "deterministic"),
+        ("Okay, thanks.", ConversationDiscardReason.trivial, "short_content", "model"),
+    ],
+)
+def test_ambient_discard_records_content_free_reason_and_classifier_provenance(
+    monkeypatch,
+    transcript,
+    expected_reason,
+    expected_classifier,
+    expected_source,
+):
+    conversation = _short_conversation(transcript)
+    _prepare_structuring_dependencies(monkeypatch)
+    monkeypatch.setattr(conversation_processor, "should_discard_conversation", lambda *args, **kwargs: True)
+
+    _, discarded, reason, provenance = conversation_processor._get_structured("uid-1", "en", conversation)
+
+    assert discarded is True
+    assert reason == expected_reason
+    assert provenance.dict() == {
+        "classifier": expected_classifier,
+        "version": "v1",
+        "decision_source": expected_source,
+    }
 
 
 class _FakeSnapshot:
@@ -2122,7 +2230,79 @@ def _conversation_api_client():
     app = FastAPI()
     app.include_router(conversations_router.router)
     app.dependency_overrides[conversations_router.auth.get_current_user_uid] = lambda: "authenticated-user"
+    app.dependency_overrides[conversations_router.require_current_ai_consent] = lambda: "authenticated-user"
     return app, TestClient(app)
+
+
+def test_process_now_contract_defaults_to_explicit_keep_and_allows_automatic_filtering(monkeypatch):
+    processed = []
+    durable_updates = []
+    conversation = _short_conversation()
+
+    monkeypatch.setattr(
+        conversations_router,
+        "retrieve_in_progress_conversation",
+        lambda uid: conversation.model_dump(),
+    )
+    monkeypatch.setattr(
+        conversations_router.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: conversation.model_dump(),
+    )
+    monkeypatch.setattr(
+        conversations_router.conversations_db,
+        "claim_initial_conversation_processing",
+        lambda uid, conversation_id: {
+            "status": "processing_claimed",
+            "claim_token": "durable-processing-claim",
+        },
+    )
+    monkeypatch.setattr(conversations_router.redis_db, "get_cached_user_geolocation", lambda uid: None)
+    monkeypatch.setattr(
+        conversations_router.redis_db,
+        "acquire_in_progress_processing_fence",
+        lambda uid, conversation_id, token: True,
+    )
+    monkeypatch.setattr(
+        conversations_router.redis_db,
+        "release_capture_commit_lease",
+        lambda uid, token: True,
+    )
+    monkeypatch.setattr(
+        conversations_router.conversations_db,
+        "update_conversation",
+        lambda uid, conversation_id, update: durable_updates.append((uid, conversation_id, update)),
+    )
+
+    def fake_process(uid, language, conversation, force_process=False, **kwargs):
+        processed.append((uid, conversation, force_process))
+        return types.SimpleNamespace(conversation=conversation, dispatched=False, status="committed")
+
+    monkeypatch.setattr(conversations_router, "process_conversation_with_outcome", fake_process)
+    app, client = _conversation_api_client()
+    try:
+        keep_response = client.post("/v1/conversations", json={})
+        automatic_response = client.post("/v1/conversations", json={"explicit_keep": False})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert keep_response.status_code == 200
+    assert automatic_response.status_code == 200
+    assert len(durable_updates) == 2
+    assert durable_updates[0][0] == "authenticated-user"
+    assert durable_updates[0][2]["explicit_keep"] is True
+    assert durable_updates[0][2]["explicit_keep_requested_at"] is not None
+    assert durable_updates[1][2] == {
+        "explicit_keep": False,
+        "explicit_keep_requested_at": None,
+    }
+    assert processed[0][0] == "authenticated-user"
+    assert processed[0][2] is True
+    assert processed[0][1].explicit_keep is True
+    assert processed[0][1].explicit_keep_requested_at is not None
+    assert processed[1][2] is False
+    assert processed[1][1].explicit_keep is False
+    assert processed[1][1].explicit_keep_requested_at is None
 
 
 def test_failed_conversations_api_is_uid_scoped_and_preserves_long_transcript(monkeypatch):
@@ -2149,6 +2329,48 @@ def test_failed_conversations_api_is_uid_scoped_and_preserves_long_transcript(mo
     assert payload["processing_error"] == CONVERSATION_SUMMARY_FAILED
     assert payload["processing_error_at"] is not None
     assert len(payload["transcript_segments"][0]["text"]) > 25_000
+
+
+def test_home_day_query_excludes_discarded_but_diagnostics_return_reason(monkeypatch):
+    conversation = _short_conversation().dict()
+    conversation.update(
+        {
+            "discarded": True,
+            "discard_reason": ConversationDiscardReason.trivial,
+            "discard_classifier_provenance": {
+                "classifier": "short_content",
+                "version": "v1",
+                "decision_source": "model",
+            },
+        }
+    )
+    calls = []
+
+    def fake_get_conversations(uid, limit, offset, **kwargs):
+        calls.append((uid, kwargs))
+        return [conversation] if kwargs["include_discarded"] else []
+
+    monkeypatch.setattr(conversations_router.conversations_db, "get_conversations", fake_get_conversations)
+    app, client = _conversation_api_client()
+    try:
+        home = client.get(
+            "/v1/conversations?include_discarded=false&start_date=2026-09-26T07:00:00Z&end_date=2026-09-27T06:59:59Z"
+        )
+        diagnostics = client.get(
+            "/v1/conversations?include_discarded=true&start_date=2026-09-26T07:00:00Z&end_date=2026-09-27T06:59:59Z"
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert home.status_code == 200
+    assert home.json() == []
+    assert diagnostics.status_code == 200
+    assert diagnostics.json()[0]["discard_reason"] == "discarded_trivial"
+    assert diagnostics.json()[0]["discard_classifier_provenance"]["classifier"] == "short_content"
+    assert all(call[0] == "authenticated-user" for call in calls)
+    assert calls[0][1]["include_discarded"] is False
+    assert calls[0][1]["start_date"] == datetime(2026, 9, 26, 7, tzinfo=timezone.utc)
+    assert calls[0][1]["end_date"] == datetime(2026, 9, 27, 6, 59, 59, tzinfo=timezone.utc)
 
 
 def test_conversation_delete_offloads_blocking_stores_from_event_loop(monkeypatch):

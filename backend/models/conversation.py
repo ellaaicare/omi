@@ -358,6 +358,17 @@ class MemoryArtworkState(BaseModel):
     failure_code: Optional[str] = None
 
 
+class ConversationDiscardReason(str, Enum):
+    empty = 'discarded_empty'
+    trivial = 'discarded_trivial'
+
+
+class ConversationDiscardClassifierProvenance(BaseModel):
+    classifier: str
+    version: str
+    decision_source: str
+
+
 class Conversation(BaseModel):
     id: str
     created_at: datetime
@@ -392,6 +403,10 @@ class Conversation(BaseModel):
     postprocessing: Optional[ConversationPostProcessing] = None
 
     discarded: bool = False
+    discard_reason: Optional[ConversationDiscardReason] = None
+    discard_classifier_provenance: Optional[ConversationDiscardClassifierProvenance] = None
+    explicit_keep: bool = False
+    explicit_keep_requested_at: Optional[datetime] = None
     visibility: ConversationVisibility = ConversationVisibility.private
     starred: bool = False
 

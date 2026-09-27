@@ -233,6 +233,10 @@ class ServerConversation {
 
   ConversationStatus status;
   bool discarded;
+  final String? discardReason;
+  final Map<String, dynamic>? discardClassifierProvenance;
+  final bool explicitKeep;
+  final DateTime? explicitKeepRequestedAt;
   final bool deleted;
   final bool isLocked;
   bool starred;
@@ -282,6 +286,10 @@ class ServerConversation {
     this.photos = const [],
     this.audioFiles = const [],
     this.discarded = false,
+    this.discardReason,
+    this.discardClassifierProvenance,
+    this.explicitKeep = false,
+    this.explicitKeepRequestedAt,
     this.deleted = false,
     this.source,
     this.language,
@@ -322,6 +330,14 @@ class ServerConversation {
           : [],
       audioFiles: ((json['audio_files'] ?? []) as List<dynamic>).map((af) => AudioFile.fromJson(af)).toList(),
       discarded: json['discarded'] ?? false,
+      discardReason: json['discard_reason']?.toString(),
+      discardClassifierProvenance: json['discard_classifier_provenance'] is Map
+          ? Map<String, dynamic>.from(json['discard_classifier_provenance'])
+          : null,
+      explicitKeep: json['explicit_keep'] ?? false,
+      explicitKeepRequestedAt: json['explicit_keep_requested_at'] != null
+          ? DateTime.parse(json['explicit_keep_requested_at']).toLocal()
+          : null,
       source: json['source'] != null ? ConversationSource.values.asNameMap()[json['source']] : ConversationSource.omi,
       language: json['language'],
       deleted: json['deleted'] ?? false,
@@ -364,6 +380,10 @@ class ServerConversation {
       'geolocation': geolocation?.toJson(),
       'photos': photos.map((photo) => photo.toJson()).toList(),
       'discarded': discarded,
+      'discard_reason': discardReason,
+      'discard_classifier_provenance': discardClassifierProvenance,
+      'explicit_keep': explicitKeep,
+      'explicit_keep_requested_at': explicitKeepRequestedAt?.toUtc().toIso8601String(),
       'deleted': deleted,
       'source': source?.toString(),
       'language': language,
