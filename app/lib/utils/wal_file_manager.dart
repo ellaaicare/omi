@@ -38,6 +38,9 @@ class WalFileManager {
   static Future<void> Function()? migrationAfterByteCopyForTesting;
 
   @visibleForTesting
+  static Future<void> Function()? migrationAfterDestinationManifestTempWriteForTesting;
+
+  @visibleForTesting
   static Future<void> Function()? migrationAfterDestinationManifestCommitForTesting;
 
   static Directory get _accountsDirectory => Directory(p.join(_baseDirectory!.path, _accountsDirectoryName));
@@ -92,6 +95,7 @@ class WalFileManager {
     rotationBeforeCommitForTesting = null;
     rotationAfterActiveManifestWriteForTesting = null;
     migrationAfterByteCopyForTesting = null;
+    migrationAfterDestinationManifestTempWriteForTesting = null;
     migrationAfterDestinationManifestCommitForTesting = null;
   }
 
@@ -705,12 +709,13 @@ class WalFileManager {
     required File sourceBackup,
     required Directory target,
   }) async {
-    final committed = await _committedSameUidWal(wal);
+    final expectsPayload = wal.filePath?.isNotEmpty == true;
+    final sourcePayload = await _sameUidSourceAudio(wal.filePath, sourceDirectory);
+    final committed = await _committedSameUidWal(wal, sourcePayload: sourcePayload, expectsPayload: expectsPayload);
     if (committed == null) {
       final copied = await _copySameUidAudio(wal, sourceDirectory, target);
+      if (wal.filePath?.isNotEmpty == true && copied == null) return;
       if (copied != null) wal.filePath = copied.path;
-      final afterCopy = migrationAfterByteCopyForTesting;
-      if (afterCopy != null) await afterCopy();
       await _commitDestinationWal(wal);
       final afterCommit = migrationAfterDestinationManifestCommitForTesting;
       if (afterCommit != null) await afterCommit();
@@ -718,12 +723,23 @@ class WalFileManager {
     await _dropSourceWal(wal, sourceDirectory, sourceManifest, sourceBackup);
   }
 
-  static Future<Wal?> _committedSameUidWal(Wal wal) async {
+  static Future<Wal?> _committedSameUidWal(
+    Wal wal, {
+    required File? sourcePayload,
+    required bool expectsPayload,
+  }) async {
     for (final candidate in await _readWals(_activeWalFile)) {
       if (candidate.id != wal.id) continue;
+      if (_activeOwner == null || candidate.owner?.matches(_activeOwner!) != true) return null;
       final path = candidate.filePath;
-      if (path == null || path.isEmpty) return candidate;
-      if (await File(path).exists()) return candidate;
+      if (!expectsPayload) return path == null || path.isEmpty ? candidate : null;
+      if (sourcePayload == null) return null;
+      if (path == null || path.isEmpty) return null;
+      final destination = File(path);
+      if (p.normalize(destination.parent.path) != p.normalize(_activeDirectory!.path) || !await destination.exists()) {
+        return null;
+      }
+      if (await destination.length() == await sourcePayload.length()) return candidate;
     }
     return null;
   }
@@ -731,19 +747,41 @@ class WalFileManager {
   static Future<File?> _copySameUidAudio(Wal wal, Directory sourceDirectory, Directory target) async {
     final filename = wal.filePath == null || wal.filePath!.isEmpty ? null : p.basename(wal.filePath!);
     if (filename == null) return null;
-    final sibling = File(p.join(sourceDirectory.path, filename));
-    final absolute = wal.filePath != null && p.isAbsolute(wal.filePath!) ? File(wal.filePath!) : null;
-    final actual = await sibling.exists()
-        ? sibling
-        : absolute != null && await absolute.exists()
-            ? absolute
-            : null;
+    final actual = await _sameUidSourceAudio(wal.filePath, sourceDirectory);
     if (actual == null) return null;
     await target.create(recursive: true);
     final destination = await _uniqueAccountDestination(target, filename);
     if (p.normalize(actual.path) == p.normalize(destination.path)) return actual;
+    final sourceLength = await actual.length();
     await actual.copy(destination.path);
+    final afterCopy = migrationAfterByteCopyForTesting;
+    if (afterCopy != null) await afterCopy();
+    final handle = await destination.open(mode: FileMode.append);
+    try {
+      await handle.flush();
+    } finally {
+      await handle.close();
+    }
+    if (await destination.length() != sourceLength) {
+      try {
+        await destination.delete();
+      } catch (_) {
+        // The intact source remains authoritative and the orphan is never published.
+      }
+      throw FileSystemException('Copied WAL payload length mismatch', destination.path);
+    }
     return destination;
+  }
+
+  static Future<File?> _sameUidSourceAudio(String? path, Directory sourceDirectory) async {
+    if (path == null || path.isEmpty) return null;
+    final sibling = File(p.join(sourceDirectory.path, p.basename(path)));
+    if (await sibling.exists()) return sibling;
+    if (p.isAbsolute(path)) {
+      final absolute = File(path);
+      if (await absolute.exists()) return absolute;
+    }
+    return null;
   }
 
   static Future<void> _commitDestinationWal(Wal wal) async {
@@ -754,7 +792,12 @@ class WalFileManager {
     } else {
       current.add(wal);
     }
-    await _commitWalManifest(_activeWalFile, _activeWalBackupFile, current);
+    await _commitWalManifest(
+      _activeWalFile,
+      _activeWalBackupFile,
+      current,
+      afterTempWrite: migrationAfterDestinationManifestTempWriteForTesting,
+    );
   }
 
   static Future<void> _dropSourceWal(
@@ -768,11 +811,18 @@ class WalFileManager {
     for (final candidate in sourceWals) {
       if (candidate.id == wal.id) sourcePath = candidate.filePath;
     }
+    final expectsPayload = sourcePath?.isNotEmpty == true;
+    final sourcePayload = await _sameUidSourceAudio(sourcePath, sourceDirectory);
+    final committed = await _committedSameUidWal(wal, sourcePayload: sourcePayload, expectsPayload: expectsPayload);
+    if (committed == null) {
+      Logger.debug('WalFileManager: Kept source WAL because the committed destination did not validate');
+      return;
+    }
     final remaining = sourceWals.where((candidate) => candidate.id != wal.id).toList();
     if (remaining.length != sourceWals.length) {
       await _commitWalManifest(sourceManifest, sourceBackup, remaining);
     }
-    final committedPath = (await _committedSameUidWal(wal))?.filePath;
+    final committedPath = committed.filePath;
     final names = <String>{};
     if (sourcePath != null && sourcePath.isNotEmpty) names.add(p.basename(sourcePath));
     if (wal.filePath != null && wal.filePath!.isNotEmpty) names.add(p.basename(wal.filePath!));
@@ -786,19 +836,31 @@ class WalFileManager {
     }
   }
 
-  static Future<void> _commitWalManifest(File? file, File? backup, List<Wal> wals) async {
+  static Future<void> _commitWalManifest(
+    File? file,
+    File? backup,
+    List<Wal> wals, {
+    Future<void> Function()? afterTempWrite,
+  }) async {
     if (file == null) return;
     await file.parent.create(recursive: true);
     if (file.existsSync() && backup != null) {
       await file.copy(backup.path);
     }
     final temp = File('${file.path}.tmp');
-    await temp.writeAsString(jsonEncode({
-      'version': 2,
-      'timestamp': DateTime.now().millisecondsSinceEpoch,
-      'wals': wals.map((wal) => wal.toJson()).toList(),
-    }));
+    await temp.writeAsString(
+      jsonEncode({
+        'version': 2,
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+        'wals': wals.map((wal) => wal.toJson()).toList(),
+      }),
+      flush: true,
+    );
+    await afterTempWrite?.call();
     await temp.rename(file.path);
+    // dart:io exposes fsync only for RandomAccessFile, not directory handles on
+    // iOS. Keep the source authoritative until the renamed manifest and copied
+    // payload are re-read instead of claiming unsupported parent-directory fsync.
   }
 
   static Future<void> _quarantineLegacyRootManifest() async {
