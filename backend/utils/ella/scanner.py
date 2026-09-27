@@ -131,7 +131,13 @@ _CREDIBLE_EMERGENCY_PATTERNS = (
             re.IGNORECASE,
         ),
     ),
-    ("breathing", re.compile(rf"^\s*i\s+{_CANNOT_PHRASE}\s+breathe\b", re.IGNORECASE)),
+    (
+        "breathing",
+        re.compile(
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT})\s+{_CANNOT_PHRASE}\s+breathe\b",
+            re.IGNORECASE,
+        ),
+    ),
     (
         "fall",
         re.compile(
@@ -228,9 +234,11 @@ _NEGATED_CURRENT_SUBJECT_PATTERN = re.compile(
     r"not\s+(?:anyone|anybody)|neither(?:\s+of\s+(?:them|us|you))?)\b",
     re.IGNORECASE,
 )
-_CONTEXTUAL_EMERGENCY_DISQUALIFIER = re.compile(
-    r"\b(?:said|says|quote(?:s|d)?|reported|reports|told\s+(?:me|us)|heard|read|"
-    r"yesterday|previously|earlier|last\s+(?:night|week|month|year))\b",
+_CONTEXTUAL_REPORTED_SPEECH_SUFFIX = re.compile(
+    (
+        r"\b(?:said|says|quote(?:s|d)?|reported|reports|"
+        r"told\s+(?:me|us|you|him|her|them)|heard|read)(?:\s+that)?\s*[,;:]?\s*$"
+    ),
     re.IGNORECASE,
 )
 _DURATION_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)(?P<unit>ms|s|m|h)")
@@ -412,7 +420,7 @@ def credible_emergency_reason_with_context(
     current_reason = credible_emergency_reason_for_segments(current_segments)
     if current_reason:
         context_text = " ".join(str(segment.get("text") or "") for segment in context_segments)
-        if _CONTEXTUAL_EMERGENCY_DISQUALIFIER.search(context_text):
+        if _CONTEXTUAL_REPORTED_SPEECH_SUFFIX.search(context_text):
             return None, False
         return current_reason, False
     if not context_segments or credible_emergency_reason_for_segments(context_segments):
