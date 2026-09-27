@@ -15,6 +15,8 @@ from typing import List, Optional
 
 import requests
 
+from ella.services.escalation_policy import MAX_DELIVERY_PLAN_STEPS
+
 from database.honcho_attestation import authority_credential
 
 from .config import ELLA_CONFIG
@@ -159,7 +161,7 @@ _ALLOWED_POLICY_CHANNELS = {
     "ios_voice_call",
 }
 _ALLOWED_POLICY_PRIORITIES = {"urgent", "critical", "high", "medium", "low", "cyborg", "daily_recap"}
-_MAX_POLICY_DELIVERY_STEPS = 8
+_MAX_POLICY_DELIVERY_STEPS = MAX_DELIVERY_PLAN_STEPS
 _DURATION_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)(?P<unit>ms|s|m|h)")
 _SCANNER_BATCHES: dict[tuple[str, str, str, str], dict] = {}
 _SCANNER_RATE_LIMIT_UNTIL = {
@@ -277,12 +279,30 @@ def credible_emergency_reason(text: str) -> Optional[str]:
 
 
 def _credible_emergency_reason_for_segments(segments: List[dict]) -> Optional[str]:
-    """Match one coherent speaker segment; never synthesize emergencies across speakers."""
-    for segment in segments:
-        reason = credible_emergency_reason(str(segment.get("text") or ""))
-        if reason:
-            return reason
-    return None
+    """Match contiguous speech from one speaker without crossing speaker boundaries."""
+    active_speaker: Optional[str] = None
+    active_text: list[str] = []
+
+    def match_active_text() -> Optional[str]:
+        if not active_text:
+            return None
+        return credible_emergency_reason(" ".join(active_text))
+
+    for index, segment in enumerate(segments):
+        text = str(segment.get("text") or "").strip()
+        if not text:
+            continue
+        raw_speaker = segment.get("speaker") or segment.get("speaker_id") or segment.get("person_id")
+        speaker = str(raw_speaker).strip() if raw_speaker else f"unknown:{index}"
+        if active_speaker is not None and speaker != active_speaker:
+            reason = match_active_text()
+            if reason:
+                return reason
+            active_text = []
+        active_speaker = speaker
+        active_text.append(text)
+
+    return match_active_text()
 
 
 def _bounded_string(value: object, *, maximum: int) -> Optional[str]:

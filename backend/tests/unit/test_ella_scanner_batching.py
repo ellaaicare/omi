@@ -383,6 +383,76 @@ def test_emergency_phrase_is_never_joined_across_speaker_segments(monkeypatch):
     assert "deterministic_emergency" not in posts[0][1]
 
 
+def test_emergency_phrase_is_joined_across_contiguous_same_speaker_segments(monkeypatch):
+    posts = []
+
+    def fake_post(url, json, **kwargs):
+        posts.append((url, json, kwargs))
+        if url == scanner.ESCALATION_EVALUATE_URL:
+            return _FakeResponse(
+                200,
+                payload={
+                    "ok": True,
+                    "trace_id": "conversation-same-speaker",
+                    "decision": "log_only",
+                    "delivery_plan": [],
+                },
+            )
+        return _FakeResponse(200)
+
+    _disable_trace(monkeypatch)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner, "ESCALATION_WEBHOOK_KEY", "configured-escalation-key")
+    monkeypatch.setattr(scanner.requests, "post", fake_post)
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-same-speaker",
+        [
+            {"text": "I cannot", "speaker": "SPEAKER_1"},
+            {"text": "breathe", "speaker": "SPEAKER_1"},
+        ],
+    )
+
+    assert status == 200
+    assert posts[0][0] == scanner.ESCALATION_EVALUATE_URL
+    assert posts[-1][1]["deterministic_emergency"]["reason"] == "breathing"
+
+
+def test_policy_plan_accepts_shared_boundary_and_rejects_one_step_over():
+    trace_id = "conversation-policy-boundary"
+    bounded_steps = [
+        {"target": "user", "channel": "email", "priority": "critical"},
+        *[
+            {
+                "target": "emergency_caregiver",
+                "caregiver_id": f"caregiver-{index}",
+                "channel": "email",
+                "priority": "critical",
+            }
+            for index in range(scanner.MAX_DELIVERY_PLAN_STEPS - 1)
+        ],
+    ]
+    response = {
+        "ok": True,
+        "trace_id": trace_id,
+        "decision": "notify_now",
+        "delivery_plan": bounded_steps,
+    }
+
+    assert scanner._validated_policy_plan(response, trace_id=trace_id) is not None
+    response["delivery_plan"] = [
+        *bounded_steps,
+        {
+            "target": "emergency_caregiver",
+            "caregiver_id": "caregiver-overflow",
+            "channel": "email",
+            "priority": "critical",
+        },
+    ]
+    assert scanner._validated_policy_plan(response, trace_id=trace_id) is None
+
+
 def test_policy_failure_does_not_block_scanner_and_exposes_only_error_class(monkeypatch):
     posts = []
 

@@ -54,6 +54,11 @@ MODE_EMERGENCY_ONLY = "emergency_only"
 MODE_MEMORY_SUPPORT = "memory_support"
 MODE_MAXIMUM_AWARENESS = "maximum_awareness"
 
+# One user delivery plus a bounded set of caregiver deliveries. Keep this
+# contract shared with the database loader and scanner response validator.
+MAX_ESCALATION_CAREGIVERS = 8
+MAX_DELIVERY_PLAN_STEPS = 1 + MAX_ESCALATION_CAREGIVERS
+
 EVENT_CLASS_DIRECT_USER_REQUEST = "direct_user_request"
 EVENT_CLASS_MEMORY_SUPPORT = "memory_support"
 EVENT_CLASS_MEDICATION_SUPPORT = "medication_support"
@@ -977,7 +982,7 @@ def evaluate_escalation_policy(
                     suppressed,
                 ):
                     break
-        for caregiver in caregivers:
+        for caregiver in caregivers[:MAX_ESCALATION_CAREGIVERS]:
             _consider_caregiver_channels(caregiver, severity, user, snapshot, "urgent", selected, suppressed)
         return EscalationPolicyDecision(
             decision=DECISION_NOTIFY_NOW if selected else DECISION_LOG_ONLY,
@@ -1027,7 +1032,7 @@ def evaluate_escalation_policy(
                 ):
                     break
         if mode == MODE_MAXIMUM_AWARENESS and not is_cyborg_context:
-            for caregiver in caregivers:
+            for caregiver in caregivers[:MAX_ESCALATION_CAREGIVERS]:
                 _consider_caregiver_channels(caregiver, severity, user, snapshot, "high", selected, suppressed)
         return EscalationPolicyDecision(
             decision=DECISION_ASK_USER_FIRST if selected else DECISION_QUEUE_FOR_REPORT,

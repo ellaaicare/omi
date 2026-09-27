@@ -48,6 +48,7 @@ from ella.services.runtime_resolver import (
 from ella.services.escalation_policy import (
     CaregiverPolicyContext,
     EscalationEvent,
+    MAX_ESCALATION_CAREGIVERS,
     MODE_EMERGENCY_ONLY,
     MODE_OFF,
     UserPolicyContext,
@@ -308,8 +309,10 @@ async def _load_delivery_context(uid: str) -> tuple[UserPolicyContext, list[Care
         FROM caregivers
         WHERE user_id = $1
         ORDER BY is_emergency_contact DESC, created_at ASC
+        LIMIT $2
         """,
         user_row["id"],
+        MAX_ESCALATION_CAREGIVERS,
     )
     caregivers: list[CaregiverPolicyContext] = []
     for row in caregiver_rows:
