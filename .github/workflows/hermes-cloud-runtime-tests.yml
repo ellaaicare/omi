@@ -802,6 +802,7 @@ jobs:
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_real_smoke_multichannel_identity_mismatch_has_zero_writes"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_real_mounted_route_manifest_has_exact_paths_authorities_and_no_duplicates"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_affected_background_boundaries_are_exact_and_trace_has_no_detached_task"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_contacts_use_configured_shared_ella_postgres_pool"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_contact_crud_rejects_unauthenticated_and_cross_owner_before_storage"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_contact_exact_owner_positive_control"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_webhook_fails_closed_without_authority"
@@ -851,7 +852,7 @@ jobs:
           for required_id in "${required_incident_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$incident_ids"
           done
-          test "$(grep -c '::' <<<"$incident_ids")" -eq 71
+          test "$(grep -c '::' <<<"$incident_ids")" -eq 72
           pytest \
             tests/unit/test_ella_incident_1182_route_isolation.py \
             tests/unit/test_ella_incident_1182_callback_auth.py \
