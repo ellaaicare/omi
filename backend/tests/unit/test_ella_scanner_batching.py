@@ -125,6 +125,34 @@ def test_emergency_bypasses_ambient_batching(monkeypatch):
     assert [segment["text"] for segment in posts[2]["segments"]] == ["I cannot", "breathe"]
 
 
+def test_guardian_off_contextual_emergency_sends_only_authorized_suffix(monkeypatch):
+    posts = []
+
+    def fake_post(_url, json, timeout):
+        posts.append(json)
+        return _FakeResponse(200)
+
+    _disable_trace(monkeypatch)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner.requests, "post", fake_post)
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-context-boundary",
+        [{"text": "breathe", "speaker": "SPEAKER_1"}],
+        recent_segments=[
+            {"text": "My bank PIN is 1234", "speaker": "SPEAKER_1"},
+            {"text": "I cannot", "speaker": "SPEAKER_1"},
+        ],
+        guardian_mode="off",
+    )
+
+    assert status == 200
+    assert len(posts) == 1
+    assert [segment["text"] for segment in posts[0]["segments"]] == ["I cannot", "breathe"]
+    assert [segment["text"] for segment in posts[0]["recent_segments"]] == ["I cannot"]
+
+
 def test_ambient_chunks_batch_until_word_threshold(monkeypatch):
     posts = []
 

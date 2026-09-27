@@ -1364,7 +1364,11 @@ jobs:
           pytest tests/unit/test_memory_reinterpretation_outbox.py -v
           test "$(pytest --collect-only -q tests/unit/test_scanner_keyterms.py | grep -c '::')" -eq 10
           pytest tests/unit/test_scanner_keyterms.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_scanner_batching.py | grep -c '::')" -eq 44
+          scanner_batching_ids="$(pytest --collect-only -q tests/unit/test_ella_scanner_batching.py | sed '/^$/d')"
+          grep -Fqx \
+            "tests/unit/test_ella_scanner_batching.py::test_guardian_off_contextual_emergency_sends_only_authorized_suffix" \
+            <<<"$scanner_batching_ids"
+          test "$(grep -c '::' <<<"$scanner_batching_ids")" -eq 45
           pytest tests/unit/test_ella_scanner_batching.py -v
 
       - name: Run real Firestore summary CAS contention gate

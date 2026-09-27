@@ -440,10 +440,10 @@ def _single_explicit_speaker(segments: List[dict]) -> Optional[str]:
     return speaker
 
 
-def credible_emergency_reason_with_context(
+def _credible_emergency_match_with_context(
     context_segments: List[dict], current_segments: List[dict]
-) -> tuple[Optional[str], bool]:
-    """Return a newly completed reason and whether prior context was required."""
+) -> tuple[Optional[str], List[dict]]:
+    """Return a newly completed reason and only the retained context that authorized it."""
     current_reason = credible_emergency_reason_for_segments(current_segments)
     if current_reason:
         context_speaker = _single_explicit_speaker(context_segments)
@@ -454,10 +454,10 @@ def credible_emergency_reason_with_context(
             and context_speaker == current_speaker
             and _CONTEXTUAL_REPORTED_SPEECH_SUFFIX.search(context_text)
         ):
-            return None, False
-        return current_reason, False
+            return None, []
+        return current_reason, []
     if not context_segments or credible_emergency_reason_for_segments(context_segments):
-        return None, False
+        return None, []
 
     for start in range(len(context_segments) - 1, -1, -1):
         candidate_segments = context_segments[start:] + current_segments
@@ -476,9 +476,17 @@ def credible_emergency_reason_with_context(
             and preceding_speaker == candidate_speaker
             and _CONTEXTUAL_REPORTED_SPEECH_SUFFIX.search(preceding_text)
         ):
-            return None, False
-        return combined_reason, True
-    return None, False
+            return None, []
+        return combined_reason, context_segments[start:]
+    return None, []
+
+
+def credible_emergency_reason_with_context(
+    context_segments: List[dict], current_segments: List[dict]
+) -> tuple[Optional[str], bool]:
+    """Return a newly completed reason and whether prior context was required."""
+    reason, matched_context = _credible_emergency_match_with_context(context_segments, current_segments)
+    return reason, bool(matched_context)
 
 
 def scanner_immediate_reason(text: str, *, wake_prefix_recent: Optional[bool] = None) -> Optional[str]:
@@ -1183,12 +1191,13 @@ def send_to_scanner(
         for s in (recent_segments or [])
         if s.get("text")
     ]
-    emergency_reason, contextual_emergency = credible_emergency_reason_with_context(
+    emergency_reason, emergency_context_segments = _credible_emergency_match_with_context(
         formatted_recent_segments,
         scanner_segments,
     )
-    if contextual_emergency:
-        scanner_segments = formatted_recent_segments + scanner_segments
+    if emergency_context_segments:
+        formatted_recent_segments = emergency_context_segments
+        scanner_segments = emergency_context_segments + scanner_segments
 
     authoritative_mode = _normalize_guardian_mode(guardian_mode)
     guardian_mode_enabled = authoritative_mode in _GUARDIAN_ACTIVE_MODES
