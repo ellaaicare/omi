@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/utils/analytics/analytics_manager.dart';
 import 'package:omi/utils/analytics/intercom.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/debugging/crash_reporter.dart';
@@ -85,4 +86,17 @@ class PlatformManager {
   bool get isDebuggingSupported => PlatformService.isCrashlyticsSupported;
   bool get isMacOS => PlatformService.isMacOS;
   bool get isFCMSupported => Platform.isAndroid || Platform.isIOS || Platform.isMacOS;
+
+  // --- Upstream capture compatibility surface (ellaaicare/ella-ai#1280) ---
+  // The vendored upstream capture stack (lib/upstream_capture/**, BasedHardware/omi@f16699a)
+  // reads these members from this shared singleton. They are additive and never import the
+  // vendored tree, so the legacy (flag-OFF) graph stays independent of it.
+
+  /// Upstream routes product analytics through `PlatformManager.instance.analytics`.
+  /// Ella keeps upstream product analytics inert (see [AnalyticsManager] compat methods).
+  AnalyticsManager get analytics => AnalyticsManager();
+
+  String get appBuild => _packageInfo.buildNumber;
+
+  String get appNamespace => _packageInfo.packageName;
 }
