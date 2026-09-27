@@ -1378,7 +1378,7 @@ jobs:
           grep -Fqx \
             "tests/unit/test_ella_scanner_batching.py::test_guardian_enabled_context_does_not_rewrite_active_segments" \
             <<<"$scanner_batching_ids"
-          test "$(grep -c '::' <<<"$scanner_batching_ids")" -eq 48
+          test "$(grep -c '::' <<<"$scanner_batching_ids")" -eq 50
           pytest tests/unit/test_ella_scanner_batching.py -v
 
       - name: Run real Firestore summary CAS contention gate
