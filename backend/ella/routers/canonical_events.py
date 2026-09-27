@@ -349,12 +349,11 @@ class CanonicalEventStore:
     async def write_batch(self, events: list[CanonicalEventIn]) -> dict[str, Any]:
         raise NotImplementedError
 
-    async def event_exists(
+    async def any_event_exists(
         self,
         *,
         uid: str,
-        event_id: str,
-        source_identity: str,
+        identities: tuple[tuple[str, str], ...],
     ) -> bool:
         raise NotImplementedError
 
@@ -506,28 +505,33 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
             "events": statuses,
         }
 
-    async def event_exists(
+    async def any_event_exists(
         self,
         *,
         uid: str,
-        event_id: str,
-        source_identity: str,
+        identities: tuple[tuple[str, str], ...],
     ) -> bool:
+        if not identities:
+            return False
+        arguments: list[str] = [uid]
+        predicates = []
+        for event_id, source_identity in identities:
+            event_parameter = len(arguments) + 1
+            source_parameter = event_parameter + 1
+            predicates.append(f"(event_id = ${event_parameter} AND source_identity = ${source_parameter})")
+            arguments.extend((event_id, source_identity))
         pool = await _get_pool()
         return bool(
             await pool.fetchval(
-                """
+                f"""
                 SELECT EXISTS (
                     SELECT 1
                     FROM canonical_events
                     WHERE uid = $1
-                      AND event_id = $2
-                      AND source_identity = $3
+                      AND ({" OR ".join(predicates)})
                 )
                 """,
-                uid,
-                event_id,
-                source_identity,
+                *arguments,
             )
         )
 
@@ -701,15 +705,17 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
             "events": statuses,
         }
 
-    async def event_exists(
+    async def any_event_exists(
         self,
         *,
         uid: str,
-        event_id: str,
-        source_identity: str,
+        identities: tuple[tuple[str, str], ...],
     ) -> bool:
-        event = self._events.get((event_id, source_identity))
-        return bool(event and event.get("uid") == uid)
+        for event_id, source_identity in identities:
+            event = self._events.get((event_id, source_identity))
+            if event and event.get("uid") == uid:
+                return True
+        return False
 
     async def get_event(
         self,

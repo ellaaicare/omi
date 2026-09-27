@@ -27,6 +27,25 @@ def _canonical_user_turn(uid, client_message_id, started_at):
     )
 
 
+def _hermes_cloud_user_turn(uid, client_message_id, started_at):
+    source_identity, event_id, _ = chat.hermes_cloud_event_identity(
+        uid=uid,
+        channel="ios_chat",
+        client_interaction_id=client_message_id,
+    )
+    return canonical_events.CanonicalEventIn(
+        uid=uid,
+        canonical_identity=uid,
+        event_id=event_id,
+        channel="ios_chat",
+        provider="hermes-cloud",
+        role="user",
+        text="synthetic managed cloud turn",
+        started_at=started_at,
+        source_ref={"source_identity": source_identity},
+    )
+
+
 def test_exact_turn_lookup_finds_old_retained_turn_despite_timestamp_tie(monkeypatch):
     store = InMemoryCanonicalEventStore()
     tied_at = datetime(2020, 1, 1, 12, 0, tzinfo=timezone.utc)
@@ -52,7 +71,7 @@ def test_exact_turn_lookup_uses_authenticated_owner_and_user_event_identity(monk
         def __init__(self):
             self.calls = []
 
-        async def event_exists(self, **kwargs):
+        async def any_event_exists(self, **kwargs):
             self.calls.append(kwargs)
             return True
 
@@ -66,13 +85,21 @@ def test_exact_turn_lookup_uses_authenticated_owner_and_user_event_identity(monk
     assert store.calls == [
         {
             "uid": "owner-a",
-            "event_id": "ios_chat:owner-a:client-123:user",
-            "source_identity": "ios_chat:owner-a:client-123",
+            "identities": (
+                (
+                    "ios_chat:owner-a:client-123:user",
+                    "ios_chat:owner-a:client-123",
+                ),
+                (
+                    "hermes-cloud:878ca9d769d70b0a8dc7b000d3fb3e8d:user",
+                    "hermes_cloud:ios_chat:interaction:878ca9d769d70b0a8dc7b000d3fb3e8d",
+                ),
+            ),
         }
     ]
 
 
-def test_postgres_exact_turn_lookup_uses_content_free_indexed_predicate(monkeypatch):
+def test_postgres_exact_turn_lookup_uses_one_content_free_indexed_predicate(monkeypatch):
     class RecordingPool:
         def __init__(self):
             self.calls = []
@@ -93,10 +120,18 @@ def test_postgres_exact_turn_lookup_uses_content_free_indexed_predicate(monkeypa
     )
 
     exists = asyncio.run(
-        store.event_exists(
+        store.any_event_exists(
             uid="owner-a",
-            event_id="ios_chat:owner-a:client-123:user",
-            source_identity="ios_chat:owner-a:client-123",
+            identities=(
+                (
+                    "ios_chat:owner-a:client-123:user",
+                    "ios_chat:owner-a:client-123",
+                ),
+                (
+                    "hermes-cloud:cloud-digest:user",
+                    "hermes_cloud:ios_chat:interaction:cloud-digest",
+                ),
+            ),
         )
     )
 
@@ -104,13 +139,38 @@ def test_postgres_exact_turn_lookup_uses_content_free_indexed_predicate(monkeypa
     assert len(pool.calls) == 1
     query, args = pool.calls[0]
     assert "SELECT EXISTS" in query
-    assert "WHERE uid = $1 AND event_id = $2 AND source_identity = $3" in query
+    assert (
+        "WHERE uid = $1 AND ((event_id = $2 AND source_identity = $3) " "OR (event_id = $4 AND source_identity = $5))"
+    ) in query
     assert args == (
         "owner-a",
         "ios_chat:owner-a:client-123:user",
         "ios_chat:owner-a:client-123",
+        "hermes-cloud:cloud-digest:user",
+        "hermes_cloud:ios_chat:interaction:cloud-digest",
     )
     assert "text" not in query.lower()
+
+
+def test_exact_turn_lookup_finds_managed_hermes_cloud_user_event(monkeypatch):
+    store = InMemoryCanonicalEventStore()
+    asyncio.run(
+        store.write_batch(
+            [
+                _hermes_cloud_user_turn(
+                    "owner-a",
+                    "managed-turn",
+                    datetime(2026, 9, 27, 8, 0, tzinfo=timezone.utc),
+                )
+            ]
+        )
+    )
+    client = _turn_lookup_client(monkeypatch, store)
+
+    response = client.get("/v1/ella/chat/turns/managed-turn")
+
+    assert response.status_code == 200
+    assert response.json() == {"exists": True}
 
 
 def test_exact_turn_lookup_does_not_expose_another_owners_same_client_id(monkeypatch):
@@ -136,7 +196,7 @@ def test_exact_turn_lookup_does_not_expose_another_owners_same_client_id(monkeyp
 
 def test_exact_turn_lookup_storage_failure_is_retryable_not_absent(monkeypatch):
     class FailingStore:
-        async def event_exists(self, **_kwargs):
+        async def any_event_exists(self, **_kwargs):
             raise RuntimeError("synthetic storage failure")
 
     client = _turn_lookup_client(monkeypatch, FailingStore())
@@ -158,7 +218,7 @@ def test_exact_turn_lookup_auth_failure_is_terminal_before_storage(monkeypatch):
         def __init__(self):
             self.calls = 0
 
-        async def event_exists(self, **_kwargs):
+        async def any_event_exists(self, **_kwargs):
             self.calls += 1
             return False
 

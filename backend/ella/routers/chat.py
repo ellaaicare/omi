@@ -43,6 +43,7 @@ from ella.services.hermes_session import canonical_omi_session_key, safe_session
 from ella.services.hermes_cloud_runtime import (
     HermesCloudRuntimeService,
     HermesCloudTurnRequest,
+    hermes_cloud_event_identity,
 )
 from ella.services.ai_consent import require_current_ai_consent
 from ella.services.provisioning import ProvisioningError
@@ -213,6 +214,11 @@ def _canonical_turn_id(uid: str, request: EllaChatRequest, started_at: datetime)
     return f"server-{digest}"
 
 
+def _ios_chat_event_identity(uid: str, turn_id: str, role: str) -> tuple[str, str]:
+    source_identity = f"ios_chat:{uid}:{turn_id}"
+    return source_identity, f"{source_identity}:{role}"
+
+
 def _ios_chat_event(
     *,
     uid: str,
@@ -224,11 +230,11 @@ def _ios_chat_event(
     ended_at: datetime = None,
     client_info: dict = None,
 ) -> CanonicalEventIn:
-    source_identity = f"ios_chat:{uid}:{turn_id}"
+    source_identity, event_id = _ios_chat_event_identity(uid, turn_id, role)
     return CanonicalEventIn(
         uid=uid,
         canonical_identity=uid,
-        event_id=f"{source_identity}:{role}",
+        event_id=event_id,
         session_id=session_key,
         channel="ios_chat",
         provider="omi-ios-chat",
@@ -1174,12 +1180,23 @@ async def ella_chat_turn_lookup(
 ) -> EllaChatTurnLookupResponse:
     """Return whether this owner has the exact canonical iOS user turn."""
     response.headers["Cache-Control"] = "private, no-store"
-    source_identity = f"ios_chat:{authenticated_uid}:{client_message_id}"
+    source_identity, event_id = _ios_chat_event_identity(
+        authenticated_uid,
+        client_message_id,
+        "user",
+    )
+    cloud_source_identity, cloud_event_id, _ = hermes_cloud_event_identity(
+        uid=authenticated_uid,
+        channel="ios_chat",
+        client_interaction_id=client_message_id,
+    )
     try:
-        exists = await _canonical_event_store.event_exists(
+        exists = await _canonical_event_store.any_event_exists(
             uid=authenticated_uid,
-            event_id=f"{source_identity}:user",
-            source_identity=source_identity,
+            identities=(
+                (event_id, source_identity),
+                (cloud_event_id, cloud_source_identity),
+            ),
         )
     except Exception as exc:
         logger.warning(
