@@ -848,7 +848,7 @@ jobs:
           for required_id in "${required_incident_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$incident_ids"
           done
-          test "$(grep -c '::' <<<"$incident_ids")" -eq 63
+          test "$(grep -c '::' <<<"$incident_ids")" -eq 69
           pytest \
             tests/unit/test_ella_incident_1182_route_isolation.py \
             tests/unit/test_ella_incident_1182_callback_auth.py \
