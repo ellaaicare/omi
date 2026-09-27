@@ -1368,7 +1368,10 @@ jobs:
           grep -Fqx \
             "tests/unit/test_ella_scanner_batching.py::test_guardian_off_contextual_emergency_sends_only_authorized_suffix" \
             <<<"$scanner_batching_ids"
-          test "$(grep -c '::' <<<"$scanner_batching_ids")" -eq 45
+          grep -Fqx \
+            "tests/unit/test_ella_scanner_batching.py::test_guardian_off_direct_emergency_omits_unmatched_retained_history" \
+            <<<"$scanner_batching_ids"
+          test "$(grep -c '::' <<<"$scanner_batching_ids")" -eq 46
           pytest tests/unit/test_ella_scanner_batching.py -v
 
       - name: Run real Firestore summary CAS contention gate
