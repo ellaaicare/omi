@@ -9,6 +9,7 @@ carry this custom app contract as a core patch.
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
@@ -20,6 +21,7 @@ from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 import database.conversations as conversations_db
 from database._client import db
+from database.auth import get_user_from_uid
 from ella.config import ELLA_CONFIG
 from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
 from ella.services.correction_propagation import propagation_run_to_dict, run_correction_propagation
@@ -311,20 +313,21 @@ def _build_direct_correction_prompt(
     transcript: str,
     segment_count: int,
 ) -> str:
-    return f"""You are Ella, Plato's warm companion summary correction writer.
+    return f"""You are Ella, a warm and attentive summary correction writer for the OMI companion app.
 
 Rewrite the OMI conversation summary using the user's correction. This is an app-visible summary, not a clinical note.
 
 Rules:
 - Return JSON only.
 - overview must start with "[Ella] ".
-- Keep the overview warm, specific, and useful for Plato to reread later.
+- Keep the overview warm, specific, and useful for the account holder to reread later.
+- Write the overview in the third person, describing what happened. Never address the account holder directly, use a greeting or salutation, or invent a persona for them.
 - Use the correction as authoritative when it resolves identity, topic, title, or media attribution.
 - Re-read the entire transcript and current summary, then produce one coherent corrected summary. Do not append or splice the correction text verbatim.
-- Correction text may contain dictation errors, rough phrasing, homophones, or ASR artifacts. Infer the intended correction only when strongly supported by the transcript, current summary, or durable companion context. For example, in a transcript context, "Trang script" likely means "transcript"; when discussing a young person, "team" may mean "teen".
+- Correction text may contain dictation errors, rough phrasing, homophones, or ASR artifacts. Infer the intended correction only when strongly supported by the transcript, current summary, or the correction text itself. For example, in a transcript context, "Trang script" likely means "transcript"; when discussing a young person, "team" may mean "teen".
 - When the correction resolves a person's identity, propagate that identity through all relevant references in the title and overview. Do not leave stale generic labels such as "the teen" where the resolved name should be used.
 - Avoid raw speaker labels such as "Speaker 5" in user-facing summaries when a name, role, or natural description can be inferred. If a speaker is still unknown, describe the action without the raw label.
-- Use durable companion context when available to identify Plato/Greg and close family members, but preserve uncertainty instead of inventing.
+- Only use a person's name if it appears in the transcript, the current summary, or the correction text. Never invent a name, and never carry over a name from outside this conversation.
 - Preserve useful details from the transcript and current summary when they do not conflict with the correction.
 - Do not invent unsupported details.
 - title must be short and contain no markdown.
@@ -1245,6 +1248,217 @@ async def _submit_correction_to_n8n(
     }
 
 
+class CorrectionIdentityGateError(Exception):
+    """Raised when a corrected summary fails the identity/name gate."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+_PROPER_NAME_TOKEN_RE = re.compile(r"[A-Z][a-z]+")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_ELLA_OVERVIEW_PREFIX_RE = re.compile(r"^\[Ella\]\s*")
+_VOCATIVE_GREETING_RE = re.compile(r"(?i)(?:^|[.!?]\s+)(?:hi|hey|hello|dear|greetings)\b,?\s*[A-Z][a-z]+")
+_VOCATIVE_LEADING_ADDRESS_RE = re.compile(r"(?:^|[.!?]\s+)[A-Z][a-z]+,\s")
+_VOCATIVE_TRAILING_ADDRESS_RE = re.compile(r",\s*[A-Z][a-z]+[.!?](?:\s|$)")
+# "Ella" is the assistant's own persona name (required by the "[Ella] " overview
+# prefix), not a personal identity that needs to be grounded per-account.
+_PERSONA_NAME_ALLOWLIST = {"Ella"}
+# A sentence-initial capitalized word is ambiguous: it could be a person's
+# name used as the subject ("Margaret stopped by...", "Plato discussed...")
+# or an ordinary word capitalized only because it starts the sentence
+# ("This was...", "Corrected in background."). We only treat it as a name
+# candidate when it reads like "<Name> <verb>...", i.e. it is immediately
+# followed by a common third-person action/reporting verb.
+_NAME_SUBJECT_VERBS = {
+    "said",
+    "says",
+    "mentioned",
+    "mentions",
+    "talked",
+    "talks",
+    "spoke",
+    "speaks",
+    "asked",
+    "asks",
+    "told",
+    "tells",
+    "discussed",
+    "discusses",
+    "replied",
+    "replies",
+    "added",
+    "adds",
+    "explained",
+    "explains",
+    "wanted",
+    "wants",
+    "decided",
+    "decides",
+    "shared",
+    "shares",
+    "described",
+    "describes",
+    "recalled",
+    "recalls",
+    "remembered",
+    "remembers",
+    "stopped",
+    "stops",
+    "came",
+    "comes",
+    "went",
+    "goes",
+    "called",
+    "calls",
+    "texted",
+    "texts",
+    "emailed",
+    "emails",
+    "visited",
+    "visits",
+    "brought",
+    "brings",
+    "planned",
+    "plans",
+    "suggested",
+    "suggests",
+    "confirmed",
+    "confirms",
+    "clarified",
+    "clarifies",
+    "expressed",
+    "expresses",
+    "wondered",
+    "wonders",
+    "worried",
+    "worries",
+    "laughed",
+    "laughs",
+    "joked",
+    "jokes",
+    "noted",
+    "notes",
+    "felt",
+    "feels",
+    "thought",
+    "thinks",
+    "reminded",
+    "reminds",
+    "agreed",
+    "agrees",
+    "insisted",
+    "insists",
+    "admitted",
+    "admits",
+    "recommended",
+    "recommends",
+    "warned",
+    "warns",
+    "promised",
+    "promises",
+    "apologized",
+    "apologizes",
+    "complained",
+    "complains",
+}
+
+
+def _extract_capitalized_tokens(text: str) -> set[str]:
+    return set(_PROPER_NAME_TOKEN_RE.findall(text or ""))
+
+
+def _strip_word_punctuation(word: str) -> str:
+    return word.strip("\"'()[]{}.,!?:;")
+
+
+def _candidate_identity_tokens(text: str) -> list[str]:
+    """Capitalized tokens in `text` that plausibly identify a person.
+
+    Sentence-initial capitalization is only treated as a name candidate when
+    it reads like a name used as a sentence subject (see
+    `_NAME_SUBJECT_VERBS`); otherwise it is indistinguishable from ordinary
+    sentence-initial capitalization and is skipped.
+    """
+
+    normalized = _ELLA_OVERVIEW_PREFIX_RE.sub("", text or "")
+    candidates: list[str] = []
+    for sentence in _SENTENCE_SPLIT_RE.split(normalized):
+        words = sentence.strip().split()
+        for index, word in enumerate(words):
+            match = _PROPER_NAME_TOKEN_RE.match(_strip_word_punctuation(word))
+            if not match:
+                continue
+            if index == 0:
+                next_word = _strip_word_punctuation(words[1]).lower() if len(words) > 1 else ""
+                if next_word not in _NAME_SUBJECT_VERBS:
+                    continue
+            candidates.append(match.group(0))
+    return candidates
+
+
+def _account_profile_name_tokens(uid: str) -> set[str]:
+    """Name tokens grounded in the authenticated account's own validated profile."""
+
+    try:
+        profile = get_user_from_uid(uid)
+    except Exception:
+        logger.exception("Failed to resolve account profile for correction identity gate", extra={"uid": uid})
+        return set()
+    if not isinstance(profile, dict):
+        return set()
+    display_name = profile.get("display_name")
+    if not isinstance(display_name, str) or not display_name.strip():
+        return set()
+    return _extract_capitalized_tokens(display_name)
+
+
+def _has_vocative_or_salutation(text: str) -> bool:
+    return bool(
+        _VOCATIVE_GREETING_RE.search(text)
+        or _VOCATIVE_LEADING_ADDRESS_RE.search(text)
+        or _VOCATIVE_TRAILING_ADDRESS_RE.search(text)
+    )
+
+
+def _enforce_correction_identity_gate(
+    *,
+    uid: str,
+    transcript: str,
+    corrected: dict[str, Any],
+) -> None:
+    """Fail-closed guard applied before a corrected summary is written back.
+
+    Rejects output that talks to the account holder directly (a vocative or
+    salutation) or that introduces a capitalized proper name not grounded in
+    this conversation's transcript or the authenticated account's own
+    validated profile. Grounding is case-sensitive: a lowercase occurrence
+    such as "will" never grounds the capitalized name "Will".
+
+    Name-grounding is checked against the overview only. The title is a
+    short, often fully Title-Cased label (e.g. "Coffee With A Friend"), so
+    treating every capitalized title word as a name candidate would reject
+    routine, harmless corrections; the vocative/salutation check still
+    covers the title.
+    """
+
+    title = str(corrected.get("title") or "")
+    overview = str(corrected.get("overview") or "")
+    overview_body = _ELLA_OVERVIEW_PREFIX_RE.sub("", overview)
+
+    # Checked separately (rather than concatenated) so the "start of string"
+    # anchors used to detect a leading salutation apply to each field's own
+    # beginning, not to the start of a combined blob.
+    if _has_vocative_or_salutation(title) or _has_vocative_or_salutation(overview_body):
+        raise CorrectionIdentityGateError("vocative_or_salutation_detected")
+
+    grounded = _extract_capitalized_tokens(transcript) | _account_profile_name_tokens(uid) | _PERSONA_NAME_ALLOWLIST
+    for candidate in _candidate_identity_tokens(overview):
+        if candidate not in grounded:
+            raise CorrectionIdentityGateError("ungrounded_name_detected")
+
+
 async def _run_direct_correction_apply(
     *,
     uid: str,
@@ -1270,6 +1484,7 @@ async def _run_direct_correction_apply(
             transcript=transcript,
             segment_count=segment_count,
         )
+        _enforce_correction_identity_gate(uid=uid, transcript=transcript, corrected=corrected_summary)
         apply_result = await _apply_corrected_summary(
             uid=uid,
             conversation_id=conversation_id,
@@ -1308,6 +1523,63 @@ async def _run_direct_correction_apply(
             conversation_id=conversation_id,
             trace_id=trace_id,
             status="applied",
+            queued=False,
+            proposal_id=proposal_id,
+        )
+    except CorrectionIdentityGateError as exc:
+        # Fail closed: keep the prior summary version and report a generic,
+        # non-leaky status rather than the rejected title/overview text.
+        logger.warning(
+            "Direct conversation correction blocked by identity gate",
+            extra={
+                "uid": uid,
+                "conversation_id": conversation_id,
+                "correction_id": correction_id,
+                "reason": exc.reason,
+            },
+        )
+        blocked_at = _now_iso()
+        _append_correction_event(
+            uid,
+            conversation_id,
+            correction_id,
+            {
+                "stage": "direct_apply_blocked_identity_gate",
+                "status": "blocked",
+                "at": blocked_at,
+                "trace_id": trace_id,
+                "reason": exc.reason,
+            },
+        )
+        _persist_correction_audit(
+            uid,
+            conversation_id,
+            correction_id,
+            {
+                "status": "correction_blocked_identity_gate",
+                "updated_at": blocked_at,
+                "direct_apply_blocked_reason": exc.reason,
+            },
+        )
+        _update_conversation_correction_state(
+            uid,
+            conversation_id,
+            {
+                "correction_state": {
+                    "status": "correction_blocked_identity_gate",
+                    "pending": False,
+                    "correction_id": correction_id,
+                    "trace_id": trace_id,
+                    "submitted_at": submitted_at,
+                    "updated_at": blocked_at,
+                }
+            },
+        )
+        return ConversationCorrectionResponse(
+            correction_id=correction_id,
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            status="correction_blocked_identity_gate",
             queued=False,
             proposal_id=proposal_id,
         )
