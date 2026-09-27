@@ -25,11 +25,7 @@ void main() {
           'reasons': ['low_confidence_title'],
         },
         'ella_tags': ['omi', 'family', 'guardian_relevant'],
-        'ella_signal': {
-          'salience': 'high',
-          'memory_promotion': 'candidate',
-          'guardian_relevant': true,
-        },
+        'ella_signal': {'salience': 'high', 'memory_promotion': 'candidate', 'guardian_relevant': true},
       });
 
       expect(conversation.hasInternalAssessment, isTrue);
@@ -53,14 +49,7 @@ void main() {
     final conversation = ServerConversation.fromJson({
       'id': 'failed-conversation',
       'created_at': '2026-07-20T08:00:00Z',
-      'structured': {
-        'title': '',
-        'overview': '',
-        'emoji': '',
-        'category': 'other',
-        'action_items': [],
-        'events': [],
-      },
+      'structured': {'title': '', 'overview': '', 'emoji': '', 'category': 'other', 'action_items': [], 'events': []},
       'transcript_segments': [],
       'apps_results': [],
       'audio_files': [],
@@ -75,6 +64,33 @@ void main() {
     expect(conversation.isRetryableSummaryFailure, isTrue);
     expect(conversation.toJson()['processing_error'], 'conversation_summary_failed');
     expect(conversation.toJson()['processing_error_at'], '2026-07-20T08:05:00.000Z');
+  });
+
+  test('parses and serializes content-free discard diagnostics and explicit keep authority', () {
+    final conversation = ServerConversation.fromJson({
+      'id': 'discarded-conversation',
+      'created_at': '2026-09-27T03:12:20Z',
+      'structured': {'title': '', 'overview': '', 'emoji': '', 'category': 'other', 'action_items': [], 'events': []},
+      'discarded': true,
+      'discard_reason': 'discarded_trivial',
+      'discard_classifier_provenance': {'classifier': 'short_content', 'version': 'v1', 'decision_source': 'model'},
+      'explicit_keep': true,
+      'explicit_keep_requested_at': '2026-09-27T03:12:18Z',
+    });
+
+    expect(conversation.discarded, isTrue);
+    expect(conversation.discardReason, 'discarded_trivial');
+    expect(conversation.discardClassifierProvenance?['classifier'], 'short_content');
+    expect(conversation.explicitKeep, isTrue);
+    expect(conversation.explicitKeepRequestedAt, isNotNull);
+    expect(conversation.toJson()['discard_reason'], 'discarded_trivial');
+    expect(conversation.toJson()['discard_classifier_provenance'], {
+      'classifier': 'short_content',
+      'version': 'v1',
+      'decision_source': 'model',
+    });
+    expect(conversation.toJson()['explicit_keep'], isTrue);
+    expect(conversation.toJson()['explicit_keep_requested_at'], '2026-09-27T03:12:18.000Z');
   });
 
   test('treats initial and recovery summary failures as retryable without exposing unrelated errors', () {
@@ -112,11 +128,7 @@ void main() {
         'events': [],
       },
       'status': 'completed',
-      'enrichment_state': {
-        'status': 'failed',
-        'pending': true,
-        'error_code': 'conversation_summary_recovery_failed',
-      },
+      'enrichment_state': {'status': 'failed', 'pending': true, 'error_code': 'conversation_summary_recovery_failed'},
     });
 
     expect(conversation.isRetryableSummaryFailure, isFalse);
