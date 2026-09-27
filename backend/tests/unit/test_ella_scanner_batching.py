@@ -359,6 +359,8 @@ def test_scanner_off_mode_does_not_leak_ambiguous_routine_speech(monkeypatch, te
 def test_credible_emergency_bypass_requires_current_context_for_sensitive_terms():
     assert scanner.credible_emergency_reason("Please call 911") == "emergency_services"
     assert scanner.credible_emergency_reason("Someone please call 911") == "emergency_services"
+    assert scanner.credible_emergency_reason("Call an ambulance") == "emergency_services"
+    assert scanner.credible_emergency_reason("Please call an ambulance") == "emergency_services"
     assert scanner.credible_emergency_reason("Hey Ella, call 911") == "emergency_services"
     assert scanner.credible_emergency_reason("Hey Ella, I can't breathe") == "breathing"
     assert scanner.credible_emergency_reason("I am having chest pain") == "chest_pain"
@@ -478,6 +480,20 @@ def test_credible_emergency_bypass_rejects_negative_or_absent_subjects():
         [{"text": "Earlier I ate lunch", "speaker": "SPEAKER_1"}],
         [{"text": "Please call 911", "speaker": "SPEAKER_1"}],
     ) == ("emergency_services", False)
+    assert scanner.credible_emergency_reason_with_context(
+        [
+            {"text": "We were discussing dinner", "speaker": "SPEAKER_1"},
+            {"text": "I cannot", "speaker": "SPEAKER_1"},
+        ],
+        [{"text": "breathe", "speaker": "SPEAKER_1"}],
+    ) == ("breathing", True)
+    assert scanner.credible_emergency_reason_with_context(
+        [
+            {"text": "She said", "speaker": "SPEAKER_1"},
+            {"text": "I cannot", "speaker": "SPEAKER_1"},
+        ],
+        [{"text": "breathe", "speaker": "SPEAKER_1"}],
+    ) == (None, False)
 
 
 def test_scanner_off_mode_does_not_join_emergency_phrase_across_segments(monkeypatch):

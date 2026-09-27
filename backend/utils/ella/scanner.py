@@ -127,7 +127,7 @@ _CREDIBLE_EMERGENCY_PATTERNS = (
     (
         "emergency_services",
         re.compile(
-            r"^\s*(?:(?:please\s+)?(?:someone\s+)?|someone\s+please\s+)call\s+911\b",
+            r"^\s*(?:(?:please\s+)?(?:someone\s+)?|someone\s+please\s+)" r"call\s+(?:911|an?\s+ambulance)\b",
             re.IGNORECASE,
         ),
     ),
@@ -458,8 +458,27 @@ def credible_emergency_reason_with_context(
         return current_reason, False
     if not context_segments or credible_emergency_reason_for_segments(context_segments):
         return None, False
-    combined_reason = credible_emergency_reason_for_segments(context_segments + current_segments)
-    return combined_reason, combined_reason is not None
+
+    for start in range(len(context_segments) - 1, -1, -1):
+        candidate_segments = context_segments[start:] + current_segments
+        candidate_speaker = _single_explicit_speaker(candidate_segments)
+        if candidate_speaker is None:
+            continue
+        combined_reason = credible_emergency_reason_for_segments(candidate_segments)
+        if not combined_reason:
+            continue
+
+        preceding_segments = context_segments[:start]
+        preceding_speaker = _single_explicit_speaker(preceding_segments)
+        preceding_text = " ".join(str(segment.get("text") or "") for segment in preceding_segments)
+        if (
+            preceding_speaker is not None
+            and preceding_speaker == candidate_speaker
+            and _CONTEXTUAL_REPORTED_SPEECH_SUFFIX.search(preceding_text)
+        ):
+            return None, False
+        return combined_reason, True
+    return None, False
 
 
 def scanner_immediate_reason(text: str, *, wake_prefix_recent: Optional[bool] = None) -> Optional[str]:
