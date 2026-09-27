@@ -2,11 +2,14 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
+
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/message_event.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
+import 'package:omi/ella/services/ella_audio_emission_gate.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/models/custom_stt_config.dart';
 import 'package:omi/models/stt_provider.dart';
@@ -302,8 +305,31 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
     return;
   }
 
-  bool get _hasProtectedSendAuthority =>
-      _aiConsentLease?.hasCurrentAuthority ?? SharedPreferencesUtil().aiConsentAccepted;
+  // No fallback to cached/durable consent (SharedPreferencesUtil().aiConsentAccepted):
+  // that flag can be stale relative to the live per-session lease, and this is the
+  // last-mile audio-emission gate, so a missing or expired lease must mean "no".
+  bool get _hasProtectedSendAuthority => mayEmitAudio(
+        boundUid: SharedPreferencesUtil().uid,
+        hasConsentAuthority: _aiConsentLease?.hasCurrentAuthority == true,
+      );
+
+  /// Establishes a real, live-checked consent lease for the current
+  /// SharedPreferencesUtil().uid without the full async start() handshake
+  /// (socket connect + capture-protocol wait), for tests that construct this
+  /// service directly over a fake transport that is already "connected". A
+  /// no-op if the current preferences do not currently grant consent for that
+  /// uid — callers still need real consent setup (e.g. acceptAiConsent) first.
+  @visibleForTesting
+  void grantActiveConsentForTesting() {
+    final uid = SharedPreferencesUtil().uid;
+    final authority = AiConsentAuthoritySnapshot.capture(expectedUid: uid);
+    if (authority == null) return;
+    _aiConsentLease = AiConsentActiveSessionLease(
+      uid: uid,
+      authority: authority,
+      onAuthorityLost: () async {},
+    )..start();
+  }
 
   @override
   void onClosed([int? closeCode]) {

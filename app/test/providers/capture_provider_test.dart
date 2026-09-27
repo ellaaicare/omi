@@ -214,6 +214,13 @@ class _FakeTranscriptSocket {
       requireCaptureProtocol: requireCaptureProtocol,
       captureProtocolTimeout: const Duration(milliseconds: 100),
     );
+    // This fixture hands back an already-"connected" fake transport without
+    // going through the real start() handshake, so it needs its own consent
+    // lease established the same way production's _initiateWebsocket ->
+    // socket.start() flow would (see ella-ai#1280 P1 review on #589: sends
+    // require an active lease, not just cached aiConsentAccepted). A no-op
+    // when the current SharedPreferencesUtil() uid has no consent granted.
+    service.grantActiveConsentForTesting();
   }
 
   final _FakePureSocket pure;
@@ -694,6 +701,35 @@ void main() {
     expect(provider.captureDiagnostics.physicalFrames, 1);
     expect(provider.captureDiagnostics.physicalBytes, 3);
     expect(provider.captureDiagnostics.transmittedFrames, 0);
+  });
+
+  test('phone capture refuses to start with an empty bound uid even when the authority reports current', () async {
+    // Regression for ella-ai#1280 P1: an authority whose `currentCheck` override
+    // reports itself current must still be refused if its bound uid is empty —
+    // `_isCaptureCurrent`/`isCurrent()` alone do not inspect uid content.
+    final authority = _CaptureAuthority('')..current = true;
+    final mic = _FakeMicRecorder();
+    var transmittedFrames = 0;
+    final provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneMicrophonePermissionChecker: () async => true,
+      phoneTranscriptionPreparer: () async => true,
+      phoneMicRecorder: mic,
+      phoneAudioSender: (bytes) {
+        transmittedFrames++;
+        return false;
+      },
+      captureStartProofTimeout: const Duration(milliseconds: 100),
+    );
+    addTearDown(provider.dispose);
+
+    final result = await provider.streamRecording();
+
+    expect(result, PhoneCaptureStartResult.accountNotReady);
+    expect(mic.starts, 0);
+    expect(transmittedFrames, 0);
+    expect(provider.recordingState, isNot(RecordingState.record));
   });
 
   test('production phone path clears one stale recorder owner and retries once', () async {

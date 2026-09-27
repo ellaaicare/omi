@@ -26,6 +26,8 @@ import 'package:omi/ella/services/ai_consent_coordinator.dart';
 import 'package:omi/ella/services/ella_account_commit_barrier.dart';
 import 'package:omi/ella/services/ella_account_isolation_service.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
+import 'package:omi/ella/services/ella_audio_emission_gate.dart';
+import 'package:omi/ella/services/ella_capture_uid_gate.dart';
 import 'package:omi/models/custom_stt_config.dart';
 import 'package:omi/providers/calendar_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
@@ -1581,12 +1583,22 @@ class CaptureProvider extends ChangeNotifier
 
     unawaited(
       _sendDeviceFrame(session, session.socket, frame, startProof: startProof).then((sent) {
+        // A replacement already in flight (buffer exists) always gets this
+        // frame appended: shouldOpenReplacementListenSocket exists to decide
+        // whether to START a new replacement, not to gate buffering into one
+        // already underway. Without this, a frame that fails to send after
+        // the old socket has already been stopped (which now correctly drops
+        // hasActiveSessionAuthority for that socket the instant its consent
+        // lease is torn down, per the ella-ai#1280 P1 fail-closed fix) reads
+        // as "connected but only waiting on its lease" and is silently
+        // dropped instead of replayed once the replacement completes.
         if (!sent &&
             _isDeviceCaptureCurrent(session) &&
-            shouldOpenReplacementListenSocket(
-              socketConnected: session.socket.state == SocketServiceState.connected,
-              hasSessionAuthority: session.socket.hasActiveSessionAuthority,
-            )) {
+            (session.socketReplacementBuffer != null ||
+                shouldOpenReplacementListenSocket(
+                  socketConnected: session.socket.state == SocketServiceState.connected,
+                  hasSessionAuthority: session.socket.hasActiveSessionAuthority,
+                ))) {
           _recoverDeviceCaptureSocket(
             session,
             frame,
@@ -1654,6 +1666,9 @@ class CaptureProvider extends ChangeNotifier
     if (!_isDeviceCaptureCurrent(session) ||
         socket.state != SocketServiceState.connected ||
         !socket.hasActiveSessionAuthority) {
+      return false;
+    }
+    if (!mayEmitAudio(boundUid: session.authority.uid, hasConsentAuthority: session.authority.isCurrent())) {
       return false;
     }
     try {
@@ -2271,7 +2286,7 @@ class CaptureProvider extends ChangeNotifier
     _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.waitingForAccount, clearFailure: true);
     final captureAuthority = await _waitForCaptureAuthority(generation);
     if (!_isPhoneCaptureGenerationCurrent(generation)) return PhoneCaptureStartResult.cancelled;
-    if (captureAuthority == null) {
+    if (captureAuthority == null || !hasNonEmptyBoundUid(captureAuthority.uid)) {
       _failCaptureDiagnostics(CaptureDiagnosticFailure.accountNotReady);
       return PhoneCaptureStartResult.accountNotReady;
     }
@@ -2354,6 +2369,9 @@ class CaptureProvider extends ChangeNotifier
         await mic.start(
           onByteReceived: (bytes) {
             if (!_isPhoneCaptureCurrent(generation, captureAuthority) || !startProof.acceptFrame(bytes)) return;
+            if (!mayEmitAudio(boundUid: captureAuthority.uid, hasConsentAuthority: captureAuthority.isCurrent())) {
+              return;
+            }
             _recordPhysicalCaptureFrame(bytes);
             final transmitted = _phoneAudioSender?.call(bytes) ??
                 (() {
@@ -2705,7 +2723,9 @@ class CaptureProvider extends ChangeNotifier
     }
     _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.waitingForAccount, clearFailure: true);
     final captureAuthority = _activeWalAuthority();
-    if (captureAuthority == null || !_isCaptureCurrent(attempt.accountGeneration, captureAuthority)) {
+    if (captureAuthority == null ||
+        !_isCaptureCurrent(attempt.accountGeneration, captureAuthority) ||
+        !hasNonEmptyBoundUid(captureAuthority.uid)) {
       if (_isDeviceCaptureAttemptCurrent(attempt)) {
         updateRecordingState(RecordingState.error);
         _failCaptureDiagnostics(CaptureDiagnosticFailure.accountNotReady);
@@ -3038,7 +3058,11 @@ class CaptureProvider extends ChangeNotifier
     _systemAudioCaching = true;
     _systemAudioCaptureAuthority = _activeWalAuthority();
     final captureAuthority = _systemAudioCaptureAuthority;
-    if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) return false;
+    if (captureAuthority == null ||
+        !_isCaptureCurrent(generation, captureAuthority) ||
+        !hasNonEmptyBoundUid(captureAuthority.uid)) {
+      return false;
+    }
     _systemAudioCacheTimer?.cancel();
     _systemAudioCacheTimer = Timer(const Duration(seconds: 3), () {
       if (!_isCaptureCurrent(generation, captureAuthority)) return;
