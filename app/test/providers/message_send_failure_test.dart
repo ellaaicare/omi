@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/message.dart';
+import 'package:omi/ella/services/ella_chat_service.dart';
 import 'package:omi/ella/services/ella_service_result.dart';
 import 'package:omi/providers/message_provider.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
@@ -38,8 +39,13 @@ void main() {
     final provider = MessageProvider(
       activeAuthority: () => const _CurrentAuthority(),
       aiConsentEnsurer: () async => true,
-      ellaChatHistoryFetcher: ({required limit, required expectedAuthenticatedUid, required exactAuthority}) async =>
-          const EllaServiceResult.success(<ServerMessage>[]),
+      ellaChatHistoryFetcher: ({
+        required limit,
+        required before,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+      }) async =>
+          const EllaServiceResult.success(EllaChatHistoryPage(messages: [], hasMore: false)),
       ellaChatStreamSender: (
         text, {
         required clientMessageId,
@@ -112,22 +118,32 @@ void main() {
         retainedSentAt = clientSentAt;
         throw const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true);
       },
-      ellaChatHistoryFetcher: ({required limit, required expectedAuthenticatedUid, required exactAuthority}) async {
-        return EllaServiceResult.success([
-          ServerMessage(
-            'ios_chat:uid-a:$retainedTurnId:user',
-            retainedSentAt!,
-            'persisted before the ACK was lost',
-            MessageSender.human,
-            MessageType.text,
-            null,
-            false,
-            [],
-            [],
-            [],
-            canonicalTurnId: retainedTurnId,
+      ellaChatHistoryFetcher: ({
+        required limit,
+        required before,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+      }) async {
+        return EllaServiceResult.success(
+          EllaChatHistoryPage(
+            messages: [
+              ServerMessage(
+                'ios_chat:uid-a:$retainedTurnId:user',
+                retainedSentAt!,
+                'persisted before the ACK was lost',
+                MessageSender.human,
+                MessageType.text,
+                null,
+                false,
+                [],
+                [],
+                [],
+                canonicalTurnId: retainedTurnId,
+              ),
+            ],
+            hasMore: false,
           ),
-        ]);
+        );
       },
     );
 
@@ -142,6 +158,188 @@ void main() {
     expect(provider.messages.single.id, 'ios_chat:uid-a:$retainedTurnId:user');
     expect(provider.messages.single.canonicalTurnId, retainedTurnId);
     expect(provider.messages.single.clientDeliveryState, isNull);
+  });
+
+  test('retry finds a canonical turn older than the first history page without a second stream', () async {
+    var attempts = 0;
+    var historyPages = 0;
+    String? retainedTurnId;
+    DateTime? retainedSentAt;
+    DateTime? firstPageOldest;
+    final provider = MessageProvider(
+      activeAuthority: () => const _CurrentAuthority(),
+      aiConsentEnsurer: () async => true,
+      ellaChatStreamSender: (
+        text, {
+        required clientMessageId,
+        required clientSentAt,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async* {
+        attempts++;
+        retainedTurnId = clientMessageId;
+        retainedSentAt = clientSentAt;
+        throw const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true);
+      },
+      ellaChatHistoryFetcher: ({
+        required limit,
+        required before,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+      }) async {
+        historyPages++;
+        expect(limit, 50);
+        if (historyPages == 1) {
+          expect(before, isNull);
+          firstPageOldest = retainedSentAt!.add(const Duration(minutes: 1));
+          return EllaServiceResult.success(
+            EllaChatHistoryPage(
+              messages: List.generate(
+                50,
+                (index) => ServerMessage(
+                  'newer-$index',
+                  firstPageOldest!.add(Duration(minutes: index)),
+                  'newer $index',
+                  index.isEven ? MessageSender.human : MessageSender.ai,
+                  MessageType.text,
+                  null,
+                  false,
+                  [],
+                  [],
+                  [],
+                  canonicalTurnId: 'newer-turn-$index',
+                ),
+              ),
+              hasMore: true,
+            ),
+          );
+        }
+        expect(before, firstPageOldest);
+        return EllaServiceResult.success(
+          EllaChatHistoryPage(
+            messages: [
+              ServerMessage(
+                'ios_chat:uid-a:$retainedTurnId:user',
+                retainedSentAt!,
+                'persisted before the ACK was lost',
+                MessageSender.human,
+                MessageType.text,
+                null,
+                false,
+                [],
+                [],
+                [],
+                canonicalTurnId: retainedTurnId,
+              ),
+            ],
+            hasMore: false,
+          ),
+        );
+      },
+    );
+
+    await provider.sendMessageStreamToServer('persisted before the ACK was lost');
+    final failedLocalId = provider.messages.single.id;
+    await provider.retryFailedMessage(failedLocalId);
+
+    expect(historyPages, 2);
+    expect(attempts, 1);
+    expect(provider.messages.where((message) => message.canonicalTurnId == retainedTurnId), hasLength(1));
+    expect(provider.messages.single.clientDeliveryState, isNull);
+  });
+
+  test('retry fails closed when a later history page cannot be verified', () async {
+    var attempts = 0;
+    var historyPages = 0;
+    final provider = MessageProvider(
+      activeAuthority: () => const _CurrentAuthority(),
+      aiConsentEnsurer: () async => true,
+      ellaChatStreamSender: (
+        text, {
+        required clientMessageId,
+        required clientSentAt,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async* {
+        attempts++;
+        throw const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true);
+      },
+      ellaChatHistoryFetcher: ({
+        required limit,
+        required before,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+      }) async {
+        historyPages++;
+        if (historyPages == 1) {
+          return EllaServiceResult.success(
+            EllaChatHistoryPage(
+              messages: [
+                ServerMessage(
+                  'newer',
+                  DateTime.utc(2026, 9, 26, 20),
+                  'newer',
+                  MessageSender.human,
+                  MessageType.text,
+                  null,
+                  false,
+                  [],
+                  [],
+                  [],
+                  canonicalTurnId: 'newer-turn',
+                ),
+              ],
+              hasMore: true,
+            ),
+          );
+        }
+        return const EllaServiceResult.failure(
+          ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true),
+        );
+      },
+    );
+
+    await provider.sendMessageStreamToServer('must not be sent twice');
+    final failedLocalId = provider.messages.single.id;
+    await provider.retryFailedMessage(failedLocalId);
+
+    expect(historyPages, 2);
+    expect(attempts, 1);
+    expect(provider.messages.single.clientDeliveryState, ClientMessageDeliveryState.failed);
+    expect(provider.lastStreamFailure?.kind, ClientApiFailureKind.unavailable);
+  });
+
+  test('retry fails closed when history claims another page without a cursor', () async {
+    var attempts = 0;
+    final provider = MessageProvider(
+      activeAuthority: () => const _CurrentAuthority(),
+      aiConsentEnsurer: () async => true,
+      ellaChatStreamSender: (
+        text, {
+        required clientMessageId,
+        required clientSentAt,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async* {
+        attempts++;
+        throw const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true);
+      },
+      ellaChatHistoryFetcher: ({
+        required limit,
+        required before,
+        required expectedAuthenticatedUid,
+        required exactAuthority,
+      }) async =>
+          const EllaServiceResult.success(EllaChatHistoryPage(messages: [], hasMore: true)),
+    );
+
+    await provider.sendMessageStreamToServer('must remain retryable');
+    final failedLocalId = provider.messages.single.id;
+    await provider.retryFailedMessage(failedLocalId);
+
+    expect(attempts, 1);
+    expect(provider.messages.single.clientDeliveryState, ClientMessageDeliveryState.failed);
+    expect(provider.lastStreamFailure?.kind, ClientApiFailureKind.invalidResponse);
   });
 }
 

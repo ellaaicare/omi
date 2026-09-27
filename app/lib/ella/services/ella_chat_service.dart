@@ -40,6 +40,13 @@ typedef EllaVoiceTurnTransport = Future<http.Response?> Function({
   required ExactAccountAuthorityVerifier exactAuthority,
 });
 
+class EllaChatHistoryPage {
+  const EllaChatHistoryPage({required this.messages, required this.hasMore});
+
+  final List<ServerMessage> messages;
+  final bool hasMore;
+}
+
 const ellaChatInactivityTimeout = Duration(seconds: 75);
 
 Stream<T> withEllaChatInactivityTimeout<T>(Stream<T> stream, {Duration timeout = ellaChatInactivityTimeout}) =>
@@ -204,21 +211,25 @@ Future<EllaServiceResult<List<ServerMessage>>> persistEllaV2VTurn({
   }
 }
 
-/// Fetch chat history from the VPS proxy endpoint.
-/// Returns messages in chronological order (oldest first). A failed read is
-/// distinct from a verified empty history so callers can preserve their cache.
-Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
+/// Fetch one owner-bound chat history page from the VPS proxy endpoint.
+/// Messages are chronological (oldest first); [hasMore] is the server's
+/// pagination authority and must be honored before proving a turn absent.
+Future<EllaServiceResult<EllaChatHistoryPage>> fetchEllaChatHistoryPage({
   int limit = 50,
+  DateTime? before,
   required String expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier exactAuthority,
   EllaChatHistoryTransport? transport,
 }) async {
   if (SharedPreferencesUtil().demoMode) {
-    return EllaServiceResult.success(DemoFixtures.chatMessages());
+    return EllaServiceResult.success(EllaChatHistoryPage(messages: DemoFixtures.chatMessages(), hasMore: false));
   }
 
   try {
-    final query = <String, String>{'limit': '$limit'};
+    final query = <String, String>{
+      'limit': '$limit',
+      if (before != null) 'before': before.toUtc().toIso8601String(),
+    };
     final url = Uri.parse('${Env.apiBaseUrl}v1/ella/chat/history').replace(queryParameters: query).toString();
     final response = await (transport ?? _defaultHistoryTransport)(
       url: url,
@@ -237,6 +248,10 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
 
     final data = jsonDecode(response.body) as Map<String, dynamic>;
     final rawMessages = data['messages'] as List<dynamic>? ?? [];
+    final hasMore = data['hasMore'];
+    if (hasMore is! bool) {
+      return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
+    }
 
     final result = <ServerMessage>[];
     var recognizedHistoryShape = rawMessages.isEmpty;
@@ -296,7 +311,7 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
     // API returns newest first; reverse for chronological UI order
     result.sort(compareServerMessagesChronologically);
     Logger.debug('[EllaChat] Fetched ${result.length} messages from history');
-    return EllaServiceResult.success(result);
+    return EllaServiceResult.success(EllaChatHistoryPage(messages: result, hasMore: hasMore));
   } on ClientApiFailure catch (failure) {
     return EllaServiceResult.failure(failure);
   } on ExactAccountAuthorityChangedException {
@@ -305,6 +320,27 @@ Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
     Logger.debug('[EllaChat] History fetch error: $e');
     return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
   }
+}
+
+/// Fetch the newest owner-bound history page for normal Chat hydration.
+Future<EllaServiceResult<List<ServerMessage>>> fetchEllaChatHistory({
+  int limit = 50,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+  EllaChatHistoryTransport? transport,
+}) async {
+  final result = await fetchEllaChatHistoryPage(
+    limit: limit,
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
+    transport: transport,
+  );
+  if (result.isFailure) {
+    return EllaServiceResult.failure(
+      result.failure ?? const ClientApiFailure(ClientApiFailureKind.invalidResponse),
+    );
+  }
+  return EllaServiceResult.success(result.value?.messages ?? const <ServerMessage>[]);
 }
 
 /// Main entry point for Ella chat streaming.

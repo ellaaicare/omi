@@ -134,6 +134,43 @@ void main() {
     expect(result.failure?.kind, ClientApiFailureKind.updateRequired);
   });
 
+  test('history page sends the UTC cursor and preserves server pagination authority', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final result = await fetchEllaChatHistoryPage(
+      before: DateTime.parse('2026-08-09T03:00:00-07:00'),
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: authority,
+      transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async {
+        final uri = Uri.parse(url);
+        expect(uri.path, '/v1/ella/chat/history');
+        expect(uri.queryParameters, {
+          'limit': '50',
+          'before': '2026-08-09T10:00:00.000Z',
+        });
+        expect(expectedAuthenticatedUid, 'uid-a');
+        expect(exactAuthority, same(authority));
+        return http.Response(
+          jsonEncode({
+            'messages': [
+              {
+                'id': 'canonical-0',
+                'sender': 'human',
+                'text': 'Older persisted question',
+                'created_at': '2026-08-09T02:59:00Z',
+              },
+            ],
+            'hasMore': true,
+          }),
+          200,
+        );
+      },
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(result.value?.hasMore, isTrue);
+    expect(result.value?.messages.single.id, 'canonical-0');
+  });
+
   test('history preserves canonical sender roles after hydration', () async {
     const authority = _CurrentAuthority('uid-a');
     final result = await fetchEllaChatHistory(
@@ -151,6 +188,7 @@ void main() {
               },
               {'id': 'canonical-1', 'sender': 'ai', 'text': 'Persisted answer', 'created_at': '2026-08-09T03:00:00Z'},
             ],
+            'hasMore': false,
           }),
           200,
         );
@@ -195,6 +233,7 @@ void main() {
               'created_at': '2026-08-09T03:00:00Z',
             },
           ],
+          'hasMore': false,
         }),
         200,
       ),
@@ -232,6 +271,7 @@ void main() {
               message('turn-000002', 'human', 0),
               message('turn-000001', 'human', 0),
             ],
+            'hasMore': false,
           }),
           200,
         );
@@ -257,6 +297,7 @@ void main() {
             'messages': [
               {'id': 'unknown-1', 'role': 'assistant', 'body': 'Not a supported contract'},
             ],
+            'hasMore': false,
           }),
           200,
         );
@@ -393,6 +434,7 @@ void main() {
             message(secondTurn, 'human', 0, 1),
             message(firstTurn, 'human', 0, 0),
           ],
+          'hasMore': false,
         }),
         200,
       ),

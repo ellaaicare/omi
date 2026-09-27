@@ -45,8 +45,9 @@ typedef EllaChatStreamSender = Stream<ServerMessageChunk> Function(
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
 });
-typedef EllaChatHistoryFetcher = Future<EllaServiceResult<List<ServerMessage>>> Function({
+typedef EllaChatHistoryFetcher = Future<EllaServiceResult<EllaChatHistoryPage>> Function({
   required int limit,
+  required DateTime? before,
   required String expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier exactAuthority,
 });
@@ -148,13 +149,15 @@ class MessageProvider extends ChangeNotifier {
     return result.apps;
   }
 
-  static Future<EllaServiceResult<List<ServerMessage>>> _fetchEllaChatHistory({
+  static Future<EllaServiceResult<EllaChatHistoryPage>> _fetchEllaChatHistory({
     required int limit,
+    required DateTime? before,
     required String expectedAuthenticatedUid,
     required ExactAccountAuthorityVerifier exactAuthority,
   }) =>
-      fetchEllaChatHistory(
+      fetchEllaChatHistoryPage(
         limit: limit,
+        before: before,
         expectedAuthenticatedUid: expectedAuthenticatedUid,
         exactAuthority: exactAuthority,
       );
@@ -745,6 +748,7 @@ class MessageProvider extends ChangeNotifier {
         // previous TestFlight cannot mask the real account timeline.
         final historyResult = await _ellaChatHistoryFetcher(
           limit: 50,
+          before: null,
           expectedAuthenticatedUid: lease.uid,
           exactAuthority: lease,
         );
@@ -755,7 +759,7 @@ class MessageProvider extends ChangeNotifier {
           );
         } else {
           _lastStreamFailure = null;
-          final history = historyResult.value ?? const <ServerMessage>[];
+          final history = historyResult.value?.messages ?? const <ServerMessage>[];
           messages = _mergeHistoryWithUnsentMessages(history, localUnsentById.values.toList(growable: false));
           SharedPreferencesUtil().cachedMessages = messages;
           setHasCachedMessages(messages.isNotEmpty);
@@ -1277,7 +1281,7 @@ class MessageProvider extends ChangeNotifier {
       (candidate) => candidate.id == messageId && _isFailedOutgoingMessage(candidate),
     );
     if (message == null || message.text.trim().isEmpty || sendingMessage) return;
-    if (!await _reconcileEllaHistoryBeforeRetry()) return;
+    if (!await _reconcileEllaHistoryBeforeRetry(message)) return;
     message = messages.firstWhereOrNull(
       (candidate) => candidate.id == messageId && _isFailedOutgoingMessage(candidate),
     );
@@ -1285,33 +1289,68 @@ class MessageProvider extends ChangeNotifier {
     await sendMessageStreamToServer(message.text, localMessageId: message.id);
   }
 
-  Future<bool> _reconcileEllaHistoryBeforeRetry() async {
+  Future<bool> _reconcileEllaHistoryBeforeRetry(ServerMessage failedMessage) async {
     final lease = _beginAccountCommit();
     if (lease == null) return false;
     final generation = _operationGeneration;
+    final turnId = failedMessage.canonicalTurnId?.trim() ?? '';
     try {
-      final historyResult = await _ellaChatHistoryFetcher(
-        limit: 50,
-        expectedAuthenticatedUid: lease.uid,
-        exactAuthority: lease,
-      );
-      if (!_canCommit(lease, generation)) return false;
-      if (historyResult.isFailure) {
-        _setStreamFailure(
-          historyResult.failure ?? const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true),
-        );
+      if (turnId.isEmpty) {
+        _setStreamFailure(const ClientApiFailure(ClientApiFailureKind.invalidResponse));
         return false;
       }
-      _lastStreamFailure = null;
-      final localUnsent = messages.where(_isFailedOutgoingMessage).toList(growable: false);
-      messages = _mergeHistoryWithUnsentMessages(
-        historyResult.value ?? const <ServerMessage>[],
-        localUnsent,
-      )..sort(compareServerMessagesChronologically);
-      SharedPreferencesUtil().cachedMessages = messages;
-      setHasCachedMessages(messages.isNotEmpty);
-      notifyListeners();
-      return true;
+
+      DateTime? before;
+      while (true) {
+        final historyResult = await _ellaChatHistoryFetcher(
+          limit: 50,
+          before: before,
+          expectedAuthenticatedUid: lease.uid,
+          exactAuthority: lease,
+        );
+        if (!_canCommit(lease, generation)) return false;
+        if (historyResult.isFailure || historyResult.value == null) {
+          _setStreamFailure(
+            historyResult.failure ?? const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true),
+          );
+          return false;
+        }
+
+        final page = historyResult.value!;
+        final canonicalTurn =
+            page.messages.where((message) => message.canonicalTurnId?.trim() == turnId).toList(growable: false);
+        if (canonicalTurn.isNotEmpty) {
+          messages.removeWhere(
+            (message) => _isFailedOutgoingMessage(message) && message.canonicalTurnId?.trim() == turnId,
+          );
+          final existingIds = messages.map((message) => message.id).toSet();
+          messages.addAll(canonicalTurn.where((message) => existingIds.add(message.id)));
+          messages.sort(compareServerMessagesChronologically);
+          _lastStreamFailure = null;
+          SharedPreferencesUtil().cachedMessages = messages;
+          setHasCachedMessages(messages.isNotEmpty);
+          notifyListeners();
+          return true;
+        }
+
+        if (!page.hasMore) {
+          _lastStreamFailure = null;
+          return true;
+        }
+        if (page.messages.isEmpty) {
+          _setStreamFailure(const ClientApiFailure(ClientApiFailureKind.invalidResponse));
+          return false;
+        }
+
+        final nextBefore = page.messages
+            .map((message) => message.createdAt.toUtc())
+            .reduce((oldest, candidate) => candidate.isBefore(oldest) ? candidate : oldest);
+        if (before != null && !nextBefore.isBefore(before)) {
+          _setStreamFailure(const ClientApiFailure(ClientApiFailureKind.invalidResponse));
+          return false;
+        }
+        before = nextBefore;
+      }
     } finally {
       lease.close();
     }
