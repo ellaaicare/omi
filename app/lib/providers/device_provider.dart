@@ -7,6 +7,7 @@ import 'package:omi/backend/http/api/device.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
+import 'package:omi/ella/models/capture_source.dart';
 import 'package:omi/main.dart';
 import 'package:omi/pages/home/firmware_update.dart';
 import 'package:omi/pages/home/omiglass_ota_update.dart';
@@ -161,6 +162,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   int? _deferredDeviceCaptureGeneration;
   String? _deferredDeviceCaptureId;
   Future<void>? _deferredDeviceCaptureStart;
+  bool _reconnectDeferredForPhoneCapture = false;
   // Native BLE callbacks carry only a device id, never Firebase authority.
   // Keep them fenced until a device is owner-bound or deliberately selected.
   bool _requiresExplicitDeviceSelectionAfterAuthorityChange = true;
@@ -320,6 +322,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     _bleBatteryLevelListener?.cancel();
     _bleBatteryLevelListener = null;
     _clearDeferredDeviceCapture();
+    _reconnectDeferredForPhoneCapture = false;
     connectedDevice = null;
     pairedDevice = _rememberedDeviceForCurrentAuthority();
     isConnected = false;
@@ -499,6 +502,12 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   void _onCaptureProviderChanged() {
     final capture = captureProvider;
     final activeDevice = connectedDevice;
+    if (_reconnectDeferredForPhoneCapture && capture?.phoneCaptureOwnsMobileAudio == false) {
+      _reconnectDeferredForPhoneCapture = false;
+      if (!_disposed && _deviceServiceReady && !isConnected) {
+        unawaited(resumeKnownDeviceConnection(reason: 'phone capture released deferred necklace reconnect'));
+      }
+    }
     if (activeDevice != null) {
       _scheduleConnectedCaptureRecovery(activeDevice, _deviceOperationGeneration);
     }
@@ -573,16 +582,16 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   /// fresh session is accepted only for the device already bound to this UID.
   /// Capture consent is checked later by [CaptureProvider.streamDeviceRecording]
   /// before any audio leaves the app.
-  Future<bool> connectDeviceForCurrentUser(
-    BtDevice device, {
-    bool requireFreshSession = false,
-  }) async {
+  Future<bool> connectDeviceForCurrentUser(BtDevice device, {bool requireFreshSession = false}) async {
     if (!_deviceServiceReady ||
         device.id.isEmpty ||
         _rememberedDeviceOwnerBinding() == null ||
         (requireFreshSession && !_isCurrentOwnerBoundDevice(device.id))) {
       return false;
     }
+
+    await prepareForExplicitDeviceSelection();
+    if (!_deviceServiceReady) return false;
 
     var freshSessionResetStarted = false;
     var connectionCommittedByAttempt = false;
@@ -639,6 +648,20 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         if (freshSessionResetStarted) _showFreshSessionUnavailable(device);
       },
     );
+  }
+
+  Future<void> prepareForExplicitDeviceSelection() async {
+    _reconnectionTimer?.cancel();
+    _automaticReconnectCooldownUntil = null;
+    _reconnectDeferredForPhoneCapture = false;
+    if (presentationIsConnected) return;
+
+    _deviceOperationGeneration++;
+    _activeConnectionAttemptToken = null;
+    _connectionAttemptStartedAt = null;
+    isConnecting = false;
+    await _deviceService.cancelPendingConnection();
+    if (!_disposed) notifyListeners();
   }
 
   void _showFreshSessionUnavailable(BtDevice device, {bool requireFreshSession = true}) {
@@ -893,12 +916,26 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     final generation = operationGeneration ?? _deviceOperationGeneration;
     if (!_isDeviceOperationCurrent(generation)) return;
     _reconnectionTimer?.cancel();
+    if (captureProvider?.phoneCaptureOwnsMobileAudio == true) {
+      _reconnectDeferredForPhoneCapture = true;
+      return;
+    }
+    if (SharedPreferencesUtil().ellaCaptureSource == EllaCaptureSource.phone.name) return;
     if (_hasPendingFreshBleSessionRequirement()) return;
     _automaticReconnectAttempts = 0;
     _automaticReconnectExhausted = false;
     _automaticReconnectCooldownUntil = null;
     scan(t) async {
       if (!_isDeviceOperationCurrent(generation)) {
+        t.cancel();
+        return;
+      }
+      if (captureProvider?.phoneCaptureOwnsMobileAudio == true) {
+        _reconnectDeferredForPhoneCapture = true;
+        t.cancel();
+        return;
+      }
+      if (SharedPreferencesUtil().ellaCaptureSource == EllaCaptureSource.phone.name) {
         t.cancel();
         return;
       }
@@ -960,6 +997,10 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
           notifyListeners();
         }
       } else {
+        final device = connectedDevice;
+        if (boundDeviceOnly && device != null) {
+          await _resumeCaptureForConnectedDevice(device, generation);
+        }
         t.cancel();
       }
     }
@@ -1153,6 +1194,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     _accountAuthorityChanges.removeListener(_handleAccountAuthorityChanged);
     captureProvider?.removeListener(_onCaptureProviderChanged);
     _clearDeferredDeviceCapture();
+    _reconnectDeferredForPhoneCapture = false;
     _bleBatteryLevelListener?.cancel();
     _reconnectionTimer?.cancel();
     _disconnectDebouncer.cancel();
@@ -1169,7 +1211,14 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   }
 
   Future<void> resumeKnownDeviceConnection({required String reason}) async {
-    if (!_deviceServiceReady || isConnected) return;
+    if (!_deviceServiceReady) return;
+    final capture = captureProvider;
+    if (capture?.isPaused == true || capture?.recordingState == RecordingState.pause) return;
+    if (isConnected) {
+      final device = connectedDevice;
+      if (device != null) await _resumeCaptureForConnectedDevice(device, _deviceOperationGeneration);
+      return;
+    }
     final stored = _rememberedDeviceForCurrentAuthority();
     if (stored == null || _requiresFreshBleSessionFor(stored)) return;
     await _captureTeardown;
@@ -1178,6 +1227,32 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     pairedDevice = stored;
     _automaticReconnectCooldownUntil = null;
     await periodicConnect(reason, boundDeviceOnly: true, operationGeneration: generation);
+  }
+
+  Future<void> _resumeCaptureForConnectedDevice(BtDevice device, int operationGeneration) async {
+    final capture = captureProvider;
+    final captureFailure = capture?.captureDiagnostics.failure;
+    if (!_isDeviceOperationCurrent(operationGeneration) ||
+        !_isCurrentOwnerBoundDevice(device.id) ||
+        _hasPendingFreshBleSessionRequirement() ||
+        capture == null ||
+        capture.isPaused ||
+        capture.recordingState == RecordingState.pause ||
+        capture.phoneCaptureOwnsMobileAudio ||
+        SharedPreferencesUtil().ellaCaptureSource == EllaCaptureSource.phone.name ||
+        (capture.recordingState == RecordingState.error &&
+            captureFailure != null &&
+            _requiresFreshBleSessionForCaptureFailure(captureFailure)) ||
+        capture.recordingState == RecordingState.deviceRecord ||
+        capture.recordingState == RecordingState.initialising) {
+      return;
+    }
+    final captureStarted = await _startDeviceCaptureWithRetry(device, operationGeneration);
+    if (captureStarted) {
+      _resetConnectedCaptureRecoveryBudget();
+    } else {
+      _scheduleConnectedCaptureRecovery(device, operationGeneration);
+    }
   }
 
   /// Commits the one explicit Home confirmation for a device saved by builds
@@ -1728,6 +1803,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         _activeDeviceConnectionSession = null;
         _deviceServiceReady = false;
         _clearDeferredDeviceCapture();
+        _reconnectDeferredForPhoneCapture = false;
         _reconnectionTimer?.cancel();
         _disconnectDebouncer.cancel();
         _connectDebouncer.cancel();

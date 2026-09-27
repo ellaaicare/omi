@@ -17478,7 +17478,7 @@ abstract class AppLocalizations {
   /// No description provided for @todayNecklaceAudioSilent.
   ///
   /// In en, this message translates to:
-  /// **'Your necklace is connected, but it did not send audio. Keep it nearby and try again.'**
+  /// **'No audio from necklace'**
   String get todayNecklaceAudioSilent;
 
   /// No description provided for @todayMicrophonePermissionDenied.

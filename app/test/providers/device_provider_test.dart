@@ -35,6 +35,8 @@ class _FakeDeviceService implements IDeviceService {
   bool nativeSessionRetained = false;
   Completer<DeviceConnection?>? ensureConnectionGate;
   Completer<void>? disconnectGate;
+  Future<void> Function()? cancelPendingConnectionHook;
+  int cancelPendingConnectionCalls = 0;
   final Map<Object, IDeviceServiceSubsciption> _subscriptions = {};
 
   void publish(DeviceServiceStatus next) {
@@ -83,6 +85,12 @@ class _FakeDeviceService implements IDeviceService {
   void setWifiSyncInProgress(bool value) {}
 
   @override
+  Future<void> cancelPendingConnection() async {
+    cancelPendingConnectionCalls++;
+    await cancelPendingConnectionHook?.call();
+  }
+
+  @override
   Future<void> disconnectDevice() async {
     disconnectCalls++;
     await disconnectGate?.future;
@@ -100,6 +108,7 @@ class _RecordingCaptureProvider extends CaptureProvider {
     this.onDeviceStart,
     this.forcedDiagnosticFailure,
     this.requireConsent = false,
+    this.explicitlyPaused = false,
   });
 
   final Completer<void>? startGate;
@@ -108,21 +117,26 @@ class _RecordingCaptureProvider extends CaptureProvider {
   final void Function(int attempt)? onDeviceStart;
   final CaptureDiagnosticFailure? forcedDiagnosticFailure;
   final bool requireConsent;
+  final bool explicitlyPaused;
   int deviceStarts = 0;
+  int transportStartAttempts = 0;
+  int socketOpenAttempts = 0;
   CaptureDiagnosticFailure? simulatedFailure;
   final List<String> disconnectedDeviceIds = [];
 
   @override
+  bool get isPaused => explicitlyPaused || super.isPaused;
+
+  @override
   CaptureDiagnostics get captureDiagnostics => forcedDiagnosticFailure == null && simulatedFailure == null
       ? super.captureDiagnostics
-      : CaptureDiagnostics(
-          phase: CaptureDiagnosticPhase.failed,
-          failure: forcedDiagnosticFailure ?? simulatedFailure!,
-        );
+      : CaptureDiagnostics(phase: CaptureDiagnosticPhase.failed, failure: forcedDiagnosticFailure ?? simulatedFailure!);
 
   @override
   Future<void> streamDeviceRecording({BtDevice? device}) async {
     deviceStarts++;
+    transportStartAttempts++;
+    socketOpenAttempts++;
     if (requireConsent && !SharedPreferencesUtil().aiConsentAccepted) {
       simulatedFailure = CaptureDiagnosticFailure.consentUnavailable;
       updateRecordingState(RecordingState.error);
@@ -327,8 +341,11 @@ void main() {
     final ready = await provider.connectDeviceForCurrentUser(necklace);
 
     expect(ready, isFalse);
-    expect(service.ensureConnectionCalls, greaterThanOrEqualTo(1),
-        reason: 'a stale BLE flag must not bypass transport hydration');
+    expect(
+      service.ensureConnectionCalls,
+      greaterThanOrEqualTo(1),
+      reason: 'a stale BLE flag must not bypass transport hydration',
+    );
     expect(capture.deviceStarts, 0);
   });
 
@@ -1326,10 +1343,7 @@ void main() {
       ..pairedDevice = necklace
       ..setIsConnected(true);
 
-    final recovered = await provider.connectDeviceForCurrentUser(
-      necklace,
-      requireFreshSession: true,
-    );
+    final recovered = await provider.connectDeviceForCurrentUser(necklace, requireFreshSession: true);
     await pumpEventQueue();
 
     expect(recovered, isTrue);
@@ -1356,10 +1370,7 @@ void main() {
       ..pairedDevice = necklaceA
       ..setIsConnected(true);
 
-    expect(
-      await provider.connectDeviceForCurrentUser(necklaceB, requireFreshSession: true),
-      isFalse,
-    );
+    expect(await provider.connectDeviceForCurrentUser(necklaceB, requireFreshSession: true), isFalse);
     expect(service.disconnectCalls, 0);
     expect(service.ensureConnectionCalls, 0);
     expect(provider.presentationConnectedDevice?.id, necklaceA.id);
@@ -1568,6 +1579,134 @@ void main() {
     expect(provider.connectionAttemptFailed, isFalse);
   });
 
+  test('explicit selection cancels an in-flight automatic reconnect before connecting', () async {
+    final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final automaticScan = Completer<BtDevice?>();
+    var scans = 0;
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () {
+        scans++;
+        return scans == 1 ? automaticScan.future : Future.value(necklace);
+      },
+      connectionResolver: (_) async => necklace,
+      storageListResolver: (_) async => const [],
+      reconnectionInterval: const Duration(hours: 1),
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+    service.cancelPendingConnectionHook = () async {
+      if (!automaticScan.isCompleted) automaticScan.complete(null);
+    };
+
+    unawaited(provider.periodicConnect('test automatic reconnect', boundDeviceOnly: true));
+    await pumpEventQueue();
+    expect(provider.isConnecting, isTrue);
+
+    expect(await provider.connectDeviceForCurrentUser(necklace), isTrue);
+
+    expect(service.cancelPendingConnectionCalls, 1);
+    expect(provider.presentationConnectedDevice?.id, necklace.id);
+    expect(provider.isConnecting, isFalse);
+  });
+
+  test('phone capture defers one owner-bound reconnect until mobile audio is released', () async {
+    final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider()..updateRecordingState(RecordingState.record);
+    var scanCalls = 0;
+    final provider = DeviceProvider(
+      deviceService: service,
+      scanConnector: () async {
+        scanCalls++;
+        return null;
+      },
+      reconnectionInterval: const Duration(hours: 1),
+      automaticallyReconnectOnReady: false,
+    )..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    await provider.periodicConnect('phone owns capture', boundDeviceOnly: true);
+    expect(scanCalls, 0);
+
+    capture.updateRecordingState(RecordingState.stop);
+    await pumpEventQueue();
+
+    expect(scanCalls, 1);
+    expect(provider.isConnecting, isFalse);
+  });
+
+  test('saved iPhone source suppresses ambient necklace reconnect while the phone is idle', () async {
+    final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    await SharedPreferencesUtil().saveEllaCaptureSource('phone');
+    addTearDown(() => SharedPreferencesUtil().saveEllaCaptureSource(''));
+    var scanCalls = 0;
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      scanConnector: () async {
+        scanCalls++;
+        return null;
+      },
+      automaticallyReconnectOnReady: false,
+    );
+    addTearDown(provider.dispose);
+
+    await provider.periodicConnect('phone is selected', boundDeviceOnly: true);
+
+    expect(scanCalls, 0);
+    expect(provider.isConnecting, isFalse);
+  });
+
+  test('a connected owner-bound necklace starts capture on resume without a manual Record tap', () async {
+    final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      automaticallyReconnectOnReady: false,
+    )
+      ..setProviders(capture)
+      ..connectedDevice = necklace
+      ..pairedDevice = necklace
+      ..setIsConnected(true);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    await provider.resumeKnownDeviceConnection(reason: 'cold launch retained connection');
+
+    expect(capture.deviceStarts, 1);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+  });
+
+  test('foreground resume preserves explicit pause without transport or socket startup', () async {
+    final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    final service = _FakeDeviceService(DeviceServiceStatus.ready);
+    final capture = _RecordingCaptureProvider(explicitlyPaused: true)..updateRecordingState(RecordingState.pause);
+    final provider = DeviceProvider(deviceService: service, automaticallyReconnectOnReady: false)
+      ..setProviders(capture)
+      ..connectedDevice = necklace
+      ..pairedDevice = necklace
+      ..setIsConnected(true);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    provider.didChangeAppLifecycleState(AppLifecycleState.resumed);
+    await pumpEventQueue();
+
+    expect(service.ensureConnectionCalls, 0, reason: 'foreground resume must not reopen BLE transport');
+    expect(capture.transportStartAttempts, 0);
+    expect(capture.socketOpenAttempts, 0);
+    expect(capture.recordingState, RecordingState.pause);
+  });
+
   test('failed explicit replacement restores the remembered necklace', () async {
     final necklaceA = BtDevice(name: 'Ella A', id: 'necklace-a', type: DeviceType.omi, rssi: -30);
     final necklaceB = BtDevice(name: 'Ella B', id: 'necklace-b', type: DeviceType.omi, rssi: -30);
@@ -1611,14 +1750,11 @@ void main() {
     await bindRememberedDeviceForCurrentTestAuthority(necklaceA);
     final connectionGate = Completer<DeviceConnection?>();
     final service = _FakeDeviceService(DeviceServiceStatus.ready)..ensureConnectionGate = connectionGate;
-    final provider = DeviceProvider(
-      deviceService: service,
-      scanConnector: () async => null,
-      automaticallyReconnectOnReady: false,
-    )
-      ..connectedDevice = necklaceA
-      ..pairedDevice = necklaceA
-      ..isConnected = true;
+    final provider =
+        DeviceProvider(deviceService: service, scanConnector: () async => null, automaticallyReconnectOnReady: false)
+          ..connectedDevice = necklaceA
+          ..pairedDevice = necklaceA
+          ..isConnected = true;
     addTearDown(provider.dispose);
 
     final replacement = provider.connectDeviceForCurrentUser(necklaceB);

@@ -2023,9 +2023,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                     child: _TodayHeader(
                       now: now,
                       onGreetingLongPress: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(builder: (_) => const EllaRuntimeDiagnosticsPage()),
-                        );
+                        Navigator.of(
+                          context,
+                        ).push(MaterialPageRoute(builder: (_) => const EllaRuntimeDiagnosticsPage()));
                       },
                     ),
                   ),
@@ -3111,7 +3111,9 @@ class TodayRecordMomentControl extends StatelessWidget {
       transcriptionReady: transcriptionReady,
       diagnostics: diagnostics,
     );
-    final necklaceTransportStarting = rawNecklaceRecording && !necklaceRecording;
+    final necklaceHasNoAudio =
+        rawNecklaceRecording && diagnostics.failure == CaptureDiagnosticFailure.physicalAudioUnavailable;
+    final necklaceTransportStarting = rawNecklaceRecording && !necklaceRecording && !necklaceHasNoAudio;
     final initialising = starting || recordingState == RecordingState.initialising || necklaceTransportStarting;
     final phoneRecording = recordingState == RecordingState.record;
     final active = phoneRecording || necklaceRecording;
@@ -3124,6 +3126,7 @@ class TodayRecordMomentControl extends StatelessWidget {
       initialising: initialising,
       phoneRecording: phoneRecording,
       necklaceRecording: necklaceRecording,
+      necklaceHasNoAudio: necklaceHasNoAudio,
       externalCaptureFinalizationPending: externalCaptureFinalizationPending,
       hasNecklace: hasNecklace,
       legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
@@ -3272,7 +3275,12 @@ class TodayRecordMomentControl extends StatelessWidget {
                     child: _TodayDockAction(
                       actionKey: const Key('today-view-live-transcript'),
                       icon: Icons.subject_rounded,
-                      label: (activeSource ?? selectedSource) == EllaCaptureSource.necklace
+                      label: (necklaceRecording || necklaceHasNoAudio
+                                  ? EllaCaptureSource.necklace
+                                  : phoneRecording
+                                      ? EllaCaptureSource.phone
+                                      : selectedSource) ==
+                              EllaCaptureSource.necklace
                           ? context.l10n.todayDockTranscriptNecklace
                           : context.l10n.todayDockTranscriptPhone,
                       onTap: onViewTranscript,
@@ -3304,6 +3312,7 @@ class TodayRecordMomentControl extends StatelessWidget {
     required bool initialising,
     required bool phoneRecording,
     required bool necklaceRecording,
+    required bool necklaceHasNoAudio,
     required bool externalCaptureFinalizationPending,
     required bool hasNecklace,
     required bool legacyNecklaceNeedsConfirmation,
@@ -3319,32 +3328,32 @@ class TodayRecordMomentControl extends StatelessWidget {
         : phoneRecording
             ? context.l10n.todayDockRecordingPhone
             : necklaceRecording
-                ? sourceIsNecklace
-                    ? context.l10n.todayDockRecordingNecklace
-                    : context.l10n.todayDockNecklaceActivePhoneSelected
-                : initialising
-                    ? switchingAwayFromStartup
-                        ? sourceIsNecklace
-                            ? context.l10n.todayDockNecklaceReady
-                            : context.l10n.todayDockPhoneReady
-                        : sourceIsNecklace
-                            ? context.l10n.todayDockNecklaceConnecting
-                            : context.l10n.todayDockPhoneStarting
-                    : sourceIsNecklace
-                        ? recordingState == RecordingState.error
-                            ? context.l10n.todayDockNecklaceNeedsAttention
-                            : necklaceConnecting
+                ? context.l10n.todayDockRecordingNecklace
+                : necklaceHasNoAudio
+                    ? context.l10n.todayNecklaceAudioSilent
+                    : initialising
+                        ? switchingAwayFromStartup
+                            ? sourceIsNecklace
+                                ? context.l10n.todayDockNecklaceReady
+                                : context.l10n.todayDockPhoneReady
+                            : sourceIsNecklace
                                 ? context.l10n.todayDockNecklaceConnecting
-                                : legacyNecklaceNeedsConfirmation
-                                    ? context.l10n.todayLegacyNecklaceDockStatus
-                                    : !necklaceConnected
-                                        ? necklaceConnectionFailed
-                                            ? context.l10n.todayDockNecklaceConnectionFailed
-                                            : context.l10n.todayDockNecklaceNotConnected
-                                        : context.l10n.todayDockNecklaceReady
-                        : recordingState == RecordingState.error
-                            ? context.l10n.todayDockPhoneNeedsAttention
-                            : context.l10n.todayDockPhoneReady;
+                                : context.l10n.todayDockPhoneStarting
+                        : sourceIsNecklace
+                            ? recordingState == RecordingState.error
+                                ? context.l10n.todayDockNecklaceNeedsAttention
+                                : necklaceConnecting
+                                    ? context.l10n.todayDockNecklaceConnecting
+                                    : legacyNecklaceNeedsConfirmation
+                                        ? context.l10n.todayLegacyNecklaceDockStatus
+                                        : !necklaceConnected
+                                            ? necklaceConnectionFailed
+                                                ? context.l10n.todayDockNecklaceConnectionFailed
+                                                : context.l10n.todayDockNecklaceNotConnected
+                                            : context.l10n.todayDockNecklaceReady
+                            : recordingState == RecordingState.error
+                                ? context.l10n.todayDockPhoneNeedsAttention
+                                : context.l10n.todayDockPhoneReady;
     if (initialising && !switchingAwayFromStartup) {
       return TodayCaptureDockPresentation(
         mode: TodayCaptureDockMode.starting,

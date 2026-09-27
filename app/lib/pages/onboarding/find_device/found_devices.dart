@@ -8,7 +8,6 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/gen/flutter_communicator.g.dart';
 import 'package:omi/pages/onboarding/apple_watch_permission_page.dart';
-import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/onboarding_provider.dart';
 import 'package:omi/services/devices/apple_watch_connection.dart';
 import 'package:omi/services/services.dart';
@@ -33,16 +32,6 @@ class FoundDevices extends StatefulWidget {
 }
 
 class _FoundDevicesState extends State<FoundDevices> {
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (mounted) {
-        context.read<DeviceProvider>().periodicConnect('coming from FoundDevices');
-      }
-    });
-  }
-
   Future<void> _handleAppleWatchOnboarding(BtDevice device, OnboardingProvider provider) async {
     try {
       // First check if the watch is reachable
