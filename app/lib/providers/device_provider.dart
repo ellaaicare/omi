@@ -912,15 +912,20 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     _lastBatteryNotifyTime = null;
   }
 
-  Future periodicConnect(String printer, {bool boundDeviceOnly = false, int? operationGeneration}) async {
+  Future periodicConnect(
+    String printer, {
+    bool boundDeviceOnly = false,
+    int? operationGeneration,
+    bool explicitSelection = false,
+  }) async {
     final generation = operationGeneration ?? _deviceOperationGeneration;
     if (!_isDeviceOperationCurrent(generation)) return;
     _reconnectionTimer?.cancel();
-    if (captureProvider?.phoneCaptureOwnsMobileAudio == true) {
+    if (!explicitSelection && captureProvider?.phoneCaptureOwnsMobileAudio == true) {
       _reconnectDeferredForPhoneCapture = true;
       return;
     }
-    if (SharedPreferencesUtil().ellaCaptureSource == EllaCaptureSource.phone.name) return;
+    if (!explicitSelection && SharedPreferencesUtil().ellaCaptureSource == EllaCaptureSource.phone.name) return;
     if (_hasPendingFreshBleSessionRequirement()) return;
     _automaticReconnectAttempts = 0;
     _automaticReconnectExhausted = false;
@@ -930,12 +935,12 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         t.cancel();
         return;
       }
-      if (captureProvider?.phoneCaptureOwnsMobileAudio == true) {
+      if (!explicitSelection && captureProvider?.phoneCaptureOwnsMobileAudio == true) {
         _reconnectDeferredForPhoneCapture = true;
         t.cancel();
         return;
       }
-      if (SharedPreferencesUtil().ellaCaptureSource == EllaCaptureSource.phone.name) {
+      if (!explicitSelection && SharedPreferencesUtil().ellaCaptureSource == EllaCaptureSource.phone.name) {
         t.cancel();
         return;
       }

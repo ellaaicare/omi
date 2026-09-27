@@ -1655,6 +1655,26 @@ void main() {
     expect(provider.isConnecting, isFalse);
   });
 
+  test('saved iPhone source still permits explicit necklace discovery', () async {
+    await SharedPreferencesUtil().saveEllaCaptureSource('phone');
+    addTearDown(() => SharedPreferencesUtil().saveEllaCaptureSource(''));
+    var scanCalls = 0;
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      scanConnector: () async {
+        scanCalls++;
+        return null;
+      },
+      reconnectionInterval: const Duration(hours: 1),
+      automaticallyReconnectOnReady: false,
+    );
+    addTearDown(provider.dispose);
+
+    await provider.periodicConnect('explicit pairing scan', explicitSelection: true);
+
+    expect(scanCalls, 1);
+  });
+
   test('a connected owner-bound necklace starts capture on resume without a manual Record tap', () async {
     final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await bindRememberedDeviceForCurrentTestAuthority(necklace);

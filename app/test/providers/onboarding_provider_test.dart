@@ -61,8 +61,13 @@ class _OrderedScanDeviceProvider extends DeviceProvider {
   }
 
   @override
-  Future<void> periodicConnect(String reason, {bool boundDeviceOnly = false, int? operationGeneration}) async {
-    calls.add('scan');
+  Future<void> periodicConnect(
+    String reason, {
+    bool boundDeviceOnly = false,
+    int? operationGeneration,
+    bool explicitSelection = false,
+  }) async {
+    calls.add('scan:$explicitSelection');
   }
 }
 
@@ -108,6 +113,6 @@ void main() {
 
     await onboarding.scanDevices(onShowDialog: () {});
 
-    expect(calls, ['prepare', 'scan']);
+    expect(calls, ['prepare', 'scan:true']);
   });
 }
