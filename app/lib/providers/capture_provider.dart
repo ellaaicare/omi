@@ -26,6 +26,8 @@ import 'package:omi/ella/services/ai_consent_coordinator.dart';
 import 'package:omi/ella/services/ella_account_commit_barrier.dart';
 import 'package:omi/ella/services/ella_account_isolation_service.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
+import 'package:omi/ella/services/ella_audio_emission_gate.dart';
+import 'package:omi/ella/services/ella_capture_uid_gate.dart';
 import 'package:omi/models/custom_stt_config.dart';
 import 'package:omi/providers/calendar_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
@@ -1656,6 +1658,9 @@ class CaptureProvider extends ChangeNotifier
         !socket.hasActiveSessionAuthority) {
       return false;
     }
+    if (!mayEmitAudio(boundUid: session.authority.uid, hasConsentAuthority: session.authority.isCurrent())) {
+      return false;
+    }
     try {
       await socket.send(frame.socketPayload);
       startProof?.acceptTransmittedFrame(frame.socketPayload);
@@ -2271,7 +2276,7 @@ class CaptureProvider extends ChangeNotifier
     _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.waitingForAccount, clearFailure: true);
     final captureAuthority = await _waitForCaptureAuthority(generation);
     if (!_isPhoneCaptureGenerationCurrent(generation)) return PhoneCaptureStartResult.cancelled;
-    if (captureAuthority == null) {
+    if (captureAuthority == null || !hasNonEmptyBoundUid(captureAuthority.uid)) {
       _failCaptureDiagnostics(CaptureDiagnosticFailure.accountNotReady);
       return PhoneCaptureStartResult.accountNotReady;
     }
@@ -2354,6 +2359,9 @@ class CaptureProvider extends ChangeNotifier
         await mic.start(
           onByteReceived: (bytes) {
             if (!_isPhoneCaptureCurrent(generation, captureAuthority) || !startProof.acceptFrame(bytes)) return;
+            if (!mayEmitAudio(boundUid: captureAuthority.uid, hasConsentAuthority: captureAuthority.isCurrent())) {
+              return;
+            }
             _recordPhysicalCaptureFrame(bytes);
             final transmitted = _phoneAudioSender?.call(bytes) ??
                 (() {
@@ -2705,7 +2713,9 @@ class CaptureProvider extends ChangeNotifier
     }
     _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.waitingForAccount, clearFailure: true);
     final captureAuthority = _activeWalAuthority();
-    if (captureAuthority == null || !_isCaptureCurrent(attempt.accountGeneration, captureAuthority)) {
+    if (captureAuthority == null ||
+        !_isCaptureCurrent(attempt.accountGeneration, captureAuthority) ||
+        !hasNonEmptyBoundUid(captureAuthority.uid)) {
       if (_isDeviceCaptureAttemptCurrent(attempt)) {
         updateRecordingState(RecordingState.error);
         _failCaptureDiagnostics(CaptureDiagnosticFailure.accountNotReady);
@@ -3038,7 +3048,11 @@ class CaptureProvider extends ChangeNotifier
     _systemAudioCaching = true;
     _systemAudioCaptureAuthority = _activeWalAuthority();
     final captureAuthority = _systemAudioCaptureAuthority;
-    if (captureAuthority == null || !_isCaptureCurrent(generation, captureAuthority)) return false;
+    if (captureAuthority == null ||
+        !_isCaptureCurrent(generation, captureAuthority) ||
+        !hasNonEmptyBoundUid(captureAuthority.uid)) {
+      return false;
+    }
     _systemAudioCacheTimer?.cancel();
     _systemAudioCacheTimer = Timer(const Duration(seconds: 3), () {
       if (!_isCaptureCurrent(generation, captureAuthority)) return;
