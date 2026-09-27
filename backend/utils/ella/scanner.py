@@ -124,7 +124,15 @@ _EMERGENCY_PATTERN = re.compile(
 _CREDIBLE_EMERGENCY_PATTERNS = (
     ("emergency_services", re.compile(r"\b(?:someone\s+)?call\s+911\b", re.IGNORECASE)),
     ("breathing", re.compile(r"\bi\s+(?:can\s*not|cannot|can't)\s+breathe\b", re.IGNORECASE)),
-    ("fall", re.compile(r"\bi\s+(?:fell|(?:have|'ve)\s+fallen)\b", re.IGNORECASE)),
+    (
+        "fall",
+        re.compile(
+            r"\bi\s+(?:fell\s+down|(?:fell|(?:have|'ve)\s+fallen)\s+and\s+"
+            r"(?:i\s+)?(?:am\s+)?(?:hurt|injured|bleeding|unable\s+to\s+move|need\s+help|"
+            r"(?:can\s*not|cannot|can't)\s+get\s+up))\b",
+            re.IGNORECASE,
+        ),
+    ),
     ("immobile", re.compile(r"\bi\s+(?:can\s*not|cannot|can't)\s+get\s+up\b", re.IGNORECASE)),
     ("chest_pain", re.compile(r"\b(?:chest\s+pain|my\s+chest\s+hurts)\b", re.IGNORECASE)),
     ("fire", re.compile(r"\b(?:fire|smoke\s+in\s+the\s+house)\b", re.IGNORECASE)),
@@ -132,11 +140,22 @@ _CREDIBLE_EMERGENCY_PATTERNS = (
     ("severe_bleeding", re.compile(r"\bbleeding\s+out\b", re.IGNORECASE)),
     ("intruder", re.compile(r"\bintruder\b", re.IGNORECASE)),
 )
-_CREDIBLE_HELP_PATTERN = re.compile(r"\b(?:help\s+me|i\s+need\s+help)\b", re.IGNORECASE)
-_ROUTINE_HELP_PATTERN = re.compile(
-    r"\b(?:help\s+me|i\s+need\s+help)\s+(?:find|remember|figure|with)\b",
+_CREDIBLE_HELP_PATTERN = re.compile(
+    r"^\s*(?:please\s+)?(?:help\s+me|i\s+need\s+help)(?:\s+(?:now|please|right\s+now))?[.!?]*\s*$",
     re.IGNORECASE,
 )
+_ALLOWED_POLICY_DECISIONS = {"notify_now", "ask_user_first", "queue_for_report", "log_only", "suppress"}
+_ALLOWED_POLICY_TARGETS = {"user", "emergency_caregiver"}
+_ALLOWED_POLICY_CHANNELS = {
+    "guardian_audio",
+    "imessage",
+    "email",
+    "twilio_sms",
+    "twilio_voice",
+    "ios_voice_call",
+}
+_ALLOWED_POLICY_PRIORITIES = {"critical", "high", "medium", "low", "cyborg", "daily_recap"}
+_MAX_POLICY_DELIVERY_STEPS = 8
 _DURATION_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)(?P<unit>ms|s|m|h)")
 _SCANNER_BATCHES: dict[tuple[str, str, str], dict] = {}
 _SCANNER_RATE_LIMIT_UNTIL = {
@@ -247,9 +266,86 @@ def credible_emergency_reason(text: str) -> Optional[str]:
     for reason, pattern in _CREDIBLE_EMERGENCY_PATTERNS:
         if pattern.search(candidate):
             return reason
-    if _CREDIBLE_HELP_PATTERN.search(candidate) and not _ROUTINE_HELP_PATTERN.search(candidate):
+    if _CREDIBLE_HELP_PATTERN.search(candidate):
         return "explicit_help"
     return None
+
+
+def _credible_emergency_reason_for_segments(segments: List[dict]) -> Optional[str]:
+    """Match one coherent speaker segment; never synthesize emergencies across speakers."""
+    for segment in segments:
+        reason = credible_emergency_reason(str(segment.get("text") or ""))
+        if reason:
+            return reason
+    return None
+
+
+def _bounded_string(value: object, *, maximum: int) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized or len(normalized) > maximum:
+        return None
+    return normalized
+
+
+def _validated_policy_plan(raw_plan: object, *, trace_id: str) -> Optional[dict]:
+    """Return only the bounded fields n8n may consume from the policy service."""
+    if not isinstance(raw_plan, dict) or raw_plan.get("ok") is not True:
+        return None
+    decision = _bounded_string(raw_plan.get("decision"), maximum=32)
+    response_trace_id = _bounded_string(raw_plan.get("trace_id"), maximum=128)
+    if decision not in _ALLOWED_POLICY_DECISIONS or response_trace_id != trace_id:
+        return None
+    delivery_plan = raw_plan.get("delivery_plan")
+    if not isinstance(delivery_plan, list) or len(delivery_plan) > _MAX_POLICY_DELIVERY_STEPS:
+        return None
+
+    sanitized_steps = []
+    for raw_step in delivery_plan:
+        if not isinstance(raw_step, dict):
+            return None
+        target = _bounded_string(raw_step.get("target"), maximum=32)
+        channel = _bounded_string(raw_step.get("channel"), maximum=32)
+        priority = _bounded_string(raw_step.get("priority"), maximum=32)
+        if (
+            target not in _ALLOWED_POLICY_TARGETS
+            or channel not in _ALLOWED_POLICY_CHANNELS
+            or priority not in _ALLOWED_POLICY_PRIORITIES
+        ):
+            return None
+        caregiver_id = raw_step.get("caregiver_id")
+        if caregiver_id is not None:
+            caregiver_id = _bounded_string(caregiver_id, maximum=128)
+            if caregiver_id is None:
+                return None
+        if target == "emergency_caregiver" and not caregiver_id:
+            return None
+        if target == "user" and caregiver_id is not None:
+            return None
+        fallback = raw_step.get("fallback")
+        if fallback is not None:
+            fallback = _bounded_string(fallback, maximum=32)
+            if fallback not in _ALLOWED_POLICY_CHANNELS:
+                return None
+        step = {"target": target, "channel": channel, "priority": priority}
+        if caregiver_id:
+            step["caregiver_id"] = caregiver_id
+        if fallback:
+            step["fallback"] = fallback
+        sanitized_steps.append(step)
+
+    if decision == "notify_now" and not sanitized_steps:
+        return None
+    if decision in {"log_only", "suppress"} and sanitized_steps:
+        return None
+    return {
+        "ok": True,
+        "decision": decision,
+        "trace_id": response_trace_id,
+        "requires_ack": raw_plan.get("requires_ack") is True,
+        "delivery_plan": sanitized_steps,
+    }
 
 
 def scanner_immediate_reason(text: str, *, wake_prefix_recent: Optional[bool] = None) -> Optional[str]:
@@ -755,8 +851,10 @@ def _evaluate_credible_emergency_plan(
             )
             return result
         try:
-            plan = response.json()
+            plan = _validated_policy_plan(response.json(), trace_id=trace_id)
         except (TypeError, ValueError):
+            plan = None
+        if plan is None:
             result = {
                 "routed": False,
                 "status": "policy_invalid_response",
@@ -1125,7 +1223,14 @@ def send_to_scanner(
         )
         return None
 
-    _enqueue_wake_ack(uid, str(conversation_id), trace_id, scanner_segments)
+    normalized_traffic_class = str(traffic_class or "live").strip().lower()
+    if normalized_traffic_class not in {"live", "dry_run", "synthetic"}:
+        normalized_traffic_class = "dry_run"
+    if dry_run:
+        normalized_traffic_class = "dry_run"
+    effective_dry_run = bool(dry_run or normalized_traffic_class != "live")
+    if not effective_dry_run:
+        _enqueue_wake_ack(uid, str(conversation_id), trace_id, scanner_segments)
 
     payload = {
         "uid": uid,
@@ -1141,15 +1246,9 @@ def send_to_scanner(
         },
         "scanner_batch": batch_metadata,
     }
-    normalized_traffic_class = str(traffic_class or "live").strip().lower()
-    if normalized_traffic_class not in {"live", "dry_run", "synthetic"}:
-        normalized_traffic_class = "dry_run"
-    if dry_run:
-        normalized_traffic_class = "dry_run"
-    effective_dry_run = bool(dry_run or normalized_traffic_class != "live")
     payload["dry_run"] = effective_dry_run
     payload["traffic_class"] = normalized_traffic_class
-    emergency_reason = credible_emergency_reason(_combined_segment_text(scanner_segments))
+    emergency_reason = _credible_emergency_reason_for_segments(scanner_segments)
     if emergency_reason:
         payload["deterministic_emergency"] = _evaluate_credible_emergency_plan(
             uid,

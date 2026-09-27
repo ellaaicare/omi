@@ -1,3 +1,5 @@
+import pytest
+
 from utils.ella import scanner
 
 
@@ -88,8 +90,16 @@ def test_emergency_bypasses_ambient_batching(monkeypatch):
                 200,
                 payload={
                     "ok": True,
+                    "trace_id": "conversation-1",
                     "decision": "notify_now",
-                    "delivery_plan": [{"target": "user", "channel": "guardian_audio"}],
+                    "delivery_plan": [
+                        {
+                            "target": "user",
+                            "channel": "guardian_audio",
+                            "priority": "critical",
+                            "untrusted": "drop-me",
+                        }
+                    ],
                 },
             )
         return _FakeResponse(200)
@@ -121,6 +131,9 @@ def test_emergency_bypasses_ambient_batching(monkeypatch):
     assert scanner_payload["deterministic_emergency"]["routed"] is True
     assert scanner_payload["deterministic_emergency"]["status"] == "planned"
     assert scanner_payload["deterministic_emergency"]["plan"]["decision"] == "notify_now"
+    assert scanner_payload["deterministic_emergency"]["plan"]["delivery_plan"] == [
+        {"target": "user", "channel": "guardian_audio", "priority": "critical"}
+    ]
 
 
 def test_credible_emergency_dry_run_reaches_policy_without_user_content(monkeypatch):
@@ -129,7 +142,15 @@ def test_credible_emergency_dry_run_reaches_policy_without_user_content(monkeypa
     def fake_post(url, json, **kwargs):
         posts.append((url, json, kwargs))
         if url == scanner.ESCALATION_EVALUATE_URL:
-            return _FakeResponse(200, payload={"ok": True, "decision": "log_only", "delivery_plan": []})
+            return _FakeResponse(
+                200,
+                payload={
+                    "ok": True,
+                    "trace_id": "conversation-dry-emergency",
+                    "decision": "log_only",
+                    "delivery_plan": [],
+                },
+            )
         return _FakeResponse(200)
 
     _disable_trace(monkeypatch)
@@ -154,7 +175,17 @@ def test_credible_emergency_dry_run_reaches_policy_without_user_content(monkeypa
     assert scanner_payload["deterministic_emergency"]["dry_run"] is True
 
 
-def test_routine_help_does_not_trigger_deterministic_emergency_policy(monkeypatch):
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Ella, help me find my glasses",
+        "I fell in love with that song",
+        "I have fallen behind on email",
+        "Help me open settings",
+        "I need help setting up my phone",
+    ],
+)
+def test_ambiguous_routine_language_stays_on_classifier_path(monkeypatch, text):
     posts = []
 
     def fake_post(url, json, **kwargs):
@@ -169,7 +200,107 @@ def test_routine_help_does_not_trigger_deterministic_emergency_policy(monkeypatc
     status = scanner.send_to_scanner(
         "uid-1",
         "conversation-routine-help",
-        [{"text": "Ella, help me find my glasses", "speaker": "SPEAKER_1"}],
+        [{"text": text, "speaker": "SPEAKER_1"}],
+    )
+
+    assert status == 200
+    assert len(posts) == 1
+    assert posts[0][0] == scanner.ELLA_CONFIG.scanner_url
+    assert "deterministic_emergency" not in posts[0][1]
+
+
+def test_synthetic_wake_traffic_never_enqueues_audible_ack(monkeypatch):
+    posts = []
+    acks = []
+
+    def fake_post(url, json, **kwargs):
+        posts.append((url, json, kwargs))
+        return _FakeResponse(200)
+
+    monkeypatch.setattr(scanner, "_log_trace_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scanner, "_enqueue_wake_ack", lambda *args, **kwargs: acks.append((args, kwargs)))
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner.requests, "post", fake_post)
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-synthetic-wake",
+        [{"text": "Hey Ella, call 911", "speaker": "SPEAKER_1"}],
+        traffic_class="synthetic",
+    )
+
+    assert status == 200
+    assert acks == []
+    assert posts[-1][1]["traffic_class"] == "synthetic"
+    assert posts[-1][1]["dry_run"] is True
+
+
+@pytest.mark.parametrize(
+    "policy_response",
+    [
+        {
+            "ok": True,
+            "trace_id": "conversation-invalid-plan",
+            "decision": "execute_arbitrary_action",
+            "delivery_plan": [],
+        },
+        {
+            "ok": True,
+            "trace_id": "conversation-invalid-plan",
+            "decision": "notify_now",
+            "delivery_plan": [{"target": "user", "channel": "webhook", "priority": "critical"}],
+        },
+    ],
+)
+def test_unallowlisted_policy_plan_is_not_carried_or_logged(monkeypatch, policy_response):
+    posts = []
+    trace_events = []
+
+    def fake_post(url, json, **kwargs):
+        posts.append((url, json, kwargs))
+        if url == scanner.ESCALATION_EVALUATE_URL:
+            return _FakeResponse(200, payload=policy_response)
+        return _FakeResponse(200)
+
+    monkeypatch.setattr(scanner, "_log_trace_event", lambda *args, **kwargs: trace_events.append((args, kwargs)))
+    monkeypatch.setattr(scanner, "_enqueue_wake_ack", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner, "ESCALATION_WEBHOOK_KEY", "configured-escalation-key")
+    monkeypatch.setattr(scanner.requests, "post", fake_post)
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-invalid-plan",
+        [{"text": "I cannot breathe", "speaker": "SPEAKER_1"}],
+    )
+
+    assert status == 200
+    result = posts[-1][1]["deterministic_emergency"]
+    assert result["routed"] is False
+    assert result["status"] == "policy_invalid_response"
+    assert "plan" not in result
+    assert policy_response["decision"] not in str(trace_events)
+
+
+def test_emergency_phrase_is_never_joined_across_speaker_segments(monkeypatch):
+    posts = []
+
+    def fake_post(url, json, **kwargs):
+        posts.append((url, json, kwargs))
+        return _FakeResponse(200)
+
+    _disable_trace(monkeypatch)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner, "ESCALATION_WEBHOOK_KEY", "configured-escalation-key")
+    monkeypatch.setattr(scanner.requests, "post", fake_post)
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-speaker-boundary",
+        [
+            {"text": "I cannot", "speaker": "SPEAKER_1"},
+            {"text": "breathe", "speaker": "SPEAKER_2"},
+        ],
     )
 
     assert status == 200
@@ -214,7 +345,12 @@ def test_classifier_failure_cannot_prevent_deterministic_emergency_policy_plan(m
         if url == scanner.ESCALATION_EVALUATE_URL:
             return _FakeResponse(
                 200,
-                payload={"ok": True, "decision": "notify_now", "delivery_plan": [{"channel": "email"}]},
+                payload={
+                    "ok": True,
+                    "trace_id": "conversation-classifier-outage",
+                    "decision": "notify_now",
+                    "delivery_plan": [{"target": "user", "channel": "email", "priority": "critical"}],
+                },
             )
         return _FakeResponse(503)
 
