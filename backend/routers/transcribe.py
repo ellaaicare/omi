@@ -210,10 +210,12 @@ class ScannerDispatchQueue:
         self._dispatcher = dispatcher
         self._maxsize = max(2, maxsize)
         self._routine_capacity = self._maxsize - 1
-        self._queue: asyncio.PriorityQueue = asyncio.PriorityQueue(maxsize=self._maxsize)
+        self._emergency_capacity = min(8, self._maxsize)
+        self._queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
         self._drain_timeout_seconds = max(0.1, drain_timeout_seconds)
         self._emergency_predicate = emergency_predicate
         self._queued_routine = 0
+        self._queued_emergency = 0
         self._sequence = 0
         self._emergency_context_segments: list[dict] = []
         self._emergency_context_conversation_id: str | None = None
@@ -241,15 +243,16 @@ class ScannerDispatchQueue:
             is_emergency = bool(self._emergency_predicate(item))
         except Exception:
             is_emergency = False
+        if is_emergency and self._queued_emergency >= self._emergency_capacity:
+            return False
         if not is_emergency and self._queued_routine >= self._routine_capacity:
             return False
         sequence = self._sequence
         self._sequence += 1
-        try:
-            self._queue.put_nowait((0 if is_emergency else 1, sequence, item, is_emergency))
-        except asyncio.QueueFull:
-            return False
-        if not is_emergency:
+        self._queue.put_nowait((0 if is_emergency else 1, sequence, item, is_emergency))
+        if is_emergency:
+            self._queued_emergency += 1
+        else:
             self._queued_routine += 1
         return True
 
@@ -303,7 +306,9 @@ class ScannerDispatchQueue:
             try:
                 if item is _SCANNER_DISPATCH_STOP:
                     return
-                if not is_emergency:
+                if is_emergency:
+                    self._queued_emergency -= 1
+                else:
                     self._queued_routine -= 1
                 await self._dispatcher(item)
             finally:

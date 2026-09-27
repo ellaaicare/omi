@@ -357,6 +357,8 @@ def test_scanner_off_mode_does_not_leak_ambiguous_routine_speech(monkeypatch, te
 
 
 def test_credible_emergency_bypass_requires_current_context_for_sensitive_terms():
+    assert scanner.credible_emergency_reason("Please call 911") == "emergency_services"
+    assert scanner.credible_emergency_reason("Someone please call 911") == "emergency_services"
     assert scanner.credible_emergency_reason("I am having chest pain") == "chest_pain"
     assert scanner.credible_emergency_reason("I'm having chest pain") == "chest_pain"
     assert scanner.credible_emergency_reason("I can’t breathe") == "breathing"
@@ -407,6 +409,13 @@ def test_credible_emergency_bypass_rejects_negative_or_absent_subjects():
     ):
         assert scanner.credible_emergency_reason(text) is None
 
+    for text in (
+        "My computer is having a stroke",
+        "Server is choking",
+        "ChatGPT is overdosing",
+    ):
+        assert scanner.credible_emergency_reason(text) is None
+
     assert (
         scanner.credible_emergency_reason_for_segments(
             [
@@ -425,6 +434,19 @@ def test_credible_emergency_bypass_rejects_negative_or_absent_subjects():
         )
         is None
     )
+
+    assert scanner.credible_emergency_reason_with_context(
+        [{"text": "She said", "speaker": "SPEAKER_1"}],
+        [{"text": "I want to kill myself", "speaker": "SPEAKER_1"}],
+    ) == (None, False)
+    assert scanner.credible_emergency_reason_with_context(
+        [{"text": "Yesterday", "speaker": "SPEAKER_1"}],
+        [{"text": "I am having a heart attack", "speaker": "SPEAKER_1"}],
+    ) == (None, False)
+    assert scanner.credible_emergency_reason_with_context(
+        [{"text": "We finished lunch", "speaker": "SPEAKER_1"}],
+        [{"text": "I am having a heart attack", "speaker": "SPEAKER_1"}],
+    ) == ("heart_attack", False)
 
 
 def test_scanner_off_mode_does_not_join_emergency_phrase_across_segments(monkeypatch):

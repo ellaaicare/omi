@@ -120,13 +120,17 @@ _CURRENT_PERSON_SUBJECT = (
     r"(?:i|he|she|they|someone|somebody|"
     r"my\s+(?:husband|wife|partner|mother|mom|father|dad|parent|son|daughter|child|"
     r"brother|sister|friend|roommate|caregiver)|"
-    r"(?:mom|mother|dad|father|husband|wife|partner|son|daughter|child|brother|sister)|"
-    r"(?!(?:the|this|that|an?|documentary|article|movie|film|song|podcast|book|story|report|news|"
-    r"video|show|character)\b)[a-z][a-z'’-]{1,30}(?:\s+[a-z][a-z'’-]{1,30})?)"
+    r"(?:mom|mother|dad|father|husband|wife|partner|son|daughter|child|brother|sister))"
 )
 _CURRENT_PERSON_COPULA = r"(?:\s+(?:am|is|are)|\s*['’](?:m|s|re))"
 _CREDIBLE_EMERGENCY_PATTERNS = (
-    ("emergency_services", re.compile(r"^\s*(?:someone\s+)?call\s+911\b", re.IGNORECASE)),
+    (
+        "emergency_services",
+        re.compile(
+            r"^\s*(?:(?:please\s+)?(?:someone\s+)?|someone\s+please\s+)call\s+911\b",
+            re.IGNORECASE,
+        ),
+    ),
     ("breathing", re.compile(rf"^\s*i\s+{_CANNOT_PHRASE}\s+breathe\b", re.IGNORECASE)),
     (
         "fall",
@@ -222,6 +226,11 @@ _CREDIBLE_HELP_PATTERN = re.compile(
 _NEGATED_CURRENT_SUBJECT_PATTERN = re.compile(
     r"^\s*(?:no\s+(?:one|body|person)|nobody|none(?:\s+of\s+(?:them|us|you))?|"
     r"not\s+(?:anyone|anybody)|neither(?:\s+of\s+(?:them|us|you))?)\b",
+    re.IGNORECASE,
+)
+_CONTEXTUAL_EMERGENCY_DISQUALIFIER = re.compile(
+    r"\b(?:said|says|quote(?:s|d)?|reported|reports|told\s+(?:me|us)|heard|read|"
+    r"yesterday|previously|earlier|last\s+(?:night|week|month|year))\b",
     re.IGNORECASE,
 )
 _DURATION_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)(?P<unit>ms|s|m|h)")
@@ -402,6 +411,9 @@ def credible_emergency_reason_with_context(
     """Return a newly completed reason and whether prior context was required."""
     current_reason = credible_emergency_reason_for_segments(current_segments)
     if current_reason:
+        context_text = " ".join(str(segment.get("text") or "") for segment in context_segments)
+        if _CONTEXTUAL_EMERGENCY_DISQUALIFIER.search(context_text):
+            return None, False
         return current_reason, False
     if not context_segments or credible_emergency_reason_for_segments(context_segments):
         return None, False

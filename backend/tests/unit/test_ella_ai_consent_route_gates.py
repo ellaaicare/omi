@@ -496,11 +496,52 @@ def test_scanner_dispatch_queue_is_bounded_ordered_and_drains_on_close():
             )
             is True
         )
+        assert (
+            queue.enqueue(
+                {
+                    "uid": "uid-1",
+                    "conversation_id": "conversation-1",
+                    "session": "session-1",
+                    "sequence": 100,
+                    "kind": "emergency",
+                    "segments": [{"text": "Please call 911", "speaker": "SPEAKER_1"}],
+                }
+            )
+            is True
+        )
+        assert (
+            queue.enqueue(
+                {
+                    "uid": "uid-1",
+                    "conversation_id": "conversation-1",
+                    "session": "session-1",
+                    "sequence": 101,
+                    "kind": "emergency",
+                    "segments": [{"text": "I am choking", "speaker": "SPEAKER_1"}],
+                }
+            )
+            is True
+        )
+        assert (
+            queue.enqueue(
+                {
+                    "uid": "uid-1",
+                    "conversation_id": "conversation-1",
+                    "session": "session-1",
+                    "sequence": 102,
+                    "kind": "emergency",
+                    "segments": [{"text": "I am having a stroke", "speaker": "SPEAKER_1"}],
+                }
+            )
+            is False
+        )
         release.set()
         await queue.close()
         assert dispatched == [
             ("uid-1", "session-1", 1),
             ("uid-1", "session-1", 99),
+            ("uid-1", "session-1", 100),
+            ("uid-1", "session-1", 101),
             ("uid-1", "session-1", 2),
             ("uid-1", "session-1", 3),
         ]
