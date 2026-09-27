@@ -696,6 +696,35 @@ void main() {
     expect(provider.captureDiagnostics.transmittedFrames, 0);
   });
 
+  test('phone capture refuses to start with an empty bound uid even when the authority reports current', () async {
+    // Regression for ella-ai#1280 P1: an authority whose `currentCheck` override
+    // reports itself current must still be refused if its bound uid is empty —
+    // `_isCaptureCurrent`/`isCurrent()` alone do not inspect uid content.
+    final authority = _CaptureAuthority('')..current = true;
+    final mic = _FakeMicRecorder();
+    var transmittedFrames = 0;
+    final provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneMicrophonePermissionChecker: () async => true,
+      phoneTranscriptionPreparer: () async => true,
+      phoneMicRecorder: mic,
+      phoneAudioSender: (bytes) {
+        transmittedFrames++;
+        return false;
+      },
+      captureStartProofTimeout: const Duration(milliseconds: 100),
+    );
+    addTearDown(provider.dispose);
+
+    final result = await provider.streamRecording();
+
+    expect(result, PhoneCaptureStartResult.accountNotReady);
+    expect(mic.starts, 0);
+    expect(transmittedFrames, 0);
+    expect(provider.recordingState, isNot(RecordingState.record));
+  });
+
   test('production phone path clears one stale recorder owner and retries once', () async {
     final authority = _CaptureAuthority('uid-a');
     final mic = _FakeMicRecorder(failuresBeforeStart: 1);
