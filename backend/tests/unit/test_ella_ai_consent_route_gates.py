@@ -563,6 +563,26 @@ def test_live_scanner_queue_uses_server_owned_emergency_predicate():
     assert "credible_emergency_reason_with_context" in predicate_source
     assert 'item.get("segments")' in predicate_source
 
+    from utils.ella.scanner import credible_emergency_reason_with_context
+
+    namespace = {"credible_emergency_reason_with_context": credible_emergency_reason_with_context}
+    exec(predicate_source, namespace)
+    predicate = namespace["_scanner_dispatch_item_is_credible_emergency"]
+    assert predicate(
+        {
+            "segments": [
+                {"text": "I can't breathe, please call 911 now", "speaker": "SPEAKER_1"},
+            ]
+        }
+    )
+    assert predicate(
+        {
+            "segments": [
+                {"text": "I am having a heart attack, call an ambulance now", "speaker": "SPEAKER_1"},
+            ]
+        }
+    )
+
 
 def test_scanner_mode_authority_uses_shared_async_pool_and_fails_closed():
     source = _function_source(

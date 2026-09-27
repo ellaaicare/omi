@@ -290,18 +290,25 @@ def test_scanner_preserves_emergency_only_dispatch_when_guardian_is_off(monkeypa
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
     monkeypatch.setattr(scanner.requests, "post", fake_post)
 
-    status = scanner.send_to_scanner(
-        "uid-1",
-        "conversation-emergency-off",
-        [{"text": "I cannot breathe and need an ambulance", "speaker": "SPEAKER_1"}],
-        guardian_mode="off",
-    )
+    for index, text in enumerate(
+        (
+            "I can't breathe, please call 911 now",
+            "I am having a heart attack, call an ambulance right now",
+        )
+    ):
+        status = scanner.send_to_scanner(
+            "uid-1",
+            f"conversation-emergency-off-{index}",
+            [{"text": text, "speaker": "SPEAKER_1"}],
+            guardian_mode="off",
+        )
 
-    assert status == 200
-    assert len(posts) == 1
-    assert posts[0]["guardian_mode"] == "off"
-    assert posts[0]["guardian_mode_enabled"] is False
-    assert posts[0]["emergency_only_dispatch"] is True
+        assert status == 200
+        assert posts[index]["guardian_mode"] == "off"
+        assert posts[index]["guardian_mode_enabled"] is False
+        assert posts[index]["emergency_only_dispatch"] is True
+
+    assert len(posts) == 2
 
 
 def test_scanner_fails_closed_when_mode_authority_is_unavailable(monkeypatch):
@@ -372,7 +379,11 @@ def test_credible_emergency_bypass_requires_current_context_for_sensitive_terms(
     assert scanner.credible_emergency_reason("You cannot breathe") == "breathing"
     assert scanner.credible_emergency_reason("She cannot breathe, please help me") == "breathing"
     assert scanner.credible_emergency_reason("I can't breathe, call 911") == "breathing"
+    assert scanner.credible_emergency_reason("I can't breathe, please call 911 now") == "breathing"
     assert scanner.credible_emergency_reason("I am having a heart attack, call an ambulance") == "heart_attack"
+    assert (
+        scanner.credible_emergency_reason("I am having a heart attack, call an ambulance right now") == "heart_attack"
+    )
     assert scanner.credible_emergency_reason("Dad is choking, please call 911") == "choking"
     assert scanner.credible_emergency_reason("She is having a seizure") == "seizure"
     assert scanner.credible_emergency_reason("She's having a seizure") == "seizure"

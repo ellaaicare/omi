@@ -249,7 +249,7 @@ _CREDIBLE_WAKE_PREFIX = re.compile(
 )
 _CREDIBLE_EMERGENCY_TAIL = re.compile(
     r"^\s*[,;:!?-]*\s*(?:(?:right\s+)?now|today|tonight|(?:please\s+)?help(?:\s+me)?|"
-    r"(?:and\s+)?(?:please\s+)?call\s+(?:911|an?\s+ambulance)|"
+    r"(?:and\s+)?(?:please\s+)?call\s+(?:911|an?\s+ambulance)(?:\s+(?:right\s+)?now)?|"
     r"and\s+(?:i\s+)?need\s+(?:help|an?\s+ambulance)|"
     rf"and\s+(?:i\s+)?{_CANNOT_PHRASE}\s+breathe|please)?\s*[.!?]*\s*$",
     re.IGNORECASE,
