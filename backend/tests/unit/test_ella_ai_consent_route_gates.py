@@ -440,21 +440,51 @@ def test_scanner_dispatch_queue_is_bounded_ordered_and_drains_on_close():
 
     async def scenario():
         dispatched = []
+        started = asyncio.Event()
+        release = asyncio.Event()
 
         async def dispatch(item):
-            await asyncio.sleep(0)
-            dispatched.append(item["sequence"])
+            dispatched.append((item["uid"], item["session"], item["sequence"]))
+            if item["sequence"] == 1:
+                started.set()
+                await release.wait()
 
-        queue = queue_class(dispatch, maxsize=2, drain_timeout_seconds=1.0)
+        queue = queue_class(
+            dispatch,
+            maxsize=3,
+            drain_timeout_seconds=1.0,
+            emergency_predicate=lambda item: item.get("kind") == "emergency",
+        )
         queue.start()
-        assert queue.enqueue({"sequence": 1}) is True
-        assert queue.enqueue({"sequence": 2}) is True
-        assert queue.enqueue({"sequence": 3}) is False
+        assert queue.enqueue({"uid": "uid-1", "session": "session-1", "sequence": 1}) is True
+        await started.wait()
+        assert queue.enqueue({"uid": "uid-1", "session": "session-1", "sequence": 2}) is True
+        assert queue.enqueue({"uid": "uid-1", "session": "session-1", "sequence": 3}) is True
+        assert queue.enqueue({"uid": "uid-1", "session": "session-1", "sequence": 4}) is False
+        assert queue.enqueue({"uid": "uid-1", "session": "session-1", "sequence": 99, "kind": "emergency"}) is True
+        release.set()
         await queue.close()
-        assert dispatched == [1, 2]
-        assert queue.enqueue({"sequence": 4}) is False
+        assert dispatched == [
+            ("uid-1", "session-1", 1),
+            ("uid-1", "session-1", 2),
+            ("uid-1", "session-1", 3),
+            ("uid-1", "session-1", 99),
+        ]
+        assert queue.enqueue({"uid": "uid-2", "session": "session-2", "sequence": 5}) is False
 
     asyncio.run(scenario())
+
+
+def test_live_scanner_queue_uses_server_owned_emergency_predicate():
+    stream_source = _function_source(BACKEND / "routers" / "transcribe.py", "_stream_handler")
+    predicate_source = _function_source(
+        BACKEND / "routers" / "transcribe.py",
+        "_scanner_dispatch_item_is_credible_emergency",
+    )
+
+    assert "emergency_predicate=_scanner_dispatch_item_is_credible_emergency" in stream_source
+    assert "credible_emergency_reason" in predicate_source
+    assert 'item.get("segments")' in predicate_source
 
 
 def test_scanner_mode_authority_uses_shared_async_pool_and_fails_closed():

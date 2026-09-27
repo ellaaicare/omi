@@ -339,8 +339,23 @@ def test_scanner_off_mode_does_not_leak_ambiguous_routine_speech(monkeypatch, te
 def test_credible_emergency_bypass_requires_current_context_for_sensitive_terms():
     assert scanner.credible_emergency_reason("I am having chest pain") == "chest_pain"
     assert scanner.credible_emergency_reason("She is having a seizure") == "seizure"
+    assert scanner.credible_emergency_reason("My husband is having a seizure") == "seizure"
+    assert scanner.credible_emergency_reason("Dad is bleeding out") == "severe_bleeding"
     assert scanner.credible_emergency_reason("I am bleeding out") == "severe_bleeding"
     assert scanner.credible_emergency_reason("There is an intruder in my home") == "intruder"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The documentary says she is having a seizure",
+        "The article quotes I am having chest pain",
+        "She said he is bleeding out",
+        "Yesterday I was having chest pain",
+    ],
+)
+def test_credible_emergency_bypass_rejects_reported_quoted_and_historical_speech(text):
+    assert scanner.credible_emergency_reason(text) is None
 
 
 def test_scanner_off_mode_does_not_join_emergency_phrase_across_segments(monkeypatch):

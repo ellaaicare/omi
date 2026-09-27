@@ -115,30 +115,40 @@ _EMERGENCY_PATTERN = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_CURRENT_PERSON_SUBJECT = (
+    r"(?:i|he|she|they|someone|somebody|"
+    r"my\s+(?:husband|wife|partner|mother|mom|father|dad|parent|son|daughter|child|"
+    r"brother|sister|friend|roommate|caregiver)|"
+    r"(?:mom|mother|dad|father|husband|wife|partner|son|daughter|child|brother|sister)|"
+    r"(?!(?:the|this|that|an?|documentary|article|movie|film|song|podcast|book|story|report|news|"
+    r"video|show|character)\b)[a-z][a-z'’-]{1,30}(?:\s+[a-z][a-z'’-]{1,30})?)"
+)
 _CREDIBLE_EMERGENCY_PATTERNS = (
-    ("emergency_services", re.compile(r"\b(?:someone\s+)?call\s+911\b", re.IGNORECASE)),
-    ("breathing", re.compile(r"\bi\s+(?:can\s*not|cannot|can't)\s+breathe\b", re.IGNORECASE)),
+    ("emergency_services", re.compile(r"^\s*(?:someone\s+)?call\s+911\b", re.IGNORECASE)),
+    ("breathing", re.compile(r"^\s*i\s+(?:can\s*not|cannot|can't)\s+breathe\b", re.IGNORECASE)),
     (
         "fall",
         re.compile(
-            r"\bi\s+(?:fell\s+down|(?:fell|(?:have|'ve)\s+fallen)\s+and\s+"
+            r"^\s*i\s+(?:fell\s+down|(?:fell|(?:have|'ve)\s+fallen)\s+and\s+"
             r"(?:i\s+)?(?:am\s+)?(?:hurt|injured|bleeding|unable\s+to\s+move|need\s+help|"
             r"(?:can\s*not|cannot|can't)\s+get\s+up))\b",
             re.IGNORECASE,
         ),
     ),
-    ("immobile", re.compile(r"\bi\s+(?:can\s*not|cannot|can't)\s+get\s+up\b", re.IGNORECASE)),
+    ("immobile", re.compile(r"^\s*i\s+(?:can\s*not|cannot|can't)\s+get\s+up\b", re.IGNORECASE)),
     (
         "chest_pain",
         re.compile(
-            r"\b(?:(?:i\s+(?:have|am\s+having)|i'm\s+having)\s+chest\s+pain|my\s+chest\s+hurts)\b",
+            rf"^\s*(?:i\s+have\s+chest\s+pain|"
+            rf"(?:{_CURRENT_PERSON_SUBJECT})\s+(?:am|is|are|'m|'s|'re)\s+having\s+chest\s+pain|"
+            r"my\s+chest\s+hurts)\b",
             re.IGNORECASE,
         ),
     ),
     (
         "fire",
         re.compile(
-            r"\b(?:there\s+is\s+(?:a\s+)?fire|(?:my|the)\s+(?:house|home)\s+is\s+on\s+fire|"
+            r"^\s*(?:there\s+is\s+(?:a\s+)?fire|(?:my|the)\s+(?:house|home)\s+is\s+on\s+fire|"
             r"(?:a\s+)?fire\s+(?:in|inside)\s+(?:my|the)\s+(?:house|home)|"
             r"smoke\s+(?:in|inside)\s+(?:my|the)\s+(?:house|home))\b",
             re.IGNORECASE,
@@ -147,22 +157,21 @@ _CREDIBLE_EMERGENCY_PATTERNS = (
     (
         "seizure",
         re.compile(
-            r"\b(?:i\s+am|i'm|he\s+is|he's|she\s+is|she's|"
-            r"they\s+are|they're|someone\s+is)\s+having\s+(?:a\s+)?seizure\b",
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT})\s+(?:am|is|are|'m|'s|'re)\s+having\s+(?:a\s+)?seizure\b",
             re.IGNORECASE,
         ),
     ),
     (
         "severe_bleeding",
         re.compile(
-            r"\b(?:i\s+am|i'm|he\s+is|he's|she\s+is|she's|" r"they\s+are|they're|someone\s+is)\s+bleeding\s+out\b",
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT})\s+(?:am|is|are|'m|'s|'re)\s+bleeding\s+out\b",
             re.IGNORECASE,
         ),
     ),
     (
         "intruder",
         re.compile(
-            r"\b(?:there\s+is\s+(?:an?\s+)?intruder|(?:an?\s+)?intruder\s+is\s+(?:in|inside)\s+"
+            r"^\s*(?:there\s+is\s+(?:an?\s+)?intruder|(?:an?\s+)?intruder\s+is\s+(?:in|inside)\s+"
             r"(?:my|the)\s+(?:house|home))\b",
             re.IGNORECASE,
         ),

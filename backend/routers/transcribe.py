@@ -97,6 +97,7 @@ from utils.capture_buffer import (
 from utils.ella.memory_artwork_storage import acquire_memory_artwork_publication_lock
 from utils.ella.scanner_keyterms import cache_status as scanner_keyterm_cache_status
 from utils.ella.scanner_keyterms import combine_deepgram_keyterms, get_scanner_keyterms
+from utils.ella.scanner import credible_emergency_reason
 from utils.notifications import send_credit_limit_notification, send_silent_user_notification
 from utils.other import endpoints as auth
 from utils.other.storage import get_profile_audio_if_exists, get_user_has_speech_profile
@@ -173,7 +174,7 @@ class _AiConsentSyncCheckRejected(RuntimeError):
         self.authority_error = authority_error
 
 
-SCANNER_DISPATCH_QUEUE_MAXSIZE = max(1, int(os.getenv("ELLA_SCANNER_DISPATCH_QUEUE_MAXSIZE", "32")))
+SCANNER_DISPATCH_QUEUE_MAXSIZE = max(2, int(os.getenv("ELLA_SCANNER_DISPATCH_QUEUE_MAXSIZE", "32")))
 SCANNER_DISPATCH_DRAIN_TIMEOUT_SECONDS = max(
     0.1,
     float(os.getenv("ELLA_SCANNER_DISPATCH_DRAIN_TIMEOUT_SECONDS", "10.0")),
@@ -181,8 +182,18 @@ SCANNER_DISPATCH_DRAIN_TIMEOUT_SECONDS = max(
 _SCANNER_DISPATCH_STOP = object()
 
 
+def _scanner_dispatch_item_is_credible_emergency(item: dict) -> bool:
+    segments = item.get("segments")
+    if not isinstance(segments, list):
+        return False
+    return any(
+        isinstance(segment, dict) and credible_emergency_reason(str(segment.get("text") or "")) is not None
+        for segment in segments
+    )
+
+
 class ScannerDispatchQueue:
-    """Bounded, ordered scanner work owned by one websocket session."""
+    """Bounded, ordered scanner work with one slot reserved for emergencies."""
 
     def __init__(
         self,
@@ -190,10 +201,15 @@ class ScannerDispatchQueue:
         *,
         maxsize: int = SCANNER_DISPATCH_QUEUE_MAXSIZE,
         drain_timeout_seconds: float = SCANNER_DISPATCH_DRAIN_TIMEOUT_SECONDS,
+        emergency_predicate: Callable[[dict], bool] = lambda _item: False,
     ):
         self._dispatcher = dispatcher
-        self._queue: asyncio.Queue = asyncio.Queue(maxsize=max(1, maxsize))
+        self._maxsize = max(2, maxsize)
+        self._routine_capacity = self._maxsize - 1
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=self._maxsize)
         self._drain_timeout_seconds = max(0.1, drain_timeout_seconds)
+        self._emergency_predicate = emergency_predicate
+        self._queued_routine = 0
         self._worker: asyncio.Task | None = None
         self._closed = False
 
@@ -205,9 +221,17 @@ class ScannerDispatchQueue:
         if self._closed:
             return False
         try:
-            self._queue.put_nowait(item)
+            is_emergency = bool(self._emergency_predicate(item))
+        except Exception:
+            is_emergency = False
+        if not is_emergency and self._queued_routine >= self._routine_capacity:
+            return False
+        try:
+            self._queue.put_nowait((item, is_emergency))
         except asyncio.QueueFull:
             return False
+        if not is_emergency:
+            self._queued_routine += 1
         return True
 
     async def close(self) -> None:
@@ -232,10 +256,13 @@ class ScannerDispatchQueue:
 
     async def _run(self) -> None:
         while True:
-            item = await self._queue.get()
+            queued_item = await self._queue.get()
             try:
-                if item is _SCANNER_DISPATCH_STOP:
+                if queued_item is _SCANNER_DISPATCH_STOP:
                     return
+                item, is_emergency = queued_item
+                if not is_emergency:
+                    self._queued_routine -= 1
                 await self._dispatcher(item)
             finally:
                 self._queue.task_done()
@@ -1701,7 +1728,10 @@ async def _stream_handler(
             provider_kwargs=provider_kwargs,
         )
 
-    scanner_dispatch_queue = ScannerDispatchQueue(dispatch_scanner_item)
+    scanner_dispatch_queue = ScannerDispatchQueue(
+        dispatch_scanner_item,
+        emergency_predicate=_scanner_dispatch_item_is_credible_emergency,
+    )
     scanner_dispatch_queue.start()
 
     def stream_transcript(segments):
