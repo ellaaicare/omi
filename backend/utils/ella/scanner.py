@@ -142,7 +142,7 @@ _CREDIBLE_EMERGENCY_PATTERNS = (
         "fall",
         re.compile(
             r"^\s*(?:i\s+fell\s+down|(?:i\s+fell|i\s+have\s+fallen|i['’]ve\s+fallen)\s+and\s+"
-            r"(?:i\s+)?(?:am\s+)?(?:hurt|injured|bleeding|unable\s+to\s+move|need\s+help|"
+            r"(?:(?:i(?:\s+am|['’]m)?|am)\s+)?(?:hurt|injured|bleeding|unable\s+to\s+move|need\s+help|"
             rf"{_CANNOT_PHRASE}\s+get\s+up))\b",
             re.IGNORECASE,
         ),

@@ -123,14 +123,22 @@ def test_emergency_bypasses_ambient_batching(monkeypatch):
         [{"text": "I've fallen and I can't get up", "speaker": "SPEAKER_1"}],
         guardian_mode="off",
     )
+    fall_injury = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-fall-injury",
+        [{"text": "I've fallen and I'm hurt", "speaker": "SPEAKER_1"}],
+        guardian_mode="off",
+    )
 
     assert intruder == 200
     assert contextual == 200
     assert fall == 200
+    assert fall_injury == 200
     assert posts[1]["scanner_batch"]["flush_reason"] == "immediate_credible_emergency"
     assert posts[2]["scanner_batch"]["flush_reason"] == "immediate_emergency"
     assert [segment["text"] for segment in posts[2]["segments"]] == ["I cannot", "breathe"]
     assert posts[3]["scanner_batch"]["flush_reason"] == "immediate_emergency"
+    assert posts[4]["scanner_batch"]["flush_reason"] == "immediate_emergency"
 
 
 def test_guardian_off_contextual_emergency_sends_only_authorized_suffix(monkeypatch):
@@ -489,6 +497,8 @@ def test_credible_emergency_bypass_requires_current_context_for_sensitive_terms(
     assert scanner.credible_emergency_reason("I’m going to hurt myself") == "self_harm"
     assert scanner.credible_emergency_reason("I've fallen and I can't get up") == "fall"
     assert scanner.credible_emergency_reason("I’ve fallen and I can’t get up") == "fall"
+    assert scanner.credible_emergency_reason("I've fallen and I'm hurt") == "fall"
+    assert scanner.credible_emergency_reason("I’ve fallen and I’m unable to move") == "fall"
 
 
 @pytest.mark.parametrize(
