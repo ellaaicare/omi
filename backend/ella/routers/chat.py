@@ -29,7 +29,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -1158,8 +1158,40 @@ class EllaChatHistoryRequest(BaseModel):
     pass
 
 
+class EllaChatTurnLookupResponse(BaseModel):
+    exists: bool
+
+
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
 PROVISION_API_TOKEN = authority_credential("ELLA_PROVISION_API_TOKEN", strip=False)
+
+
+@router.get("/chat/turns/{client_message_id}", response_model=EllaChatTurnLookupResponse)
+async def ella_chat_turn_lookup(
+    response: Response,
+    client_message_id: str = Path(min_length=1, max_length=128),
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+) -> EllaChatTurnLookupResponse:
+    """Return whether this owner has the exact canonical iOS user turn."""
+    response.headers["Cache-Control"] = "private, no-store"
+    source_identity = f"ios_chat:{authenticated_uid}:{client_message_id}"
+    try:
+        exists = await _canonical_event_store.event_exists(
+            uid=authenticated_uid,
+            event_id=f"{source_identity}:user",
+            source_identity=source_identity,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[FLOW:CHAT-TURN-LOOKUP] canonical_store_unavailable error_type=%s",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "canonical_turn_lookup_unavailable", "retryable": True},
+            headers={"Cache-Control": "private, no-store"},
+        ) from exc
+    return EllaChatTurnLookupResponse(exists=exists)
 
 
 @router.get("/chat/history")

@@ -349,6 +349,15 @@ class CanonicalEventStore:
     async def write_batch(self, events: list[CanonicalEventIn]) -> dict[str, Any]:
         raise NotImplementedError
 
+    async def event_exists(
+        self,
+        *,
+        uid: str,
+        event_id: str,
+        source_identity: str,
+    ) -> bool:
+        raise NotImplementedError
+
     async def get_event(
         self,
         *,
@@ -496,6 +505,31 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
             "duplicates": len(statuses) - inserted_count - updated_count,
             "events": statuses,
         }
+
+    async def event_exists(
+        self,
+        *,
+        uid: str,
+        event_id: str,
+        source_identity: str,
+    ) -> bool:
+        pool = await _get_pool()
+        return bool(
+            await pool.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM canonical_events
+                    WHERE uid = $1
+                      AND event_id = $2
+                      AND source_identity = $3
+                )
+                """,
+                uid,
+                event_id,
+                source_identity,
+            )
+        )
 
     async def get_event(
         self,
@@ -666,6 +700,16 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
             "duplicates": len(statuses) - inserted_count,
             "events": statuses,
         }
+
+    async def event_exists(
+        self,
+        *,
+        uid: str,
+        event_id: str,
+        source_identity: str,
+    ) -> bool:
+        event = self._events.get((event_id, source_identity))
+        return bool(event and event.get("uid") == uid)
 
     async def get_event(
         self,
