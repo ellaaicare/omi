@@ -913,6 +913,22 @@ def send_to_scanner(
         )
         return None
 
+    if not SCANNER_WEBHOOK_KEY:
+        _log_trace_event(
+            trace_id=trace_id,
+            uid=uid,
+            stage="scanner_dispatched",
+            status="error",
+            metadata={
+                "conversation_id": str(conversation_id),
+                "device_type": device_type,
+                "segment_count": len(scanner_segments),
+                "reason": "scanner_webhook_authority_unavailable",
+            },
+        )
+        print(f"📡 Scanner authority unavailable trace={trace_id}", flush=True)
+        return None
+
     scanner_segments, batch_metadata = _apply_ambient_batching(
         uid,
         str(conversation_id),
@@ -978,23 +994,6 @@ def send_to_scanner(
         payload["scanner_window_text"] = canonicalize_wake_phrase(scanner_window_text)
     if wake_prefix_recent is not None:
         payload["wake_prefix_recent"] = wake_prefix_recent
-
-    if not SCANNER_WEBHOOK_KEY:
-        _log_trace_event(
-            trace_id=trace_id,
-            uid=uid,
-            stage="scanner_dispatched",
-            status="error",
-            metadata={
-                "conversation_id": str(conversation_id),
-                "device_type": device_type,
-                "segment_count": len(scanner_segments),
-                "reason": "scanner_webhook_authority_unavailable",
-                "scanner_batch": batch_metadata,
-            },
-        )
-        print(f"📡 Scanner authority unavailable trace={trace_id}", flush=True)
-        return None
 
     try:
         start = time.time()
