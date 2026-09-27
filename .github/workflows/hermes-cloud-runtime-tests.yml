@@ -1266,6 +1266,7 @@ jobs:
           )"
           required_conversation_summary_cas_ids=(
             "tests/unit/test_conversation_summary_cas.py::test_stock_summary_commit_preserves_concurrent_capture_fields_and_merges_process_metadata"
+            "tests/unit/test_conversation_summary_cas.py::test_stock_summary_commit_persists_discard_diagnostics"
             "tests/unit/test_conversation_summary_cas.py::test_stock_summary_commit_does_not_clear_durable_metadata_with_process_nulls"
             "tests/unit/test_conversation_summary_cas.py::test_stock_summary_two_processors_from_empty_source_produce_one_winner"
             "tests/unit/test_conversation_summary_cas.py::test_stock_summary_missing_persisted_conversation_does_not_resurrect_without_create_authority"
@@ -1289,7 +1290,7 @@ jobs:
           for required_id in "${required_conversation_summary_cas_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$conversation_summary_cas_ids"
           done
-          test "$(grep -c '::' <<<"$conversation_summary_cas_ids")" -eq 50
+          test "$(grep -c '::' <<<"$conversation_summary_cas_ids")" -eq 51
           pytest tests/unit/test_conversation_summary_cas.py -k "$baseline_summary_cas_selector" -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 85
           pytest tests/unit/test_ella_conversation_corrections.py -v

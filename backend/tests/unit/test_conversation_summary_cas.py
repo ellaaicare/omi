@@ -779,6 +779,54 @@ def test_stock_summary_commit_preserves_concurrent_capture_fields_and_merges_pro
     assert ref.data["summary_versions"][0]["is_active"] is True
 
 
+def test_stock_summary_commit_persists_discard_diagnostics(monkeypatch):
+    conversations = _load_conversations_module(monkeypatch)
+    ref = _ConversationRef(
+        {
+            "id": "conversation-1",
+            "created_at": "2026-07-22T00:00:00+00:00",
+            "structured": {},
+            "summary_versions": [],
+            "active_summary_version_id": None,
+            "status": "processing",
+            "discarded": False,
+        }
+    )
+    transaction = _Transaction()
+    processing_payload = _stock_processing_payload()
+    processing_payload.update(
+        {
+            "discarded": True,
+            "discard_reason": "discarded_trivial",
+            "discard_classifier_provenance": {
+                "classifier": "short_content",
+                "version": "v1",
+                "decision_source": "model",
+            },
+        }
+    )
+
+    result = conversations._commit_stock_summary_processing_result_transaction(
+        transaction,
+        ref,
+        "uid-1",
+        processing_payload,
+        expected_active_summary_version_id=None,
+    )
+
+    assert result["status"] == "committed"
+    updated_fields = transaction.updates[0][1]
+    assert updated_fields["discard_reason"] == "discarded_trivial"
+    assert updated_fields["discard_classifier_provenance"] == {
+        "classifier": "short_content",
+        "version": "v1",
+        "decision_source": "model",
+    }
+    assert ref.data["discarded"] is True
+    assert ref.data["discard_reason"] == "discarded_trivial"
+    assert ref.data["discard_classifier_provenance"] == updated_fields["discard_classifier_provenance"]
+
+
 def test_stock_summary_commit_does_not_clear_durable_metadata_with_process_nulls(monkeypatch):
     conversations = _load_conversations_module(monkeypatch)
     durable = {
