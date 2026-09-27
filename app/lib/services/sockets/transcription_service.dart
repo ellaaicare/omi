@@ -303,9 +303,12 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
     return;
   }
 
+  // No fallback to cached/durable consent (SharedPreferencesUtil().aiConsentAccepted):
+  // that flag can be stale relative to the live per-session lease, and this is the
+  // last-mile audio-emission gate, so a missing or expired lease must mean "no".
   bool get _hasProtectedSendAuthority => mayEmitAudio(
         boundUid: SharedPreferencesUtil().uid,
-        hasConsentAuthority: _aiConsentLease?.hasCurrentAuthority ?? SharedPreferencesUtil().aiConsentAccepted,
+        hasConsentAuthority: _aiConsentLease?.hasCurrentAuthority == true,
       );
 
   @override
