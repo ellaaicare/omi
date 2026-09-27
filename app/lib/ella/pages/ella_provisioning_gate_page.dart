@@ -100,7 +100,8 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
 
     String timezone;
     try {
-      timezone = await (widget.timezoneProvider?.call() ?? FlutterTimezone.getLocalTimezone());
+      final provider = widget.timezoneProvider;
+      timezone = provider != null ? await provider() : (await FlutterTimezone.getLocalTimezone()).identifier;
     } catch (_) {
       timezone = DateTime.now().timeZoneName;
     }

@@ -146,7 +146,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
 
     String timezone;
     try {
-      timezone = await FlutterTimezone.getLocalTimezone();
+      timezone = (await FlutterTimezone.getLocalTimezone()).identifier;
     } catch (_) {
       timezone = DateTime.now().timeZoneName;
     }
