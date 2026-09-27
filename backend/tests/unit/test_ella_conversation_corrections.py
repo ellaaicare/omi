@@ -4664,7 +4664,7 @@ def test_direct_correction_apply_blocks_and_keeps_prior_version_on_gate_rejectio
     async def fake_generate(**kwargs):
         return {
             "title": "Evening chat",
-            "overview": "[Ella] Plato talked about the weekend plans.",
+            "overview": "[Ella] Rowan talked about the weekend plans.",
             "emoji": "\U0001f4ac",
             "category": "other",
             "ella_tags": ["omi", "correction"],
@@ -4710,14 +4710,14 @@ def test_two_account_regression_account_a_name_never_leaks_into_account_b_summar
     monkeypatch.setattr(corrections, "_append_correction_event", lambda *args, **kwargs: None)
     monkeypatch.setattr(corrections.conversations_db, "update_conversation", lambda *args, **kwargs: None)
 
-    # Account A's own conversation genuinely mentions "Plato" (their own
+    # Account A's own conversation genuinely mentions "Rowan" (their own
     # persona/name), so a corrected summary that references it is legitimate.
     account_a_applied = []
 
     async def fake_generate_a(**kwargs):
         return {
             "title": "Evening chat",
-            "overview": "[Ella] Plato talked about the weekend plans.",
+            "overview": "[Ella] Rowan talked about the weekend plans.",
             "emoji": "\U0001f4ac",
             "category": "other",
             "ella_tags": ["omi", "correction"],
@@ -4739,7 +4739,7 @@ def test_two_account_regression_account_a_name_never_leaks_into_account_b_summar
             trace_id="trace-a-1",
             request=corrections.ConversationCorrectionRequest(correction_text="Fix the summary.", source="ios"),
             structured={},
-            transcript="Plato said the weekend plans sound great.",
+            transcript="Rowan said the weekend plans sound great.",
             segment_count=1,
             submitted_at="2024-01-01T00:00:00+00:00",
             active_summary_version_id="legacy-a",
@@ -4750,7 +4750,7 @@ def test_two_account_regression_account_a_name_never_leaks_into_account_b_summar
     assert result_a.status == "applied"
     assert len(account_a_applied) == 1
 
-    # Account B's conversation never mentions "Plato". Even if the correction
+    # Account B's conversation never mentions "Rowan". Even if the correction
     # pipeline were to leak account A's name (e.g. via a shared/stale prompt
     # or upstream cross-talk), the identity gate must block the write so it
     # can never land in account B's corrected summary.
@@ -4759,7 +4759,7 @@ def test_two_account_regression_account_a_name_never_leaks_into_account_b_summar
     async def fake_generate_b(**kwargs):
         return {
             "title": "Evening chat",
-            "overview": "[Ella] Plato talked about the weekend plans.",
+            "overview": "[Ella] Rowan talked about the weekend plans.",
             "emoji": "\U0001f4ac",
             "category": "other",
             "ella_tags": ["omi", "correction"],
