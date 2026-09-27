@@ -17,6 +17,11 @@ set -euo pipefail
 #   ELLA_PUBLIC_BUILD — "true"/"1" forces public launch mode (default: true)
 #   ELLA_ENTITLEMENT_GATE — "true"/"1" enables invitation gating (default: false)
 #   ELLA_GUARDIAN_ENABLED — "true"/"1" enables authenticated Whispers (default: true for prod)
+#   ELLA_UPSTREAM_CAPTURE_ENABLED — "true"/"1" activates the vendored upstream
+#                     BasedHardware/omi capture path on BOTH the Dart side
+#                     (--dart-define) and the Swift side
+#                     (SWIFT_ACTIVE_COMPILATION_CONDITIONS) from this single
+#                     variable, so the two sides cannot diverge (default: false)
 #   SKIP_PULL      — set to "1" to skip git pull
 #   RUN_TESTS      — set to "1" to run the Flutter suite after env generation
 #   SKIP_UPLOAD    — set to "1" to build only, no TestFlight upload
@@ -135,6 +140,12 @@ if [ "${ELLA_ENTITLEMENT_GATE:-false}" = "true" ] || [ "${ELLA_ENTITLEMENT_GATE:
 fi
 if [ "$ELLA_GUARDIAN_ENABLED" = "true" ] || [ "$ELLA_GUARDIAN_ENABLED" = "1" ]; then
   DART_DEFINES+=(--dart-define=ELLA_GUARDIAN_ENABLED=true)
+fi
+ELLA_UPSTREAM_CAPTURE_ENABLED="${ELLA_UPSTREAM_CAPTURE_ENABLED:-false}"
+EXTRA_XCODEBUILD_SETTINGS=()
+if [ "$ELLA_UPSTREAM_CAPTURE_ENABLED" = "true" ] || [ "$ELLA_UPSTREAM_CAPTURE_ENABLED" = "1" ]; then
+  DART_DEFINES+=(--dart-define=ELLA_UPSTREAM_CAPTURE_ENABLED=true)
+  EXTRA_XCODEBUILD_SETTINGS+=('SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) ELLA_UPSTREAM_CAPTURE_ENABLED')
 fi
 if { [ "$ELLA_PUBLIC_BUILD" = "true" ] || [ "$ELLA_PUBLIC_BUILD" = "1" ]; } &&
   { [ "${ELLA_ENTITLEMENT_STUBS:-false}" = "true" ] || [ "${ELLA_ENTITLEMENT_STUBS:-false}" = "1" ]; }; then
@@ -289,15 +300,21 @@ pod install --repo-update
 log "Archiving ($SCHEME) — unsigned"
 mkdir -p "$BUILD_DIR"
 rm -rf "$ARCHIVE_PATH"
-run_with_release_env xcodebuild archive \
-  -workspace Runner.xcworkspace \
-  -scheme "$SCHEME" \
-  -configuration "$CONFIG" \
-  -archivePath "$ARCHIVE_PATH" \
-  -destination "generic/platform=iOS" \
-  CODE_SIGNING_REQUIRED=NO \
-  CODE_SIGN_IDENTITY="" \
-  CODE_SIGNING_ALLOWED=NO \
+XCODEBUILD_ARCHIVE_ARGS=(
+  archive
+  -workspace Runner.xcworkspace
+  -scheme "$SCHEME"
+  -configuration "$CONFIG"
+  -archivePath "$ARCHIVE_PATH"
+  -destination "generic/platform=iOS"
+  CODE_SIGNING_REQUIRED=NO
+  CODE_SIGN_IDENTITY=
+  CODE_SIGNING_ALLOWED=NO
+)
+if [ "${#EXTRA_XCODEBUILD_SETTINGS[@]}" -gt 0 ]; then
+  XCODEBUILD_ARCHIVE_ARGS+=("${EXTRA_XCODEBUILD_SETTINGS[@]}")
+fi
+run_with_release_env xcodebuild "${XCODEBUILD_ARCHIVE_ARGS[@]}" \
   2>&1 | tee /tmp/ella-xcodebuild-archive.log
 
 if [ ! -d "$ARCHIVE_PATH" ]; then
