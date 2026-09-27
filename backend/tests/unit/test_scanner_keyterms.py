@@ -237,8 +237,9 @@ def test_isolated_scanner_uses_hermes_workspace_and_drops_legacy_cache(monkeypat
             return None
 
     class FakeClient:
-        def __init__(self, timeout):
+        def __init__(self, timeout, trust_env):
             self.timeout = timeout
+            assert trust_env is False
 
         async def __aenter__(self):
             return self
@@ -279,6 +280,49 @@ def test_isolated_scanner_uses_hermes_workspace_and_drops_legacy_cache(monkeypat
         )
     ]
     assert scanner_keyterms._cache["uid-isolated"].source == "isolated:hermes"
+
+
+def test_isolated_scanner_ignores_environment_proxies(monkeypatch):
+    client_options = {}
+
+    async def authority_enabled(_uid):
+        return True
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"content": SCANNER_TUNING}
+
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            client_options.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    _configure_hermes_provision_authority(monkeypatch)
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:8080")
+    monkeypatch.setenv("ALL_PROXY", "socks5://proxy.invalid:1080")
+    monkeypatch.setattr(scanner_keyterms, "runtime_authority_enabled", authority_enabled)
+    monkeypatch.setattr(scanner_keyterms.httpx, "AsyncClient", FakeClient)
+
+    asyncio.run(scanner_keyterms._fetch_scanner_tuning("omi-isolated", uid="uid-isolated"))
+
+    assert client_options == {
+        "timeout": scanner_keyterms.DEFAULT_TIMEOUT_SECONDS,
+        "trust_env": False,
+    }
 
 
 def test_isolated_scanner_fails_before_request_without_bound_authority(monkeypatch):
@@ -357,8 +401,9 @@ def test_isolated_scanner_revalidates_authority_snapshot_immediately_before_egre
         return True
 
     class ForbiddenClient:
-        def __init__(self, timeout):
+        def __init__(self, timeout, trust_env):
             self.timeout = timeout
+            assert trust_env is False
 
         async def __aenter__(self):
             return self

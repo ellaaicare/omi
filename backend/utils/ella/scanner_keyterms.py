@@ -418,7 +418,10 @@ async def _fetch_scanner_tuning(agent_id: str, uid: str = "") -> str:
     if isolated:
         headers["X-Ella-Owner-Uid"] = uid
     url = f"{provision_url}/workspace/{agent_id}/files/scanner-tuning.md"
-    async with httpx.AsyncClient(timeout=_timeout_seconds()) as client:
+    client_options = {"timeout": _timeout_seconds()}
+    if isolated_snapshot is not None:
+        client_options["trust_env"] = False
+    async with httpx.AsyncClient(**client_options) as client:
         if isolated_snapshot is not None:
             try:
                 hermes_provision_authority(isolated_snapshot)
