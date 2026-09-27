@@ -2920,6 +2920,10 @@ def test_recovery_writeback_fails_closed_when_active_summary_changed(monkeypatch
     conversation = {
         **_retry_conversation(status="completed", request_id=None),
         "active_summary_version_id": "newer-v2",
+        "discarded": False,
+        "discard_reason": None,
+        "discard_classifier_provenance": None,
+        "explicit_keep": True,
     }
     monkeypatch.setattr(summary_writeback.conversations_db, "get_conversation", lambda uid, cid: conversation)
     monkeypatch.setattr(
@@ -2943,6 +2947,10 @@ def test_recovery_writeback_fails_closed_when_active_summary_changed(monkeypatch
                 require_based_on_match=True,
             )
         )
+
+    assert conversation["explicit_keep"] is True
+    assert conversation["discard_reason"] is None
+    assert conversation["discard_classifier_provenance"] is None
 
 
 def test_strict_summary_writeback_uses_atomic_active_version_compare_and_set(monkeypatch):

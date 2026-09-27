@@ -13,6 +13,8 @@ def apply_conversation_processing_failed(
 ) -> Conversation:
     conversation.status = ConversationStatus.failed
     conversation.discarded = False
+    conversation.discard_reason = None
+    conversation.discard_classifier_provenance = None
     conversation.processing_error = error_code
     conversation.processing_error_at = failed_at or datetime.now(timezone.utc)
     return conversation

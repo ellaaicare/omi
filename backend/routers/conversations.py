@@ -57,6 +57,7 @@ def _get_valid_conversation_by_id(uid: str, conversation_id: str) -> dict:
 
 class ProcessConversationRequest(BaseModel):
     calendar_meeting_context: Optional[CalendarMeetingContext] = None
+    explicit_keep: bool = True
 
 
 @router.post(
@@ -74,6 +75,9 @@ def process_in_progress_conversation(
     redis_db.remove_in_progress_conversation_id(uid)
 
     conversation = Conversation(**conversation)
+    explicit_keep = request.explicit_keep if request else True
+    conversation.explicit_keep = explicit_keep
+    conversation.explicit_keep_requested_at = datetime.now(timezone.utc) if explicit_keep else None
 
     # Inject calendar context if provided
     if request and request.calendar_meeting_context:
@@ -87,8 +91,16 @@ def process_in_progress_conversation(
         geolocation = Geolocation(**geolocation)
         conversation.geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
 
-    conversations_db.update_conversation_status(uid, conversation.id, ConversationStatus.processing)
-    conversation = process_conversation(uid, conversation.language, conversation, force_process=True)
+    conversations_db.update_conversation(
+        uid,
+        conversation.id,
+        {
+            'status': ConversationStatus.processing,
+            'explicit_keep': conversation.explicit_keep,
+            'explicit_keep_requested_at': conversation.explicit_keep_requested_at,
+        },
+    )
+    conversation = process_conversation(uid, conversation.language, conversation, force_process=explicit_keep)
     messages = trigger_external_integrations(uid, conversation)
 
     return CreateConversationResponse(conversation=conversation, messages=messages)
