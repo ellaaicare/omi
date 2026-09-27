@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
+
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/message_event.dart';
@@ -310,6 +312,24 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
         boundUid: SharedPreferencesUtil().uid,
         hasConsentAuthority: _aiConsentLease?.hasCurrentAuthority == true,
       );
+
+  /// Establishes a real, live-checked consent lease for the current
+  /// SharedPreferencesUtil().uid without the full async start() handshake
+  /// (socket connect + capture-protocol wait), for tests that construct this
+  /// service directly over a fake transport that is already "connected". A
+  /// no-op if the current preferences do not currently grant consent for that
+  /// uid — callers still need real consent setup (e.g. acceptAiConsent) first.
+  @visibleForTesting
+  void grantActiveConsentForTesting() {
+    final uid = SharedPreferencesUtil().uid;
+    final authority = AiConsentAuthoritySnapshot.capture(expectedUid: uid);
+    if (authority == null) return;
+    _aiConsentLease = AiConsentActiveSessionLease(
+      uid: uid,
+      authority: authority,
+      onAuthorityLost: () async {},
+    )..start();
+  }
 
   @override
   void onClosed([int? closeCode]) {
