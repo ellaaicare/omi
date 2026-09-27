@@ -117,7 +117,7 @@ _EMERGENCY_PATTERN = re.compile(
 )
 _CANNOT_PHRASE = r"(?:can\s*not|cannot|can['’]t)"
 _CURRENT_PERSON_SUBJECT = (
-    r"(?:i|he|she|they|someone|somebody|"
+    r"(?:i|we|you|he|she|they|someone|somebody|"
     r"my\s+(?:husband|wife|partner|mother|mom|father|dad|parent|son|daughter|child|"
     r"brother|sister|friend|roommate|caregiver)|"
     r"(?:mom|mother|dad|father|husband|wife|partner|son|daughter|child|brother|sister))"
@@ -237,7 +237,7 @@ _NEGATED_CURRENT_SUBJECT_PATTERN = re.compile(
 _CONTEXTUAL_REPORTED_SPEECH_SUFFIX = re.compile(
     (
         r"\b(?:said|says|quote(?:s|d)?|reported|reports|"
-        r"told\s+(?:me|us|you|him|her|them)|heard|read)(?:\s+that)?\s*[,;:]?\s*$"
+        r"told\s+(?:me|us|you|him|her|them)|heard|read)(?:\s+that)?\s*[.!?,;:]*\s*$"
     ),
     re.IGNORECASE,
 )
@@ -413,14 +413,33 @@ def credible_emergency_reason_for_segments(segments: List[dict]) -> Optional[str
     return match_active_text()
 
 
+def _single_explicit_speaker(segments: List[dict]) -> Optional[str]:
+    speaker: Optional[str] = None
+    for segment in segments:
+        if not str(segment.get("text") or "").strip():
+            continue
+        raw_speaker = segment.get("speaker") or segment.get("speaker_id") or segment.get("person_id")
+        current = str(raw_speaker).strip() if raw_speaker is not None else ""
+        if not current or (speaker is not None and current != speaker):
+            return None
+        speaker = current
+    return speaker
+
+
 def credible_emergency_reason_with_context(
     context_segments: List[dict], current_segments: List[dict]
 ) -> tuple[Optional[str], bool]:
     """Return a newly completed reason and whether prior context was required."""
     current_reason = credible_emergency_reason_for_segments(current_segments)
     if current_reason:
+        context_speaker = _single_explicit_speaker(context_segments)
+        current_speaker = _single_explicit_speaker(current_segments)
         context_text = " ".join(str(segment.get("text") or "") for segment in context_segments)
-        if _CONTEXTUAL_REPORTED_SPEECH_SUFFIX.search(context_text):
+        if (
+            context_speaker is not None
+            and context_speaker == current_speaker
+            and _CONTEXTUAL_REPORTED_SPEECH_SUFFIX.search(context_text)
+        ):
             return None, False
         return current_reason, False
     if not context_segments or credible_emergency_reason_for_segments(context_segments):

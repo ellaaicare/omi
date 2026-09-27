@@ -364,6 +364,8 @@ def test_credible_emergency_bypass_requires_current_context_for_sensitive_terms(
     assert scanner.credible_emergency_reason("I can’t breathe") == "breathing"
     assert scanner.credible_emergency_reason("She can't breathe") == "breathing"
     assert scanner.credible_emergency_reason("My husband cannot breathe") == "breathing"
+    assert scanner.credible_emergency_reason("We can't breathe") == "breathing"
+    assert scanner.credible_emergency_reason("You cannot breathe") == "breathing"
     assert scanner.credible_emergency_reason("She is having a seizure") == "seizure"
     assert scanner.credible_emergency_reason("She's having a seizure") == "seizure"
     assert scanner.credible_emergency_reason("My husband is having a seizure") == "seizure"
@@ -443,6 +445,14 @@ def test_credible_emergency_bypass_rejects_negative_or_absent_subjects():
         [{"text": "She said", "speaker": "SPEAKER_1"}],
         [{"text": "I want to kill myself", "speaker": "SPEAKER_1"}],
     ) == (None, False)
+    assert scanner.credible_emergency_reason_with_context(
+        [{"text": "She said.", "speaker": "SPEAKER_1"}],
+        [{"text": "I want to kill myself", "speaker": "SPEAKER_1"}],
+    ) == (None, False)
+    assert scanner.credible_emergency_reason_with_context(
+        [{"text": "She said.", "speaker": "SPEAKER_1"}],
+        [{"text": "I cannot breathe", "speaker": "SPEAKER_2"}],
+    ) == ("breathing", False)
     assert scanner.credible_emergency_reason_with_context(
         [{"text": "The article says that", "speaker": "SPEAKER_1"}],
         [{"text": "I am having a heart attack", "speaker": "SPEAKER_1"}],
