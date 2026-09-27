@@ -15,7 +15,6 @@ class _FakeResponse:
 def _disable_trace(monkeypatch):
     monkeypatch.setattr(scanner, "_log_trace_event", lambda *args, **kwargs: None)
     monkeypatch.setattr(scanner, "_enqueue_wake_ack", lambda *args, **kwargs: None)
-    monkeypatch.setattr(scanner, "_load_authoritative_guardian_mode", lambda _uid: ("active_support", None))
 
 
 def setup_function():
@@ -73,6 +72,7 @@ def test_wake_word_bypasses_ambient_batching(monkeypatch):
         "uid-1",
         "conversation-1",
         [{"text": "Hey Ella, did you catch that morning conversation?", "speaker": "SPEAKER_1"}],
+        guardian_mode="active_support",
     )
 
     assert status == 200
@@ -97,6 +97,7 @@ def test_emergency_bypasses_ambient_batching(monkeypatch):
         "uid-1",
         "conversation-1",
         [{"text": "I have chest pain and cannot breathe", "speaker": "SPEAKER_1"}],
+        guardian_mode="active_support",
     )
 
     assert status == 200
@@ -121,11 +122,13 @@ def test_ambient_chunks_batch_until_word_threshold(monkeypatch):
         "uid-1",
         "conversation-ambient",
         [{"text": "coffee shop", "speaker": "SPEAKER_1"}],
+        guardian_mode="active_support",
     )
     second = scanner.send_to_scanner(
         "uid-1",
         "conversation-ambient",
         [{"text": "table order ready", "speaker": "SPEAKER_1"}],
+        guardian_mode="active_support",
     )
 
     assert first is None
@@ -155,16 +158,19 @@ def test_rate_limit_defers_ambient_but_not_wake(monkeypatch):
         "uid-1",
         "conversation-rate-limit",
         [{"text": "ambient", "speaker": "SPEAKER_1"}],
+        guardian_mode="active_support",
     )
     deferred = scanner.send_to_scanner(
         "uid-1",
         "conversation-rate-limit",
         [{"text": "more ambient", "speaker": "SPEAKER_1"}],
+        guardian_mode="active_support",
     )
     wake = scanner.send_to_scanner(
         "uid-1",
         "conversation-rate-limit",
         [{"text": "Hey Ella, are you there?", "speaker": "SPEAKER_1"}],
+        guardian_mode="active_support",
     )
 
     assert first == 429
@@ -220,6 +226,7 @@ def test_scanner_payload_preserves_stt_identity_and_latency_metadata(monkeypatch
             }
         ],
         latency_metadata={"first_audio_frame_at": "2026-05-09T18:00:00+00:00"},
+        guardian_mode="active_support",
     )
 
     assert status == 200
@@ -240,12 +247,12 @@ def test_scanner_suppresses_all_off_equivalent_modes(monkeypatch, mode):
     _disable_trace(monkeypatch)
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
     monkeypatch.setattr(scanner.requests, "post", lambda *args, **kwargs: posts.append((args, kwargs)))
-    monkeypatch.setattr(scanner, "_load_authoritative_guardian_mode", lambda _uid: (mode, None))
 
     status = scanner.send_to_scanner(
         "uid-1",
         "conversation-off",
         [{"text": "Hey Ella, are you there?", "speaker": "SPEAKER_1"}],
+        guardian_mode=mode,
     )
 
     assert status is None
@@ -262,12 +269,12 @@ def test_scanner_preserves_emergency_only_dispatch_when_guardian_is_off(monkeypa
     _disable_trace(monkeypatch)
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
     monkeypatch.setattr(scanner.requests, "post", fake_post)
-    monkeypatch.setattr(scanner, "_load_authoritative_guardian_mode", lambda _uid: ("off", None))
 
     status = scanner.send_to_scanner(
         "uid-1",
         "conversation-emergency-off",
         [{"text": "I cannot breathe and need an ambulance", "speaker": "SPEAKER_1"}],
+        guardian_mode="off",
     )
 
     assert status == 200
@@ -283,7 +290,6 @@ def test_scanner_fails_closed_when_mode_authority_is_unavailable(monkeypatch):
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
     monkeypatch.setattr(scanner.requests, "post", lambda *args, **kwargs: posts.append((args, kwargs)))
     monkeypatch.setattr(scanner, "_enqueue_wake_ack", lambda *args, **kwargs: None)
-    monkeypatch.setattr(scanner, "_load_authoritative_guardian_mode", lambda _uid: ("off", "lookup_unavailable"))
     monkeypatch.setattr(scanner, "_log_trace_event", lambda **kwargs: trace_events.append(kwargs))
 
     status = scanner.send_to_scanner(
@@ -296,7 +302,54 @@ def test_scanner_fails_closed_when_mode_authority_is_unavailable(monkeypatch):
     assert posts == []
     assert trace_events[-1]["stage"] == "scanner_mode_authority"
     assert trace_events[-1]["status"] == "error"
-    assert trace_events[-1]["metadata"] == {"reason": "lookup_unavailable"}
+    assert trace_events[-1]["metadata"] == {"reason": "guardian_mode_required"}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Help me find my glasses",
+        "Urgent, remind me to call tomorrow",
+        "That movie was about a fire",
+        "I fell in love with that song",
+        "Help me open settings",
+    ],
+)
+def test_scanner_off_mode_does_not_leak_ambiguous_routine_speech(monkeypatch, text):
+    posts = []
+    _disable_trace(monkeypatch)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner.requests, "post", lambda *args, **kwargs: posts.append((args, kwargs)))
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-routine-off",
+        [{"text": text, "speaker": "SPEAKER_1"}],
+        guardian_mode="off",
+    )
+
+    assert status is None
+    assert posts == []
+
+
+def test_scanner_off_mode_does_not_join_emergency_phrase_across_segments(monkeypatch):
+    posts = []
+    _disable_trace(monkeypatch)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner.requests, "post", lambda *args, **kwargs: posts.append((args, kwargs)))
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-cross-speaker-off",
+        [
+            {"text": "I cannot", "speaker": "SPEAKER_1"},
+            {"text": "breathe", "speaker": "SPEAKER_2"},
+        ],
+        guardian_mode="off",
+    )
+
+    assert status is None
+    assert posts == []
 
 
 @pytest.mark.parametrize("mode", [None, "", "OFF", "none", "disabled", "null", "guardian_off"])

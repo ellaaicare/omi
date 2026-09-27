@@ -396,11 +396,12 @@ def test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary():
     assert "lambda: stt_egress_consent_guard(refresh=True)" in stream_source
     assert "segment_buffers.clear()" in stream_source
     assert stream_source.count("await _run_sync_provider_with_current_consent(") == 2
-    assert "_schedule_scanner_dispatch(" in stream_source
+    assert "scanner_dispatch_queue.enqueue(" in stream_source
     assert "_dispatch_scanner_with_current_consent(" in stream_source
-    assert stream_source.index("_schedule_scanner_dispatch(") < stream_source.index(
+    assert stream_source.index("scanner_dispatch_queue.enqueue(") < stream_source.index(
         "await websocket.send_json([segment.dict() for segment in updated_segments])"
     )
+    assert "await scanner_dispatch_queue.close()" in stream_source
     translate_source = _function_source(BACKEND / "routers" / "transcribe.py", "translate")
     speaker_source = _function_source(BACKEND / "routers" / "transcribe.py", "_match_speaker_embedding")
     for source, provider_name in (
@@ -414,11 +415,104 @@ def test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary():
         "_dispatch_scanner_with_current_consent",
     )
     assert "await _run_sync_provider_with_current_consent(" in scanner_source
+    assert "await mode_loader(subject_uid)" in scanner_source
+    assert "guardian_mode=guardian_mode" in scanner_source
     assert "except AiConsentWebSocketRejected" in scanner_source
     assert "except Exception" in scanner_source
     assert "audio_bytes_send(data, last_audio_received_time)" in stream_source
     assert "except AiConsentWebSocketRejected" in stream_source
     assert "not ai_consent_egress_rejected.is_set()" in stream_source
+
+
+def test_scanner_dispatch_queue_is_bounded_ordered_and_drains_on_close():
+    queue_class = _class_from_source(
+        BACKEND / "routers" / "transcribe.py",
+        "ScannerDispatchQueue",
+        {
+            "asyncio": asyncio,
+            "Awaitable": Awaitable,
+            "Callable": Callable,
+            "SCANNER_DISPATCH_QUEUE_MAXSIZE": 32,
+            "SCANNER_DISPATCH_DRAIN_TIMEOUT_SECONDS": 1.0,
+            "_SCANNER_DISPATCH_STOP": object(),
+        },
+    )
+
+    async def scenario():
+        dispatched = []
+
+        async def dispatch(item):
+            await asyncio.sleep(0)
+            dispatched.append(item["sequence"])
+
+        queue = queue_class(dispatch, maxsize=2, drain_timeout_seconds=1.0)
+        queue.start()
+        assert queue.enqueue({"sequence": 1}) is True
+        assert queue.enqueue({"sequence": 2}) is True
+        assert queue.enqueue({"sequence": 3}) is False
+        await queue.close()
+        assert dispatched == [1, 2]
+        assert queue.enqueue({"sequence": 4}) is False
+
+    asyncio.run(scenario())
+
+
+def test_scanner_mode_authority_uses_shared_async_pool_and_fails_closed():
+    source = _function_source(
+        BACKEND / "routers" / "transcribe.py",
+        "_load_authoritative_guardian_mode",
+    )
+
+    assert "await get_ella_postgres_pool()" in source
+    assert "await pool.fetchrow(" in source
+    assert "psycopg2" not in source
+    assert 'return None, "lookup_unavailable"' in source
+    assert 'return None, "user_not_found"' in source
+
+    class Pool:
+        def __init__(self, row=None, failure=None):
+            self.row = row
+            self.failure = failure
+            self.calls = []
+
+        async def fetchrow(self, query, uid):
+            self.calls.append((query, uid))
+            if self.failure:
+                raise self.failure
+            return self.row
+
+    async def scenario():
+        code = _function_code(
+            BACKEND / "routers" / "transcribe.py",
+            "_load_authoritative_guardian_mode",
+        )
+
+        available_pool = Pool({"guardian_mode": "active_support"})
+
+        async def available():
+            return available_pool
+
+        loader = types.FunctionType(code, {"get_ella_postgres_pool": available})
+        assert await loader("uid-a") == ("active_support", None)
+        assert available_pool.calls[0][1] == "uid-a"
+
+        missing_pool = Pool()
+
+        async def missing():
+            return missing_pool
+
+        loader = types.FunctionType(code, {"get_ella_postgres_pool": missing})
+        assert await loader("uid-b") == (None, "user_not_found")
+
+        unavailable_pool = Pool(failure=RuntimeError("database unavailable"))
+
+        async def unavailable():
+            return unavailable_pool
+
+        loader = types.FunctionType(code, {"get_ella_postgres_pool": unavailable})
+        assert await loader("uid-c") == (None, "lookup_unavailable")
+
+    asyncio.run(scenario())
 
 
 def test_stt_session_authority_avoids_transaction_per_audio_fragment_and_caches_fail_closed_state():

@@ -34,6 +34,7 @@ from utils.speaker_assignment import (
 import database.conversations as conversations_db
 import database.calendar_meetings as calendar_db
 import database.users as user_db
+from database.ella_postgres import get_ella_postgres_pool
 from database.users import get_user_conversation_lifecycle_preferences, get_user_transcription_preferences
 from database import redis_db
 from database.redis_db import (
@@ -172,7 +173,72 @@ class _AiConsentSyncCheckRejected(RuntimeError):
         self.authority_error = authority_error
 
 
-_SCANNER_DISPATCH_TASKS: set[asyncio.Task] = set()
+SCANNER_DISPATCH_QUEUE_MAXSIZE = max(1, int(os.getenv("ELLA_SCANNER_DISPATCH_QUEUE_MAXSIZE", "32")))
+SCANNER_DISPATCH_DRAIN_TIMEOUT_SECONDS = max(
+    0.1,
+    float(os.getenv("ELLA_SCANNER_DISPATCH_DRAIN_TIMEOUT_SECONDS", "10.0")),
+)
+_SCANNER_DISPATCH_STOP = object()
+
+
+class ScannerDispatchQueue:
+    """Bounded, ordered scanner work owned by one websocket session."""
+
+    def __init__(
+        self,
+        dispatcher: Callable[[dict], Awaitable[None]],
+        *,
+        maxsize: int = SCANNER_DISPATCH_QUEUE_MAXSIZE,
+        drain_timeout_seconds: float = SCANNER_DISPATCH_DRAIN_TIMEOUT_SECONDS,
+    ):
+        self._dispatcher = dispatcher
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=max(1, maxsize))
+        self._drain_timeout_seconds = max(0.1, drain_timeout_seconds)
+        self._worker: asyncio.Task | None = None
+        self._closed = False
+
+    def start(self) -> None:
+        if self._worker is None:
+            self._worker = asyncio.create_task(self._run())
+
+    def enqueue(self, item: dict) -> bool:
+        if self._closed:
+            return False
+        try:
+            self._queue.put_nowait(item)
+        except asyncio.QueueFull:
+            return False
+        return True
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._worker is None:
+            return
+
+        async def drain() -> None:
+            await self._queue.put(_SCANNER_DISPATCH_STOP)
+            await self._worker
+
+        try:
+            await asyncio.wait_for(drain(), timeout=self._drain_timeout_seconds)
+        except asyncio.TimeoutError:
+            self._worker.cancel()
+            try:
+                await self._worker
+            except asyncio.CancelledError:
+                pass
+
+    async def _run(self) -> None:
+        while True:
+            item = await self._queue.get()
+            try:
+                if item is _SCANNER_DISPATCH_STOP:
+                    return
+                await self._dispatcher(item)
+            finally:
+                self._queue.task_done()
 
 
 class AiConsentSessionAuthority:
@@ -315,14 +381,21 @@ async def _dispatch_scanner_with_current_consent(
     *,
     on_consent_rejected: Callable[[], None],
     on_failure: Callable[[], None],
+    on_mode_authority_failure: Callable[[str], None],
+    mode_loader: Callable[[str], Awaitable[tuple[object, Optional[str]]]],
     provider_kwargs: dict,
 ) -> None:
     try:
+        guardian_mode, mode_error = await mode_loader(subject_uid)
+        if mode_error is not None:
+            on_mode_authority_failure(mode_error)
+            return
         await _run_sync_provider_with_current_consent(
             subject_uid,
             consent_checker,
             reject_consent,
             provider_call,
+            guardian_mode=guardian_mode,
             **provider_kwargs,
         )
     except AiConsentWebSocketRejected:
@@ -331,12 +404,19 @@ async def _dispatch_scanner_with_current_consent(
         on_failure()
 
 
-def _schedule_scanner_dispatch(coroutine: Awaitable[None]) -> asyncio.Task:
-    """Keep best-effort scanner work alive without delaying transcript delivery."""
-    task = safe_create_task(coroutine)
-    _SCANNER_DISPATCH_TASKS.add(task)
-    task.add_done_callback(_SCANNER_DISPATCH_TASKS.discard)
-    return task
+async def _load_authoritative_guardian_mode(uid: str) -> tuple[object, Optional[str]]:
+    """Read Guardian mode through the shared async database layer."""
+    try:
+        pool = await get_ella_postgres_pool()
+        row = await pool.fetchrow(
+            "SELECT guardian_mode FROM users WHERE omi_uid = $1",
+            uid,
+        )
+    except Exception:
+        return None, "lookup_unavailable"
+    if row is None:
+        return None, "user_not_found"
+    return row["guardian_mode"], None
 
 
 async def _require_current_ai_consent_for_websocket(
@@ -1593,6 +1673,36 @@ async def _stream_handler(
             is_active=lambda: websocket_active,
             on_rejected=reject_stt_egress,
         )
+
+    async def dispatch_scanner_item(provider_kwargs: dict) -> None:
+        try:
+            from utils.ella import send_to_scanner
+        except ImportError:
+            return
+        await _dispatch_scanner_with_current_consent(
+            uid,
+            assert_current_ai_consent,
+            reject_stt_egress,
+            send_to_scanner,
+            on_consent_rejected=lambda: _delivery_log(
+                "scanner_dispatch_suppressed",
+                terminal_reason="ai_consent_egress_rejected",
+            ),
+            on_failure=lambda: _delivery_log(
+                "scanner_dispatch_failed",
+                failure_class="unexpected",
+            ),
+            on_mode_authority_failure=lambda reason: _delivery_log(
+                "scanner_dispatch_suppressed",
+                terminal_reason="guardian_mode_authority_unavailable",
+                failure_class=reason,
+            ),
+            mode_loader=_load_authoritative_guardian_mode,
+            provider_kwargs=provider_kwargs,
+        )
+
+    scanner_dispatch_queue = ScannerDispatchQueue(dispatch_scanner_item)
+    scanner_dispatch_queue.start()
 
     def stream_transcript(segments):
         nonlocal realtime_segment_buffers
@@ -2896,31 +3006,15 @@ async def _stream_handler(
 
             if transcript_segments:
                 # ====== ELLA INTEGRATION: Send chunks to scanner ======
-                try:
-                    from utils.ella import send_to_scanner
-
-                    _schedule_scanner_dispatch(
-                        _dispatch_scanner_with_current_consent(
-                            uid,
-                            assert_current_ai_consent,
-                            reject_stt_egress,
-                            send_to_scanner,
-                            on_consent_rejected=lambda: _delivery_log(
-                                "scanner_dispatch_suppressed",
-                                terminal_reason="ai_consent_egress_rejected",
-                            ),
-                            on_failure=lambda: _delivery_log(
-                                "scanner_dispatch_failed",
-                                failure_class="unexpected",
-                            ),
-                            provider_kwargs={
-                                "uid": uid,
-                                "conversation_id": batch_conversation_id,
-                                "segments": [s.dict() for s in transcript_segments],
-                                "latency_metadata": _latency_metadata(),
-                            },
-                        )
-                    )
+                scanner_dispatch_queued = scanner_dispatch_queue.enqueue(
+                    {
+                        "uid": uid,
+                        "conversation_id": batch_conversation_id,
+                        "segments": [s.dict() for s in transcript_segments],
+                        "latency_metadata": _latency_metadata(),
+                    }
+                )
+                if scanner_dispatch_queued:
                     if first_transcript_dispatched_at is None:
                         first_transcript_dispatched_at = time.time()
                         _latency_log(
@@ -2930,8 +3024,11 @@ async def _stream_handler(
                             since_first_audio_ms=_elapsed_ms(first_audio_frame_at, first_transcript_dispatched_at),
                             since_first_stt_result_ms=_elapsed_ms(first_stt_result_at, first_transcript_dispatched_at),
                         )
-                except ImportError:
-                    pass
+                else:
+                    _delivery_log(
+                        "scanner_dispatch_dropped",
+                        failure_class="session_queue_full_or_closed",
+                    )
 
                 try:
                     await websocket.send_json([segment.dict() for segment in updated_segments])
@@ -3699,6 +3796,7 @@ async def _stream_handler(
             if transcription_seconds > 0 or words_to_record > 0:
                 record_usage(uid, transcription_seconds=transcription_seconds, words_transcribed=words_to_record)
         websocket_active = False
+        await scanner_dispatch_queue.close()
         if not ai_consent_monitor_task.done():
             ai_consent_monitor_task.cancel()
             try:

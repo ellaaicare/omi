@@ -115,6 +115,37 @@ _EMERGENCY_PATTERN = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_CREDIBLE_EMERGENCY_PATTERNS = (
+    ("emergency_services", re.compile(r"\b(?:someone\s+)?call\s+911\b", re.IGNORECASE)),
+    ("breathing", re.compile(r"\bi\s+(?:can\s*not|cannot|can't)\s+breathe\b", re.IGNORECASE)),
+    (
+        "fall",
+        re.compile(
+            r"\bi\s+(?:fell\s+down|(?:fell|(?:have|'ve)\s+fallen)\s+and\s+"
+            r"(?:i\s+)?(?:am\s+)?(?:hurt|injured|bleeding|unable\s+to\s+move|need\s+help|"
+            r"(?:can\s*not|cannot|can't)\s+get\s+up))\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("immobile", re.compile(r"\bi\s+(?:can\s*not|cannot|can't)\s+get\s+up\b", re.IGNORECASE)),
+    ("chest_pain", re.compile(r"\b(?:chest\s+pain|my\s+chest\s+hurts)\b", re.IGNORECASE)),
+    (
+        "fire",
+        re.compile(
+            r"\b(?:there\s+is\s+(?:a\s+)?fire|(?:my|the)\s+(?:house|home)\s+is\s+on\s+fire|"
+            r"(?:a\s+)?fire\s+(?:in|inside)\s+(?:my|the)\s+(?:house|home)|"
+            r"smoke\s+(?:in|inside)\s+(?:my|the)\s+(?:house|home))\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("seizure", re.compile(r"\bseizure\b", re.IGNORECASE)),
+    ("severe_bleeding", re.compile(r"\bbleeding\s+out\b", re.IGNORECASE)),
+    ("intruder", re.compile(r"\bintruder\b", re.IGNORECASE)),
+)
+_CREDIBLE_HELP_PATTERN = re.compile(
+    r"^\s*(?:please\s+)?(?:help\s+me|i\s+need\s+help)(?:\s+(?:now|please|right\s+now))?[.!?]*\s*$",
+    re.IGNORECASE,
+)
 _DURATION_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)(?P<unit>ms|s|m|h)")
 _SCANNER_BATCHES: dict[tuple[str, str, str], dict] = {}
 _SCANNER_RATE_LIMIT_UNTIL = {
@@ -132,6 +163,7 @@ _GUARDIAN_ACTIVE_MODES = {
     "chatbot",
     "demo",
 }
+_GUARDIAN_MODE_UNSET = object()
 
 
 def _trace_id_for(conversation_id: str) -> str:
@@ -161,38 +193,6 @@ def _normalize_guardian_mode(value: object) -> str:
     if normalized in {"chat"}:
         return "chatbot"
     return normalized
-
-
-def _load_authoritative_guardian_mode(uid: str) -> tuple[str, Optional[str]]:
-    """Read the single Whispers mode authority without exposing database errors."""
-    try:
-        import psycopg2
-    except Exception:
-        return "off", "driver_unavailable"
-
-    conn = None
-    try:
-        conn = psycopg2.connect(
-            host=ELLA_POSTGRES_HOST,
-            port=ELLA_POSTGRES_PORT,
-            user=ELLA_POSTGRES_USER,
-            password=ELLA_POSTGRES_PASSWORD,
-            dbname=ELLA_POSTGRES_DATABASE,
-        )
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT guardian_mode FROM users WHERE omi_uid = %s",
-                (uid,),
-            )
-            row = cur.fetchone()
-        if row is None:
-            return "off", "user_not_found"
-        return _normalize_guardian_mode(row[0]), None
-    except Exception:
-        return "off", "lookup_unavailable"
-    finally:
-        if conn is not None:
-            conn.close()
 
 
 def _word_count(text: str) -> int:
@@ -276,6 +276,26 @@ def contains_wake_phrase(text: str) -> bool:
 
 def contains_emergency_phrase(text: str) -> bool:
     return bool(_EMERGENCY_PATTERN.search(text or ""))
+
+
+def credible_emergency_reason(text: str) -> Optional[str]:
+    """Return a conservative reason suitable for dispatch while Guardian is off."""
+    candidate = text or ""
+    for reason, pattern in _CREDIBLE_EMERGENCY_PATTERNS:
+        if pattern.search(candidate):
+            return reason
+    if _CREDIBLE_HELP_PATTERN.search(candidate):
+        return "explicit_help"
+    return None
+
+
+def _credible_emergency_reason_for_segments(segments: List[dict]) -> Optional[str]:
+    """Match one coherent segment; never join phrases across speakers."""
+    for segment in segments:
+        reason = credible_emergency_reason(str(segment.get("text") or ""))
+        if reason:
+            return reason
+    return None
 
 
 def scanner_immediate_reason(text: str, *, wake_prefix_recent: Optional[bool] = None) -> Optional[str]:
@@ -908,7 +928,7 @@ def send_to_scanner(
     scanner_window_text: Optional[str] = None,
     wake_prefix_recent: Optional[bool] = None,
     latency_metadata: Optional[dict] = None,
-    guardian_mode: Optional[str] = None,
+    guardian_mode: object = _GUARDIAN_MODE_UNSET,
 ) -> Optional[int]:
     """
     Send transcript segments to Ella scanner agent.
@@ -954,23 +974,20 @@ def send_to_scanner(
     if not scanner_segments:
         return None
 
-    authoritative_mode = _normalize_guardian_mode(guardian_mode)
-    mode_error = None
-    if guardian_mode is None:
-        authoritative_mode, mode_error = _load_authoritative_guardian_mode(uid)
-    if mode_error is not None:
+    if guardian_mode is _GUARDIAN_MODE_UNSET:
         _log_trace_event(
             trace_id=trace_id,
             uid=uid,
             stage="scanner_mode_authority",
             status="error",
-            metadata={"reason": mode_error},
+            metadata={"reason": "guardian_mode_required"},
         )
-        print(f"Scanner dispatch skipped: Guardian mode authority {mode_error}", flush=True)
+        print("Scanner dispatch skipped: Guardian mode authority was not resolved", flush=True)
         return None
+    authoritative_mode = _normalize_guardian_mode(guardian_mode)
     guardian_mode_enabled = authoritative_mode in _GUARDIAN_ACTIVE_MODES
-    emergency_only_dispatch = not guardian_mode_enabled and contains_emergency_phrase(
-        _combined_segment_text(scanner_segments)
+    emergency_only_dispatch = (
+        not guardian_mode_enabled and _credible_emergency_reason_for_segments(scanner_segments) is not None
     )
     if not guardian_mode_enabled and not emergency_only_dispatch:
         _log_trace_event(
