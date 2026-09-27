@@ -313,6 +313,10 @@ def test_scanner_fails_closed_when_mode_authority_is_unavailable(monkeypatch):
         "That movie was about a fire",
         "I fell in love with that song",
         "Help me open settings",
+        "The documentary was about a seizure",
+        "We watched a movie called The Intruder",
+        "The article discussed chest pain",
+        "The song was called Bleeding Out",
     ],
 )
 def test_scanner_off_mode_does_not_leak_ambiguous_routine_speech(monkeypatch, text):
@@ -330,6 +334,13 @@ def test_scanner_off_mode_does_not_leak_ambiguous_routine_speech(monkeypatch, te
 
     assert status is None
     assert posts == []
+
+
+def test_credible_emergency_bypass_requires_current_context_for_sensitive_terms():
+    assert scanner.credible_emergency_reason("I am having chest pain") == "chest_pain"
+    assert scanner.credible_emergency_reason("She is having a seizure") == "seizure"
+    assert scanner.credible_emergency_reason("I am bleeding out") == "severe_bleeding"
+    assert scanner.credible_emergency_reason("There is an intruder in my home") == "intruder"
 
 
 def test_scanner_off_mode_does_not_join_emergency_phrase_across_segments(monkeypatch):

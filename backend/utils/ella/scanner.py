@@ -128,7 +128,13 @@ _CREDIBLE_EMERGENCY_PATTERNS = (
         ),
     ),
     ("immobile", re.compile(r"\bi\s+(?:can\s*not|cannot|can't)\s+get\s+up\b", re.IGNORECASE)),
-    ("chest_pain", re.compile(r"\b(?:chest\s+pain|my\s+chest\s+hurts)\b", re.IGNORECASE)),
+    (
+        "chest_pain",
+        re.compile(
+            r"\b(?:(?:i\s+(?:have|am\s+having)|i'm\s+having)\s+chest\s+pain|my\s+chest\s+hurts)\b",
+            re.IGNORECASE,
+        ),
+    ),
     (
         "fire",
         re.compile(
@@ -138,9 +144,29 @@ _CREDIBLE_EMERGENCY_PATTERNS = (
             re.IGNORECASE,
         ),
     ),
-    ("seizure", re.compile(r"\bseizure\b", re.IGNORECASE)),
-    ("severe_bleeding", re.compile(r"\bbleeding\s+out\b", re.IGNORECASE)),
-    ("intruder", re.compile(r"\bintruder\b", re.IGNORECASE)),
+    (
+        "seizure",
+        re.compile(
+            r"\b(?:i\s+am|i'm|he\s+is|he's|she\s+is|she's|"
+            r"they\s+are|they're|someone\s+is)\s+having\s+(?:a\s+)?seizure\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "severe_bleeding",
+        re.compile(
+            r"\b(?:i\s+am|i'm|he\s+is|he's|she\s+is|she's|" r"they\s+are|they're|someone\s+is)\s+bleeding\s+out\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "intruder",
+        re.compile(
+            r"\b(?:there\s+is\s+(?:an?\s+)?intruder|(?:an?\s+)?intruder\s+is\s+(?:in|inside)\s+"
+            r"(?:my|the)\s+(?:house|home))\b",
+            re.IGNORECASE,
+        ),
+    ),
 )
 _CREDIBLE_HELP_PATTERN = re.compile(
     r"^\s*(?:please\s+)?(?:help\s+me|i\s+need\s+help)(?:\s+(?:now|please|right\s+now))?[.!?]*\s*$",
