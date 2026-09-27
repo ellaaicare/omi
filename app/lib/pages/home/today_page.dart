@@ -27,6 +27,8 @@ import 'package:omi/ella/services/memory_artwork_api.dart';
 import 'package:omi/ella/services/today_card_controller.dart';
 import 'package:omi/ella/services/today_card_repository.dart';
 import 'package:omi/ella/services/v2v_client.dart';
+import 'package:omi/ella/upstream_capture/ella_upstream_capture_adapter.dart';
+import 'package:omi/ella/upstream_capture/ella_upstream_capture_home.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
 import 'package:omi/ella/widgets/today_card_surface.dart';
 import 'package:omi/pages/capture/connect.dart';
@@ -1698,6 +1700,13 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (_homeCaptureStarting) return false;
     setState(() => _homeCaptureStarting = true);
     try {
+      // ELLA_UPSTREAM_CAPTURE (default off, rule 4/6): a manual necklace
+      // connect runs on the promoted upstream BLE stack instead of the
+      // legacy DeviceProvider path. No ambient/periodic reconnect loop is
+      // added here — this is still a single explicit connect action.
+      if (kEllaUpstreamCaptureEnabled) {
+        return await EllaUpstreamCaptureHome.instance.ensureConnection();
+      }
       final target = device.presentationConnectedDevice ?? device.presentationPairedDevice;
       return target != null && await device.connectDeviceForCurrentUser(target);
     } catch (_) {
@@ -1754,6 +1763,20 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     required bool legacyNecklaceNeedsConfirmation,
   }) async {
     if (_homeCaptureStarting) return;
+    // ELLA_UPSTREAM_CAPTURE (default off, rule 6): the Home record tap drives
+    // the promoted upstream capture stack directly instead of the legacy
+    // multi-branch dispatcher below. Toggling is the only action — the
+    // legacy branches (external-capture finalization, home/necklace
+    // handoff, legacy-necklace confirmation) do not apply to this path.
+    if (kEllaUpstreamCaptureEnabled) {
+      setState(() => _homeCaptureStarting = true);
+      try {
+        await EllaUpstreamCaptureHome.instance.toggleCapture(selectedSource);
+      } finally {
+        if (mounted) setState(() => _homeCaptureStarting = false);
+      }
+      return;
+    }
     if (_externalCaptureFinalizationSource != null) {
       await _finishExternalCapture(capture);
       return;
