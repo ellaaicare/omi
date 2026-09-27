@@ -16,6 +16,7 @@ from typing import Any
 
 import httpx
 from ella.services.ai_consent import assert_current_ai_consent
+from starlette.concurrency import run_in_threadpool
 
 from ella.services.observer import ObserverCandidate, structured_candidate_extractor
 from ella.services import runtime_resolver
@@ -430,7 +431,7 @@ async def build_extraction_result(
     if normalized == "heuristic":
         return _heuristic_extraction_result(events)
 
-    assert_current_ai_consent(uid)
+    await run_in_threadpool(assert_current_ai_consent, uid)
 
     heuristic = _heuristic_extraction_result(events)
     hermes_kwargs: dict[str, Any] = {}

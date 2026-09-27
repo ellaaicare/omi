@@ -239,10 +239,30 @@ def test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary():
     pusher_forward = types.FunctionType(
         _function_code(
             BACKEND / "routers" / "transcribe.py",
-            "_send_pusher_audio_with_current_consent",
+            "_send_pusher_payload_with_current_consent",
         ),
         {},
     )
+    scanner_calls = []
+
+    class SyncCheckRejected(RuntimeError):
+        def __init__(self, authority_error):
+            self.authority_error = authority_error
+
+    async def run_in_threadpool(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    sync_provider_code = _function_code(
+        BACKEND / "routers" / "transcribe.py",
+        "_run_sync_provider_with_current_consent",
+    )
+    sync_provider_globals = {
+        "AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE": "ai_consent_authority_unavailable",
+        "HTTPException": HTTPException,
+        "_AiConsentSyncCheckRejected": SyncCheckRejected,
+        "run_in_threadpool": run_in_threadpool,
+    }
+    sync_provider_call = types.FunctionType(sync_provider_code, sync_provider_globals)
 
     state = {"failure": None}
 
@@ -253,11 +273,39 @@ def test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary():
     async def provider_send(data):
         provider_bytes.append(data)
 
+    def consent_checker(_uid):
+        if state["failure"] is not None:
+            raise state["failure"]
+
+    async def reject_consent(exc):
+        return exc
+
+    def scanner_send(**kwargs):
+        scanner_calls.append(kwargs)
+
     async def scenario():
         await deepgram_forward(consent_guard, object(), b"accepted-deepgram", object())
         await async_forward(consent_guard, provider_send, b"accepted-async", object())
         await pusher_forward(consent_guard, provider_send, b"accepted-pusher")
+        await sync_provider_call(
+            "uid-a",
+            consent_checker,
+            reject_consent,
+            scanner_send,
+            uid="uid-a",
+            conversation_id="conversation-a",
+            segments=[{"id": "segment-a"}],
+            latency_metadata={"phase": "live"},
+        )
         assert provider_bytes == [b"accepted-deepgram", b"accepted-async", b"accepted-pusher"]
+        assert scanner_calls == [
+            {
+                "uid": "uid-a",
+                "conversation_id": "conversation-a",
+                "segments": [{"id": "segment-a"}],
+                "latency_metadata": {"phase": "live"},
+            }
+        ]
 
         state["failure"] = HTTPException(
             status_code=403,
@@ -268,7 +316,52 @@ def test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary():
         assert terminal.value.status_code == 403
         with pytest.raises(HTTPException):
             await pusher_forward(consent_guard, provider_send, b"buffered-before-revoke")
+        with pytest.raises(HTTPException):
+            await sync_provider_call(
+                "uid-a",
+                consent_checker,
+                reject_consent,
+                scanner_send,
+                uid="uid-a",
+                conversation_id="conversation-a",
+                segments=[{"id": "segment-revoked"}],
+                latency_metadata={},
+            )
         assert provider_bytes == [b"accepted-deepgram", b"accepted-async", b"accepted-pusher"]
+        assert len(scanner_calls) == 1
+
+        worker_queued = asyncio.Event()
+        worker_release = asyncio.Event()
+        delayed_provider_calls = []
+
+        async def delayed_worker(function, *args, **kwargs):
+            worker_queued.set()
+            await worker_release.wait()
+            return function(*args, **kwargs)
+
+        delayed_sync_provider_call = types.FunctionType(
+            sync_provider_code,
+            {**sync_provider_globals, "run_in_threadpool": delayed_worker},
+        )
+        state["failure"] = None
+        delayed_task = asyncio.create_task(
+            delayed_sync_provider_call(
+                "uid-a",
+                consent_checker,
+                reject_consent,
+                lambda: delayed_provider_calls.append("sent"),
+            )
+        )
+        await worker_queued.wait()
+        state["failure"] = HTTPException(
+            status_code=403,
+            detail={"code": "ai_consent_required"},
+        )
+        worker_release.set()
+        with pytest.raises(HTTPException) as saturated_worker_rejection:
+            await delayed_task
+        assert saturated_worker_rejection.value.status_code == 403
+        assert delayed_provider_calls == []
 
         state["failure"] = HTTPException(
             status_code=503,
@@ -279,15 +372,40 @@ def test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary():
         assert retryable.value.status_code == 503
         with pytest.raises(HTTPException):
             await pusher_forward(consent_guard, provider_send, b"buffered-before-outage")
+        with pytest.raises(HTTPException):
+            await sync_provider_call(
+                "uid-a",
+                consent_checker,
+                reject_consent,
+                scanner_send,
+                uid="uid-a",
+                conversation_id="conversation-a",
+                segments=[{"id": "segment-uncertain"}],
+                latency_metadata={},
+            )
         assert provider_bytes == [b"accepted-deepgram", b"accepted-async", b"accepted-pusher"]
+        assert len(scanner_calls) == 1
 
     asyncio.run(scenario())
 
     stream_source = _function_source(BACKEND / "routers" / "transcribe.py", "_stream_handler")
     assert "_forward_deepgram_audio_with_current_consent(" in stream_source
     assert "_forward_async_provider_audio_with_current_consent(" in stream_source
-    assert "_send_pusher_audio_with_current_consent(" in stream_source
+    assert "_send_pusher_payload_with_current_consent(" in stream_source
+    assert stream_source.count("await send_pusher_payload(data)") == 5
     assert "lambda: stt_egress_consent_guard(refresh=True)" in stream_source
+    assert "segment_buffers.clear()" in stream_source
+    assert stream_source.count("await _run_sync_provider_with_current_consent(") == 3
+    translate_source = _function_source(BACKEND / "routers" / "transcribe.py", "translate")
+    speaker_source = _function_source(BACKEND / "routers" / "transcribe.py", "_match_speaker_embedding")
+    scanner_source = _function_source(BACKEND / "routers" / "transcribe.py", "stream_transcript_process")
+    for source, provider_name in (
+        (translate_source, "translation_service.translate_text_by_sentence"),
+        (speaker_source, "extract_embedding_from_bytes"),
+        (scanner_source, "send_to_scanner"),
+    ):
+        assert source.index("_run_sync_provider_with_current_consent(") < source.rindex(provider_name)
+        assert source.index("assert_current_ai_consent") < source.rindex(provider_name)
     assert "audio_bytes_send(data, last_audio_received_time)" in stream_source
     assert "except AiConsentWebSocketRejected" in stream_source
     assert "not ai_consent_egress_rejected.is_set()" in stream_source
@@ -459,7 +577,7 @@ def test_background_ai_and_honcho_boundaries_recheck_consent_before_network_egre
     assert recovery_source.index("assert_current_ai_consent(uid)") < recovery_source.index(
         "generate_summary_from_prompt("
     )
-    assert observer_source.index("assert_current_ai_consent(uid)") < observer_source.index(
+    assert observer_source.index("await run_in_threadpool(assert_current_ai_consent, uid)") < observer_source.index(
         "hermes_candidate_extraction("
     )
 

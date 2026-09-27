@@ -550,6 +550,49 @@ def test_observer_extractor_uses_isolated_runtime_for_hermes(monkeypatch):
     }
 
 
+def test_observer_consent_lookup_is_offloaded_before_hermes(monkeypatch):
+    sys.modules.pop("ella.services.observer_extractor", None)
+    extractor_module = importlib.import_module("ella.services.observer_extractor")
+    effects = []
+
+    def consent(uid):
+        effects.append(("consent", uid))
+
+    async def run_in_threadpool(function, *args):
+        effects.append(("threadpool", function, args))
+        return function(*args)
+
+    async def authority_disabled(_uid=None):
+        return False
+
+    async def fake_hermes(_events, **_kwargs):
+        effects.append(("provider",))
+        return extractor_module.ExtractionResult(metadata={"extractor": "hermes"})
+
+    monkeypatch.setattr(extractor_module, "assert_current_ai_consent", consent)
+    monkeypatch.setattr(extractor_module, "run_in_threadpool", run_in_threadpool)
+    monkeypatch.setattr(
+        extractor_module.runtime_resolver,
+        "runtime_authority_enabled",
+        authority_disabled,
+    )
+    monkeypatch.setattr(extractor_module, "hermes_candidate_extraction", fake_hermes)
+
+    asyncio.run(
+        extractor_module.build_extraction_result(
+            [_event()],
+            mode="hermes",
+            uid="uid-a",
+        )
+    )
+
+    assert effects == [
+        ("threadpool", consent, ("uid-a",)),
+        ("consent", "uid-a"),
+        ("provider",),
+    ]
+
+
 @pytest.mark.parametrize(
     "error_code",
     (

@@ -781,7 +781,17 @@ def test_reconnect_claim_rejects_missing_or_malformed_v2_lease_evidence(capture_
 def test_rotation_installs_successor_and_drains_only_exact_predecessor(capture_protocol):
     now = datetime.now(timezone.utc)
     authority_ref = _Document(_authority())
-    predecessor_ref = _Document(_conversation())
+    predecessor = _conversation()
+    predecessor.update(
+        {
+            'status': 'processing',
+            'capture_owner_id': None,
+            'initial_processing_claimed_at': now,
+            'initial_processing_claim_token': capture_protocol.CAPTURE_ROTATION_PROCESSING_CLAIM_TOKEN,
+            'capture_rotation_successor_id': 'capture-b',
+        }
+    )
+    predecessor_ref = _Document(predecessor)
     successor_ref = _Document(
         {
             'id': 'capture-b',
@@ -805,12 +815,37 @@ def test_rotation_installs_successor_and_drains_only_exact_predecessor(capture_p
     )
 
     assert installed is True
-    assert _updated(predecessor_ref.data, transaction, predecessor_ref)['capture_state'] == 'drained'
+    updated_predecessor = _updated(predecessor_ref.data, transaction, predecessor_ref)
+    assert updated_predecessor['capture_state'] == 'drained'
+    assert updated_predecessor['initial_processing_claimed_at'] is None
+    assert updated_predecessor['initial_processing_claim_token'] is None
+    assert updated_predecessor['capture_rotation_successor_id'] is None
     successor = _updated(successor_ref.data, transaction, successor_ref)
     assert successor['capture_state'] == 'active'
     assert successor['capture_generation'] == 'generation-a'
     assert successor['capture_owner_token'] == 'owner-a'
     assert _updated(authority_ref.data, transaction, authority_ref)['conversation_id'] == 'capture-b'
+
+    claimed_predecessor = dict(predecessor)
+    claimed_predecessor['initial_processing_claim_token'] = 'claim-a'
+    claimed_transaction = _Transaction()
+    assert (
+        capture_protocol._install_authority_transaction.to_wrap(
+            claimed_transaction,
+            _Document(_authority()),
+            _Document({'id': 'capture-b', 'status': 'in_progress', 'capture_owner_id': 'owner-a'}),
+            'capture-b',
+            'generation-a',
+            'owner-a',
+            now,
+            'capture-a',
+            _Document(claimed_predecessor),
+            False,
+        )
+        is False
+    )
+    assert claimed_transaction.updates == []
+    assert claimed_transaction.sets == []
 
 
 def test_rotation_rejects_stale_generation_without_writes(capture_protocol):

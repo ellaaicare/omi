@@ -316,6 +316,9 @@ class PostProcessingStatus(str, Enum):
     failed = 'failed'
 
 
+CAPTURE_ROTATION_PROCESSING_CLAIM_TOKEN = 'capture_rotation_pending'
+
+
 class ConversationStatus(str, Enum):
     in_progress = 'in_progress'
     processing = 'processing'
