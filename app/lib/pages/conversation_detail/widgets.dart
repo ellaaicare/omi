@@ -855,7 +855,7 @@ class _CorrectSummarySheetState extends State<_CorrectSummarySheet> {
                 textInputAction: TextInputAction.newline,
                 style: const TextStyle(color: EllaColors.textPrimary, fontSize: 16),
                 decoration: InputDecoration(
-                  hintText: 'Example: This was Greg and his son watching NASA news, not a group meeting.',
+                  hintText: 'Example: This was a neighbor and their dog stopping by, not a group meeting.',
                   hintStyle: const TextStyle(color: EllaColors.textTertiary),
                   filled: true,
                   fillColor: EllaColors.bgSecondary,
