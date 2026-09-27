@@ -247,11 +247,14 @@ def _validate_provider_response(
         ) from exc
 
 
-def _event_identity(request: HermesCloudTurnRequest) -> tuple[str, str, str]:
-    digest = hashlib.sha256(
-        f"{request.uid}|{request.channel}|{request.client_interaction_id}".encode("utf-8")
-    ).hexdigest()[:32]
-    source_identity = f"hermes_cloud:{request.channel}:interaction:{digest}"
+def hermes_cloud_event_identity(
+    *,
+    uid: str,
+    channel: str,
+    client_interaction_id: str,
+) -> tuple[str, str, str]:
+    digest = hashlib.sha256(f"{uid}|{channel}|{client_interaction_id}".encode("utf-8")).hexdigest()[:32]
+    source_identity = f"hermes_cloud:{channel}:interaction:{digest}"
     return (
         source_identity,
         f"hermes-cloud:{digest}:user",
@@ -492,8 +495,16 @@ class HermesCloudRuntimeService:
                     request,
                     client_interaction_id=(f"{request.client_interaction_id}:format-retry:" f"{invalid_attempts}"),
                 )
-        user_source_identity, user_event_id, _ = _event_identity(stable_user_request)
-        assistant_source_identity, _, assistant_event_id = _event_identity(request)
+        user_source_identity, user_event_id, _ = hermes_cloud_event_identity(
+            uid=stable_user_request.uid,
+            channel=stable_user_request.channel,
+            client_interaction_id=stable_user_request.client_interaction_id,
+        )
+        assistant_source_identity, _, assistant_event_id = hermes_cloud_event_identity(
+            uid=request.uid,
+            channel=request.channel,
+            client_interaction_id=request.client_interaction_id,
+        )
         request_hash = _request_hash(request)
         try:
             interaction = await self.repository.get_or_create_runtime_interaction(
