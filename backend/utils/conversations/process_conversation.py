@@ -29,6 +29,8 @@ from models.conversation import *
 from models.conversation import (
     ExternalIntegrationCreateConversation,
     Conversation,
+    ConversationDiscardClassifierProvenance,
+    ConversationDiscardReason,
     CreateConversation,
     ConversationSource,
 )
@@ -86,7 +88,12 @@ def _get_structured(
     conversation: Union[Conversation, CreateConversation, ExternalIntegrationCreateConversation],
     force_process: bool = False,
     people: List[Person] = None,
-) -> Tuple[Structured, bool]:
+) -> Tuple[
+    Structured,
+    bool,
+    Optional[ConversationDiscardReason],
+    Optional[ConversationDiscardClassifierProvenance],
+]:
     try:
         tz = notification_db.get_user_time_zone(uid)
 
@@ -119,17 +126,17 @@ def _get_structured(
                     calendar_meeting_context=calendar_context,
                     uid=uid,
                 )
-                return structured, False
+                return structured, False, None, None
 
             if conversation.text_source == ExternalIntegrationConversationSource.message:
                 structured = get_message_structure(
                     conversation.text, conversation.started_at, language_code, tz, conversation.text_source_spec
                 )
-                return structured, False
+                return structured, False, None, None
 
             if conversation.text_source == ExternalIntegrationConversationSource.other:
                 structured = summarize_experience_text(conversation.text, conversation.text_source_spec)
-                return structured, False
+                return structured, False, None, None
 
             # not supported conversation source
             raise HTTPException(status_code=400, detail=f'Invalid conversation source: {conversation.text_source}')
@@ -150,6 +157,8 @@ def _get_structured(
                     existing_action_items=existing_action_items,
                 ),
                 False,
+                None,
+                None,
             )
 
         # Determine whether to discard the conversation based on its content (transcript and/or photos).
@@ -160,7 +169,23 @@ def _get_structured(
         discarded = should_discard_conversation(transcript_text, conversation.photos)
         if discarded:
             print(f"[FLOW:PROCESS] DISCARDED uid={uid}", flush=True)
-            return Structured(emoji=random.choice(['🧠', '🎉'])), True
+            photo_descriptions = ConversationPhoto.photos_as_string(conversation.photos)
+            has_classifiable_content = bool(transcript_text and transcript_text.strip()) or photo_descriptions != 'None'
+            if has_classifiable_content:
+                reason = ConversationDiscardReason.trivial
+                provenance = ConversationDiscardClassifierProvenance(
+                    classifier='short_content',
+                    version='v1',
+                    decision_source='model',
+                )
+            else:
+                reason = ConversationDiscardReason.empty
+                provenance = ConversationDiscardClassifierProvenance(
+                    classifier='empty_content',
+                    version='v1',
+                    decision_source='deterministic',
+                )
+            return Structured(emoji=random.choice(['🧠', '🎉'])), True, reason, provenance
 
         # If not discarded, proceed to generate the structured summary from transcript and/or photos.
         return (
@@ -176,6 +201,8 @@ def _get_structured(
                 existing_conversation_id=conversation.id if hasattr(conversation, 'id') else None,
             ),
             False,
+            None,
+            None,
         )
     except Exception as e:
         print(e)
@@ -187,6 +214,8 @@ def _get_conversation_obj(
     structured: Structured,
     conversation: Union[Conversation, CreateConversation, ExternalIntegrationCreateConversation],
     discarded: bool,
+    discard_reason: Optional[ConversationDiscardReason],
+    discard_classifier_provenance: Optional[ConversationDiscardClassifierProvenance],
 ):
     if isinstance(conversation, CreateConversation):
         conversation_dict = conversation.dict()
@@ -201,6 +230,8 @@ def _get_conversation_obj(
             structured=structured,
             created_at=created_at,
             discarded=discarded,
+            discard_reason=discard_reason,
+            discard_classifier_provenance=discard_classifier_provenance,
             **conversation_dict,
         )
 
@@ -222,12 +253,16 @@ def _get_conversation_obj(
             created_at=created_at,
             structured=structured,
             discarded=discarded,
+            discard_reason=discard_reason,
+            discard_classifier_provenance=discard_classifier_provenance,
         )
         conversation.external_data = create_conversation.dict()
         conversation.app_id = create_conversation.app_id
     else:
         conversation.structured = structured
         conversation.discarded = discarded
+        conversation.discard_reason = discard_reason
+        conversation.discard_classifier_provenance = discard_classifier_provenance
 
     return conversation
 
@@ -586,13 +621,22 @@ def process_conversation(
         people = [Person(**p) for p in people_data]
 
     try:
-        structured, discarded = _get_structured(uid, language_code, conversation, force_process, people=people)
+        structured, discarded, discard_reason, discard_classifier_provenance = _get_structured(
+            uid, language_code, conversation, force_process, people=people
+        )
     except Exception:
         if isinstance(conversation, Conversation):
             mark_conversation_processing_failed(uid, conversation)
         raise
 
-    conversation = _get_conversation_obj(uid, structured, conversation, discarded)
+    conversation = _get_conversation_obj(
+        uid,
+        structured,
+        conversation,
+        discarded,
+        discard_reason,
+        discard_classifier_provenance,
+    )
     clear_conversation_processing_error(conversation)
 
     # AI-based folder assignment

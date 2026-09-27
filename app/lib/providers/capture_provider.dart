@@ -590,7 +590,7 @@ class CaptureProvider extends ChangeNotifier
           // End conversation and process (default)
           Logger.debug("Double tap: processing conversation");
           MixpanelManager().omiDoubleTap(feature: 'process_conversation');
-          forceProcessingCurrentConversation();
+          forceProcessingCurrentConversation(explicitKeep: true);
         }
         return;
       }
@@ -1293,7 +1293,7 @@ class CaptureProvider extends ChangeNotifier
       await _cleanupCurrentState();
     }
 
-    await forceProcessingCurrentConversation();
+    await forceProcessingCurrentConversation(explicitKeep: false);
   }
 
   Future<void> _handleRecordingStartedFromNub() async {
@@ -1506,13 +1506,13 @@ class CaptureProvider extends ChangeNotifier
     }
   }
 
-  Future<void> forceProcessingCurrentConversation() async {
+  Future<void> forceProcessingCurrentConversation({bool explicitKeep = true}) async {
     _resetStateVariables();
     conversationProvider!.addProcessingConversation(
       ServerConversation(
           id: '0', createdAt: DateTime.now(), structured: Structured('', ''), status: ConversationStatus.processing),
     );
-    processInProgressConversation().then((result) {
+    processInProgressConversation(explicitKeep: explicitKeep).then((result) {
       if (result == null || result.conversation == null) {
         conversationProvider!.removeProcessingConversation('0');
         return;

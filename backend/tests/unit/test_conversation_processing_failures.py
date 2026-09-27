@@ -9,7 +9,13 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from models.conversation import Conversation, ConversationStatus, Structured
+from models.conversation import (
+    Conversation,
+    ConversationDiscardClassifierProvenance,
+    ConversationDiscardReason,
+    ConversationStatus,
+    Structured,
+)
 from models.transcript_segment import TranscriptSegment
 
 os.environ.setdefault("FIRESTORE_EMULATOR_HOST", "localhost:9999")
@@ -194,6 +200,22 @@ def _long_conversation() -> Conversation:
     )
 
 
+def _short_conversation(
+    text: str = "Run zero zero five. The heron carried seven blue kites over the bridge.",
+) -> Conversation:
+    conversation = _long_conversation()
+    conversation.id = "short-transcript"
+    conversation.transcript_segments = (
+        [TranscriptSegment(text=text, speaker="SPEAKER_00", is_user=True, start=0, end=12)] if text else []
+    )
+    return conversation
+
+
+def _prepare_structuring_dependencies(monkeypatch):
+    monkeypatch.setattr(conversation_processor.notification_db, "get_user_time_zone", lambda uid: "UTC")
+    monkeypatch.setattr(conversation_processor.action_items_db, "get_action_items", lambda **kwargs: [])
+
+
 def test_processing_failure_helper_preserves_long_transcript_and_retryable_state():
     conversation = _long_conversation()
 
@@ -275,7 +297,16 @@ def test_process_conversation_intentional_discard_stays_completed_discarded(monk
     monkeypatch.setattr(
         conversation_processor,
         "_get_structured",
-        lambda *args, **kwargs: (Structured(), True),
+        lambda *args, **kwargs: (
+            Structured(),
+            True,
+            ConversationDiscardReason.trivial,
+            ConversationDiscardClassifierProvenance(
+                classifier="short_content",
+                version="v1",
+                decision_source="model",
+            ),
+        ),
     )
     monkeypatch.setattr(
         conversation_processor.conversations_db,
@@ -289,8 +320,70 @@ def test_process_conversation_intentional_discard_stays_completed_discarded(monk
     assert result.discarded is True
     assert result.status == ConversationStatus.completed
     assert writes[-1][1]["discarded"] is True
+    assert writes[-1][1]["discard_reason"] == ConversationDiscardReason.trivial
+    assert writes[-1][1]["discard_classifier_provenance"] == {
+        "classifier": "short_content",
+        "version": "v1",
+        "decision_source": "model",
+    }
     assert writes[-1][1]["status"] == ConversationStatus.completed
     assert writes[-1][1].get("processing_error") is None
+
+
+def test_explicit_multi_utterance_keep_bypasses_trivial_classifier(monkeypatch):
+    conversation = _short_conversation(
+        "Run zero zero five. The heron carried seven blue kites over the bridge. "
+        "This user-finished capture must be kept."
+    )
+    _prepare_structuring_dependencies(monkeypatch)
+    monkeypatch.setattr(
+        conversation_processor,
+        "should_discard_conversation",
+        lambda *args, **kwargs: pytest.fail("explicit keep must bypass the trivial-content classifier"),
+    )
+    monkeypatch.setattr(
+        conversation_processor,
+        "get_reprocess_transcript_structure",
+        lambda *args, **kwargs: Structured(title="Kept", overview="Explicit user-finished capture."),
+    )
+
+    structured, discarded, reason, provenance = conversation_processor._get_structured(
+        "uid-1", "en", conversation, force_process=True
+    )
+
+    assert structured.title == "Kept"
+    assert discarded is False
+    assert reason is None
+    assert provenance is None
+
+
+@pytest.mark.parametrize(
+    ("transcript", "expected_reason", "expected_classifier", "expected_source"),
+    [
+        ("", ConversationDiscardReason.empty, "empty_content", "deterministic"),
+        ("Okay, thanks.", ConversationDiscardReason.trivial, "short_content", "model"),
+    ],
+)
+def test_ambient_discard_records_content_free_reason_and_classifier_provenance(
+    monkeypatch,
+    transcript,
+    expected_reason,
+    expected_classifier,
+    expected_source,
+):
+    conversation = _short_conversation(transcript)
+    _prepare_structuring_dependencies(monkeypatch)
+    monkeypatch.setattr(conversation_processor, "should_discard_conversation", lambda *args, **kwargs: True)
+
+    _, discarded, reason, provenance = conversation_processor._get_structured("uid-1", "en", conversation)
+
+    assert discarded is True
+    assert reason == expected_reason
+    assert provenance.dict() == {
+        "classifier": expected_classifier,
+        "version": "v1",
+        "decision_source": expected_source,
+    }
 
 
 class _FakeSnapshot:
@@ -388,7 +481,65 @@ def _conversation_api_client():
     app = FastAPI()
     app.include_router(conversations_router.router)
     app.dependency_overrides[conversations_router.auth.get_current_user_uid] = lambda: "authenticated-user"
+    app.dependency_overrides[conversations_router.require_current_ai_consent] = lambda: "authenticated-user"
     return app, TestClient(app)
+
+
+def test_process_now_contract_defaults_to_explicit_keep_and_allows_automatic_filtering(monkeypatch):
+    processed = []
+    removed = []
+    durable_updates = []
+
+    monkeypatch.setattr(
+        conversations_router,
+        "retrieve_in_progress_conversation",
+        lambda uid: _short_conversation().dict(),
+    )
+    monkeypatch.setattr(
+        conversations_router.redis_db,
+        "remove_in_progress_conversation_id",
+        lambda uid: removed.append(uid),
+    )
+    monkeypatch.setattr(conversations_router.redis_db, "get_cached_user_geolocation", lambda uid: None)
+    monkeypatch.setattr(
+        conversations_router.conversations_db,
+        "update_conversation",
+        lambda uid, conversation_id, update: durable_updates.append((uid, conversation_id, update)),
+    )
+
+    def fake_process(uid, language, conversation, force_process=False):
+        processed.append((uid, conversation, force_process))
+        return conversation
+
+    monkeypatch.setattr(conversations_router, "process_conversation", fake_process)
+    monkeypatch.setattr(conversations_router, "trigger_external_integrations", lambda uid, conversation: [])
+    app, client = _conversation_api_client()
+    try:
+        keep_response = client.post("/v1/conversations", json={})
+        automatic_response = client.post("/v1/conversations", json={"explicit_keep": False})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert keep_response.status_code == 200
+    assert automatic_response.status_code == 200
+    assert removed == ["authenticated-user", "authenticated-user"]
+    assert len(durable_updates) == 2
+    assert durable_updates[0][0] == "authenticated-user"
+    assert durable_updates[0][2]["status"] == ConversationStatus.processing
+    assert durable_updates[0][2]["explicit_keep"] is True
+    assert durable_updates[0][2]["explicit_keep_requested_at"] is not None
+    assert durable_updates[1][2] == {
+        "status": ConversationStatus.processing,
+        "explicit_keep": False,
+        "explicit_keep_requested_at": None,
+    }
+    assert processed[0][0] == "authenticated-user"
+    assert processed[0][2] is True
+    assert processed[0][1].explicit_keep is True
+    assert processed[0][1].explicit_keep_requested_at is not None
+    assert processed[1][2] is False
+    assert processed[1][1].explicit_keep is False
+    assert processed[1][1].explicit_keep_requested_at is None
 
 
 def test_failed_conversations_api_is_uid_scoped_and_preserves_long_transcript(monkeypatch):
@@ -415,6 +566,48 @@ def test_failed_conversations_api_is_uid_scoped_and_preserves_long_transcript(mo
     assert payload["processing_error"] == CONVERSATION_SUMMARY_FAILED
     assert payload["processing_error_at"] is not None
     assert len(payload["transcript_segments"][0]["text"]) > 25_000
+
+
+def test_home_day_query_excludes_discarded_but_diagnostics_return_reason(monkeypatch):
+    conversation = _short_conversation().dict()
+    conversation.update(
+        {
+            "discarded": True,
+            "discard_reason": ConversationDiscardReason.trivial,
+            "discard_classifier_provenance": {
+                "classifier": "short_content",
+                "version": "v1",
+                "decision_source": "model",
+            },
+        }
+    )
+    calls = []
+
+    def fake_get_conversations(uid, limit, offset, **kwargs):
+        calls.append((uid, kwargs))
+        return [conversation] if kwargs["include_discarded"] else []
+
+    monkeypatch.setattr(conversations_router.conversations_db, "get_conversations", fake_get_conversations)
+    app, client = _conversation_api_client()
+    try:
+        home = client.get(
+            "/v1/conversations?include_discarded=false&start_date=2026-09-26T07:00:00Z&end_date=2026-09-27T06:59:59Z"
+        )
+        diagnostics = client.get(
+            "/v1/conversations?include_discarded=true&start_date=2026-09-26T07:00:00Z&end_date=2026-09-27T06:59:59Z"
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert home.status_code == 200
+    assert home.json() == []
+    assert diagnostics.status_code == 200
+    assert diagnostics.json()[0]["discard_reason"] == "discarded_trivial"
+    assert diagnostics.json()[0]["discard_classifier_provenance"]["classifier"] == "short_content"
+    assert all(call[0] == "authenticated-user" for call in calls)
+    assert calls[0][1]["include_discarded"] is False
+    assert calls[0][1]["start_date"] == datetime(2026, 9, 26, 7, tzinfo=timezone.utc)
+    assert calls[0][1]["end_date"] == datetime(2026, 9, 27, 6, 59, 59, tzinfo=timezone.utc)
 
 
 def test_conversation_delete_offloads_blocking_stores_from_event_loop(monkeypatch):
