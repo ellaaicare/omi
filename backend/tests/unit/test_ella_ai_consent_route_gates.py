@@ -483,7 +483,7 @@ def test_live_scanner_queue_uses_server_owned_emergency_predicate():
     )
 
     assert "emergency_predicate=_scanner_dispatch_item_is_credible_emergency" in stream_source
-    assert "credible_emergency_reason" in predicate_source
+    assert "credible_emergency_reason_for_segments" in predicate_source
     assert 'item.get("segments")' in predicate_source
 
 

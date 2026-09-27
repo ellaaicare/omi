@@ -1025,7 +1025,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 21
-          test "$collected" -eq 622
+          test "$collected" -eq 623
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
@@ -1364,7 +1364,7 @@ jobs:
           pytest tests/unit/test_memory_reinterpretation_outbox.py -v
           test "$(pytest --collect-only -q tests/unit/test_scanner_keyterms.py | grep -c '::')" -eq 10
           pytest tests/unit/test_scanner_keyterms.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_scanner_batching.py | grep -c '::')" -eq 39
+          test "$(pytest --collect-only -q tests/unit/test_ella_scanner_batching.py | grep -c '::')" -eq 40
           pytest tests/unit/test_ella_scanner_batching.py -v
 
       - name: Run real Firestore summary CAS contention gate

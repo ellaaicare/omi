@@ -358,6 +358,38 @@ def test_credible_emergency_bypass_rejects_reported_quoted_and_historical_speech
     assert scanner.credible_emergency_reason(text) is None
 
 
+def test_credible_emergency_bypass_rejects_negative_or_absent_subjects():
+    for text in (
+        "Nobody is having a seizure",
+        "No one is having a seizure",
+        "Nobody here is bleeding out",
+        "No person is having chest pain",
+        "None of them are having a seizure",
+        "Not anybody here is bleeding out",
+        "Neither of them is having chest pain",
+    ):
+        assert scanner.credible_emergency_reason(text) is None
+
+    assert (
+        scanner.credible_emergency_reason_for_segments(
+            [
+                {"text": "I cannot", "speaker": "SPEAKER_1"},
+                {"text": "breathe", "speaker": "SPEAKER_1"},
+            ]
+        )
+        == "breathing"
+    )
+    assert (
+        scanner.credible_emergency_reason_for_segments(
+            [
+                {"text": "I cannot", "speaker": "SPEAKER_1"},
+                {"text": "breathe", "speaker": "SPEAKER_2"},
+            ]
+        )
+        is None
+    )
+
+
 def test_scanner_off_mode_does_not_join_emergency_phrase_across_segments(monkeypatch):
     posts = []
     _disable_trace(monkeypatch)

@@ -97,7 +97,7 @@ from utils.capture_buffer import (
 from utils.ella.memory_artwork_storage import acquire_memory_artwork_publication_lock
 from utils.ella.scanner_keyterms import cache_status as scanner_keyterm_cache_status
 from utils.ella.scanner_keyterms import combine_deepgram_keyterms, get_scanner_keyterms
-from utils.ella.scanner import credible_emergency_reason
+from utils.ella.scanner import credible_emergency_reason_for_segments
 from utils.notifications import send_credit_limit_notification, send_silent_user_notification
 from utils.other import endpoints as auth
 from utils.other.storage import get_profile_audio_if_exists, get_user_has_speech_profile
@@ -186,9 +186,9 @@ def _scanner_dispatch_item_is_credible_emergency(item: dict) -> bool:
     segments = item.get("segments")
     if not isinstance(segments, list):
         return False
-    return any(
-        isinstance(segment, dict) and credible_emergency_reason(str(segment.get("text") or "")) is not None
-        for segment in segments
+    return (
+        credible_emergency_reason_for_segments([segment for segment in segments if isinstance(segment, dict)])
+        is not None
     )
 
 

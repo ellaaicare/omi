@@ -181,6 +181,11 @@ _CREDIBLE_HELP_PATTERN = re.compile(
     r"^\s*(?:please\s+)?(?:help\s+me|i\s+need\s+help)(?:\s+(?:now|please|right\s+now))?[.!?]*\s*$",
     re.IGNORECASE,
 )
+_NEGATED_CURRENT_SUBJECT_PATTERN = re.compile(
+    r"^\s*(?:no\s+(?:one|body|person)|nobody|none(?:\s+of\s+(?:them|us|you))?|"
+    r"not\s+(?:anyone|anybody)|neither(?:\s+of\s+(?:them|us|you))?)\b",
+    re.IGNORECASE,
+)
 _DURATION_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)(?P<unit>ms|s|m|h)")
 _SCANNER_BATCHES: dict[tuple[str, str, str], dict] = {}
 _SCANNER_RATE_LIMIT_UNTIL = {
@@ -316,6 +321,8 @@ def contains_emergency_phrase(text: str) -> bool:
 def credible_emergency_reason(text: str) -> Optional[str]:
     """Return a conservative reason suitable for dispatch while Guardian is off."""
     candidate = text or ""
+    if _NEGATED_CURRENT_SUBJECT_PATTERN.search(candidate):
+        return None
     for reason, pattern in _CREDIBLE_EMERGENCY_PATTERNS:
         if pattern.search(candidate):
             return reason
@@ -324,13 +331,31 @@ def credible_emergency_reason(text: str) -> Optional[str]:
     return None
 
 
-def _credible_emergency_reason_for_segments(segments: List[dict]) -> Optional[str]:
-    """Match one coherent segment; never join phrases across speakers."""
-    for segment in segments:
-        reason = credible_emergency_reason(str(segment.get("text") or ""))
-        if reason:
-            return reason
-    return None
+def credible_emergency_reason_for_segments(segments: List[dict]) -> Optional[str]:
+    """Match contiguous speech from one speaker without crossing speaker boundaries."""
+    active_speaker: Optional[str] = None
+    active_text: list[str] = []
+
+    def match_active_text() -> Optional[str]:
+        if not active_text:
+            return None
+        return credible_emergency_reason(" ".join(active_text))
+
+    for index, segment in enumerate(segments):
+        text = str(segment.get("text") or "").strip()
+        if not text:
+            continue
+        raw_speaker = segment.get("speaker") or segment.get("speaker_id") or segment.get("person_id")
+        speaker = str(raw_speaker).strip() if raw_speaker else f"unknown:{index}"
+        if active_speaker is not None and speaker != active_speaker:
+            reason = match_active_text()
+            if reason:
+                return reason
+            active_text = []
+        active_speaker = speaker
+        active_text.append(text)
+
+    return match_active_text()
 
 
 def scanner_immediate_reason(text: str, *, wake_prefix_recent: Optional[bool] = None) -> Optional[str]:
@@ -1022,7 +1047,7 @@ def send_to_scanner(
     authoritative_mode = _normalize_guardian_mode(guardian_mode)
     guardian_mode_enabled = authoritative_mode in _GUARDIAN_ACTIVE_MODES
     emergency_only_dispatch = (
-        not guardian_mode_enabled and _credible_emergency_reason_for_segments(scanner_segments) is not None
+        not guardian_mode_enabled and credible_emergency_reason_for_segments(scanner_segments) is not None
     )
     if not guardian_mode_enabled and not emergency_only_dispatch:
         _log_trace_event(
