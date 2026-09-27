@@ -33,6 +33,12 @@ typedef EllaChatHistoryTransport = Future<http.Response?> Function({
   required ExactAccountAuthorityVerifier exactAuthority,
 });
 
+typedef EllaChatTurnLookupTransport = Future<http.Response?> Function({
+  required String url,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+});
+
 typedef EllaVoiceTurnTransport = Future<http.Response?> Function({
   required String url,
   required String body,
@@ -69,6 +75,23 @@ Future<http.Response?> _defaultHistoryTransport({
       method: 'GET',
       body: '',
       timeout: const Duration(seconds: 10),
+      requireAuthCheck: true,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+
+Future<http.Response?> _defaultTurnLookupTransport({
+  required String url,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+}) =>
+    makeApiCall(
+      url: url,
+      headers: _ellaDebugHeaders(routeSource: 'chat-turn-lookup'),
+      method: 'GET',
+      body: '',
+      timeout: const Duration(seconds: 10),
+      retries: 0,
       requireAuthCheck: true,
       expectedAuthenticatedUid: expectedAuthenticatedUid,
       exactAuthority: exactAuthority,
@@ -207,6 +230,56 @@ Future<EllaServiceResult<List<ServerMessage>>> persistEllaV2VTurn({
     return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.accountChanged));
   } catch (error) {
     Logger.debug('[EllaChat] V2V canonical response rejected: ${error.runtimeType}');
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
+  }
+}
+
+/// Check whether the authenticated owner already has this exact canonical user turn.
+Future<EllaServiceResult<bool>> lookupEllaChatTurn({
+  required String clientMessageId,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+  EllaChatTurnLookupTransport? transport,
+}) async {
+  final turnId = clientMessageId.trim();
+  if (turnId.isEmpty || turnId.length > 128) {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
+  }
+  if (!exactAuthority.isExactCurrent() || exactAuthority.uid != expectedAuthenticatedUid) {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.accountChanged));
+  }
+  if (SharedPreferencesUtil().demoMode) return const EllaServiceResult.success(false);
+
+  try {
+    final url = '${Env.apiBaseUrl}v1/ella/chat/turns/${Uri.encodeComponent(turnId)}';
+    final response = await (transport ?? _defaultTurnLookupTransport)(
+      url: url,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+    if (!exactAuthority.isExactCurrent() || exactAuthority.uid != expectedAuthenticatedUid) {
+      return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.accountChanged));
+    }
+    if (response == null || response.statusCode != 200) {
+      Logger.debug('[EllaChat] Exact turn lookup failed: ${response?.statusCode}');
+      return EllaServiceResult.failure(
+        response == null
+            ? const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true)
+            : ClientApiFailure.fromHttp(statusCode: response.statusCode, body: response.body),
+      );
+    }
+
+    final payload = jsonDecode(response.body);
+    if (payload is! Map<String, dynamic> || payload['exists'] is! bool) {
+      return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
+    }
+    return EllaServiceResult.success(payload['exists'] as bool);
+  } on ClientApiFailure catch (failure) {
+    return EllaServiceResult.failure(failure);
+  } on ExactAccountAuthorityChangedException {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.accountChanged));
+  } catch (error) {
+    Logger.debug('[EllaChat] Exact turn lookup response rejected: ${error.runtimeType}');
     return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
   }
 }

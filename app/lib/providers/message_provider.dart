@@ -51,6 +51,11 @@ typedef EllaChatHistoryFetcher = Future<EllaServiceResult<EllaChatHistoryPage>> 
   required String expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier exactAuthority,
 });
+typedef EllaChatTurnLookup = Future<EllaServiceResult<bool>> Function({
+  required String clientMessageId,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+});
 typedef VoiceChatStreamSender = Stream<ServerMessageChunk> Function(
   List<File> files, {
   String? expectedAuthenticatedUid,
@@ -101,6 +106,7 @@ class MessageProvider extends ChangeNotifier {
     ActiveAccountAuthorityProvider? activeAuthority,
     EllaChatStreamSender? ellaChatStreamSender,
     EllaChatHistoryFetcher? ellaChatHistoryFetcher,
+    EllaChatTurnLookup? ellaChatTurnLookup,
     VoiceChatStreamSender? voiceChatStreamSender,
     VoiceTempFileSaver? voiceTempFileSaver,
     AttachmentFilePicker? filePicker,
@@ -113,6 +119,7 @@ class MessageProvider extends ChangeNotifier {
         _activeAuthority = activeAuthority ?? WalOwnerAuthority.operationEntry,
         _ellaChatStreamSender = ellaChatStreamSender ?? sendEllaChatStream,
         _ellaChatHistoryFetcher = ellaChatHistoryFetcher ?? _fetchEllaChatHistory,
+        _ellaChatTurnLookup = ellaChatTurnLookup ?? _lookupEllaChatTurn,
         _voiceChatStreamSender = voiceChatStreamSender ?? sendVoiceMessageStreamServer,
         _voiceTempFileSaver = voiceTempFileSaver ?? FileUtils.saveAudioBytesToTempFile,
         _filePicker = filePicker,
@@ -134,6 +141,7 @@ class MessageProvider extends ChangeNotifier {
   final ActiveAccountAuthorityProvider _activeAuthority;
   final EllaChatStreamSender _ellaChatStreamSender;
   final EllaChatHistoryFetcher _ellaChatHistoryFetcher;
+  final EllaChatTurnLookup _ellaChatTurnLookup;
   final VoiceChatStreamSender _voiceChatStreamSender;
   final VoiceTempFileSaver _voiceTempFileSaver;
   final AttachmentFilePicker? _filePicker;
@@ -158,6 +166,17 @@ class MessageProvider extends ChangeNotifier {
       fetchEllaChatHistoryPage(
         limit: limit,
         before: before,
+        expectedAuthenticatedUid: expectedAuthenticatedUid,
+        exactAuthority: exactAuthority,
+      );
+
+  static Future<EllaServiceResult<bool>> _lookupEllaChatTurn({
+    required String clientMessageId,
+    required String expectedAuthenticatedUid,
+    required ExactAccountAuthorityVerifier exactAuthority,
+  }) =>
+      lookupEllaChatTurn(
+        clientMessageId: clientMessageId,
         expectedAuthenticatedUid: expectedAuthenticatedUid,
         exactAuthority: exactAuthority,
       );
@@ -1281,7 +1300,7 @@ class MessageProvider extends ChangeNotifier {
       (candidate) => candidate.id == messageId && _isFailedOutgoingMessage(candidate),
     );
     if (message == null || message.text.trim().isEmpty || sendingMessage) return;
-    if (!await _reconcileEllaHistoryBeforeRetry(message)) return;
+    if (!await _reconcileEllaTurnBeforeRetry(message)) return;
     message = messages.firstWhereOrNull(
       (candidate) => candidate.id == messageId && _isFailedOutgoingMessage(candidate),
     );
@@ -1289,7 +1308,7 @@ class MessageProvider extends ChangeNotifier {
     await sendMessageStreamToServer(message.text, localMessageId: message.id);
   }
 
-  Future<bool> _reconcileEllaHistoryBeforeRetry(ServerMessage failedMessage) async {
+  Future<bool> _reconcileEllaTurnBeforeRetry(ServerMessage failedMessage) async {
     final lease = _beginAccountCommit();
     if (lease == null) return false;
     final generation = _operationGeneration;
@@ -1300,57 +1319,25 @@ class MessageProvider extends ChangeNotifier {
         return false;
       }
 
-      DateTime? before;
-      while (true) {
-        final historyResult = await _ellaChatHistoryFetcher(
-          limit: 50,
-          before: before,
-          expectedAuthenticatedUid: lease.uid,
-          exactAuthority: lease,
+      final lookupResult = await _ellaChatTurnLookup(
+        clientMessageId: turnId,
+        expectedAuthenticatedUid: lease.uid,
+        exactAuthority: lease,
+      );
+      if (!_canCommit(lease, generation)) return false;
+      if (lookupResult.isFailure || lookupResult.value == null) {
+        _setStreamFailure(
+          lookupResult.failure ?? const ClientApiFailure(ClientApiFailureKind.invalidResponse),
         );
-        if (!_canCommit(lease, generation)) return false;
-        if (historyResult.isFailure || historyResult.value == null) {
-          _setStreamFailure(
-            historyResult.failure ?? const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true),
-          );
-          return false;
-        }
-
-        final page = historyResult.value!;
-        final canonicalTurn =
-            page.messages.where((message) => message.canonicalTurnId?.trim() == turnId).toList(growable: false);
-        if (canonicalTurn.isNotEmpty) {
-          messages.removeWhere(
-            (message) => _isFailedOutgoingMessage(message) && message.canonicalTurnId?.trim() == turnId,
-          );
-          final existingIds = messages.map((message) => message.id).toSet();
-          messages.addAll(canonicalTurn.where((message) => existingIds.add(message.id)));
-          messages.sort(compareServerMessagesChronologically);
-          _lastStreamFailure = null;
-          SharedPreferencesUtil().cachedMessages = messages;
-          setHasCachedMessages(messages.isNotEmpty);
-          notifyListeners();
-          return true;
-        }
-
-        if (!page.hasMore) {
-          _lastStreamFailure = null;
-          return true;
-        }
-        if (page.messages.isEmpty) {
-          _setStreamFailure(const ClientApiFailure(ClientApiFailureKind.invalidResponse));
-          return false;
-        }
-
-        final nextBefore = page.messages
-            .map((message) => message.createdAt.toUtc())
-            .reduce((oldest, candidate) => candidate.isBefore(oldest) ? candidate : oldest);
-        if (before != null && !nextBefore.isBefore(before)) {
-          _setStreamFailure(const ClientApiFailure(ClientApiFailureKind.invalidResponse));
-          return false;
-        }
-        before = nextBefore;
+        return false;
       }
+
+      _lastStreamFailure = null;
+      if (lookupResult.value!) {
+        _markOutgoingDelivered(failedMessage);
+        return false;
+      }
+      return true;
     } finally {
       lease.close();
     }

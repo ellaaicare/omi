@@ -114,6 +114,57 @@ void main() {
     );
   });
 
+  test('turn lookup uses the owner-bound exact route and returns canonical existence', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final result = await lookupEllaChatTurn(
+      clientMessageId: 'stable-client-turn-a',
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: authority,
+      transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async {
+        final uri = Uri.parse(url);
+        expect(uri.path, '/v1/ella/chat/turns/stable-client-turn-a');
+        expect(uri.queryParameters, isEmpty);
+        expect(expectedAuthenticatedUid, 'uid-a');
+        expect(exactAuthority, same(authority));
+        return http.Response('{"exists":true}', 200);
+      },
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(result.value, isTrue);
+  });
+
+  test('turn lookup preserves retryable storage failure instead of treating it as absence', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final result = await lookupEllaChatTurn(
+      clientMessageId: 'stable-client-turn-a',
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: authority,
+      transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async => http.Response(
+        '{"detail":{"code":"canonical_turn_lookup_unavailable","retryable":true}}',
+        503,
+      ),
+    );
+
+    expect(result.isFailure, isTrue);
+    expect(result.failure?.kind, ClientApiFailureKind.unavailable);
+    expect(result.failure?.retryable, isTrue);
+  });
+
+  test('turn lookup rejects malformed success instead of treating it as absence', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final result = await lookupEllaChatTurn(
+      clientMessageId: 'stable-client-turn-a',
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: authority,
+      transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async =>
+          http.Response('{"exists":"false"}', 200),
+    );
+
+    expect(result.isFailure, isTrue);
+    expect(result.failure?.kind, ClientApiFailureKind.invalidResponse);
+  });
+
   test('history uses the first-party owner-bound route and preserves failed state', () async {
     const authority = _CurrentAuthority('uid-a');
     final result = await fetchEllaChatHistory(
