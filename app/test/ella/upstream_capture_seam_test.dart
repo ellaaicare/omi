@@ -14,6 +14,86 @@ void main() {
     expect(adapter.emitted, isEmpty);
   });
 
+  test('capture refuses to start with an empty uid', () {
+    final adapter = EllaUpstreamCaptureAdapter(mayEmitAudio: () => true, enabled: true);
+    // No replaceSession() call: uid stays '' — no bound account session yet,
+    // on both the phone-mic and necklace start paths.
+    expect(adapter.uid, isEmpty);
+    adapter.bleConnected = true;
+    expect(adapter.startNecklace(), isFalse);
+    expect(adapter.startPhoneMic(), isFalse);
+    expect(adapter.liveSource, UpstreamLiveSource.none);
+    expect(
+      adapter.onDeviceAudio(generation: adapter.generation, ownerUid: '', bytes: const [1]),
+      isFalse,
+    );
+    expect(adapter.finalizeBatch(sessionId: 'sess-1', source: 'phone'), isFalse);
+    expect(adapter.emitted, isEmpty);
+    expect(adapter.memories, isEmpty);
+  });
+
+  test('phone-mic emission is gated per frame, not just at start', () {
+    var allowed = true;
+    final adapter = EllaUpstreamCaptureAdapter(mayEmitAudio: () => allowed, enabled: true);
+    adapter.replaceSession('account-a');
+    expect(adapter.startPhoneMic(), isTrue);
+    final generation = adapter.generation;
+
+    expect(
+      adapter.onPhoneAudio(generation: generation, ownerUid: 'account-a', bytes: const [1]),
+      isTrue,
+    );
+
+    // Consent withdrawn mid-stream: the next frame is dropped even though
+    // startPhoneMic() already succeeded and BLE/mic stay running.
+    allowed = false;
+    expect(
+      adapter.onPhoneAudio(generation: generation, ownerUid: 'account-a', bytes: const [2]),
+      isFalse,
+    );
+    expect(adapter.emitted, hasLength(1));
+
+    // A frame is never admitted through onPhoneAudio while the necklace (not
+    // the phone) is the live source, even with consent restored and a
+    // matching generation/uid.
+    allowed = true;
+    adapter.stopPhoneMic();
+    adapter.bleConnected = true;
+    expect(adapter.startNecklace(), isTrue);
+    expect(
+      adapter.onPhoneAudio(generation: generation, ownerUid: 'account-a', bytes: const [3]),
+      isFalse,
+    );
+  });
+
+  test('capture can start again after finish conversation / process now', () {
+    final adapter = EllaUpstreamCaptureAdapter(mayEmitAudio: () => true, enabled: true);
+    adapter.replaceSession('account-a');
+    expect(adapter.startPhoneMic(), isTrue);
+    final generation = adapter.generation;
+    expect(
+      adapter.onPhoneAudio(generation: generation, ownerUid: 'account-a', bytes: const [1]),
+      isTrue,
+    );
+
+    // "Finish conversation / process now": finalize the batch and stop.
+    expect(adapter.finalizeBatch(sessionId: 'sess-1', source: 'phone'), isTrue);
+    adapter.stopPhoneMic();
+    expect(adapter.liveSource, UpstreamLiveSource.none);
+
+    // A known regression in the legacy Ella path leaves capture unable to
+    // restart here. The adapter carries no such latch: a new session starts
+    // immediately.
+    expect(adapter.startPhoneMic(), isTrue);
+    final secondGeneration = adapter.generation;
+    expect(
+      adapter.onPhoneAudio(generation: secondGeneration, ownerUid: 'account-a', bytes: const [2]),
+      isTrue,
+    );
+    expect(adapter.finalizeBatch(sessionId: 'sess-2', source: 'phone'), isTrue);
+    expect(adapter.memoriesFor('account-a'), hasLength(2));
+  });
+
   test('account A BLE callback after sign-in to B is ignored', () {
     final adapter = EllaUpstreamCaptureAdapter(mayEmitAudio: () => true, enabled: true);
     adapter.replaceSession('account-a');
