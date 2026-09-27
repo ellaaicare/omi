@@ -1195,15 +1195,14 @@ def send_to_scanner(
         formatted_recent_segments,
         scanner_segments,
     )
-    if emergency_context_segments:
-        formatted_recent_segments = emergency_context_segments
-        scanner_segments = emergency_context_segments + scanner_segments
 
     authoritative_mode = _normalize_guardian_mode(guardian_mode)
     guardian_mode_enabled = authoritative_mode in _GUARDIAN_ACTIVE_MODES
     emergency_only_dispatch = not guardian_mode_enabled and emergency_reason is not None
-    if emergency_only_dispatch and not emergency_context_segments:
-        formatted_recent_segments = []
+    if emergency_only_dispatch:
+        formatted_recent_segments = emergency_context_segments
+        if emergency_context_segments:
+            scanner_segments = emergency_context_segments + scanner_segments
     if not guardian_mode_enabled and not emergency_only_dispatch:
         _log_trace_event(
             trace_id=trace_id,

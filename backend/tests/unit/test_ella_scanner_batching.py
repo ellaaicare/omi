@@ -178,6 +178,31 @@ def test_guardian_off_direct_emergency_omits_unmatched_retained_history(monkeypa
     assert posts[0]["recent_segments"] == []
 
 
+def test_guardian_enabled_context_does_not_rewrite_active_segments(monkeypatch):
+    posts = []
+
+    def fake_post(_url, json, timeout):
+        posts.append(json)
+        return _FakeResponse(200)
+
+    _disable_trace(monkeypatch)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner.requests, "post", fake_post)
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-active-boundary",
+        [{"text": "breathe", "speaker": "SPEAKER_1"}],
+        recent_segments=[{"text": "I cannot", "speaker": "SPEAKER_1"}],
+        guardian_mode="active_support",
+    )
+
+    assert status == 200
+    assert len(posts) == 1
+    assert [segment["text"] for segment in posts[0]["segments"]] == ["breathe"]
+    assert [segment["text"] for segment in posts[0]["recent_segments"]] == ["I cannot"]
+
+
 def test_ambient_chunks_batch_until_word_threshold(monkeypatch):
     posts = []
 

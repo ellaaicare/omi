@@ -434,7 +434,9 @@ def test_scanner_dispatch_queue_is_bounded_ordered_and_drains_on_close():
             "Callable": Callable,
             "SCANNER_DISPATCH_QUEUE_MAXSIZE": 32,
             "SCANNER_DISPATCH_DRAIN_TIMEOUT_SECONDS": 1.0,
+            "SCANNER_EMERGENCY_CONTEXT_MAX_AGE_SECONDS": 10.0,
             "_SCANNER_DISPATCH_STOP": object(),
+            "time": __import__("time"),
         },
     )
 
@@ -549,6 +551,64 @@ def test_scanner_dispatch_queue_is_bounded_ordered_and_drains_on_close():
         assert queue.enqueue({"uid": "uid-2", "session": "session-2", "sequence": 5}) is False
 
     asyncio.run(scenario())
+
+
+def test_scanner_dispatch_queue_expires_retained_emergency_context():
+    from utils.ella.scanner import credible_emergency_reason_with_context
+
+    queue_class = _class_from_source(
+        BACKEND / "routers" / "transcribe.py",
+        "ScannerDispatchQueue",
+        {
+            "asyncio": asyncio,
+            "Awaitable": Awaitable,
+            "Callable": Callable,
+            "SCANNER_DISPATCH_QUEUE_MAXSIZE": 32,
+            "SCANNER_DISPATCH_DRAIN_TIMEOUT_SECONDS": 1.0,
+            "SCANNER_EMERGENCY_CONTEXT_MAX_AGE_SECONDS": 10.0,
+            "_SCANNER_DISPATCH_STOP": object(),
+            "time": __import__("time"),
+        },
+    )
+    now = [100.0]
+
+    async def dispatch(_item):
+        return None
+
+    def emergency_predicate(item):
+        reason, _used_context = credible_emergency_reason_with_context(
+            item.get("recent_segments") or [],
+            item.get("segments") or [],
+        )
+        return reason is not None
+
+    queue = queue_class(
+        dispatch,
+        maxsize=4,
+        emergency_predicate=emergency_predicate,
+        context_max_age_seconds=10.0,
+        clock=lambda: now[0],
+    )
+    assert queue.enqueue(
+        {
+            "conversation_id": "conversation-1",
+            "segments": [{"text": "She said", "speaker": "SPEAKER_1"}],
+        }
+    )
+    now[0] += 10.1
+    assert queue.enqueue(
+        {
+            "conversation_id": "conversation-1",
+            "segments": [{"text": "I cannot breathe", "speaker": "SPEAKER_1"}],
+        }
+    )
+
+    queued = [queue._queue.get_nowait(), queue._queue.get_nowait()]
+    by_text = {entry[2]["segments"][0]["text"]: entry for entry in queued}
+    assert by_text["She said"][2]["recent_segments"] == []
+    direct_emergency = by_text["I cannot breathe"]
+    assert direct_emergency[2]["recent_segments"] == []
+    assert direct_emergency[3] is True
 
 
 def test_live_scanner_queue_uses_server_owned_emergency_predicate():

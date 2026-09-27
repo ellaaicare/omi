@@ -179,6 +179,10 @@ SCANNER_DISPATCH_DRAIN_TIMEOUT_SECONDS = max(
     0.1,
     float(os.getenv("ELLA_SCANNER_DISPATCH_DRAIN_TIMEOUT_SECONDS", "10.0")),
 )
+SCANNER_EMERGENCY_CONTEXT_MAX_AGE_SECONDS = max(
+    0.1,
+    float(os.getenv("ELLA_SCANNER_EMERGENCY_CONTEXT_MAX_AGE_SECONDS", "10.0")),
+)
 _SCANNER_DISPATCH_STOP = object()
 
 
@@ -206,6 +210,8 @@ class ScannerDispatchQueue:
         maxsize: int = SCANNER_DISPATCH_QUEUE_MAXSIZE,
         drain_timeout_seconds: float = SCANNER_DISPATCH_DRAIN_TIMEOUT_SECONDS,
         emergency_predicate: Callable[[dict], bool] = lambda _item: False,
+        context_max_age_seconds: float = SCANNER_EMERGENCY_CONTEXT_MAX_AGE_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self._dispatcher = dispatcher
         self._maxsize = max(2, maxsize)
@@ -214,11 +220,14 @@ class ScannerDispatchQueue:
         self._queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
         self._drain_timeout_seconds = max(0.1, drain_timeout_seconds)
         self._emergency_predicate = emergency_predicate
+        self._context_max_age_seconds = max(0.1, context_max_age_seconds)
+        self._clock = clock
         self._queued_routine = 0
         self._queued_emergency = 0
         self._sequence = 0
         self._emergency_context_segments: list[dict] = []
         self._emergency_context_conversation_id: str | None = None
+        self._emergency_context_observed_at: float | None = None
         self._worker: asyncio.Task | None = None
         self._closed = False
 
@@ -230,15 +239,28 @@ class ScannerDispatchQueue:
         if self._closed:
             return False
         item = dict(item)
+        now = self._clock()
         conversation_id = str(item.get("conversation_id") or "")
-        if conversation_id != self._emergency_context_conversation_id:
+        context_expired = (
+            self._emergency_context_observed_at is not None
+            and now - self._emergency_context_observed_at > self._context_max_age_seconds
+        )
+        if conversation_id != self._emergency_context_conversation_id or context_expired:
             self._emergency_context_segments = []
             self._emergency_context_conversation_id = conversation_id
+            self._emergency_context_observed_at = None
         item["recent_segments"] = list(self._emergency_context_segments)
+        current_segments = item.get("segments")
         self._emergency_context_segments = self._next_emergency_context(
             self._emergency_context_segments,
-            item.get("segments"),
+            current_segments,
         )
+        if isinstance(current_segments, list) and any(
+            isinstance(segment, dict) and str(segment.get("text") or "").strip() for segment in current_segments
+        ):
+            self._emergency_context_observed_at = now
+        elif not self._emergency_context_segments:
+            self._emergency_context_observed_at = None
         try:
             is_emergency = bool(self._emergency_predicate(item))
         except Exception:
