@@ -111,9 +111,28 @@ class EllaUpstreamCaptureAdapter {
     return true;
   }
 
+  /// Fail-closed check at the phone-mic native-to-socket emission boundary.
+  /// Mirrors [onDeviceAudio]: re-checks [mayEmitAudio] on every frame (not
+  /// just once at [startPhoneMic]) so a consent decision withdrawn mid-stream
+  /// stops emission on the very next frame, and drops any frame minted by a
+  /// session that has since been replaced by [replaceSession].
+  bool onPhoneAudio({
+    required int generation,
+    required String ownerUid,
+    required List<int> bytes,
+  }) {
+    if (!_admits(generation: generation, ownerUid: ownerUid)) return false;
+    if (liveSource != UpstreamLiveSource.phone) return false;
+    emitted.add(
+      UpstreamAudioFrame(generation: generation, ownerUid: ownerUid, bytes: bytes),
+    );
+    return true;
+  }
+
   /// Pendant live capture hands off to the phone. They are never both live.
+  /// Refuses to start before a nonempty uid session is bound.
   bool startPhoneMic() {
-    if (!enabled || !mayEmitAudio()) return false;
+    if (!enabled || _uid.isEmpty || !mayEmitAudio()) return false;
     liveSource = UpstreamLiveSource.phone;
     return true;
   }
@@ -124,8 +143,9 @@ class EllaUpstreamCaptureAdapter {
     liveSource = resume ? UpstreamLiveSource.necklace : UpstreamLiveSource.none;
   }
 
+  /// Refuses to start before a nonempty uid session is bound.
   bool startNecklace() {
-    if (!enabled || !mayEmitAudio() || !bleConnected) return false;
+    if (!enabled || _uid.isEmpty || !mayEmitAudio() || !bleConnected) return false;
     if (liveSource == UpstreamLiveSource.phone) return false;
     liveSource = UpstreamLiveSource.necklace;
     return true;
