@@ -97,7 +97,7 @@ from utils.capture_buffer import (
 from utils.ella.memory_artwork_storage import acquire_memory_artwork_publication_lock
 from utils.ella.scanner_keyterms import cache_status as scanner_keyterm_cache_status
 from utils.ella.scanner_keyterms import combine_deepgram_keyterms, get_scanner_keyterms
-from utils.ella.scanner import credible_emergency_reason_for_segments
+from utils.ella.scanner import credible_emergency_reason_with_context
 from utils.notifications import send_credit_limit_notification, send_silent_user_notification
 from utils.other import endpoints as auth
 from utils.other.storage import get_profile_audio_if_exists, get_user_has_speech_profile
@@ -186,10 +186,14 @@ def _scanner_dispatch_item_is_credible_emergency(item: dict) -> bool:
     segments = item.get("segments")
     if not isinstance(segments, list):
         return False
-    return (
-        credible_emergency_reason_for_segments([segment for segment in segments if isinstance(segment, dict)])
-        is not None
+    recent_segments = item.get("recent_segments")
+    if not isinstance(recent_segments, list):
+        recent_segments = []
+    reason, _used_context = credible_emergency_reason_with_context(
+        [segment for segment in recent_segments if isinstance(segment, dict)],
+        [segment for segment in segments if isinstance(segment, dict)],
     )
+    return reason is not None
 
 
 class ScannerDispatchQueue:
@@ -211,6 +215,8 @@ class ScannerDispatchQueue:
         self._emergency_predicate = emergency_predicate
         self._queued_routine = 0
         self._sequence = 0
+        self._emergency_context_segments: list[dict] = []
+        self._emergency_context_conversation_id: str | None = None
         self._worker: asyncio.Task | None = None
         self._closed = False
 
@@ -221,6 +227,16 @@ class ScannerDispatchQueue:
     def enqueue(self, item: dict) -> bool:
         if self._closed:
             return False
+        item = dict(item)
+        conversation_id = str(item.get("conversation_id") or "")
+        if conversation_id != self._emergency_context_conversation_id:
+            self._emergency_context_segments = []
+            self._emergency_context_conversation_id = conversation_id
+        item["recent_segments"] = list(self._emergency_context_segments)
+        self._emergency_context_segments = self._next_emergency_context(
+            self._emergency_context_segments,
+            item.get("segments"),
+        )
         try:
             is_emergency = bool(self._emergency_predicate(item))
         except Exception:
@@ -236,6 +252,28 @@ class ScannerDispatchQueue:
         if not is_emergency:
             self._queued_routine += 1
         return True
+
+    @staticmethod
+    def _next_emergency_context(previous: list[dict], current: object) -> list[dict]:
+        segments = list(previous)
+        if isinstance(current, list):
+            segments.extend(segment for segment in current if isinstance(segment, dict))
+        active_speaker: str | None = None
+        tail: list[dict] = []
+        for segment in segments:
+            raw_speaker = segment.get("speaker") or segment.get("speaker_id") or segment.get("person_id")
+            speaker = str(raw_speaker).strip() if raw_speaker is not None else ""
+            if not speaker:
+                active_speaker = None
+                tail = []
+                continue
+            if speaker != active_speaker:
+                tail = []
+            active_speaker = speaker
+            tail.append(segment)
+            while len(tail) > 4 or sum(len(str(value.get("text") or "")) for value in tail) > 256:
+                tail.pop(0)
+        return tail
 
     async def close(self) -> None:
         if self._closed:

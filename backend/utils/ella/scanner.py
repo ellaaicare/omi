@@ -109,12 +109,13 @@ _EMERGENCY_PATTERN = re.compile(
     r"\b("
     r"911|emergency|urgent|ambulance|paramedic|"
     r"help me|need help|call for help|"
-    r"can(?:not|'t|t) breathe|chest pain|heart attack|stroke|seizure|"
+    r"can(?:not|['’]t|t) breathe|chest pain|heart attack|stroke|seizure|"
     r"fell|fallen|falling|bleeding|choking|overdose|"
     r"suicidal|kill myself|hurt myself|fire|break in|burglar"
     r")\b",
     re.IGNORECASE,
 )
+_CANNOT_PHRASE = r"(?:can\s*not|cannot|can['’]t)"
 _CURRENT_PERSON_SUBJECT = (
     r"(?:i|he|she|they|someone|somebody|"
     r"my\s+(?:husband|wife|partner|mother|mom|father|dad|parent|son|daughter|child|"
@@ -126,17 +127,17 @@ _CURRENT_PERSON_SUBJECT = (
 _CURRENT_PERSON_COPULA = r"(?:\s+(?:am|is|are)|\s*['’](?:m|s|re))"
 _CREDIBLE_EMERGENCY_PATTERNS = (
     ("emergency_services", re.compile(r"^\s*(?:someone\s+)?call\s+911\b", re.IGNORECASE)),
-    ("breathing", re.compile(r"^\s*i\s+(?:can\s*not|cannot|can't)\s+breathe\b", re.IGNORECASE)),
+    ("breathing", re.compile(rf"^\s*i\s+{_CANNOT_PHRASE}\s+breathe\b", re.IGNORECASE)),
     (
         "fall",
         re.compile(
             r"^\s*i\s+(?:fell\s+down|(?:fell|(?:have|'ve)\s+fallen)\s+and\s+"
             r"(?:i\s+)?(?:am\s+)?(?:hurt|injured|bleeding|unable\s+to\s+move|need\s+help|"
-            r"(?:can\s*not|cannot|can't)\s+get\s+up))\b",
+            rf"{_CANNOT_PHRASE}\s+get\s+up))\b",
             re.IGNORECASE,
         ),
     ),
-    ("immobile", re.compile(r"^\s*i\s+(?:can\s*not|cannot|can't)\s+get\s+up\b", re.IGNORECASE)),
+    ("immobile", re.compile(rf"^\s*i\s+{_CANNOT_PHRASE}\s+get\s+up\b", re.IGNORECASE)),
     (
         "chest_pain",
         re.compile(
@@ -357,6 +358,19 @@ def credible_emergency_reason_for_segments(segments: List[dict]) -> Optional[str
         active_text.append(text)
 
     return match_active_text()
+
+
+def credible_emergency_reason_with_context(
+    context_segments: List[dict], current_segments: List[dict]
+) -> tuple[Optional[str], bool]:
+    """Return a newly completed reason and whether prior context was required."""
+    current_reason = credible_emergency_reason_for_segments(current_segments)
+    if current_reason:
+        return current_reason, False
+    if not context_segments or credible_emergency_reason_for_segments(context_segments):
+        return None, False
+    combined_reason = credible_emergency_reason_for_segments(context_segments + current_segments)
+    return combined_reason, combined_reason is not None
 
 
 def scanner_immediate_reason(text: str, *, wake_prefix_recent: Optional[bool] = None) -> Optional[str]:
@@ -625,11 +639,14 @@ def _apply_ambient_batching(
     trace_id: str,
     *,
     wake_prefix_recent: Optional[bool] = None,
+    credible_emergency: Optional[str] = None,
     now: Optional[float] = None,
 ) -> tuple[Optional[List[dict]], dict]:
     now = now if now is not None else time.time()
     combined_text = _combined_segment_text(scanner_segments)
     immediate_reason = scanner_immediate_reason(combined_text, wake_prefix_recent=wake_prefix_recent)
+    if immediate_reason is None and credible_emergency:
+        immediate_reason = "credible_emergency"
     base_metadata = {
         "batching_enabled": SCANNER_AMBIENT_BATCHING_ENABLED,
         "model": scanner_model_name(),
@@ -1045,11 +1062,29 @@ def send_to_scanner(
         )
         print("Scanner dispatch skipped: Guardian mode authority was not resolved", flush=True)
         return None
+    formatted_recent_segments = [
+        {
+            "speaker": s.get("speaker") or f"SPEAKER_{s.get('speaker_id', 0)}",
+            "text": canonicalize_wake_phrase(s.get("text", "")),
+            "stt_source": s.get("stt_provider") or s.get("stt_source") or s.get("source"),
+            "is_user": s.get("is_user"),
+            "person_id": s.get("person_id"),
+            "speaker_id": s.get("speaker_id"),
+            "speech_profile_processed": s.get("speech_profile_processed"),
+        }
+        for s in (recent_segments or [])
+        if s.get("text")
+    ]
+    emergency_reason, contextual_emergency = credible_emergency_reason_with_context(
+        formatted_recent_segments,
+        scanner_segments,
+    )
+    if contextual_emergency:
+        scanner_segments = formatted_recent_segments + scanner_segments
+
     authoritative_mode = _normalize_guardian_mode(guardian_mode)
     guardian_mode_enabled = authoritative_mode in _GUARDIAN_ACTIVE_MODES
-    emergency_only_dispatch = (
-        not guardian_mode_enabled and credible_emergency_reason_for_segments(scanner_segments) is not None
-    )
+    emergency_only_dispatch = not guardian_mode_enabled and emergency_reason is not None
     if not guardian_mode_enabled and not emergency_only_dispatch:
         _log_trace_event(
             trace_id=trace_id,
@@ -1088,6 +1123,7 @@ def send_to_scanner(
         device_type,
         trace_id,
         wake_prefix_recent=wake_prefix_recent,
+        credible_emergency=emergency_reason,
     )
     if not scanner_segments:
         _log_trace_event(
@@ -1133,19 +1169,7 @@ def send_to_scanner(
     if latency_metadata:
         payload["latency"] = latency_metadata
     if recent_segments is not None:
-        payload["recent_segments"] = [
-            {
-                "speaker": s.get("speaker") or f"SPEAKER_{s.get('speaker_id', 0)}",
-                "text": canonicalize_wake_phrase(s.get("text", "")),
-                "stt_source": s.get("stt_provider") or s.get("stt_source") or s.get("source"),
-                "is_user": s.get("is_user"),
-                "person_id": s.get("person_id"),
-                "speaker_id": s.get("speaker_id"),
-                "speech_profile_processed": s.get("speech_profile_processed"),
-            }
-            for s in recent_segments
-            if s.get("text")
-        ]
+        payload["recent_segments"] = formatted_recent_segments
     if scanner_window_text is not None:
         payload["scanner_window_text"] = canonicalize_wake_phrase(scanner_window_text)
     if wake_prefix_recent is not None:

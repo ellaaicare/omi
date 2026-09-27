@@ -104,6 +104,26 @@ def test_emergency_bypasses_ambient_batching(monkeypatch):
     assert len(posts) == 1
     assert posts[0]["scanner_batch"]["flush_reason"] == "immediate_emergency"
 
+    intruder = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-intruder",
+        [{"text": "There is an intruder in my home", "speaker": "SPEAKER_1"}],
+        guardian_mode="off",
+    )
+    contextual = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-split",
+        [{"text": "breathe", "speaker": "SPEAKER_1"}],
+        recent_segments=[{"text": "I cannot", "speaker": "SPEAKER_1"}],
+        guardian_mode="off",
+    )
+
+    assert intruder == 200
+    assert contextual == 200
+    assert posts[1]["scanner_batch"]["flush_reason"] == "immediate_credible_emergency"
+    assert posts[2]["scanner_batch"]["flush_reason"] == "immediate_emergency"
+    assert [segment["text"] for segment in posts[2]["segments"]] == ["I cannot", "breathe"]
+
 
 def test_ambient_chunks_batch_until_word_threshold(monkeypatch):
     posts = []
@@ -339,6 +359,7 @@ def test_scanner_off_mode_does_not_leak_ambiguous_routine_speech(monkeypatch, te
 def test_credible_emergency_bypass_requires_current_context_for_sensitive_terms():
     assert scanner.credible_emergency_reason("I am having chest pain") == "chest_pain"
     assert scanner.credible_emergency_reason("I'm having chest pain") == "chest_pain"
+    assert scanner.credible_emergency_reason("I can’t breathe") == "breathing"
     assert scanner.credible_emergency_reason("She is having a seizure") == "seizure"
     assert scanner.credible_emergency_reason("She's having a seizure") == "seizure"
     assert scanner.credible_emergency_reason("My husband is having a seizure") == "seizure"

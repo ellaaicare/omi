@@ -440,11 +440,13 @@ def test_scanner_dispatch_queue_is_bounded_ordered_and_drains_on_close():
 
     async def scenario():
         dispatched = []
+        dispatch_context = {}
         started = asyncio.Event()
         release = asyncio.Event()
 
         async def dispatch(item):
             dispatched.append((item["uid"], item["session"], item["sequence"]))
+            dispatch_context[item["sequence"]] = item.get("recent_segments")
             if item["sequence"] == 1:
                 started.set()
                 await release.wait()
@@ -456,12 +458,44 @@ def test_scanner_dispatch_queue_is_bounded_ordered_and_drains_on_close():
             emergency_predicate=lambda item: item.get("kind") == "emergency",
         )
         queue.start()
-        assert queue.enqueue({"uid": "uid-1", "session": "session-1", "sequence": 1}) is True
+        assert (
+            queue.enqueue(
+                {
+                    "uid": "uid-1",
+                    "conversation_id": "conversation-1",
+                    "session": "session-1",
+                    "sequence": 1,
+                    "segments": [{"text": "I cannot", "speaker": "SPEAKER_1"}],
+                }
+            )
+            is True
+        )
         await started.wait()
-        assert queue.enqueue({"uid": "uid-1", "session": "session-1", "sequence": 2}) is True
-        assert queue.enqueue({"uid": "uid-1", "session": "session-1", "sequence": 3}) is True
-        assert queue.enqueue({"uid": "uid-1", "session": "session-1", "sequence": 4}) is False
-        assert queue.enqueue({"uid": "uid-1", "session": "session-1", "sequence": 99, "kind": "emergency"}) is True
+        assert (
+            queue.enqueue({"uid": "uid-1", "conversation_id": "conversation-1", "session": "session-1", "sequence": 2})
+            is True
+        )
+        assert (
+            queue.enqueue({"uid": "uid-1", "conversation_id": "conversation-1", "session": "session-1", "sequence": 3})
+            is True
+        )
+        assert (
+            queue.enqueue({"uid": "uid-1", "conversation_id": "conversation-1", "session": "session-1", "sequence": 4})
+            is False
+        )
+        assert (
+            queue.enqueue(
+                {
+                    "uid": "uid-1",
+                    "conversation_id": "conversation-1",
+                    "session": "session-1",
+                    "sequence": 99,
+                    "kind": "emergency",
+                    "segments": [{"text": "breathe", "speaker": "SPEAKER_1"}],
+                }
+            )
+            is True
+        )
         release.set()
         await queue.close()
         assert dispatched == [
@@ -470,6 +504,7 @@ def test_scanner_dispatch_queue_is_bounded_ordered_and_drains_on_close():
             ("uid-1", "session-1", 2),
             ("uid-1", "session-1", 3),
         ]
+        assert dispatch_context[99] == [{"text": "I cannot", "speaker": "SPEAKER_1"}]
         assert queue.enqueue({"uid": "uid-2", "session": "session-2", "sequence": 5}) is False
 
     asyncio.run(scenario())
@@ -483,7 +518,7 @@ def test_live_scanner_queue_uses_server_owned_emergency_predicate():
     )
 
     assert "emergency_predicate=_scanner_dispatch_item_is_credible_emergency" in stream_source
-    assert "credible_emergency_reason_for_segments" in predicate_source
+    assert "credible_emergency_reason_with_context" in predicate_source
     assert 'item.get("segments")' in predicate_source
 
 
