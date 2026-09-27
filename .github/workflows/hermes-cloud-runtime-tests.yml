@@ -1230,6 +1230,18 @@ jobs:
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_current_retained_consent_rearms_only_exact_quarantine" \
             <<<"$authority_lock_ids"
           grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_consented_pending_user_can_enable_guardian_and_activates_atomically" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_unconsented_pending_user_cannot_enable_guardian" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_guardian_reenable_fails_closed_after_consent_revocation" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_runtime_activation_initializes_explicit_guardian_default" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_retained_runtime_rearm_rejects_stale_authority_revision" \
             <<<"$authority_lock_ids"
           grep -Fqx \
@@ -1241,7 +1253,7 @@ jobs:
           grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_delete_re_resolves_email_owner_created_while_waiting_on_uid_lock" \
             <<<"$authority_lock_ids"
-          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 83
+          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 87
           pytest \
             tests/unit/test_authority_advisory_lock.py \
             tests/unit/test_authority_writer_guard.py \
