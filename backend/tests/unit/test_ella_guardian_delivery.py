@@ -99,13 +99,62 @@ _ROUTER_SPEC.loader.exec_module(guardian)
 
 
 class _FakePool:
+    """Fake asyncpg pool that simulates the atomic claim's RETURNING semantics.
+
+    `existing_rows` seeds (channel, target) -> status as if already written to
+    guardian_delivery_log. A claim attempt (the INSERT ... ON CONFLICT ...
+    RETURNING in `_claim_delivery_row`) only "returns a row" when there is no
+    existing row for that key or the existing status is in the retryable set —
+    mirroring the real WHERE clause exactly, so these fakes can't accidentally
+    authorize a dispatch the real database would have refused.
+    """
+
     def __init__(self, user_row=None, caregiver_rows=None, existing_rows=None):
         self.user_row = user_row
         self.caregiver_rows = caregiver_rows or []
         self.existing_rows = existing_rows or []
         self.executed = []
+        self.claims = []
 
-    async def fetchrow(self, *_args):
+    def _existing(self, channel, target):
+        return next(
+            (row for row in self.existing_rows if row["channel"] == channel and row["target"] == target),
+            None,
+        )
+
+    async def fetchrow(self, query, *args):
+        if "INSERT INTO guardian_delivery_log" in query:
+            (
+                trace_id,
+                uid,
+                channel,
+                target,
+                caregiver_id,
+                recipient_phone,
+                recipient_email,
+                status,
+                _provider_response,
+                retryable_statuses,
+            ) = args
+            self.claims.append((trace_id, uid, channel, target, status))
+            existing = self._existing(channel, target)
+            if existing is not None and existing["status"] not in retryable_statuses:
+                return None
+            claimed = {
+                "trace_id": trace_id,
+                "uid": uid,
+                "channel": channel,
+                "target": target,
+                "caregiver_id": caregiver_id,
+                "recipient_phone": recipient_phone,
+                "recipient_email": recipient_email,
+                "status": status,
+            }
+            if existing is not None:
+                existing["status"] = status
+            else:
+                self.existing_rows.append({"channel": channel, "target": target, "status": status})
+            return claimed
         return self.user_row
 
     async def fetch(self, query, *_args):
@@ -115,7 +164,11 @@ class _FakePool:
             return self.existing_rows
         return []
 
-    async def fetchval(self, *_args):
+    async def fetchval(self, query, *args):
+        if "SELECT status" in query and "FROM guardian_delivery_log" in query:
+            trace_id, channel, target = args
+            existing = self._existing(channel, target)
+            return existing["status"] if existing else None
         return None
 
     async def execute(self, query, *args):
@@ -248,6 +301,150 @@ def test_reserve_delivery_steps_treats_success_as_already_sent(monkeypatch):
     assert pending == []
     assert skipped[0]["skip_reason"] == "already_success"
     assert pool.executed == []
+
+
+def test_reserve_delivery_steps_blocks_in_flight_pending(monkeypatch):
+    pool = _FakePool(existing_rows=[{"channel": "sms", "target": "caregiver", "status": "pending"}])
+    monkeypatch.setattr(guardian, "_pool", pool)
+
+    pending, skipped = asyncio.run(
+        guardian._reserve_delivery_steps(
+            "trace-1",
+            "uid-1",
+            [{"channel": "sms", "target": "caregiver"}],
+        )
+    )
+
+    assert pending == []
+    assert skipped[0]["skip_reason"] == "already_pending"
+
+
+def test_reserve_delivery_steps_reclaims_after_retryable_dispatch_failure(monkeypatch):
+    pool = _FakePool(existing_rows=[{"channel": "imessage", "target": "user", "status": "dispatch_failed"}])
+    monkeypatch.setattr(guardian, "_pool", pool)
+    step = {"channel": "imessage", "target": "user", "recipient_phone": "+15550000001"}
+
+    pending, skipped = asyncio.run(guardian._reserve_delivery_steps("trace-1", "uid-1", [step]))
+
+    assert skipped == []
+    assert pending == [step]
+    assert pool.claims == [("trace-1", "uid-1", "imessage", "user", "pending")]
+
+
+def test_reserve_delivery_steps_does_not_infer_retryability_from_unrecognized_status(monkeypatch):
+    pool = _FakePool(existing_rows=[{"channel": "imessage", "target": "user", "status": "quarantined"}])
+    monkeypatch.setattr(guardian, "_pool", pool)
+
+    pending, skipped = asyncio.run(
+        guardian._reserve_delivery_steps(
+            "trace-1",
+            "uid-1",
+            [{"channel": "imessage", "target": "user"}],
+        )
+    )
+
+    assert pending == []
+    assert skipped[0]["skip_reason"] == "already_quarantined"
+
+
+class _FakeSMTP:
+    instances: list["_FakeSMTP"] = []
+
+    def __init__(self, host, port):
+        self.host = host
+        self.port = port
+        self.sent = []
+        self.started_tls = False
+        self.logged_in = False
+        type(self).instances.append(self)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def starttls(self):
+        self.started_tls = True
+
+    def login(self, user, password):
+        self.logged_in = True
+
+    def send_message(self, message):
+        self.sent.append(message)
+
+
+def _email_request(**overrides):
+    fields = {
+        "to": "caregiver@example.test",
+        "subject": "Alert",
+        "body": "Body",
+        "trace_id": "trace-1",
+        "uid": "uid-1",
+        "target": "caregiver",
+    }
+    fields.update(overrides)
+    return guardian.EmailSendRequest(**fields)
+
+
+def test_email_send_claims_and_sends_when_no_existing_row(monkeypatch):
+    pool = _FakePool()
+    monkeypatch.setattr(guardian, "_pool", pool)
+    _FakeSMTP.instances = []
+    monkeypatch.setattr(guardian.smtplib, "SMTP", _FakeSMTP)
+
+    result = asyncio.run(
+        guardian.email_send(
+            _email_request(),
+            x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+            subject_uid="uid-1",
+        )
+    )
+
+    assert result == {"ok": True, "sent": True, "trace_id": "trace-1", "to": "caregiver@example.test"}
+    assert len(_FakeSMTP.instances) == 1
+    assert len(_FakeSMTP.instances[0].sent) == 1
+    assert pool.claims == [("trace-1", "uid-1", "email", "caregiver", "sending")]
+    update_query, update_args = next(
+        (query, args) for query, args in pool.executed if "UPDATE guardian_delivery_log" in query
+    )
+    assert update_args[0] == "sent"
+
+
+def test_email_send_skips_smtp_when_already_claimed(monkeypatch):
+    pool = _FakePool(existing_rows=[{"channel": "email", "target": "caregiver", "status": "sending"}])
+    monkeypatch.setattr(guardian, "_pool", pool)
+    _FakeSMTP.instances = []
+    monkeypatch.setattr(guardian.smtplib, "SMTP", _FakeSMTP)
+
+    result = asyncio.run(
+        guardian.email_send(
+            _email_request(),
+            x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+            subject_uid="uid-1",
+        )
+    )
+
+    assert result == {"ok": True, "sent": False, "reason": "already_sending", "trace_id": "trace-1"}
+    assert _FakeSMTP.instances == []
+
+
+def test_email_send_reclaims_after_retryable_error_and_sends(monkeypatch):
+    pool = _FakePool(existing_rows=[{"channel": "email", "target": "caregiver", "status": "error"}])
+    monkeypatch.setattr(guardian, "_pool", pool)
+    _FakeSMTP.instances = []
+    monkeypatch.setattr(guardian.smtplib, "SMTP", _FakeSMTP)
+
+    result = asyncio.run(
+        guardian.email_send(
+            _email_request(),
+            x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+            subject_uid="uid-1",
+        )
+    )
+
+    assert result["sent"] is True
+    assert len(_FakeSMTP.instances) == 1
 
 
 def test_deliver_dispatches_pending_backend_resolved_recipient(monkeypatch):
