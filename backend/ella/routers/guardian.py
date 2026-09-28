@@ -2605,6 +2605,8 @@ async def record_playback_event(
             )
         except _playback_ledger.PlaybackLedgerOwnershipError:
             raise HTTPException(status_code=403, detail={"error": "playback_id_not_owned_by_caller"})
+        except _playback_ledger.PlaybackLedgerUnknownItemError:
+            raise HTTPException(status_code=404, detail={"error": "playback_id_not_found"})
 
     trace_id = req.trace_id or req.queue_item_id
     if trace_id:

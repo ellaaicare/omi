@@ -89,6 +89,17 @@ class PlaybackLedgerOwnershipError(Exception):
         self.playback_id = playback_id
 
 
+class PlaybackLedgerUnknownItemError(Exception):
+    """Raised when a playback receipt references an item this uid never
+    generated, queued, or fetched — a receipt is evidence about a real
+    delivery, not a way to create one."""
+
+    def __init__(self, uid: str, playback_id: str):
+        super().__init__(f"playback_id {playback_id!r} was never generated for uid={uid!r}")
+        self.uid = uid
+        self.playback_id = playback_id
+
+
 @dataclass(frozen=True)
 class PlaybackCandidate:
     """A confirmed-played ledger entry eligible for echo-classifier review."""
@@ -101,6 +112,9 @@ class PlaybackCandidate:
     route: Optional[str]
     device_class: Optional[str]
     duration_ms: Optional[int]
+    # The evidence timestamp: the row's `started_at` if one was recorded,
+    # else its `completed_at` — `get_played_candidates` only ever returns
+    # rows that have at least one of the two, so this is never null here.
     started_at: datetime
     completed_at: Optional[datetime]
 
@@ -121,13 +135,23 @@ class PlaybackCandidate:
 
 
 async def _fetch_owner_row(conn: asyncpg.Connection, uid: str, playback_id: str) -> Optional[asyncpg.Record]:
+    # The durable key is the (uid, playback_id) pair (see the table's UNIQUE
+    # constraint) — playback_id alone is not guaranteed unique across
+    # owners, so querying by playback_id only could lock and return a
+    # different owner's row, either leaking its status or rejecting this
+    # owner as a false "not owned" instead of treating the item as new.
     return await conn.fetchrow(
-        "SELECT uid, status FROM guardian_playback_ledger WHERE playback_id = $1 FOR UPDATE",
+        "SELECT uid, status FROM guardian_playback_ledger WHERE uid = $1 AND playback_id = $2 FOR UPDATE",
+        uid,
         playback_id,
     )
 
 
 def _assert_owned(row: Optional[asyncpg.Record], uid: str, playback_id: str) -> None:
+    """Defensive invariant: `_fetch_owner_row` is scoped by `uid`, so a
+    returned row's `uid` should always already match. Kept as a guard
+    against a future query regression rather than the primary ownership
+    check it used to be."""
     if row is not None and str(row["uid"]) != uid:
         raise PlaybackLedgerOwnershipError(uid, playback_id)
 
@@ -293,6 +317,11 @@ async def record_playback_receipt(
     duplicate or out-of-order receipt (e.g. a retried "started" arriving
     after "completed" was already recorded) is a no-op that returns the
     existing, already-terminal status rather than rewriting it.
+
+    Raises `PlaybackLedgerUnknownItemError` if this uid never generated,
+    queued, or fetched `playback_id` — a receipt is evidence about a real
+    delivery the system already knows about, never a way to fabricate one
+    from scratch.
     """
     event_type = str(event_type or "").strip().lower()
     if event_type not in _RECEIPT_EVENT_TYPES:
@@ -306,28 +335,7 @@ async def record_playback_receipt(
             _assert_owned(existing, uid, playback_id)
 
             if existing is None:
-                await conn.execute(
-                    f"""
-                    INSERT INTO guardian_playback_ledger (
-                        uid, playback_id, queue_item_id, trace_id, status,
-                        route, device_class, port_name, device_uid, duration_ms,
-                        error_message, {column}
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
-                    """,
-                    uid,
-                    playback_id,
-                    queue_item_id,
-                    trace_id,
-                    event_type,
-                    route,
-                    device_class,
-                    port_name,
-                    device_uid,
-                    duration_ms,
-                    error_message if event_type == "failed" else None,
-                )
-                return event_type
+                raise PlaybackLedgerUnknownItemError(uid, playback_id)
 
             current_status = str(existing["status"])
             if current_status in _TERMINAL_STATUSES:
@@ -377,19 +385,23 @@ async def get_played_candidates(
 ) -> list[PlaybackCandidate]:
     """Return this owner's recently-PLAYED ledger entries only.
 
-    Rows must have a recorded `started_at` (an authenticated started or
-    completed receipt) within `window_seconds`. generated/queued/fetched-only
-    rows are never returned — they are not evidence of playback.
+    Rows must have a recorded `started_at` OR `completed_at` (either is an
+    authenticated receipt) within `window_seconds` — a `completed` receipt
+    that arrived without a preceding `started` receipt (e.g. the started
+    beacon was lost in transit) is just as much evidence of playback as a
+    `started` one. generated/queued/fetched-only rows are never returned —
+    they are not evidence of playback.
     """
     rows = await pool.fetch(
         """
         SELECT playback_id, queue_item_id, trace_id, purpose, playback_text,
-               route, device_class, duration_ms, started_at, completed_at
+               route, device_class, duration_ms, started_at, completed_at,
+               COALESCE(started_at, completed_at) AS played_at
         FROM guardian_playback_ledger
         WHERE uid = $1
-          AND started_at IS NOT NULL
-          AND started_at > NOW() - ($2 || ' seconds')::interval
-        ORDER BY started_at DESC
+          AND COALESCE(started_at, completed_at) IS NOT NULL
+          AND COALESCE(started_at, completed_at) > NOW() - ($2 || ' seconds')::interval
+        ORDER BY played_at DESC
         LIMIT $3
         """,
         uid,
@@ -406,7 +418,7 @@ async def get_played_candidates(
             route=row["route"],
             device_class=row["device_class"],
             duration_ms=row["duration_ms"],
-            started_at=row["started_at"],
+            started_at=row["played_at"],
             completed_at=row["completed_at"],
         )
         for row in rows

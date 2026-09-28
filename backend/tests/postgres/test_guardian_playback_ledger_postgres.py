@@ -122,24 +122,98 @@ def test_expired_rows_are_deleted_by_cleanup_and_recent_rows_survive():
     asyncio.run(_run_with_database(scenario))
 
 
-def test_cross_owner_mismatched_uid_is_denied_not_silently_written():
+def test_cross_owner_same_playback_id_are_independent_rows_with_no_leak():
+    """The durable key is `(uid, playback_id)`, not `playback_id` alone
+    (see the table's UNIQUE constraint). `_fetch_owner_row` used to query
+    by `playback_id` only, so a second owner legitimately using the exact
+    same playback_id string as another owner's row could have its own,
+    correct write nondeterministically rejected as "not owned" — a false
+    positive against an innocent id collision, not a real cross-owner
+    write. Scoping the lookup by the full `(uid, playback_id)` key means
+    each owner gets their own independent row instead, with neither able
+    to read or overwrite the other's text or status."""
+
     async def scenario(pool: asyncpg.Pool) -> None:
         await ledger.record_generated(pool, uid="uid-owner", playback_id="pb-shared", playback_text="owner's whisper")
 
-        with pytest.raises(ledger.PlaybackLedgerOwnershipError):
-            await ledger.record_fetched(pool, uid="uid-attacker", playback_id="pb-shared")
+        # A second, unrelated owner using the exact same playback_id string
+        # must succeed on their own row, never touching the first owner's.
+        await ledger.record_fetched(
+            pool, uid="uid-second", playback_id="pb-shared", route="Speaker", device_class="high"
+        )
+        await ledger.record_playback_receipt(pool, uid="uid-second", playback_id="pb-shared", event_type="started")
 
-        with pytest.raises(ledger.PlaybackLedgerOwnershipError):
+        owner_row = await pool.fetchrow(
+            "SELECT status, playback_text FROM guardian_playback_ledger WHERE uid = $1 AND playback_id = $2",
+            "uid-owner",
+            "pb-shared",
+        )
+        assert owner_row["status"] == "generated"
+        assert owner_row["playback_text"] == "owner's whisper"
+
+        second_row = await pool.fetchrow(
+            "SELECT status, playback_text FROM guardian_playback_ledger WHERE uid = $1 AND playback_id = $2",
+            "uid-second",
+            "pb-shared",
+        )
+        assert second_row["status"] == "started"
+        assert second_row["playback_text"] is None
+
+        # The owner never submitted a started/completed receipt, so they
+        # have no played candidate at all.
+        owner_candidates = await ledger.get_played_candidates(pool, "uid-owner", window_seconds=3600)
+        assert owner_candidates == []
+
+        # The second owner's own candidate never carries the owner's text.
+        second_candidates = await ledger.get_played_candidates(pool, "uid-second", window_seconds=3600)
+        assert len(second_candidates) == 1
+        assert second_candidates[0].playback_text is None
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_unknown_playback_id_is_rejected_not_created():
+    """A receipt is evidence about a delivery the system already knows
+    about, never a way to fabricate one from scratch: an id that was never
+    generated/queued/fetched for this uid must be rejected, not silently
+    turned into a new row."""
+
+    async def scenario(pool: asyncpg.Pool) -> None:
+        with pytest.raises(ledger.PlaybackLedgerUnknownItemError):
             await ledger.record_playback_receipt(
-                pool, uid="uid-attacker", playback_id="pb-shared", event_type="started"
+                pool, uid="uid-1", playback_id="pb-never-generated", event_type="started"
             )
 
-        row = await pool.fetchrow("SELECT uid, status FROM guardian_playback_ledger WHERE playback_id = 'pb-shared'")
-        assert row["uid"] == "uid-owner"
-        assert row["status"] == "generated"
+        count = await pool.fetchval(
+            "SELECT COUNT(*) FROM guardian_playback_ledger WHERE playback_id = 'pb-never-generated'"
+        )
+        assert count == 0
 
-        candidates = await ledger.get_played_candidates(pool, "uid-attacker", window_seconds=3600)
-        assert candidates == []
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_completed_only_receipt_is_eligible_playback_evidence():
+    """A `completed` receipt that arrives without a preceding `started`
+    receipt (e.g. the started beacon was lost) must still count as
+    evidence of playback."""
+
+    async def scenario(pool: asyncpg.Pool) -> None:
+        await ledger.record_generated(pool, uid="uid-1", playback_id="pb-completed-only", playback_text="hi")
+        status = await ledger.record_playback_receipt(
+            pool, uid="uid-1", playback_id="pb-completed-only", event_type="completed"
+        )
+        assert status == "completed"
+
+        row = await pool.fetchrow(
+            "SELECT started_at FROM guardian_playback_ledger WHERE uid = $1 AND playback_id = $2",
+            "uid-1",
+            "pb-completed-only",
+        )
+        assert row["started_at"] is None
+
+        candidates = await ledger.get_played_candidates(pool, "uid-1", window_seconds=3600)
+        assert len(candidates) == 1
+        assert candidates[0].playback_id == "pb-completed-only"
 
     asyncio.run(_run_with_database(scenario))
 
