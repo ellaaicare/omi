@@ -951,6 +951,14 @@ jobs:
             "tests/unit/test_ella_ai_consent.py::test_consent_rejection_handler_returns_stable_top_level_contract"
             "tests/unit/test_ella_ai_consent.py::test_consent_authority_outage_is_retryable_and_not_revocation_shaped"
             "tests/unit/test_ella_ai_consent.py::test_enforcement_is_server_authoritative_and_cannot_be_disabled"
+            "tests/unit/test_ella_ai_consent.py::test_policy_matches_exact_managed_cloud_v11_typesafe_contract"
+            "tests/unit/test_ella_ai_consent.py::test_v11_policy_matches_documented_cross_stack_fixture"
+            "tests/unit/test_ella_ai_consent.py::test_v11_grant_is_durable_and_authorizes_typesafe_egress"
+            "tests/unit/test_ella_ai_consent.py::test_v10_receipt_keeps_capture_working_without_forced_reconsent"
+            "tests/unit/test_ella_ai_consent.py::test_build_871_refresh_semantics_keep_exact_v10_receipt_verified"
+            "tests/unit/test_ella_ai_consent.py::test_status_policy_matches_stored_receipt_while_v11_upgrade_is_explicitly_negotiated"
+            "tests/unit/test_ella_ai_consent.py::test_v10_receipt_cannot_authorize_typesafe_egress"
+            "tests/unit/test_ella_ai_consent.py::test_v9_receipt_still_requires_reconsent"
             "tests/unit/test_ella_ai_consent_route_gates.py::test_native_websocket_consent_check_precedes_runtime_and_stt_provider_work"
             "tests/unit/test_ella_ai_consent_route_gates.py::test_websocket_consent_rejection_and_authority_outage_have_distinct_close_contracts"
             "tests/unit/test_ella_ai_consent_route_gates.py::test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary"
@@ -1005,6 +1013,7 @@ jobs:
             "tests/unit/test_ella_provisioning_service.py::test_post_provider_attestation_rejections_retry_and_reconcile_one_binding"
             "tests/unit/test_ella_provisioning_service.py::test_invitation_runtime_requires_persisted_profile_local_honcho_proof"
             "tests/unit/test_ella_provisioning_service.py::test_retained_owner_identity_is_exact_and_requires_server_configuration"
+            "tests/unit/test_ella_provisioning_service.py::test_existing_v10_invitation_authority_remains_admitted"
             "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_activation_does_not_require_invitation_target"
             "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_preserves_exact_active_retained_runtime"
             "tests/unit/test_ella_provisioning_service.py::test_fresh_uid_relax_prefers_healthy_direct_binding_over_late_legacy_cluster"
@@ -1066,14 +1075,14 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 21
-          # 630 (base) + 18 (test_ella_sync_v2_contract.py, now wired into
+          # 638 (consent v10/v11 compatibility) + 18 (test_ella_sync_v2_contract.py, now wired into
           # this collection for the first time) + 10
           # (test_ella_sync_segments_state_machine.py -- new: exercises the real
           # claim/reserve/complete/release state machine and the append transaction in
           # database/sync_segments.py directly, including the SYNC-V2-002
           # retry-after-commit/stale-lease regressions, rather than through this file's own
           # route-level fakes).
-          test "$collected" -eq 658
+          test "$collected" -eq 666
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \

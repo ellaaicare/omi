@@ -37,6 +37,7 @@ from ella.services.provisioning import (
     public_receipt,
     retained_compatibility_receipt,
     self_hosted_invitation_admission,
+    self_hosted_invitation_lineage,
     self_hosted_provisioning_configured,
     self_hosted_provisioning_enabled,
     self_hosted_runtime_authority_required,
@@ -355,12 +356,17 @@ async def onboarding_status(
         )
     else:
         self_hosted_required = self_hosted_provisioning_enabled(uid, admission=invitation_admission)
+        authority_lineage = (
+            self_hosted_invitation_lineage(invitation_admission)
+            if self_hosted_required and invitation_admission is not None
+            else current_self_hosted_runtime_lineage() if self_hosted_required else None
+        )
         binding = await repository.resolve_active_runtime(
             uid,
             template_version=target_schema_version,
             target_mode="hermes-chat" if self_hosted_required else None,
             required_provider="hermes",
-            authority_lineage=current_self_hosted_runtime_lineage() if self_hosted_required else None,
+            authority_lineage=authority_lineage,
             model=SELF_HOSTED_RUNTIME_MODEL if self_hosted_required else CLOUD_RUNTIME_MODEL,
         )
     if not binding and cloud_required:

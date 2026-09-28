@@ -34,11 +34,15 @@ logger = logging.getLogger(__name__)
 
 # Prior consent versions are immutable history. V10 replaces the xAI artwork
 # recipient with the owner-only OpenAI Codex artwork designer, so stale v9
-# receipts cannot authorize selected-memory artwork egress.
+# receipts cannot authorize selected-memory artwork egress. V11 adds the
+# TypeSafe (Jev), via OpenRouter processor for Guardian/Whispers conversation
+# safety classification. V10 remains valid for every processor it named, while
+# TypeSafe egress requires the exact v11 contract.
 LEGACY_POLICY_VERSION_V7 = "ai-data-processors-v7"
 LEGACY_POLICY_VERSION_V8 = "ai-data-processors-v8"
 LEGACY_POLICY_VERSION_V9 = "ai-data-processors-v9"
-CURRENT_POLICY_VERSION = "ai-data-processors-v10"
+LEGACY_POLICY_VERSION_V10 = "ai-data-processors-v10"
+CURRENT_POLICY_VERSION = "ai-data-processors-v11"
 # This is the only policy constant that invalidates a prior explicit grant.
 # Adding processors, changing descriptive scope metadata, or deploying code
 # must not silently revoke consent. A human-reviewed material policy change
@@ -47,10 +51,11 @@ CONSENT_POLICY_VERSION_ORDER = (
     LEGACY_POLICY_VERSION_V7,
     LEGACY_POLICY_VERSION_V8,
     LEGACY_POLICY_VERSION_V9,
+    LEGACY_POLICY_VERSION_V10,
     CURRENT_POLICY_VERSION,
 )
-MINIMUM_REQUIRED_POLICY_VERSION = "ai-data-processors-v10"
-CANONICAL_PROCESSOR_SET = (
+MINIMUM_REQUIRED_POLICY_VERSION = LEGACY_POLICY_VERSION_V10
+LEGACY_V10_CANONICAL_PROCESSOR_SET = (
     "deepgram:stt|soniox:stt|speechmatics:stt|firebase:auth-infrastructure|"
     "hermes-self-hosted:agent-runtime|honcho-self-hosted:memory-context|ella-self-hosted-tts:tts|"
     "nous-hermes-cloud:managed-agent-runtime|hermes-profile-memory:profile-scoped-memory|"
@@ -58,6 +63,16 @@ CANONICAL_PROCESSOR_SET = (
     "openrouter:model-routing|google-gemini:language-live-voice|openai:language-live-voice|"
     "groq:language|xai-grok:language-live-voice|"
     "inworld:tts|elevenlabs:tts-fallback"
+)
+LEGACY_V10_PROCESSOR_SET_HASH = f"sha256:{hashlib.sha256(LEGACY_V10_CANONICAL_PROCESSOR_SET.encode()).hexdigest()}"
+CANONICAL_PROCESSOR_SET = (
+    "deepgram:stt|soniox:stt|speechmatics:stt|firebase:auth-infrastructure|"
+    "hermes-self-hosted:agent-runtime|honcho-self-hosted:memory-context|ella-self-hosted-tts:tts|"
+    "nous-hermes-cloud:managed-agent-runtime|hermes-profile-memory:profile-scoped-memory|"
+    "openai-codex:managed-agent-model-memory-illustration|photon:messaging-delivery|"
+    "openrouter:model-routing|google-gemini:language-live-voice|openai:language-live-voice|"
+    "groq:language|xai-grok:language-live-voice|"
+    "inworld:tts|elevenlabs:tts-fallback|typesafe:guardian-whispers-safety-classification"
 )
 CURRENT_PROCESSOR_SET_HASH = f"sha256:{hashlib.sha256(CANONICAL_PROCESSOR_SET.encode()).hexdigest()}"
 CURRENT_SCOPE_VERSION = "managed-cloud-internal-pilot-v4"
@@ -215,6 +230,14 @@ PROCESSORS: tuple[dict[str, Any], ...] = (
         "third_party": True,
     },
     {
+        "id": "typesafe",
+        "legal_recipient": "TypeSafe (Jev), via OpenRouter",
+        "function": "Conversation safety classification for Guardian and Whispers",
+        "data": "Conversation transcript text windows (no audio)",
+        "provider_aliases": ["typesafe", "typesafe-jev", "jev"],
+        "third_party": True,
+    },
+    {
         "id": "inworld",
         "legal_recipient": "Inworld AI",
         "function": "Voice synthesis",
@@ -231,6 +254,61 @@ PROCESSORS: tuple[dict[str, Any], ...] = (
         "third_party": True,
     },
 )
+
+LEGACY_V10_PROCESSOR_IDS = tuple(str(processor["id"]) for processor in PROCESSORS if processor["id"] != "typesafe")
+CURRENT_PROCESSOR_IDS = tuple(str(processor["id"]) for processor in PROCESSORS)
+TYPESAFE_PROCESSOR_ID = "typesafe"
+TYPESAFE_POLICY_VERSION = "ai-data-processors-v11"
+TYPESAFE_PROCESSOR_SET_HASH = CURRENT_PROCESSOR_SET_HASH
+
+
+@dataclass(frozen=True)
+class ConsentPolicyContract:
+    version: str
+    processor_set_hash: str
+    canonical_processor_set: str
+    scope_version: str
+    scope_hash: str
+    processor_ids: tuple[str, ...]
+
+
+SUPPORTED_CONSENT_POLICY_CONTRACTS = {
+    LEGACY_POLICY_VERSION_V10: ConsentPolicyContract(
+        version=LEGACY_POLICY_VERSION_V10,
+        processor_set_hash=LEGACY_V10_PROCESSOR_SET_HASH,
+        canonical_processor_set=LEGACY_V10_CANONICAL_PROCESSOR_SET,
+        scope_version=CURRENT_SCOPE_VERSION,
+        scope_hash=CURRENT_SCOPE_HASH,
+        processor_ids=LEGACY_V10_PROCESSOR_IDS,
+    ),
+    CURRENT_POLICY_VERSION: ConsentPolicyContract(
+        version=CURRENT_POLICY_VERSION,
+        processor_set_hash=CURRENT_PROCESSOR_SET_HASH,
+        canonical_processor_set=CANONICAL_PROCESSOR_SET,
+        scope_version=CURRENT_SCOPE_VERSION,
+        scope_hash=CURRENT_SCOPE_HASH,
+        processor_ids=CURRENT_PROCESSOR_IDS,
+    ),
+}
+
+
+def consent_policy_contract(
+    policy_version: Any,
+    processor_set_hash: Any,
+    scope_version: Any,
+    scope_hash: Any,
+) -> Optional[ConsentPolicyContract]:
+    contract = SUPPORTED_CONSENT_POLICY_CONTRACTS.get(str(policy_version or ""))
+    if contract is None:
+        return None
+    if not (
+        hmac.compare_digest(str(processor_set_hash or ""), contract.processor_set_hash)
+        and hmac.compare_digest(str(scope_version or ""), contract.scope_version)
+        and hmac.compare_digest(str(scope_hash or ""), contract.scope_hash)
+    ):
+        return None
+    return contract
+
 
 ACCOUNT_DELETION_CONTRACT = {
     "method": "DELETE",
@@ -794,29 +872,45 @@ class AiConsentService:
         self.now = now
 
     @staticmethod
-    def policy() -> dict[str, Any]:
+    def policy(policy_version: str = CURRENT_POLICY_VERSION) -> dict[str, Any]:
+        contract = SUPPORTED_CONSENT_POLICY_CONTRACTS.get(policy_version)
+        if contract is None:
+            raise ConsentPolicyMismatch("unsupported consent policy version")
         return {
-            "version": CURRENT_POLICY_VERSION,
+            "version": contract.version,
             "minimum_required_version": MINIMUM_REQUIRED_POLICY_VERSION,
-            "processor_set_hash": CURRENT_PROCESSOR_SET_HASH,
-            "canonical_processor_set": CANONICAL_PROCESSOR_SET,
-            "scope_version": CURRENT_SCOPE_VERSION,
-            "scope_hash": CURRENT_SCOPE_HASH,
+            "processor_set_hash": contract.processor_set_hash,
+            "canonical_processor_set": contract.canonical_processor_set,
+            "scope_version": contract.scope_version,
+            "scope_hash": contract.scope_hash,
             "canonical_scope": CANONICAL_SCOPE,
-            "processors": [dict(processor) for processor in PROCESSORS],
+            "processors": [dict(processor) for processor in PROCESSORS if processor["id"] in contract.processor_ids],
         }
 
-    def status(self, uid: str, *, account_epoch_auth_time: int = 0) -> dict[str, Any]:
+    def status(
+        self,
+        uid: str,
+        *,
+        account_epoch_auth_time: int = 0,
+        requested_policy_version: str = LEGACY_POLICY_VERSION_V10,
+    ) -> dict[str, Any]:
         try:
             state, receipt = self.repository.get_current(uid)
         except Exception as exc:
             logger.warning("ai_consent_authority_unavailable error=%s", type(exc).__name__)
-            return _status_payload(uid, None, None, authority_state="unavailable")
+            return _status_payload(
+                uid,
+                None,
+                None,
+                authority_state="unavailable",
+                requested_policy_version=requested_policy_version,
+            )
         return _status_payload(
             uid,
             state,
             receipt,
             account_epoch_auth_time=account_epoch_auth_time,
+            requested_policy_version=requested_policy_version,
         )
 
     def receipt(self, uid: str, receipt_id: str) -> Optional[dict[str, Any]]:
@@ -829,12 +923,13 @@ class AiConsentService:
         return _public_receipt(receipt)
 
     def submit(self, uid: str, submission: ConsentSubmission) -> dict[str, Any]:
-        if submission.decision == "granted" and (
-            submission.policy_version != CURRENT_POLICY_VERSION
-            or submission.processor_set_hash != CURRENT_PROCESSOR_SET_HASH
-            or submission.scope_version != CURRENT_SCOPE_VERSION
-            or submission.scope_hash != CURRENT_SCOPE_HASH
-        ):
+        grant_contract = consent_policy_contract(
+            submission.policy_version,
+            submission.processor_set_hash,
+            submission.scope_version,
+            submission.scope_hash,
+        )
+        if submission.decision == "granted" and grant_contract is None:
             raise ConsentPolicyMismatch("grant does not match the server-required processor policy")
 
         receipt_id = "aicr_" + hashlib.sha256(f"{uid}:{submission.request_id}".encode()).hexdigest()[:32]
@@ -845,7 +940,9 @@ class AiConsentService:
             "decision": submission.decision,
             "policy_version": submission.policy_version,
             "processor_set_hash": submission.processor_set_hash,
-            "processor_ids": [str(processor["id"]) for processor in PROCESSORS],
+            "processor_ids": list(
+                (grant_contract or SUPPORTED_CONSENT_POLICY_CONTRACTS[CURRENT_POLICY_VERSION]).processor_ids
+            ),
             "profile_binding_id": profile_binding_id,
             "scope_version": submission.scope_version,
             "scope_hash": submission.scope_hash,
@@ -1030,8 +1127,17 @@ def _status_payload(
     *,
     authority_state: Optional[ConsentAuthorityState] = None,
     account_epoch_auth_time: int = 0,
+    requested_policy_version: str = LEGACY_POLICY_VERSION_V10,
 ) -> dict[str, Any]:
     resolved_authority_state = authority_state or _authority_state(uid, state, receipt)
+    stored_policy_version = str((state or {}).get("policy_version") or "")
+    response_policy_version = (
+        stored_policy_version
+        if stored_policy_version in SUPPORTED_CONSENT_POLICY_CONTRACTS
+        else requested_policy_version
+    )
+    if response_policy_version not in SUPPORTED_CONSENT_POLICY_CONTRACTS:
+        response_policy_version = LEGACY_POLICY_VERSION_V10
     payload = {
         "subject_uid": uid,
         "authorized": resolved_authority_state == "authorized",
@@ -1039,7 +1145,7 @@ def _status_payload(
         "retryable": resolved_authority_state == "unavailable",
         "minimum_required_policy_version": MINIMUM_REQUIRED_POLICY_VERSION,
         "enforcement_required": ai_consent_enforcement_required(uid),
-        "policy": AiConsentService.policy(),
+        "policy": AiConsentService.policy(response_policy_version),
         "consent": _public_consent_state(state) if state else {"decision": "not_recorded", "receipt_id": None},
         "account_deletion": {**ACCOUNT_DELETION_CONTRACT, "status": "not_requested"},
     }
@@ -1144,6 +1250,40 @@ def assert_current_ai_consent(uid: str) -> str:
                 "retryable": True,
             },
         )
+    raise AiConsentHTTPException(
+        status_code=403,
+        detail={"code": AI_CONSENT_REQUIRED_CODE},
+    )
+
+
+def assert_typesafe_egress_consent(uid: str) -> str:
+    """Authorize TypeSafe/Jev transcript egress only under the exact v11 grant."""
+    status = get_ai_consent_service().status(uid)
+    if status.get("authority_state") == "unavailable":
+        raise AiConsentHTTPException(
+            status_code=503,
+            detail={
+                "code": AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE,
+                "retryable": True,
+            },
+        )
+    consent = dict(status.get("consent") or {})
+    processor_ids = consent.get("processor_ids")
+    if (
+        status.get("authorized") is True
+        and consent_policy_contract(
+            consent.get("policy_version"),
+            consent.get("processor_set_hash"),
+            consent.get("scope_version"),
+            consent.get("scope_hash"),
+        )
+        == SUPPORTED_CONSENT_POLICY_CONTRACTS[TYPESAFE_POLICY_VERSION]
+        and consent.get("policy_version") == TYPESAFE_POLICY_VERSION
+        and consent.get("processor_set_hash") == TYPESAFE_PROCESSOR_SET_HASH
+        and isinstance(processor_ids, list)
+        and TYPESAFE_PROCESSOR_ID in processor_ids
+    ):
+        return uid
     raise AiConsentHTTPException(
         status_code=403,
         detail={"code": AI_CONSENT_REQUIRED_CODE},

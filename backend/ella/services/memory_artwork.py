@@ -32,7 +32,7 @@ except ModuleNotFoundError:
     _IMAGE_DECODE_ERRORS = (OSError,)
 
 import database.memory_artwork as artwork_db
-from ella.services.ai_consent import CURRENT_POLICY_VERSION, get_ai_consent_service
+from ella.services.ai_consent import LEGACY_POLICY_VERSION_V10, get_ai_consent_service
 from ella.services.runtime_resolver import resolve_isolated_runtime
 from utils.ella.memory_artwork_storage import (
     MAX_ARTWORK_BYTES,
@@ -45,7 +45,10 @@ from utils.ella.memory_artwork_storage import (
 )
 
 ARTWORK_SCHEMA_VERSION = "ella.memory_artwork.v1"
-ARTWORK_CONSENT_VERSION = CURRENT_POLICY_VERSION
+# Artwork was introduced and explicitly authorized by the v10 processor
+# contract. Later global policy versions must not silently invalidate this
+# separate, owner-controlled preference.
+ARTWORK_CONSENT_VERSION = LEGACY_POLICY_VERSION_V10
 ARTWORK_QUEUE_SCHEMA_VERSION = "ella.memory_artwork.queue.v1"
 ARTWORK_LIBRARIES_SCHEMA_VERSION = "ella.memory_artwork.libraries.v1"
 ARTWORK_PROMPT_CONTRACT_VERSION = "ella.memory_artwork.prompt.v2"

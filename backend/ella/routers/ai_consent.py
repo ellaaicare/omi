@@ -12,6 +12,9 @@ from ella.services.ai_consent import (
     ConsentIdempotencyConflict,
     ConsentPolicyMismatch,
     ConsentSubmission,
+    CURRENT_POLICY_VERSION,
+    LEGACY_POLICY_VERSION_V10,
+    SUPPORTED_CONSENT_POLICY_CONTRACTS,
     get_ai_consent_service,
 )
 from ella.services.consent_authority import ArtworkConsentErasureUnavailable, submit_with_managed_cloud_authority
@@ -41,16 +44,24 @@ class AiConsentSubmissionRequest(BaseModel):
 
 
 @router.get("/v1/users/ai-consent/policy")
-def get_ai_consent_policy():
-    """Public metadata so disclosure can occur before Firebase sign-in."""
-    return AiConsentService.policy()
+def get_ai_consent_policy(policy_version: str = LEGACY_POLICY_VERSION_V10):
+    """Return legacy v10 by default; newer clients must negotiate v11."""
+    if policy_version not in SUPPORTED_CONSENT_POLICY_CONTRACTS:
+        raise HTTPException(status_code=404, detail={"code": "ai_consent_policy_version_not_supported"})
+    return AiConsentService.policy(policy_version)
 
 
 @router.get("/v1/users/ai-consent")
-def get_ai_consent_status(identity: FirebaseTokenIdentity = Depends(get_firebase_token_identity)):
+def get_ai_consent_status(
+    policy_version: str = LEGACY_POLICY_VERSION_V10,
+    identity: FirebaseTokenIdentity = Depends(get_firebase_token_identity),
+):
+    if policy_version not in SUPPORTED_CONSENT_POLICY_CONTRACTS:
+        raise HTTPException(status_code=404, detail={"code": "ai_consent_policy_version_not_supported"})
     status = get_ai_consent_service().status(
         identity.uid,
         account_epoch_auth_time=identity.auth_time,
+        requested_policy_version=policy_version,
     )
     if status.get("authority_state") == "unavailable":
         raise HTTPException(
@@ -107,11 +118,16 @@ async def submit_ai_consent(
             ),
         )
     except ConsentPolicyMismatch as exc:
+        required_policy_version = (
+            request.policy_version
+            if request.policy_version in SUPPORTED_CONSENT_POLICY_CONTRACTS
+            else CURRENT_POLICY_VERSION
+        )
         raise HTTPException(
             status_code=409,
             detail={
                 "code": "ai_consent_policy_mismatch",
-                "required_policy": AiConsentService.policy(),
+                "required_policy": AiConsentService.policy(required_policy_version),
             },
         ) from exc
     except ConsentIdempotencyConflict as exc:

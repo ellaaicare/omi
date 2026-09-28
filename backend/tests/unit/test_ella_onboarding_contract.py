@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from ella.routers import onboarding
 from ella.services import provisioning
+from ella.services.ai_consent import LEGACY_POLICY_VERSION_V10, LEGACY_V10_PROCESSOR_SET_HASH
 from ella.services.provisioning import ProvisioningError
 from ella.utils.provision_authority import APPROVED_HERMES_PROVISION_URL, _authority_binding_value
 
@@ -289,8 +290,8 @@ def test_disabled_status_allows_existing_retained_account(monkeypatch):
         async def get_self_hosted_invitation_admission(self, uid):
             return {
                 "omi_uid": uid,
-                "consent_policy_version": provisioning.CURRENT_POLICY_VERSION,
-                "consent_processor_set_hash": provisioning.CURRENT_PROCESSOR_SET_HASH,
+                "consent_policy_version": LEGACY_POLICY_VERSION_V10,
+                "consent_processor_set_hash": LEGACY_V10_PROCESSOR_SET_HASH,
                 "consent_scope_version": provisioning.CURRENT_SCOPE_VERSION,
                 "consent_scope_hash": provisioning.CURRENT_SCOPE_HASH,
                 "provider_allowlist": [provisioning.SELF_HOSTED_RUNTIME_PROVIDER],
@@ -314,7 +315,10 @@ def test_disabled_status_allows_existing_retained_account(monkeypatch):
             assert kwargs["target_mode"] == "hermes-chat"
             assert kwargs["required_provider"] == provisioning.SELF_HOSTED_RUNTIME_PROVIDER
             assert kwargs["model"] == provisioning.SELF_HOSTED_RUNTIME_MODEL
-            assert kwargs["authority_lineage"].policy_version == provisioning.CURRENT_POLICY_VERSION
+            assert kwargs["authority_lineage"].policy_version == LEGACY_POLICY_VERSION_V10
+            assert kwargs["authority_lineage"].processor_set_hash == LEGACY_V10_PROCESSOR_SET_HASH
+            assert kwargs["authority_lineage"].scope_version == provisioning.CURRENT_SCOPE_VERSION
+            assert kwargs["authority_lineage"].scope_hash == provisioning.CURRENT_SCOPE_HASH
             return {
                 "active": True,
                 "revision": 7,
