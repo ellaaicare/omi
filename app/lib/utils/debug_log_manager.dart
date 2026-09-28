@@ -194,4 +194,62 @@ class DebugLogManager {
     };
     await _append(jsonEncode(payload));
   }
+
+  // MARK: - Device discovery diagnostics (ellaaicare/ella-ai#1280 RUN-010 / #1287)
+  //
+  // Always-on (unlike the rest of this class, NOT gated behind [isEnabled]):
+  // testers need to see why a necklace didn't show up during BLE discovery
+  // without first knowing to flip the "Debug Logs" toggle. Redacted — counts
+  // and booleans only, never device names, UUIDs, or MAC addresses.
+
+  static int deviceScansStarted = 0;
+  static int deviceScansStopped = 0;
+  static int deviceCandidatesSeen = 0;
+  static int deviceCandidatesAdmitted = 0;
+  static final Map<String, int> deviceCandidatesRejectedByReason = {};
+
+  static const int _maxDeviceDiagnosticsLines = 200;
+  static final List<String> _deviceDiagnosticsBuffer = [];
+
+  /// Bounded, always-on ring buffer of redacted device-discovery lines,
+  /// newest last. Surfaced on Settings > Developer > Device Diagnostics.
+  static List<String> get deviceDiagnosticsBuffer => List.unmodifiable(_deviceDiagnosticsBuffer);
+
+  static void resetDeviceDiagnostics() {
+    deviceScansStarted = 0;
+    deviceScansStopped = 0;
+    deviceCandidatesSeen = 0;
+    deviceCandidatesAdmitted = 0;
+    deviceCandidatesRejectedByReason.clear();
+    _deviceDiagnosticsBuffer.clear();
+  }
+
+  static void recordCandidateRejected(String reason) {
+    deviceCandidatesRejectedByReason[reason] = (deviceCandidatesRejectedByReason[reason] ?? 0) + 1;
+  }
+
+  /// Appends a redacted line to the always-on buffer, and — in addition,
+  /// not instead of, matching the rest of this class — to the on-disk debug
+  /// log when the dev "Debug Logs" toggle is on. Never pass a device name,
+  /// UUID, or other identifier in [line].
+  static void recordDeviceDiagnostic(String line) {
+    final entry = '${_timestamp()} $line';
+    _deviceDiagnosticsBuffer.add(entry);
+    if (_deviceDiagnosticsBuffer.length > _maxDeviceDiagnosticsLines) {
+      _deviceDiagnosticsBuffer.removeAt(0);
+    }
+    unawaited(_append(jsonEncode({
+      'ts': _timestamp(),
+      'level': 'EVENT',
+      'type': 'device_diagnostic',
+      'message': line,
+    })));
+  }
+
+  static String deviceDiagnosticsSummaryText() {
+    final rejected = deviceCandidatesRejectedByReason.entries.map((e) => '${e.key}=${e.value}').join(', ');
+    return 'scansStarted=$deviceScansStarted scansStopped=$deviceScansStopped '
+        'candidatesSeen=$deviceCandidatesSeen candidatesAdmitted=$deviceCandidatesAdmitted '
+        'candidatesRejected={$rejected}';
+  }
 }
