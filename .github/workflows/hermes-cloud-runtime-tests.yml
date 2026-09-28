@@ -51,6 +51,10 @@ on:
       - "backend/ella/routers/chat.py"
       - "backend/ella/routers/escalations.py"
       - "backend/ella/routers/guardian.py"
+      - "backend/ella/services/guardian_playback_ledger.py"
+      - "backend/ella/services/guardian_echo_classifier.py"
+      - "backend/migrations/018_create_guardian_playback_ledger.sql"
+      - "backend/ella/docs/GUARDIAN_ECHO_CLASSIFIER_N8N_CONTRACT.md"
       - "backend/ella/routers/hermes_cloud_enrichment.py"
       - "backend/ella/routers/onboarding.py"
       - "backend/ella/routers/observer.py"
@@ -164,6 +168,10 @@ on:
       - "backend/tests/postgres/test_today_card_lifecycle_postgres.py"
       - "backend/tests/unit/test_scanner_keyterms.py"
       - "backend/tests/unit/test_ella_scanner_batching.py"
+      - "backend/tests/unit/test_ella_scanner_echo_suppression.py"
+      - "backend/tests/unit/test_guardian_echo_classifier.py"
+      - "backend/tests/postgres/test_guardian_playback_ledger_postgres.py"
+      - "backend/tests/postgres/test_guardian_echo_classifier_scanner_e2e_postgres.py"
       - "backend/tests/unit/test_capture_buffer_retention.py"
       - "backend/tests/unit/test_capture_incident_1210_regressions.py"
       - "backend/tests/unit/test_capture_protocol_v2_live.py"
@@ -221,6 +229,10 @@ on:
       - "backend/ella/routers/chat.py"
       - "backend/ella/routers/escalations.py"
       - "backend/ella/routers/guardian.py"
+      - "backend/ella/services/guardian_playback_ledger.py"
+      - "backend/ella/services/guardian_echo_classifier.py"
+      - "backend/migrations/018_create_guardian_playback_ledger.sql"
+      - "backend/ella/docs/GUARDIAN_ECHO_CLASSIFIER_N8N_CONTRACT.md"
       - "backend/ella/routers/hermes_cloud_enrichment.py"
       - "backend/ella/routers/onboarding.py"
       - "backend/ella/routers/observer.py"
@@ -334,6 +346,10 @@ on:
       - "backend/tests/postgres/test_today_card_lifecycle_postgres.py"
       - "backend/tests/unit/test_scanner_keyterms.py"
       - "backend/tests/unit/test_ella_scanner_batching.py"
+      - "backend/tests/unit/test_ella_scanner_echo_suppression.py"
+      - "backend/tests/unit/test_guardian_echo_classifier.py"
+      - "backend/tests/postgres/test_guardian_playback_ledger_postgres.py"
+      - "backend/tests/postgres/test_guardian_echo_classifier_scanner_e2e_postgres.py"
       - "backend/tests/unit/test_capture_buffer_retention.py"
       - "backend/tests/unit/test_capture_incident_1210_regressions.py"
       - "backend/tests/unit/test_capture_protocol_v2_live.py"
@@ -403,6 +419,7 @@ jobs:
           "PyJWT==2.9.0"
           "pytest==8.3.2"
           "openapi-spec-validator==0.7.1"
+          "psycopg2-binary==2.9.9"
           "PyYAML==6.0.2"
           "python-multipart==0.0.9"
           "websockets==12.0"
@@ -457,6 +474,8 @@ jobs:
           ella/routers/escalations.py
           ella/routers/hermes_cloud_enrichment.py
           ella/routers/guardian.py
+          ella/services/guardian_playback_ledger.py
+          ella/services/guardian_echo_classifier.py
           ella/routers/invites.py
           ella/routers/memory_reinterpretation.py
           ella/routers/onboarding.py
@@ -546,6 +565,7 @@ jobs:
           ella/routers/corrections.py
           ella/routers/debug_metadata.py ella/routers/escalations.py
           ella/routers/guardian.py ella/routers/hermes_cloud_enrichment.py ella/routers/invites.py
+          ella/services/guardian_playback_ledger.py ella/services/guardian_echo_classifier.py
           ella/routers/memory_reinterpretation.py ella/routers/observer.py ella/routers/photon.py
           ella/routers/onboarding.py ella/routers/plato_mcp.py ella/routers/resolve.py
           ella/routers/settings.py ella/routers/trace.py
@@ -1317,7 +1337,7 @@ jobs:
           pytest tests/unit/test_conversation_summary_cas.py -k "$baseline_summary_cas_selector" -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 113
           pytest tests/unit/test_ella_conversation_corrections.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 51
+          test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 49
           pytest tests/unit/test_ella_guardian_delivery.py -v
           guardian_delivery_claim_ids="$(
             pytest --collect-only -q tests/postgres/test_guardian_delivery_claim_postgres.py |
@@ -1335,6 +1355,12 @@ jobs:
           pytest tests/postgres/test_guardian_delivery_claim_postgres.py -v |
             tee /tmp/guardian-delivery-claim-pytest.log
           ! grep -Eq '[0-9]+ skipped' /tmp/guardian-delivery-claim-pytest.log
+          test "$(pytest --collect-only -q tests/unit/test_guardian_echo_classifier.py | grep -c '::')" -eq 19
+          pytest tests/unit/test_guardian_echo_classifier.py -v
+          test "$(pytest --collect-only -q tests/postgres/test_guardian_playback_ledger_postgres.py | grep -c '::')" -eq 13
+          pytest tests/postgres/test_guardian_playback_ledger_postgres.py -v
+          test "$(pytest --collect-only -q tests/postgres/test_guardian_echo_classifier_scanner_e2e_postgres.py | grep -c '::')" -eq 5
+          pytest tests/postgres/test_guardian_echo_classifier_scanner_e2e_postgres.py -v
           escalation_auth_ids="$(pytest --collect-only -q tests/unit/test_ella_escalations_router_auth.py | sed '/^$/d')"
           required_escalation_auth_ids=(
             "tests/unit/test_ella_escalations_router_auth.py::test_policy_view_internal_key_reaches_load_context_for_explicit_uid"
@@ -1412,8 +1438,10 @@ jobs:
           grep -Fqx \
             "tests/unit/test_ella_scanner_batching.py::test_scanner_webhook_ignores_proxy_environment_and_rejects_redirect" \
             <<<"$scanner_batching_ids"
-          test "$(grep -c '::' <<<"$scanner_batching_ids")" -eq 52
+          test "$(grep -c '::' <<<"$scanner_batching_ids")" -eq 56
           pytest tests/unit/test_ella_scanner_batching.py -v
+          test "$(pytest --collect-only -q tests/unit/test_ella_scanner_echo_suppression.py | grep -c '::')" -eq 17
+          pytest tests/unit/test_ella_scanner_echo_suppression.py -v
 
       - name: Run real Firestore summary CAS contention gate
         run: |

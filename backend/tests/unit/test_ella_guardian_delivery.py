@@ -20,6 +20,13 @@ def _configured_guardian_service_key(monkeypatch):
     monkeypatch.setattr(guardian, "GUARDIAN_WEBHOOK_KEY", "configured-guardian-service-key")
 
 
+@pytest.fixture(autouse=True)
+def _reset_playback_ledger_stub_calls():
+    guardian_playback_ledger_stub.calls.clear()
+    yield
+    guardian_playback_ledger_stub.calls.clear()
+
+
 _BACKEND = Path(__file__).resolve().parents[2]
 _POLICY_PATH = _BACKEND / "ella" / "services" / "escalation_policy.py"
 _POLICY_SPEC = importlib.util.spec_from_file_location("ella.services.escalation_policy", _POLICY_PATH)
@@ -54,6 +61,49 @@ sys.modules["ella.services.ai_consent"] = ai_consent_module
 hermes_cloud_module = types.ModuleType("ella.services.hermes_cloud")
 hermes_cloud_module.HermesCloudClient = object
 sys.modules["ella.services.hermes_cloud"] = hermes_cloud_module
+
+
+class _StubPlaybackLedgerOwnershipError(Exception):
+    pass
+
+
+guardian_playback_ledger_stub = types.ModuleType("ella.services.guardian_playback_ledger")
+guardian_playback_ledger_stub.calls = []
+guardian_playback_ledger_stub.PlaybackLedgerOwnershipError = _StubPlaybackLedgerOwnershipError
+
+
+async def _stub_ledger_get_pool():
+    return None
+
+
+async def _stub_ledger_record_generated(_pool, **kwargs):
+    guardian_playback_ledger_stub.calls.append(("record_generated", kwargs))
+
+
+async def _stub_ledger_record_queued(_pool, **kwargs):
+    guardian_playback_ledger_stub.calls.append(("record_queued", kwargs))
+
+
+async def _stub_ledger_record_fetched(_pool, **kwargs):
+    guardian_playback_ledger_stub.calls.append(("record_fetched", kwargs))
+
+
+async def _stub_ledger_record_playback_receipt(_pool, **kwargs):
+    guardian_playback_ledger_stub.calls.append(("record_playback_receipt", kwargs))
+    return kwargs.get("event_type")
+
+
+async def _stub_ledger_get_played_candidates(_pool, _uid, **_kwargs):
+    return []
+
+
+guardian_playback_ledger_stub.get_pool = _stub_ledger_get_pool
+guardian_playback_ledger_stub.record_generated = _stub_ledger_record_generated
+guardian_playback_ledger_stub.record_queued = _stub_ledger_record_queued
+guardian_playback_ledger_stub.record_fetched = _stub_ledger_record_fetched
+guardian_playback_ledger_stub.record_playback_receipt = _stub_ledger_record_playback_receipt
+guardian_playback_ledger_stub.get_played_candidates = _stub_ledger_get_played_candidates
+sys.modules["ella.services.guardian_playback_ledger"] = guardian_playback_ledger_stub
 
 
 class _ProvisioningError(Exception):
@@ -626,36 +676,6 @@ def test_synthesize_audio_falls_back_to_next_candidate(monkeypatch):
     assert response.headers["x-guardian-fallback-used"] == "true"
 
 
-def test_enqueue_rejects_guardian_wake_fallback_echo_message():
-    rejected, reason = guardian._enqueue_rejects_guardian_echo(
-        "uid-1",
-        guardian.EnqueueRequest(
-            uid="uid-1",
-            url="https://example.test/audio.mp3",
-            trigger="wake_word_fallback",
-            message="I heard you. I am checking that now: Hi, Greg. I heard my name. I'm here with you.",
-        ),
-    )
-
-    assert rejected is True
-    assert reason == "guardian_playback_echo"
-
-
-def test_enqueue_does_not_reject_real_wake_word_question():
-    rejected, reason = guardian._enqueue_rejects_guardian_echo(
-        "uid-1",
-        guardian.EnqueueRequest(
-            uid="uid-1",
-            url="https://example.test/audio.mp3",
-            trigger="wake_word_fallback",
-            message="I heard you. I am checking that now: Hey Ella, where did I put my glasses?",
-        ),
-    )
-
-    assert rejected is False
-    assert reason is None
-
-
 def test_wake_ack_request_detects_trigger_and_metadata_flag():
     assert guardian._is_wake_ack_request(
         guardian.EnqueueRequest(
@@ -1176,7 +1196,7 @@ def test_guardian_native_owner_routes_derive_subject_without_caller_uid(monkeypa
     playback = client.post(
         "/v1/ella/guardian/playback-event",
         headers=headers,
-        json={"event_type": "started", "port_type": "Speaker", "trace_id": "trace-a"},
+        json={"event_type": "started", "port_type": "Speaker", "trace_id": "trace-a", "queue_item_id": "item-a"},
     )
     playback_debug = client.post(
         "/v1/ella/guardian/playback-debug",
@@ -1195,7 +1215,10 @@ def test_guardian_native_owner_routes_derive_subject_without_caller_uid(monkeypa
         200,
         200,
     ]
-    assert guardian._playback_events["uid-a"]["trace_id"] == "trace-a"
+    receipt_calls = [call for call in guardian_playback_ledger_stub.calls if call[0] == "record_playback_receipt"]
+    assert receipt_calls[-1][1]["uid"] == "uid-a"
+    assert receipt_calls[-1][1]["trace_id"] == "trace-a"
+    assert receipt_calls[-1][1]["playback_id"] == "item-a"
     assert queue.json()["uid"] == "uid-a"
     assert activate.json()["uid"] == "uid-a"
     assert trace.json()["uid"] == "uid-a"

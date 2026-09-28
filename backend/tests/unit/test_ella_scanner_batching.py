@@ -541,12 +541,12 @@ def test_scanner_fails_closed_when_mode_authority_is_unavailable(monkeypatch):
 def test_scanner_fails_before_webhook_egress_without_authority(monkeypatch):
     posts = []
     wake_acks = []
-    echo_inspections = []
+    candidate_lookups = []
     monkeypatch.setattr(scanner, "_enqueue_wake_ack", lambda *args, **kwargs: wake_acks.append((args, kwargs)))
     monkeypatch.setattr(
         scanner,
-        "should_suppress_guardian_echo",
-        lambda *args, **kwargs: echo_inspections.append((args, kwargs)) or True,
+        "select_playback_ledger_candidates",
+        lambda *args, **kwargs: candidate_lookups.append((args, kwargs)) or [],
     )
     monkeypatch.setattr(
         scanner,
@@ -568,7 +568,7 @@ def test_scanner_fails_before_webhook_egress_without_authority(monkeypatch):
 
     assert status is None
     assert wake_acks == []
-    assert echo_inspections == []
+    assert candidate_lookups == []
     assert posts == []
 
 
@@ -868,3 +868,112 @@ def test_direct_wake_ack_skips_all_off_equivalent_modes(monkeypatch, mode):
     )
 
     assert result == {"method": "direct_db", "status": "skipped", "reason": "guardian_mode_off"}
+
+
+def test_scanner_dispatch_success_trace_and_logs_never_contain_transcript_text(monkeypatch, capsys):
+    """P0 privacy regression: the success trace event and stdout log for a
+    scanner dispatch must never carry transcript text — only content-free
+    ids/counts/statuses (see `scanner_payload_metadata_summary`)."""
+    trace_events = []
+    monkeypatch.setattr(scanner, "_log_trace_event", lambda **kwargs: trace_events.append(kwargs))
+    monkeypatch.setattr(scanner, "_enqueue_wake_ack", lambda *a, **k: None)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner, "_post_scanner_webhook", lambda *a, **k: _FakeResponse(200))
+    monkeypatch.setattr(scanner, "SCANNER_AMBIENT_BATCH_WORDS", 100)
+
+    secret_phrase = "UNMISTAKABLE_SECRET_TRANSCRIPT_MARKER_SUCCESS"
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-privacy-success",
+        [{"text": f"Hey Ella, {secret_phrase}", "speaker": "SPEAKER_1"}],
+        guardian_mode="active_support",
+    )
+
+    assert status == 200
+    captured = capsys.readouterr()
+    assert secret_phrase not in captured.out
+    assert secret_phrase not in captured.err
+    assert trace_events, "expected at least one trace event"
+    for event in trace_events:
+        assert secret_phrase not in json.dumps(event)
+
+
+def test_scanner_dispatch_timeout_trace_and_logs_never_contain_transcript_text(monkeypatch, capsys):
+    trace_events = []
+
+    def raise_timeout(*_args, **_kwargs):
+        raise scanner.requests.Timeout("boom")
+
+    monkeypatch.setattr(scanner, "_log_trace_event", lambda **kwargs: trace_events.append(kwargs))
+    monkeypatch.setattr(scanner, "_enqueue_wake_ack", lambda *a, **k: None)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner, "_post_scanner_webhook", raise_timeout)
+    monkeypatch.setattr(scanner, "SCANNER_AMBIENT_BATCH_WORDS", 100)
+
+    secret_phrase = "UNMISTAKABLE_SECRET_TRANSCRIPT_MARKER_TIMEOUT"
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-privacy-timeout",
+        [{"text": f"Hey Ella, {secret_phrase}", "speaker": "SPEAKER_1"}],
+        guardian_mode="active_support",
+    )
+
+    assert status is None
+    captured = capsys.readouterr()
+    assert secret_phrase not in captured.out
+    assert secret_phrase not in captured.err
+    assert trace_events, "expected at least one trace event"
+    for event in trace_events:
+        assert secret_phrase not in json.dumps(event)
+
+
+def test_scanner_dispatch_error_trace_and_logs_never_contain_transcript_text(monkeypatch, capsys):
+    trace_events = []
+
+    def raise_error(*_args, **_kwargs):
+        raise RuntimeError("webhook exploded")
+
+    monkeypatch.setattr(scanner, "_log_trace_event", lambda **kwargs: trace_events.append(kwargs))
+    monkeypatch.setattr(scanner, "_enqueue_wake_ack", lambda *a, **k: None)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner, "_post_scanner_webhook", raise_error)
+    monkeypatch.setattr(scanner, "SCANNER_AMBIENT_BATCH_WORDS", 100)
+
+    secret_phrase = "UNMISTAKABLE_SECRET_TRANSCRIPT_MARKER_ERROR"
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-privacy-error",
+        [{"text": f"Hey Ella, {secret_phrase}", "speaker": "SPEAKER_1"}],
+        guardian_mode="active_support",
+    )
+
+    assert status is None
+    captured = capsys.readouterr()
+    assert secret_phrase not in captured.out
+    assert secret_phrase not in captured.err
+    assert trace_events, "expected at least one trace event"
+    for event in trace_events:
+        assert secret_phrase not in json.dumps(event)
+
+
+def test_wake_detected_trace_and_persisted_queue_metadata_never_contain_transcript_text(monkeypatch, capsys):
+    """`_enqueue_wake_ack` writes both a trace event and (via
+    `_build_wake_ack_payload`) metadata persisted into `guardian_queue` —
+    neither may ever carry the transcript."""
+    trace_events = []
+    monkeypatch.setattr(scanner, "_log_trace_event", lambda **kwargs: trace_events.append(kwargs))
+    monkeypatch.setattr(scanner, "GUARDIAN_WEBHOOK_KEY", "")  # skip the fire-and-forget POST/DB write
+
+    secret_phrase = "UNMISTAKABLE_SECRET_TRANSCRIPT_MARKER_WAKE"
+    payload = scanner._build_wake_ack_payload(
+        "uid-1", "conv-1", "trace-1", [{"speaker": "SPEAKER_1", "text": f"Hey Ella, {secret_phrase}"}]
+    )
+    scanner._enqueue_wake_ack(
+        "uid-1", "conv-1", "trace-1", [{"speaker": "SPEAKER_1", "text": f"Hey Ella, {secret_phrase}"}]
+    )
+
+    assert secret_phrase not in json.dumps(payload)
+    captured = capsys.readouterr()
+    assert secret_phrase not in captured.out
+    for event in trace_events:
+        assert secret_phrase not in json.dumps(event)
