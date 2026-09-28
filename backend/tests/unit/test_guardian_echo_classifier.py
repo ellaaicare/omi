@@ -149,7 +149,7 @@ def test_tv_media_is_not_confirmed_echo():
         _decision_response(
             is_ella_playback=False,
             source="tv_media",
-            contains_additional_live_speech=True,
+            contains_additional_live_speech=False,
             confidence=0.6,
             reason_code="tv_dialogue",
         )
@@ -167,7 +167,7 @@ def test_unrelated_user_speech_is_not_confirmed_echo():
         _decision_response(
             is_ella_playback=False,
             source="live_user",
-            contains_additional_live_speech=True,
+            contains_additional_live_speech=False,
             confidence=0.95,
             reason_code="unrelated_live_speech",
         )
@@ -216,6 +216,83 @@ def test_mixed_with_unvalidated_spans_fails_open_on_original_transcript():
     assert result.fail_open
     assert result.reason_code == classifier.REASON_INVALID_SCHEMA
     assert result.validated_live_spans == []
+    assert not result.is_confirmed_echo
+
+
+def test_mixed_with_empty_live_speech_spans_list_fails_open_on_original_transcript():
+    """mixed + a matched playback id but an empty span list must never suppress.
+
+    Without at least one extractive span there is nothing to retain, so the
+    contract requires this to come back unclear/fail-open rather than a
+    confirmed echo that would drop the (claimed) live speech silently.
+    """
+    transcript = "Hi Greg I heard my name and then something else happened"
+    _FakeAsyncClient.queued_responses = [
+        _decision_response(
+            is_ella_playback=True,
+            source="mixed",
+            contains_additional_live_speech=True,
+            matched_playback_ids=["guardian_abc123"],
+            live_speech_spans=[],
+            confidence=0.5,
+        )
+    ]
+
+    result = asyncio.run(classify_playback_source_test(transcript))
+
+    assert result.fail_open
+    assert result.source == "unclear"
+    assert result.reason_code == classifier.REASON_INVALID_SCHEMA
+    assert result.validated_live_spans == []
+    assert not result.is_confirmed_echo
+
+
+def test_mixed_with_only_blank_live_speech_spans_fails_open_on_original_transcript():
+    """A whitespace-only span is technically an extractive substring of most
+    transcripts (they contain spaces) but carries no real speech — it must
+    not satisfy the cross-field invariant either."""
+    transcript = "Hi Greg I heard my name and then something else happened"
+    _FakeAsyncClient.queued_responses = [
+        _decision_response(
+            is_ella_playback=True,
+            source="mixed",
+            contains_additional_live_speech=True,
+            matched_playback_ids=["guardian_abc123"],
+            live_speech_spans=["   ", ""],
+            confidence=0.5,
+        )
+    ]
+
+    result = asyncio.run(classify_playback_source_test(transcript))
+
+    assert result.fail_open
+    assert result.source == "unclear"
+    assert result.reason_code == classifier.REASON_INVALID_SCHEMA
+    assert result.validated_live_spans == []
+    assert not result.is_confirmed_echo
+
+
+def test_contains_additional_live_speech_true_without_spans_fails_open_even_for_non_mixed_source():
+    """The invariant is keyed on `contains_additional_live_speech`, not just
+    `source == "mixed"` — a payload that declares extra live speech through
+    the boolean flag alone must also be backed by a real span."""
+    transcript = "Hi Greg I heard my name and then something else happened"
+    _FakeAsyncClient.queued_responses = [
+        _decision_response(
+            is_ella_playback=True,
+            source="ella_playback",
+            contains_additional_live_speech=True,
+            matched_playback_ids=["guardian_abc123"],
+            live_speech_spans=[],
+            confidence=0.5,
+        )
+    ]
+
+    result = asyncio.run(classify_playback_source_test(transcript))
+
+    assert result.fail_open
+    assert result.source == "unclear"
+    assert result.reason_code == classifier.REASON_INVALID_SCHEMA
     assert not result.is_confirmed_echo
 
 

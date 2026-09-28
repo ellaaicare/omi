@@ -186,6 +186,17 @@ def _validate_payload(payload: Any, *, transcript: str, known_playback_ids: set[
     if any(span and span not in transcript for span in live_speech_spans):
         return None
 
+    # Cross-field invariant: a claim of additional live speech (whether via
+    # `source="mixed"` or `contains_additional_live_speech`) is only
+    # trustworthy if it is backed by at least one non-blank extractive span.
+    # Without one there is nothing to retain, so a downstream caller could
+    # silently drop real speech instead of failing open — treat this as an
+    # invalid response rather than trusting the unsupported claim.
+    claims_additional_live_speech = source == "mixed" or contains_additional_live_speech
+    has_non_blank_span = any(span.strip() for span in live_speech_spans)
+    if claims_additional_live_speech and not has_non_blank_span:
+        return None
+
     reason_code = payload.get("reason_code")
     if not isinstance(reason_code, str) or not reason_code:
         reason_code = "classified"
