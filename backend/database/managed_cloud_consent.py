@@ -155,7 +155,7 @@ async def _rearm_fresh_self_hosted_regrant_on_connection(
          AND binding.template_version = job.target_schema_version
         WHERE account.id = $1
           AND account.omi_uid = $2
-          AND account.status = 'PENDING'
+          AND account.status IN ('PENDING', 'ACTIVE')
           AND job.state = 'blocked'
           AND job.stage = 'runtime_ready'
           AND job.retryable = FALSE
@@ -592,6 +592,19 @@ async def synchronize_grant(
                     )
                     if target_result != f"UPDATE {len(SELF_HOSTED_RUNTIME_TARGET_MODES)}":
                         raise ManagedCloudAuthorityUnavailable("invitation_runtime_target_missing")
+                activation_result = await conn.execute(
+                    """
+                    UPDATE users
+                    SET status = 'ACTIVE',
+                        guardian_mode = COALESCE(guardian_mode, 'OFF'),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                      AND status IN ('PENDING', 'ACTIVE')
+                    """,
+                    user_id,
+                )
+                if activation_result != "UPDATE 1":
+                    raise ManagedCloudAuthorityUnavailable("managed_cloud_account_activation_failed")
                 return dict(row)
     except ManagedCloudAuthorityUnavailable:
         raise
@@ -848,6 +861,17 @@ async def synchronize_denial(
                         user_id,
                         decision,
                     )
+                disabled = await conn.execute(
+                    """
+                    UPDATE users
+                    SET guardian_mode = 'OFF',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                    """,
+                    user_id,
+                )
+                if disabled != "UPDATE 1":
+                    raise ManagedCloudAuthorityUnavailable("managed_cloud_guardian_disable_failed")
                 await _quarantine_on_connection(
                     conn,
                     uid=uid,

@@ -11,7 +11,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
 import requests
 
@@ -36,6 +36,10 @@ GUARDIAN_WAKE_ACK_AUDIO_URL = os.getenv(
 )
 GUARDIAN_WAKE_ACK_TIMEOUT_S = float(os.getenv("ELLA_GUARDIAN_WAKE_ACK_TIMEOUT_S", "2.0"))
 GUARDIAN_WAKE_ACK_DIRECT_DB = os.getenv("ELLA_GUARDIAN_WAKE_ACK_DIRECT_DB", "true").lower() == "true"
+GUARDIAN_TRACE_LOG_TIMEOUT_S = min(
+    5.0,
+    max(0.25, float(os.getenv("ELLA_GUARDIAN_TRACE_LOG_TIMEOUT_S", "2.0"))),
+)
 WAKE_WORD_PREFIX_MAX_WORDS = 4
 WAKE_WORD_PENDING_WINDOW_S = float(os.getenv("ELLA_WAKE_WORD_PENDING_WINDOW_S", "12.0"))
 SCANNER_CONTEXT_WINDOW_S = float(os.getenv("ELLA_SCANNER_CONTEXT_WINDOW_S", "12.0"))
@@ -105,10 +109,149 @@ _EMERGENCY_PATTERN = re.compile(
     r"\b("
     r"911|emergency|urgent|ambulance|paramedic|"
     r"help me|need help|call for help|"
-    r"can(?:not|'t|t) breathe|chest pain|heart attack|stroke|seizure|"
+    r"can(?:not|['’]t|t) breathe|chest pain|heart attack|stroke|seizure|"
     r"fell|fallen|falling|bleeding|choking|overdose|"
     r"suicidal|kill myself|hurt myself|fire|break in|burglar"
     r")\b",
+    re.IGNORECASE,
+)
+_CANNOT_PHRASE = r"(?:can\s*not|cannot|can['’]t)"
+_CURRENT_PERSON_SUBJECT = (
+    r"(?:i|we|you|he|she|they|someone|somebody|"
+    r"my\s+(?:husband|wife|partner|mother|mom|father|dad|parent|son|daughter|child|"
+    r"brother|sister|friend|roommate|caregiver)|"
+    r"(?:mom|mother|dad|father|husband|wife|partner|son|daughter|child|brother|sister))"
+)
+_CURRENT_PERSON_COPULA = r"(?:\s+(?:am|is|are)|\s*['’](?:m|s|re))"
+_CREDIBLE_EMERGENCY_PATTERNS = (
+    (
+        "emergency_services",
+        re.compile(
+            r"^\s*(?:(?:please\s+)?(?:someone\s+)?|someone\s+please\s+)" r"call\s+(?:911|an?\s+ambulance)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "breathing",
+        re.compile(
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT})\s+{_CANNOT_PHRASE}\s+breathe\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "fall",
+        re.compile(
+            r"^\s*(?:i\s+fell\s+down|(?:i\s+fell|i\s+have\s+fallen|i['’]ve\s+fallen)\s+and\s+"
+            r"(?:(?:i(?:\s+am|['’]m)?|am)\s+)?(?:hurt|injured|bleeding|unable\s+to\s+move|need\s+help|"
+            rf"{_CANNOT_PHRASE}\s+get\s+up))\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("immobile", re.compile(rf"^\s*i\s+{_CANNOT_PHRASE}\s+get\s+up\b", re.IGNORECASE)),
+    (
+        "chest_pain",
+        re.compile(
+            rf"^\s*(?:i\s+have\s+chest\s+pain|"
+            rf"(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+having\s+chest\s+pain|"
+            r"my\s+chest\s+hurts)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "heart_attack",
+        re.compile(
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+having\s+(?:a\s+)?heart\s+attack\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "stroke",
+        re.compile(
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+having\s+(?:a\s+)?stroke\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "choking",
+        re.compile(
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+choking\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "overdose",
+        re.compile(
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+overdosing\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "self_harm",
+        re.compile(
+            r"^\s*(?:i(?:\s+am|\s*['’]m)\s+(?:suicidal|going\s+to\s+(?:kill|hurt)\s+myself)|"
+            r"i\s+(?:want|plan|intend)\s+to\s+(?:kill|hurt)\s+myself)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "fire",
+        re.compile(
+            r"^\s*(?:there\s+is\s+(?:a\s+)?fire|(?:my|the)\s+(?:house|home)\s+is\s+on\s+fire|"
+            r"(?:a\s+)?fire\s+(?:in|inside)\s+(?:my|the)\s+(?:house|home)|"
+            r"smoke\s+(?:in|inside)\s+(?:my|the)\s+(?:house|home))\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "seizure",
+        re.compile(
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+having\s+(?:a\s+)?seizure\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "severe_bleeding",
+        re.compile(
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+bleeding\s+out\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "intruder",
+        re.compile(
+            r"^\s*(?:there\s+is\s+(?:an?\s+)?intruder(?:\s+(?:in|inside)\s+(?:my|the)\s+(?:house|home))?|"
+            r"(?:an?\s+)?intruder\s+is\s+(?:in|inside)\s+"
+            r"(?:my|the)\s+(?:house|home))\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
+_CREDIBLE_HELP_PATTERN = re.compile(
+    r"^\s*(?:please\s+)?(?:help\s+me|i\s+need\s+help)(?:\s+(?:now|please|right\s+now))?[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_NEGATED_CURRENT_SUBJECT_PATTERN = re.compile(
+    r"^\s*(?:no\s+(?:one|body|person)|nobody|none(?:\s+of\s+(?:them|us|you))?|"
+    r"not\s+(?:anyone|anybody)|neither(?:\s+of\s+(?:them|us|you))?)\b",
+    re.IGNORECASE,
+)
+_CONTEXTUAL_REPORTED_SPEECH_SUFFIX = re.compile(
+    (
+        r"\b(?:said|says|quote(?:s|d)?|reported|reports|"
+        r"told\s+(?:me|us|you|him|her|them)|heard|read)(?:\s+that)?\s*[.!?,;:]*\s*$"
+    ),
+    re.IGNORECASE,
+)
+_CREDIBLE_WAKE_PREFIX = re.compile(
+    r"^\s*(?:hey\s+(?:ella|ela|ellah|ellaa|el|ell|elle|eleve|eleven)\b[\s,;:!?-]*|"
+    r"(?:ella|ela|ellah|ellaa)\b\s*[,;:!?-]+\s*)",
+    re.IGNORECASE,
+)
+_CREDIBLE_EMERGENCY_TAIL = re.compile(
+    r"^\s*[,;:!?-]*\s*(?:(?:right\s+)?now|today|tonight|(?:please\s+)?help(?:\s+me)?|"
+    r"(?:and\s+)?(?:please\s+)?call\s+(?:911|an?\s+ambulance)(?:\s+(?:right\s+)?now)?|"
+    r"and\s+(?:i\s+)?need\s+(?:help|an?\s+ambulance)|"
+    rf"and\s+(?:i\s+)?{_CANNOT_PHRASE}\s+breathe|please)?\s*[.!?]*\s*$",
     re.IGNORECASE,
 )
 _DURATION_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)(?P<unit>ms|s|m|h)")
@@ -118,6 +261,17 @@ _SCANNER_RATE_LIMIT_UNTIL = {
     "users": {},
 }
 _SCANNER_STATE_LOCK = threading.Lock()
+_GUARDIAN_OFF_MODES = {"", "off", "none", "disabled", "null", "guardian_off"}
+_GUARDIAN_ACTIVE_MODES = {
+    "active_support",
+    "emergency_only",
+    "memory_support",
+    "maximum_awareness",
+    "cyborg",
+    "chatbot",
+    "demo",
+}
+_GUARDIAN_MODE_UNSET = object()
 
 
 def _trace_id_for(conversation_id: str) -> str:
@@ -130,6 +284,23 @@ def _trace_id_for(conversation_id: str) -> str:
 
 def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())).strip()
+
+
+def _normalize_guardian_mode(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in _GUARDIAN_OFF_MODES:
+        return "off"
+    if normalized in {"active", "support"}:
+        return "active_support"
+    if normalized in {"emergency", "alert", "alerts_only"}:
+        return "emergency_only"
+    if normalized in {"memory"}:
+        return "memory_support"
+    if normalized in {"maximum", "max_awareness", "max"}:
+        return "maximum_awareness"
+    if normalized in {"chat"}:
+        return "chatbot"
+    return normalized
 
 
 def _word_count(text: str) -> int:
@@ -213,6 +384,134 @@ def contains_wake_phrase(text: str) -> bool:
 
 def contains_emergency_phrase(text: str) -> bool:
     return bool(_EMERGENCY_PATTERN.search(text or ""))
+
+
+def credible_emergency_reason(text: str) -> Optional[str]:
+    """Return a conservative reason suitable for dispatch while Guardian is off."""
+    candidate = _CREDIBLE_WAKE_PREFIX.sub("", text or "", count=1)
+    if _NEGATED_CURRENT_SUBJECT_PATTERN.search(candidate):
+        return None
+    for reason, pattern in _CREDIBLE_EMERGENCY_PATTERNS:
+        match = pattern.search(candidate)
+        if match and _CREDIBLE_EMERGENCY_TAIL.fullmatch(candidate[match.end() :]):
+            return reason
+    if _CREDIBLE_HELP_PATTERN.search(candidate):
+        return "explicit_help"
+    return None
+
+
+def _iter_credible_emergency_matches_for_segments(segments: List[dict]) -> Iterator[tuple[str, int, int]]:
+    """Yield every credible reason and its contiguous speaker-group bounds, in order."""
+    active_speaker: Optional[str] = None
+    active_text: list[str] = []
+    active_start = 0
+
+    def match_active_text() -> Optional[str]:
+        if not active_text:
+            return None
+        return credible_emergency_reason(" ".join(active_text))
+
+    for index, segment in enumerate(segments):
+        text = str(segment.get("text") or "").strip()
+        if not text:
+            continue
+        raw_speaker = segment.get("speaker") or segment.get("speaker_id") or segment.get("person_id")
+        speaker = str(raw_speaker).strip() if raw_speaker else f"unknown:{index}"
+        if active_speaker is not None and speaker != active_speaker:
+            reason = match_active_text()
+            if reason:
+                yield reason, active_start, index
+            active_text = []
+            active_start = index
+        elif active_speaker is None:
+            active_start = index
+        active_speaker = speaker
+        active_text.append(text)
+
+    reason = match_active_text()
+    if reason:
+        yield reason, active_start, len(segments)
+
+
+def _credible_emergency_match_for_segments(segments: List[dict]) -> tuple[Optional[str], int, int]:
+    """Return the first credible reason and its contiguous speaker-group bounds."""
+    for reason, start, end in _iter_credible_emergency_matches_for_segments(segments):
+        return reason, start, end
+    return None, -1, -1
+
+
+def credible_emergency_reason_for_segments(segments: List[dict]) -> Optional[str]:
+    """Match contiguous speech from one speaker without crossing speaker boundaries."""
+    reason, _, _ = _credible_emergency_match_for_segments(segments)
+    return reason
+
+
+def _single_explicit_speaker(segments: List[dict]) -> Optional[str]:
+    speaker: Optional[str] = None
+    for segment in segments:
+        if not str(segment.get("text") or "").strip():
+            continue
+        raw_speaker = segment.get("speaker") or segment.get("speaker_id") or segment.get("person_id")
+        current = str(raw_speaker).strip() if raw_speaker is not None else ""
+        if not current or (speaker is not None and current != speaker):
+            return None
+        speaker = current
+    return speaker
+
+
+def _credible_emergency_match_with_context(
+    context_segments: List[dict], current_segments: List[dict]
+) -> tuple[Optional[str], List[dict], List[dict]]:
+    """Return a reason and only the retained/current segments that authorized it."""
+    current_matches = list(_iter_credible_emergency_matches_for_segments(current_segments))
+    if current_matches:
+        context_speaker = _single_explicit_speaker(context_segments)
+        context_text = " ".join(str(segment.get("text") or "") for segment in context_segments)
+        for current_reason, current_start, current_end in current_matches:
+            matched_current_segments = current_segments[current_start:current_end]
+            current_speaker = _single_explicit_speaker(matched_current_segments)
+            if (
+                context_speaker is not None
+                and context_speaker == current_speaker
+                and _CONTEXTUAL_REPORTED_SPEECH_SUFFIX.search(context_text)
+            ):
+                continue
+            return current_reason, [], matched_current_segments
+        return None, [], []
+    if not context_segments or credible_emergency_reason_for_segments(context_segments):
+        return None, [], []
+
+    for start in range(len(context_segments) - 1, -1, -1):
+        candidate_segments = context_segments[start:] + current_segments
+        combined_reason, match_start, match_end = _credible_emergency_match_for_segments(candidate_segments)
+        if not combined_reason:
+            continue
+        context_count = len(context_segments) - start
+        matched_context_segments = candidate_segments[match_start : min(match_end, context_count)]
+        matched_current_segments = candidate_segments[max(match_start, context_count) : match_end]
+        candidate_speaker = _single_explicit_speaker(matched_context_segments + matched_current_segments)
+        if candidate_speaker is None:
+            continue
+
+        preceding_segments = context_segments[:start]
+        preceding_speaker = _single_explicit_speaker(preceding_segments)
+        preceding_text = " ".join(str(segment.get("text") or "") for segment in preceding_segments)
+        if (
+            preceding_speaker is not None
+            and preceding_speaker == candidate_speaker
+            and _CONTEXTUAL_REPORTED_SPEECH_SUFFIX.search(preceding_text)
+        ):
+            return None, [], []
+        return combined_reason, matched_context_segments, matched_current_segments
+    return None, [], []
+
+
+def credible_emergency_reason_with_context(
+    context_segments: List[dict], current_segments: List[dict]
+) -> tuple[Optional[str], bool]:
+    """Return a newly completed reason and whether prior context was required."""
+    reason, matched_context, _ = _credible_emergency_match_with_context(context_segments, current_segments)
+    return reason, bool(matched_context)
 
 
 def scanner_immediate_reason(text: str, *, wake_prefix_recent: Optional[bool] = None) -> Optional[str]:
@@ -481,11 +780,14 @@ def _apply_ambient_batching(
     trace_id: str,
     *,
     wake_prefix_recent: Optional[bool] = None,
+    credible_emergency: Optional[str] = None,
     now: Optional[float] = None,
 ) -> tuple[Optional[List[dict]], dict]:
     now = now if now is not None else time.time()
     combined_text = _combined_segment_text(scanner_segments)
     immediate_reason = scanner_immediate_reason(combined_text, wake_prefix_recent=wake_prefix_recent)
+    if immediate_reason is None and credible_emergency:
+        immediate_reason = "credible_emergency"
     base_metadata = {
         "batching_enabled": SCANNER_AMBIENT_BATCHING_ENABLED,
         "model": scanner_model_name(),
@@ -636,7 +938,7 @@ def _log_trace_event(
                 "metadata": metadata or {},
             },
             headers={"X-Guardian-Key": GUARDIAN_WEBHOOK_KEY, "X-Ella-Subject-Uid": uid},
-            timeout=0.25,
+            timeout=GUARDIAN_TRACE_LOG_TIMEOUT_S,
         )
     except Exception:
         pass
@@ -788,8 +1090,8 @@ def _insert_wake_ack_direct(uid: str, trace_id: str, payload: dict) -> dict:
                     (uid,),
                 )
                 row = cur.fetchone()
-                mode = str(row[0] if row and row[0] is not None else "").strip().lower()
-                if mode == "off":
+                mode = _normalize_guardian_mode(row[0] if row else None)
+                if mode not in _GUARDIAN_ACTIVE_MODES:
                     return {"method": "direct_db", "status": "skipped", "reason": "guardian_mode_off"}
 
                 cur.execute(
@@ -845,6 +1147,7 @@ def send_to_scanner(
     scanner_window_text: Optional[str] = None,
     wake_prefix_recent: Optional[bool] = None,
     latency_metadata: Optional[dict] = None,
+    guardian_mode: object = _GUARDIAN_MODE_UNSET,
 ) -> Optional[int]:
     """
     Send transcript segments to Ella scanner agent.
@@ -890,6 +1193,50 @@ def send_to_scanner(
     if not scanner_segments:
         return None
 
+    if guardian_mode is _GUARDIAN_MODE_UNSET:
+        _log_trace_event(
+            trace_id=trace_id,
+            uid=uid,
+            stage="scanner_mode_authority",
+            status="error",
+            metadata={"reason": "guardian_mode_required"},
+        )
+        print("Scanner dispatch skipped: Guardian mode authority was not resolved", flush=True)
+        return None
+    formatted_recent_segments = [
+        {
+            "speaker": s.get("speaker") or f"SPEAKER_{s.get('speaker_id', 0)}",
+            "text": canonicalize_wake_phrase(s.get("text", "")),
+            "stt_source": s.get("stt_provider") or s.get("stt_source") or s.get("source"),
+            "is_user": s.get("is_user"),
+            "person_id": s.get("person_id"),
+            "speaker_id": s.get("speaker_id"),
+            "speech_profile_processed": s.get("speech_profile_processed"),
+        }
+        for s in (recent_segments or [])
+        if s.get("text")
+    ]
+    emergency_reason, emergency_context_segments, emergency_current_segments = _credible_emergency_match_with_context(
+        formatted_recent_segments,
+        scanner_segments,
+    )
+
+    authoritative_mode = _normalize_guardian_mode(guardian_mode)
+    guardian_mode_enabled = authoritative_mode in _GUARDIAN_ACTIVE_MODES
+    emergency_only_dispatch = not guardian_mode_enabled and emergency_reason is not None
+    if emergency_only_dispatch:
+        formatted_recent_segments = emergency_context_segments
+        scanner_segments = emergency_context_segments + emergency_current_segments
+    if not guardian_mode_enabled and not emergency_only_dispatch:
+        _log_trace_event(
+            trace_id=trace_id,
+            uid=uid,
+            stage="scanner_mode_authority",
+            status="skipped",
+            metadata={"reason": "guardian_mode_off"},
+        )
+        return None
+
     if should_suppress_guardian_echo(uid, scanner_segments):
         _log_trace_event(
             trace_id=trace_id,
@@ -918,6 +1265,7 @@ def send_to_scanner(
         device_type,
         trace_id,
         wake_prefix_recent=wake_prefix_recent,
+        credible_emergency=emergency_reason,
     )
     if not scanner_segments:
         _log_trace_event(
@@ -955,23 +1303,15 @@ def send_to_scanner(
             "contract": "ella-ai#600",
         },
         "scanner_batch": batch_metadata,
+        "guardian_mode": authoritative_mode,
+        "guardian_mode_source": "users.guardian_mode",
+        "guardian_mode_enabled": guardian_mode_enabled,
+        "emergency_only_dispatch": emergency_only_dispatch,
     }
     if latency_metadata:
         payload["latency"] = latency_metadata
     if recent_segments is not None:
-        payload["recent_segments"] = [
-            {
-                "speaker": s.get("speaker") or f"SPEAKER_{s.get('speaker_id', 0)}",
-                "text": canonicalize_wake_phrase(s.get("text", "")),
-                "stt_source": s.get("stt_provider") or s.get("stt_source") or s.get("source"),
-                "is_user": s.get("is_user"),
-                "person_id": s.get("person_id"),
-                "speaker_id": s.get("speaker_id"),
-                "speech_profile_processed": s.get("speech_profile_processed"),
-            }
-            for s in recent_segments
-            if s.get("text")
-        ]
+        payload["recent_segments"] = formatted_recent_segments
     if scanner_window_text is not None:
         payload["scanner_window_text"] = canonicalize_wake_phrase(scanner_window_text)
     if wake_prefix_recent is not None:

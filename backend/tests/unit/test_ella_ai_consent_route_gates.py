@@ -395,20 +395,328 @@ def test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary():
     assert stream_source.count("await send_pusher_payload(data)") == 5
     assert "lambda: stt_egress_consent_guard(refresh=True)" in stream_source
     assert "segment_buffers.clear()" in stream_source
-    assert stream_source.count("await _run_sync_provider_with_current_consent(") == 3
+    assert stream_source.count("await _run_sync_provider_with_current_consent(") == 2
+    assert "scanner_dispatch_queue.enqueue(" in stream_source
+    assert "_dispatch_scanner_with_current_consent(" in stream_source
+    assert stream_source.index("scanner_dispatch_queue.enqueue(") < stream_source.index(
+        "await websocket.send_json([segment.dict() for segment in updated_segments])"
+    )
+    assert "await scanner_dispatch_queue.close()" in stream_source
     translate_source = _function_source(BACKEND / "routers" / "transcribe.py", "translate")
     speaker_source = _function_source(BACKEND / "routers" / "transcribe.py", "_match_speaker_embedding")
-    scanner_source = _function_source(BACKEND / "routers" / "transcribe.py", "stream_transcript_process")
     for source, provider_name in (
         (translate_source, "translation_service.translate_text_by_sentence"),
         (speaker_source, "extract_embedding_from_bytes"),
-        (scanner_source, "send_to_scanner"),
     ):
         assert source.index("_run_sync_provider_with_current_consent(") < source.rindex(provider_name)
         assert source.index("assert_current_ai_consent") < source.rindex(provider_name)
+    scanner_source = _function_source(
+        BACKEND / "routers" / "transcribe.py",
+        "_dispatch_scanner_with_current_consent",
+    )
+    assert "await _run_sync_provider_with_current_consent(" in scanner_source
+    assert "await mode_loader(subject_uid)" in scanner_source
+    assert "guardian_mode=guardian_mode" in scanner_source
+    assert "except AiConsentWebSocketRejected" in scanner_source
+    assert "except Exception" in scanner_source
     assert "audio_bytes_send(data, last_audio_received_time)" in stream_source
     assert "except AiConsentWebSocketRejected" in stream_source
     assert "not ai_consent_egress_rejected.is_set()" in stream_source
+
+
+def test_scanner_dispatch_queue_is_bounded_ordered_and_drains_on_close():
+    queue_class = _class_from_source(
+        BACKEND / "routers" / "transcribe.py",
+        "ScannerDispatchQueue",
+        {
+            "asyncio": asyncio,
+            "Awaitable": Awaitable,
+            "Callable": Callable,
+            "SCANNER_DISPATCH_QUEUE_MAXSIZE": 32,
+            "SCANNER_DISPATCH_DRAIN_TIMEOUT_SECONDS": 1.0,
+            "SCANNER_EMERGENCY_CONTEXT_MAX_AGE_SECONDS": 10.0,
+            "_SCANNER_DISPATCH_STOP": object(),
+            "time": __import__("time"),
+        },
+    )
+
+    async def scenario():
+        dispatched = []
+        dispatch_context = {}
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def dispatch(item):
+            dispatched.append((item["uid"], item["session"], item["sequence"]))
+            dispatch_context[item["sequence"]] = item.get("recent_segments")
+            if item["sequence"] == 1:
+                started.set()
+                await release.wait()
+
+        queue = queue_class(
+            dispatch,
+            maxsize=3,
+            drain_timeout_seconds=1.0,
+            emergency_predicate=lambda item: item.get("kind") == "emergency",
+        )
+        queue.start()
+        assert (
+            queue.enqueue(
+                {
+                    "uid": "uid-1",
+                    "conversation_id": "conversation-1",
+                    "session": "session-1",
+                    "sequence": 1,
+                    "segments": [{"text": "I cannot", "speaker": "SPEAKER_1"}],
+                }
+            )
+            is True
+        )
+        await started.wait()
+        assert (
+            queue.enqueue({"uid": "uid-1", "conversation_id": "conversation-1", "session": "session-1", "sequence": 2})
+            is True
+        )
+        assert (
+            queue.enqueue({"uid": "uid-1", "conversation_id": "conversation-1", "session": "session-1", "sequence": 3})
+            is True
+        )
+        assert (
+            queue.enqueue({"uid": "uid-1", "conversation_id": "conversation-1", "session": "session-1", "sequence": 4})
+            is False
+        )
+        assert (
+            queue.enqueue(
+                {
+                    "uid": "uid-1",
+                    "conversation_id": "conversation-1",
+                    "session": "session-1",
+                    "sequence": 99,
+                    "kind": "emergency",
+                    "segments": [{"text": "breathe", "speaker": "SPEAKER_1"}],
+                }
+            )
+            is True
+        )
+        assert (
+            queue.enqueue(
+                {
+                    "uid": "uid-1",
+                    "conversation_id": "conversation-1",
+                    "session": "session-1",
+                    "sequence": 100,
+                    "kind": "emergency",
+                    "segments": [{"text": "Please call 911", "speaker": "SPEAKER_1"}],
+                }
+            )
+            is True
+        )
+        assert (
+            queue.enqueue(
+                {
+                    "uid": "uid-1",
+                    "conversation_id": "conversation-1",
+                    "session": "session-1",
+                    "sequence": 101,
+                    "kind": "emergency",
+                    "segments": [{"text": "I am choking", "speaker": "SPEAKER_1"}],
+                }
+            )
+            is True
+        )
+        assert (
+            queue.enqueue(
+                {
+                    "uid": "uid-1",
+                    "conversation_id": "conversation-1",
+                    "session": "session-1",
+                    "sequence": 102,
+                    "kind": "emergency",
+                    "segments": [{"text": "I am having a stroke", "speaker": "SPEAKER_1"}],
+                }
+            )
+            is False
+        )
+        release.set()
+        await queue.close()
+        assert dispatched == [
+            ("uid-1", "session-1", 1),
+            ("uid-1", "session-1", 99),
+            ("uid-1", "session-1", 100),
+            ("uid-1", "session-1", 101),
+            ("uid-1", "session-1", 2),
+            ("uid-1", "session-1", 3),
+        ]
+        assert dispatch_context[99] == [{"text": "I cannot", "speaker": "SPEAKER_1"}]
+        assert queue.enqueue({"uid": "uid-2", "session": "session-2", "sequence": 5}) is False
+
+    asyncio.run(scenario())
+
+
+def test_scanner_dispatch_queue_expires_retained_emergency_context():
+    from utils.ella.scanner import credible_emergency_reason_with_context
+
+    queue_class = _class_from_source(
+        BACKEND / "routers" / "transcribe.py",
+        "ScannerDispatchQueue",
+        {
+            "asyncio": asyncio,
+            "Awaitable": Awaitable,
+            "Callable": Callable,
+            "SCANNER_DISPATCH_QUEUE_MAXSIZE": 32,
+            "SCANNER_DISPATCH_DRAIN_TIMEOUT_SECONDS": 1.0,
+            "SCANNER_EMERGENCY_CONTEXT_MAX_AGE_SECONDS": 10.0,
+            "_SCANNER_DISPATCH_STOP": object(),
+            "time": __import__("time"),
+        },
+    )
+    now = [100.0]
+
+    async def dispatch(_item):
+        return None
+
+    def emergency_predicate(item):
+        reason, _used_context = credible_emergency_reason_with_context(
+            item.get("recent_segments") or [],
+            item.get("segments") or [],
+        )
+        return reason is not None
+
+    queue = queue_class(
+        dispatch,
+        maxsize=4,
+        emergency_predicate=emergency_predicate,
+        context_max_age_seconds=10.0,
+        clock=lambda: now[0],
+    )
+    assert queue.enqueue(
+        {
+            "conversation_id": "conversation-1",
+            "segments": [{"text": "She said", "speaker": "SPEAKER_1"}],
+        }
+    )
+    now[0] += 10.1
+    assert queue.enqueue(
+        {
+            "conversation_id": "conversation-1",
+            "segments": [{"text": "I cannot breathe", "speaker": "SPEAKER_1"}],
+        }
+    )
+
+    queued = [queue._queue.get_nowait(), queue._queue.get_nowait()]
+    by_text = {entry[2]["segments"][0]["text"]: entry for entry in queued}
+    assert by_text["She said"][2]["recent_segments"] == []
+    direct_emergency = by_text["I cannot breathe"]
+    assert direct_emergency[2]["recent_segments"] == []
+    assert direct_emergency[3] is True
+
+
+def test_live_scanner_queue_uses_server_owned_emergency_predicate():
+    stream_source = _function_source(BACKEND / "routers" / "transcribe.py", "_stream_handler")
+    predicate_source = _function_source(
+        BACKEND / "routers" / "transcribe.py",
+        "_scanner_dispatch_item_is_credible_emergency",
+    )
+
+    assert "emergency_predicate=_scanner_dispatch_item_is_credible_emergency" in stream_source
+    assert "import send_to_scanner" not in stream_source
+    assert "credible_emergency_reason_with_context" in predicate_source
+    assert 'item.get("segments")' in predicate_source
+
+    from utils.ella.scanner import credible_emergency_reason_with_context
+
+    namespace = {"credible_emergency_reason_with_context": credible_emergency_reason_with_context}
+    exec(predicate_source, namespace)
+    predicate = namespace["_scanner_dispatch_item_is_credible_emergency"]
+    assert predicate(
+        {
+            "segments": [
+                {"text": "I can't breathe, please call 911 now", "speaker": "SPEAKER_1"},
+            ]
+        }
+    )
+    assert predicate(
+        {
+            "segments": [
+                {"text": "I am having a heart attack, call an ambulance now", "speaker": "SPEAKER_1"},
+            ]
+        }
+    )
+    # A disqualified same-speaker group (reported speech) must not shadow an
+    # independent qualifying group later in the same batch.
+    assert predicate(
+        {
+            "segments": [
+                {"text": "I cannot breathe", "speaker": "SPEAKER_1"},
+                {"text": "I cannot breathe", "speaker": "SPEAKER_2"},
+            ],
+            "recent_segments": [{"text": "She said.", "speaker": "SPEAKER_1"}],
+        }
+    )
+    assert not predicate(
+        {
+            "segments": [{"text": "I cannot breathe", "speaker": "SPEAKER_1"}],
+            "recent_segments": [{"text": "She said.", "speaker": "SPEAKER_1"}],
+        }
+    )
+
+
+def test_scanner_mode_authority_uses_shared_async_pool_and_fails_closed():
+    source = _function_source(
+        BACKEND / "routers" / "transcribe.py",
+        "_load_authoritative_guardian_mode",
+    )
+
+    assert "await get_ella_postgres_pool()" in source
+    assert "await pool.fetchrow(" in source
+    assert "psycopg2" not in source
+    assert 'return None, "lookup_unavailable"' in source
+    assert 'return None, "user_not_found"' in source
+
+    class Pool:
+        def __init__(self, row=None, failure=None):
+            self.row = row
+            self.failure = failure
+            self.calls = []
+
+        async def fetchrow(self, query, uid):
+            self.calls.append((query, uid))
+            if self.failure:
+                raise self.failure
+            return self.row
+
+    async def scenario():
+        code = _function_code(
+            BACKEND / "routers" / "transcribe.py",
+            "_load_authoritative_guardian_mode",
+        )
+
+        available_pool = Pool({"guardian_mode": "active_support"})
+
+        async def available():
+            return available_pool
+
+        loader = types.FunctionType(code, {"get_ella_postgres_pool": available})
+        assert await loader("uid-a") == ("active_support", None)
+        assert available_pool.calls[0][1] == "uid-a"
+
+        missing_pool = Pool()
+
+        async def missing():
+            return missing_pool
+
+        loader = types.FunctionType(code, {"get_ella_postgres_pool": missing})
+        assert await loader("uid-b") == (None, "user_not_found")
+
+        unavailable_pool = Pool(failure=RuntimeError("database unavailable"))
+
+        async def unavailable():
+            return unavailable_pool
+
+        loader = types.FunctionType(code, {"get_ella_postgres_pool": unavailable})
+        assert await loader("uid-c") == (None, "lookup_unavailable")
+
+    asyncio.run(scenario())
 
 
 def test_stt_session_authority_avoids_transaction_per_audio_fragment_and_caches_fail_closed_state():

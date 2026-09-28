@@ -917,6 +917,9 @@ jobs:
             "tests/unit/test_ella_ai_consent_route_gates.py::test_stt_session_authority_avoids_transaction_per_audio_fragment_and_caches_fail_closed_state"
             "tests/unit/test_ella_ai_consent_route_gates.py::test_memory_artwork_provider_routes_share_the_consent_gate"
             "tests/unit/test_ella_ai_consent_route_gates.py::test_background_ai_and_honcho_boundaries_recheck_consent_before_network_egress"
+            "tests/unit/test_ella_ai_consent_route_gates.py::test_scanner_dispatch_queue_is_bounded_ordered_and_drains_on_close"
+            "tests/unit/test_ella_ai_consent_route_gates.py::test_scanner_dispatch_queue_expires_retained_emergency_context"
+            "tests/unit/test_ella_ai_consent_route_gates.py::test_live_scanner_queue_uses_server_owned_emergency_predicate"
             "tests/unit/test_ella_chat_stream_resilience.py::test_empty_hermes_stream_rechecks_consent_before_nonstream_fallback[403-detail0-ai_consent_required]"
             "tests/unit/test_ella_chat_stream_resilience.py::test_empty_hermes_stream_rechecks_consent_before_nonstream_fallback[503-detail1-ai_consent_authority_unavailable]"
             "tests/unit/test_ella_chat_stream_resilience.py::test_cloud_hermes_post_header_consent_race_preserves_exact_sse_code[403-detail0-ai_consent_required]"
@@ -1023,7 +1026,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 21
-          test "$collected" -eq 626
+          test "$collected" -eq 630
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
@@ -1233,6 +1236,18 @@ jobs:
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_current_retained_consent_rearms_only_exact_quarantine" \
             <<<"$authority_lock_ids"
           grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_consented_pending_user_can_enable_guardian_and_activates_atomically" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_unconsented_pending_user_cannot_enable_guardian" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_guardian_reenable_fails_closed_after_consent_revocation" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_runtime_activation_initializes_explicit_guardian_default" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_retained_runtime_rearm_rejects_stale_authority_revision" \
             <<<"$authority_lock_ids"
           grep -Fqx \
@@ -1244,7 +1259,7 @@ jobs:
           grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_delete_re_resolves_email_owner_created_while_waiting_on_uid_lock" \
             <<<"$authority_lock_ids"
-          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 83
+          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 87
           pytest \
             tests/unit/test_authority_advisory_lock.py \
             tests/unit/test_authority_writer_guard.py \
@@ -1354,7 +1369,20 @@ jobs:
           pytest tests/unit/test_memory_reinterpretation_outbox.py -v
           test "$(pytest --collect-only -q tests/unit/test_scanner_keyterms.py | grep -c '::')" -eq 10
           pytest tests/unit/test_scanner_keyterms.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_scanner_batching.py | grep -c '::')" -eq 8
+          scanner_batching_ids="$(pytest --collect-only -q tests/unit/test_ella_scanner_batching.py | sed '/^$/d')"
+          grep -Fqx \
+            "tests/unit/test_ella_scanner_batching.py::test_guardian_off_contextual_emergency_sends_only_authorized_suffix" \
+            <<<"$scanner_batching_ids"
+          grep -Fqx \
+            "tests/unit/test_ella_scanner_batching.py::test_guardian_off_direct_emergency_omits_unmatched_retained_history" \
+            <<<"$scanner_batching_ids"
+          grep -Fqx \
+            "tests/unit/test_ella_scanner_batching.py::test_guardian_off_direct_emergency_sends_only_matching_current_speaker_group" \
+            <<<"$scanner_batching_ids"
+          grep -Fqx \
+            "tests/unit/test_ella_scanner_batching.py::test_guardian_enabled_context_does_not_rewrite_active_segments" \
+            <<<"$scanner_batching_ids"
+          test "$(grep -c '::' <<<"$scanner_batching_ids")" -eq 50
           pytest tests/unit/test_ella_scanner_batching.py -v
 
       - name: Run real Firestore summary CAS contention gate
