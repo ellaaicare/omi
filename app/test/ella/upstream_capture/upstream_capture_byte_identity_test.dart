@@ -34,7 +34,7 @@ List<_Entry> _entries() => _manifest
     .toList();
 
 Set<String> _relocatedRels(List<_Entry> entries) => entries
-    .where((e) => e.kind == 'dart-relocated' && e.upstreamPath.startsWith('app/lib/'))
+    .where((e) => (e.kind == 'dart-relocated' || e.kind == 'patched') && e.upstreamPath.startsWith('app/lib/'))
     .map((e) => e.upstreamPath.substring('app/lib/'.length))
     .toSet();
 
@@ -91,7 +91,16 @@ void main() {
     ]) {
       expect(upstream, contains(required));
     }
-    expect(entries.where((e) => e.kind == 'patched'), isEmpty, reason: 'no upstream-owned file is patched');
+    // ellaaicare/ella-ai#1280 RUN-009: upstream's own native BLE discovery admission
+    // classifier drops production necklaces (bare 'Friend'/'Omi' local names with no
+    // advertised service UUID). Confirmed identical at BasedHardware/omi main
+    // (a74e4cfca376a7c8212687a23d9354e7e755671d), so it's patched here in upstream
+    // style rather than diverging from a fixed upstream. See UPSTREAM_PATCHES.md.
+    final patched = entries.where((e) => e.kind == 'patched').toList();
+    expect(
+      patched.map((e) => e.localPath),
+      ['app/lib/upstream_capture/services/devices/discovery/native_bluetooth_discoverer.dart'],
+    );
   });
 
   test('scripts/verify_upstream_capture_identity.py passes on this checkout', () async {
@@ -100,16 +109,26 @@ void main() {
     expect(result.stdout as String, contains('UPSTREAM CAPTURE IDENTITY: OK'));
   });
 
-  test('Dart re-check: every upstream-owned file is the pin blob modulo the import relocation', () {
+  test('Dart re-check: every non-patched upstream-owned file is the pin blob modulo the import relocation', () {
     final entries = _entries();
     final rels = _relocatedRels(entries);
     final mismatches = <String>[];
-    for (final entry in entries) {
+    for (final entry in entries.where((e) => e.kind != 'patched')) {
       final file = File('$_repoRoot/${entry.localPath}');
       if (!file.existsSync() || !_matchesPin(entry, file.readAsBytesSync(), rels)) mismatches.add(entry.localPath);
     }
     expect(mismatches, isEmpty);
     expect(entries.length, greaterThan(190));
+  });
+
+  test('the patched discoverer still exists, decodes and intentionally differs from its pin blob', () {
+    final entries = _entries();
+    final rels = _relocatedRels(entries);
+    final entry = entries.singleWhere((e) => e.kind == 'patched');
+    final file = File('$_repoRoot/${entry.localPath}');
+    expect(file.existsSync(), isTrue);
+    expect(_matchesPin(entry, file.readAsBytesSync(), rels), isFalse,
+        reason: 'the patch changes admission logic, so it must NOT byte-match the pin');
   });
 
   group('the identity check rejects everything except the mechanical relocation', () {
