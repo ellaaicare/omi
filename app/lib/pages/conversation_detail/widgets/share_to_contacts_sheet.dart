@@ -8,7 +8,6 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/schema/conversation.dart';
-import 'package:omi/widgets/extensions/string.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/ella/ella_theme.dart';
