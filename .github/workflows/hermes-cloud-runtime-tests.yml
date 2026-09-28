@@ -1332,10 +1332,26 @@ jobs:
           done
           test "$(grep -c '::' <<<"$conversation_summary_cas_ids")" -eq 51
           pytest tests/unit/test_conversation_summary_cas.py -k "$baseline_summary_cas_selector" -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 85
+          test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 113
           pytest tests/unit/test_ella_conversation_corrections.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 42
+          test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 49
           pytest tests/unit/test_ella_guardian_delivery.py -v
+          guardian_delivery_claim_ids="$(
+            pytest --collect-only -q tests/postgres/test_guardian_delivery_claim_postgres.py |
+              sed '/^$/d'
+          )"
+          required_guardian_delivery_claim_ids=(
+            "tests/postgres/test_guardian_delivery_claim_postgres.py::test_two_connections_produce_exactly_one_delivery_claim"
+            "tests/postgres/test_guardian_delivery_claim_postgres.py::test_claim_retries_only_explicit_failures_and_survives_rollback_and_new_pool"
+            "tests/postgres/test_guardian_delivery_claim_postgres.py::test_concurrent_direct_email_uses_one_database_winner"
+          )
+          for required_id in "${required_guardian_delivery_claim_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$guardian_delivery_claim_ids"
+          done
+          test "$(grep -c '::' <<<"$guardian_delivery_claim_ids")" -eq 3
+          pytest tests/postgres/test_guardian_delivery_claim_postgres.py -v |
+            tee /tmp/guardian-delivery-claim-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/guardian-delivery-claim-pytest.log
           test "$(pytest --collect-only -q tests/unit/test_guardian_echo_classifier.py | grep -c '::')" -eq 16
           pytest tests/unit/test_guardian_echo_classifier.py -v
           test "$(pytest --collect-only -q tests/postgres/test_guardian_playback_ledger_postgres.py | grep -c '::')" -eq 9

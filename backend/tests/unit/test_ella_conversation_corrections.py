@@ -14,6 +14,7 @@ _MISSING_MODULE = object()
 _STUBBED_IMPORT_MODULES = {
     "database._client": MagicMock(db=MagicMock()),
     "database.conversations": MagicMock(),
+    "database.auth": MagicMock(get_user_from_uid=MagicMock(return_value=None)),
     "httpx": MagicMock(),
     "utils.other.endpoints": MagicMock(),
     "utils.conversations.vector": MagicMock(refresh_structured_summary_vector=MagicMock()),
@@ -1003,7 +1004,7 @@ def test_submit_correction_directly_applies_when_model_path_succeeds(monkeypatch
 
     async def fake_generate(**kwargs):
         return {
-            "title": "TV Audio, Not Memory Concern",
+            "title": "tv audio, not a real memory concern",
             "overview": "[Ella] This was background TV audio, not a real memory concern.",
             "emoji": "📺",
             "category": "other",
@@ -1135,8 +1136,8 @@ def test_submit_correction_queues_background_direct_apply_without_waiting(monkey
     async def fake_generate(**kwargs):
         generated.append(kwargs)
         return {
-            "title": "Corrected",
-            "overview": "[Ella] Corrected in background.",
+            "title": "correction applied",
+            "overview": "[Ella] applied in the background.",
             "emoji": "🪽",
             "category": "other",
             "ella_tags": ["omi", "correction"],
@@ -4519,3 +4520,483 @@ def test_semantic_attestation_cannot_be_copied_or_mutated_before_writeback(monke
         )
 
     assert updates == []
+
+
+# --- Correction identity/name gate (privacy fix) -----------------------------
+#
+# The correction prompt used to be personalized to one specific account (a
+# hard-coded persona name and family reference). These tests cover the
+# generic prompt, the fail-closed identity gate applied before a corrected
+# summary is written back -- covering both the title and the overview, with
+# grounding evidence limited to exactly what the prompt itself is allowed to
+# draw a name from (transcript, current summary, and the user's own
+# correction text) -- and a two-account regression proving one account's name
+# can never land in another account's corrected summary.
+
+
+def test_correction_prompt_has_no_hard_coded_account_persona():
+    prompt = corrections._build_direct_correction_prompt(
+        request=corrections.ConversationCorrectionRequest(correction_text="Fix the summary.", source="ios"),
+        structured={"title": "Chat", "overview": "[Ella] A chat happened.", "emoji": "\U0001f4ac", "category": "other"},
+        transcript="Two coworkers spoke about their day.",
+        segment_count=2,
+    )
+
+    # The prompt used to hard-code one specific account's real name as the
+    # assistant's persona target and to invite the model to identify that
+    # account holder and a family member from "durable companion context".
+    # It must now be fully generic, third-person, and name-source-scoped.
+    assert "You are Ella, a warm and attentive summary correction writer for the OMI companion app." in prompt
+    assert "useful for the account holder to reread later" in prompt
+    assert "Never address the account holder directly" in prompt
+    assert "durable companion context" not in prompt
+    assert "warm companion summary correction writer" not in prompt
+
+
+def test_identity_gate_allows_name_grounded_in_transcript():
+    corrected = {"title": "coffee chat", "overview": "[Ella] Margaret stopped by for coffee."}
+
+    corrections._enforce_correction_identity_gate(
+        uid="user-1",
+        transcript="Margaret said she'd bring pastries.",
+        structured={},
+        correction_text="Fix the summary.",
+        corrected=corrected,
+    )
+
+
+def test_identity_gate_allows_name_grounded_in_account_profile(monkeypatch):
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: {"display_name": "Jordan Blake"})
+    corrected = {"title": "weekend plans", "overview": "[Ella] Jordan mentioned plans for the weekend."}
+
+    corrections._enforce_correction_identity_gate(
+        uid="user-1",
+        transcript="No names were mentioned in this transcript.",
+        structured={},
+        correction_text="Fix the summary.",
+        corrected=corrected,
+    )
+
+
+def test_identity_gate_allows_name_grounded_only_in_correction_text(monkeypatch):
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    corrected = {"title": "weekend plans", "overview": "[Ella] Sam mentioned plans for the weekend."}
+
+    # "Sam" appears nowhere in the transcript or the current summary -- only
+    # in the user's own correction text. The prompt explicitly permits a name
+    # sourced from the correction text, so the gate's grounding evidence must
+    # match that or a legitimate correction gets blocked.
+    corrections._enforce_correction_identity_gate(
+        uid="user-1",
+        transcript="No names were mentioned in this transcript.",
+        structured={"title": "weekend", "overview": "[Ella] weekend plans were discussed."},
+        correction_text="It was Sam who brought up the weekend plans, not a stranger.",
+        corrected=corrected,
+    )
+
+
+def test_identity_gate_allows_name_grounded_only_in_current_summary(monkeypatch):
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    corrected = {"title": "weekend plans", "overview": "[Ella] Avery mentioned plans for the weekend."}
+
+    # "Avery" appears nowhere in the transcript or the correction text --
+    # only in the current (pre-correction) structured summary. The prompt
+    # explicitly permits a name sourced from the current summary.
+    corrections._enforce_correction_identity_gate(
+        uid="user-1",
+        transcript="No names were mentioned in this transcript.",
+        structured={"title": "weekend", "overview": "[Ella] Avery discussed weekend plans."},
+        correction_text="Fix the tone of the summary.",
+        corrected=corrected,
+    )
+
+
+def test_identity_gate_rejects_ungrounded_name(monkeypatch):
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    corrected = {"title": "coffee chat", "overview": "[Ella] Margaret stopped by for coffee."}
+
+    with pytest.raises(corrections.CorrectionIdentityGateError) as exc_info:
+        corrections._enforce_correction_identity_gate(
+            uid="user-1",
+            transcript="A friend stopped by for coffee.",
+            structured={},
+            correction_text="Fix the summary.",
+            corrected=corrected,
+        )
+
+    assert exc_info.value.reason == "ungrounded_name_detected"
+
+
+def test_identity_gate_rejects_ungrounded_name_with_arbitrary_verb(monkeypatch):
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    # "baked" is an ordinary verb that would never appear in a finite
+    # "name-indicating verb" allowlist. A gate that only special-cases a
+    # fixed set of subject verbs (said/mentioned/etc.) can be bypassed by any
+    # verb outside that list; this must still be rejected.
+    corrected = {"title": "weekend baking", "overview": "[Ella] Rowan baked cookies for the visit."}
+
+    with pytest.raises(corrections.CorrectionIdentityGateError) as exc_info:
+        corrections._enforce_correction_identity_gate(
+            uid="user-1",
+            transcript="Someone baked cookies before the visit.",
+            structured={},
+            correction_text="Fix the summary.",
+            corrected=corrected,
+        )
+
+    assert exc_info.value.reason == "ungrounded_name_detected"
+
+
+def test_identity_gate_grounding_is_case_sensitive(monkeypatch):
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    corrected = {"title": "evening plans", "overview": "[Ella] Will said he would call back tomorrow."}
+
+    with pytest.raises(corrections.CorrectionIdentityGateError) as exc_info:
+        corrections._enforce_correction_identity_gate(
+            uid="user-1",
+            # "will" only appears lowercase (as the auxiliary verb), so it
+            # must not ground the capitalized name "Will".
+            transcript="I will call back tomorrow if I have time.",
+            structured={},
+            correction_text="Fix the summary.",
+            corrected=corrected,
+        )
+
+    assert exc_info.value.reason == "ungrounded_name_detected"
+
+
+def test_identity_gate_rejects_ungrounded_name_in_title_only(monkeypatch):
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    # The overview never mentions a name at all; only the title does. A gate
+    # that only checks the overview (the original design, to avoid rejecting
+    # routine Title-Cased titles) would let a cross-account name introduced
+    # solely through the title through untouched.
+    corrected = {"title": "Rowan's weekend plans", "overview": "[Ella] plans for the weekend were discussed."}
+
+    with pytest.raises(corrections.CorrectionIdentityGateError) as exc_info:
+        corrections._enforce_correction_identity_gate(
+            uid="user-1",
+            transcript="plans for the weekend were discussed.",
+            structured={},
+            correction_text="Fix the summary.",
+            corrected=corrected,
+        )
+
+    assert exc_info.value.reason == "ungrounded_name_detected"
+
+
+def test_identity_gate_allows_name_grounded_in_title(monkeypatch):
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    corrected = {"title": "Rowan's weekend plans", "overview": "[Ella] plans for the weekend were discussed."}
+
+    corrections._enforce_correction_identity_gate(
+        uid="user-1",
+        transcript="Rowan brought up plans for the weekend.",
+        structured={},
+        correction_text="Fix the summary.",
+        corrected=corrected,
+    )
+
+
+@pytest.mark.parametrize(
+    "fictional_name",
+    ["O’Fable", "Élora", "FABLE", "Anne-Marie"],
+    ids=["apostrophe", "unicode-letter", "all-caps", "hyphenated"],
+)
+@pytest.mark.parametrize("field", ["title", "overview"])
+def test_identity_gate_rejects_ungrounded_unicode_and_all_caps_name_forms(monkeypatch, fictional_name, field):
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    # The original `[A-Z][a-z]+` token regex misses an apostrophe-joined name
+    # ("O'Fable"), a non-Latin-script Unicode name ("Élora"), an all-caps
+    # name ("FABLE"), and a hyphenated name ("Anne-Marie"), so an ungrounded
+    # instance of any of these forms must still be rejected -- whether it
+    # appears in the title or the overview.
+    corrected = {
+        "title": f"{fictional_name} stopped by" if field == "title" else "coffee chat",
+        "overview": (
+            f"[Ella] {fictional_name} stopped by for coffee." if field == "overview" else "[Ella] coffee chat happened."
+        ),
+    }
+
+    with pytest.raises(corrections.CorrectionIdentityGateError) as exc_info:
+        corrections._enforce_correction_identity_gate(
+            uid="user-1",
+            transcript="A friend stopped by for coffee.",
+            structured={},
+            correction_text="Fix the summary.",
+            corrected=corrected,
+        )
+
+    assert exc_info.value.reason == "ungrounded_name_detected"
+
+
+@pytest.mark.parametrize(
+    "fictional_name",
+    ["O’Fable", "Élora", "FABLE", "Anne-Marie"],
+    ids=["apostrophe", "unicode-letter", "all-caps", "hyphenated"],
+)
+def test_identity_gate_allows_unicode_and_all_caps_name_forms_when_grounded(monkeypatch, fictional_name):
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    corrected = {
+        "title": f"{fictional_name}'s visit",
+        "overview": f"[Ella] {fictional_name} stopped by for coffee.",
+    }
+
+    corrections._enforce_correction_identity_gate(
+        uid="user-1",
+        transcript=f"{fictional_name} said she'd bring pastries.",
+        structured={},
+        correction_text="Fix the summary.",
+        corrected=corrected,
+    )
+
+
+def test_identity_gate_rejects_leading_vocative(monkeypatch):
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    # "Will" is grounded by the transcript, but direct address is rejected
+    # regardless of whether the name is grounded.
+    corrected = {"title": "evening plans", "overview": "[Ella] Will, that's exactly what happened tonight."}
+
+    with pytest.raises(corrections.CorrectionIdentityGateError) as exc_info:
+        corrections._enforce_correction_identity_gate(
+            uid="user-1",
+            transcript="Will said he would call back tomorrow.",
+            structured={},
+            correction_text="Fix the summary.",
+            corrected=corrected,
+        )
+
+    assert exc_info.value.reason == "vocative_or_salutation_detected"
+
+
+def test_identity_gate_rejects_greeting_salutation(monkeypatch):
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    corrected = {"title": "evening plans", "overview": "[Ella] Hey Will, here is what happened tonight."}
+
+    with pytest.raises(corrections.CorrectionIdentityGateError) as exc_info:
+        corrections._enforce_correction_identity_gate(
+            uid="user-1",
+            transcript="Will said he would call back tomorrow.",
+            structured={},
+            correction_text="Fix the summary.",
+            corrected=corrected,
+        )
+
+    assert exc_info.value.reason == "vocative_or_salutation_detected"
+
+
+def test_identity_gate_rejects_trailing_vocative(monkeypatch):
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    corrected = {"title": "evening plans", "overview": "[Ella] Great job figuring that out, Will."}
+
+    with pytest.raises(corrections.CorrectionIdentityGateError) as exc_info:
+        corrections._enforce_correction_identity_gate(
+            uid="user-1",
+            transcript="Will said he would call back tomorrow.",
+            structured={},
+            correction_text="Fix the summary.",
+            corrected=corrected,
+        )
+
+    assert exc_info.value.reason == "vocative_or_salutation_detected"
+
+
+def test_direct_correction_apply_blocks_and_keeps_prior_version_on_gate_rejection(monkeypatch):
+    audits = []
+    events = []
+    conversation_updates = []
+    apply_calls = []
+
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    monkeypatch.setattr(
+        corrections,
+        "_persist_correction_audit",
+        lambda uid, conversation_id, correction_id, payload: audits.append(payload),
+    )
+    monkeypatch.setattr(
+        corrections,
+        "_append_correction_event",
+        lambda uid, conversation_id, correction_id, event: events.append(event),
+    )
+    monkeypatch.setattr(
+        corrections.conversations_db,
+        "update_conversation",
+        lambda uid, conversation_id, update_data: conversation_updates.append(update_data),
+    )
+
+    async def fake_generate(**kwargs):
+        return {
+            "title": "correction pending",
+            "overview": "[Ella] Rowan talked about the weekend plans.",
+            "emoji": "\U0001f4ac",
+            "category": "other",
+            "ella_tags": ["omi", "correction"],
+            "ella_signal": {},
+        }
+
+    async def fake_apply(**kwargs):
+        apply_calls.append(kwargs)
+        return {"status": "ok", "active_summary_version_id": "should-not-happen"}
+
+    monkeypatch.setattr(corrections, "_generate_corrected_summary", fake_generate)
+    monkeypatch.setattr(corrections, "_apply_corrected_summary", fake_apply)
+
+    result = asyncio.run(
+        corrections._run_direct_correction_apply(
+            uid="account-b",
+            conversation_id="conv-b-1",
+            correction_id="corr-1",
+            trace_id="trace-1",
+            request=corrections.ConversationCorrectionRequest(correction_text="Fix the summary.", source="ios"),
+            structured={"title": "Evening chat", "overview": "[Ella] A chat happened."},
+            transcript="Two coworkers discussed the weekend.",
+            segment_count=1,
+            submitted_at="2024-01-01T00:00:00+00:00",
+            active_summary_version_id="legacy-v1",
+            proposal_id=None,
+        )
+    )
+
+    assert result.status == "correction_blocked_identity_gate"
+    assert result.queued is False
+    assert apply_calls == []  # the ungrounded name was never written back
+    assert audits[-1]["status"] == "correction_blocked_identity_gate"
+    assert events[-1]["stage"] == "direct_apply_blocked_identity_gate"
+    assert events[-1]["reason"] == "ungrounded_name_detected"
+    assert conversation_updates[-1]["correction_state"]["status"] == "correction_blocked_identity_gate"
+    assert conversation_updates[-1]["correction_state"]["pending"] is False
+
+
+def test_direct_correction_apply_blocks_ungrounded_name_introduced_only_in_title(monkeypatch):
+    apply_calls = []
+
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    monkeypatch.setattr(corrections, "_persist_correction_audit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(corrections, "_append_correction_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(corrections.conversations_db, "update_conversation", lambda *args, **kwargs: None)
+
+    async def fake_generate(**kwargs):
+        return {
+            "title": "Rowan's weekend plans",
+            "overview": "[Ella] plans for the weekend were discussed.",
+            "emoji": "\U0001f4ac",
+            "category": "other",
+            "ella_tags": ["omi", "correction"],
+            "ella_signal": {},
+        }
+
+    async def fake_apply(**kwargs):
+        apply_calls.append(kwargs)
+        return {"status": "ok", "active_summary_version_id": "should-not-happen"}
+
+    monkeypatch.setattr(corrections, "_generate_corrected_summary", fake_generate)
+    monkeypatch.setattr(corrections, "_apply_corrected_summary", fake_apply)
+
+    result = asyncio.run(
+        corrections._run_direct_correction_apply(
+            uid="account-b",
+            conversation_id="conv-b-1",
+            correction_id="corr-2",
+            trace_id="trace-2",
+            request=corrections.ConversationCorrectionRequest(correction_text="Fix the summary.", source="ios"),
+            structured={},
+            transcript="plans for the weekend were discussed.",
+            segment_count=1,
+            submitted_at="2024-01-01T00:00:00+00:00",
+            active_summary_version_id="legacy-v1",
+            proposal_id=None,
+        )
+    )
+
+    assert result.status == "correction_blocked_identity_gate"
+    assert apply_calls == []  # the ungrounded title name was never written back
+
+
+def test_two_account_regression_account_a_name_never_leaks_into_account_b_summary(monkeypatch):
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    monkeypatch.setattr(corrections, "_persist_correction_audit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(corrections, "_append_correction_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(corrections.conversations_db, "update_conversation", lambda *args, **kwargs: None)
+
+    # Account A's own conversation genuinely mentions "Rowan", so a corrected
+    # summary that references it is legitimate.
+    account_a_applied = []
+
+    async def fake_generate_a(**kwargs):
+        return {
+            "title": "evening chat",
+            "overview": "[Ella] Rowan talked about the weekend plans.",
+            "emoji": "\U0001f4ac",
+            "category": "other",
+            "ella_tags": ["omi", "correction"],
+            "ella_signal": {},
+        }
+
+    async def fake_apply_a(**kwargs):
+        account_a_applied.append(kwargs)
+        return {"status": "ok", "active_summary_version_id": "account-a-v2"}
+
+    monkeypatch.setattr(corrections, "_generate_corrected_summary", fake_generate_a)
+    monkeypatch.setattr(corrections, "_apply_corrected_summary", fake_apply_a)
+
+    result_a = asyncio.run(
+        corrections._run_direct_correction_apply(
+            uid="account-a",
+            conversation_id="conv-a-1",
+            correction_id="corr-a-1",
+            trace_id="trace-a-1",
+            request=corrections.ConversationCorrectionRequest(correction_text="Fix the summary.", source="ios"),
+            structured={},
+            transcript="Rowan said the weekend plans sound great.",
+            segment_count=1,
+            submitted_at="2024-01-01T00:00:00+00:00",
+            active_summary_version_id="legacy-a",
+            proposal_id=None,
+        )
+    )
+
+    assert result_a.status == "applied"
+    assert len(account_a_applied) == 1
+
+    # Account B's conversation never mentions "Rowan" anywhere (not the
+    # transcript, not the current summary, not the correction text). Even if
+    # the correction pipeline were to leak account A's name (e.g. via a
+    # shared/stale prompt or upstream cross-talk), the identity gate must
+    # block the write so it can never land in account B's corrected summary.
+    account_b_applied = []
+
+    async def fake_generate_b(**kwargs):
+        return {
+            "title": "evening chat",
+            "overview": "[Ella] Rowan talked about the weekend plans.",
+            "emoji": "\U0001f4ac",
+            "category": "other",
+            "ella_tags": ["omi", "correction"],
+            "ella_signal": {},
+        }
+
+    async def fake_apply_b(**kwargs):
+        account_b_applied.append(kwargs)
+        return {"status": "ok", "active_summary_version_id": "should-not-happen"}
+
+    monkeypatch.setattr(corrections, "_generate_corrected_summary", fake_generate_b)
+    monkeypatch.setattr(corrections, "_apply_corrected_summary", fake_apply_b)
+
+    result_b = asyncio.run(
+        corrections._run_direct_correction_apply(
+            uid="account-b",
+            conversation_id="conv-b-1",
+            correction_id="corr-b-1",
+            trace_id="trace-b-1",
+            request=corrections.ConversationCorrectionRequest(correction_text="Fix the summary.", source="ios"),
+            structured={},
+            transcript="Two coworkers discussed the weekend.",
+            segment_count=1,
+            submitted_at="2024-01-01T00:00:00+00:00",
+            active_summary_version_id="legacy-b",
+            proposal_id=None,
+        )
+    )
+
+    assert result_b.status == "correction_blocked_identity_gate"
+    assert account_b_applied == []

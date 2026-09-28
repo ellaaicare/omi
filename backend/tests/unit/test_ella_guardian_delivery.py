@@ -173,6 +173,72 @@ class _FakePool:
         return "OK"
 
 
+class _ClaimPool:
+    def __init__(self, claim_rows=None, existing_row=None):
+        self.claim_rows = list(claim_rows or [])
+        self.existing_row = existing_row
+        self.fetchrow_calls = []
+        self.executed = []
+
+    async def fetchrow(self, query, *args):
+        self.fetchrow_calls.append((query, args))
+        if "INSERT INTO guardian_delivery_log" in query:
+            return self.claim_rows.pop(0) if self.claim_rows else None
+        if "FROM guardian_delivery_log" in query:
+            return self.existing_row
+        return None
+
+    async def execute(self, query, *args):
+        self.executed.append((query, args))
+        return "OK"
+
+
+class _AtomicDeliveryPool:
+    def __init__(self):
+        self.rows = {}
+        self.executed = []
+        self.claim_attempts = 0
+        self._lock = asyncio.Lock()
+
+    async def fetchrow(self, query, *args):
+        if "FROM users" in query:
+            return _user_row()
+        if "INSERT INTO guardian_delivery_log" in query:
+            key = (args[0], args[2], args[3])
+            async with self._lock:
+                self.claim_attempts += 1
+                row = self.rows.get(key)
+                if row and (row["uid"] != args[1] or row["status"] not in args[9]):
+                    return None
+                row = {"uid": args[1], "status": args[7]}
+                self.rows[key] = row
+                return dict(row)
+        if "FROM guardian_delivery_log" in query:
+            return self.rows.get((args[0], args[1], args[2]))
+        return None
+
+    async def fetch(self, query, *_args):
+        if "FROM caregivers" in query:
+            return [_caregiver_row()]
+        return []
+
+    async def execute(self, query, *args):
+        self.executed.append((query, args))
+        if "UPDATE guardian_delivery_log" not in query:
+            return "OK"
+        if "SET status = $1" in query:
+            key = (args[2], "email", args[3])
+            row = self.rows.get(key)
+            if row and row["uid"] == args[4] and row["status"] == "sending":
+                row["status"] = args[0]
+        elif "SET status = 'dispatch_failed'" in query:
+            key = (args[1], args[3], args[4])
+            row = self.rows.get(key)
+            if row and row["uid"] == args[2] and row["status"] == "pending":
+                row["status"] = "dispatch_failed"
+        return "OK"
+
+
 class _FakeResponse:
     status_code = 200
     text = "ok"
@@ -284,7 +350,7 @@ def test_load_delivery_context_prefers_identities_phone(monkeypatch):
 
 
 def test_reserve_delivery_steps_treats_success_as_already_sent(monkeypatch):
-    pool = _FakePool(existing_rows=[{"channel": "imessage", "target": "user", "status": "success"}])
+    pool = _ClaimPool(existing_row={"uid": "uid-1", "status": "success"})
     monkeypatch.setattr(guardian, "_pool", pool)
 
     pending, skipped = asyncio.run(
@@ -298,6 +364,201 @@ def test_reserve_delivery_steps_treats_success_as_already_sent(monkeypatch):
     assert pending == []
     assert skipped[0]["skip_reason"] == "already_success"
     assert pool.executed == []
+
+
+def test_delivery_claim_uses_returning_and_only_explicit_retryable_states(monkeypatch):
+    pool = _ClaimPool(claim_rows=[{"uid": "uid-1", "status": "pending"}])
+    monkeypatch.setattr(guardian, "_pool", pool)
+
+    pending, skipped = asyncio.run(
+        guardian._reserve_delivery_steps(
+            "trace-1",
+            "uid-1",
+            [{"channel": "imessage", "target": "user", "recipient_phone": "+15550000001"}],
+        )
+    )
+
+    assert len(pending) == 1
+    assert skipped == []
+    claim_query, claim_args = pool.fetchrow_calls[0]
+    assert "RETURNING guardian_delivery_log.uid, guardian_delivery_log.status" in claim_query
+    assert "guardian_delivery_log.uid = EXCLUDED.uid" in claim_query
+    assert "guardian_delivery_log.status = ANY($10::text[])" in claim_query
+    assert claim_args[9] == ["dispatch_failed", "error"]
+    for status in ("pending", "sending", "sent", "success", "delivered"):
+        assert guardian._delivery_status_blocks_dispatch(status) is True
+    assert guardian._delivery_status_blocks_dispatch("unexpected_state") is True
+    assert guardian._delivery_status_blocks_dispatch("dispatch_failed") is False
+    assert guardian._delivery_status_blocks_dispatch("error") is False
+
+
+def test_delivery_claim_rejects_cross_owner_existing_row(monkeypatch):
+    pool = _ClaimPool(existing_row={"uid": "uid-2", "status": "error"})
+    monkeypatch.setattr(guardian, "_pool", pool)
+
+    pending, skipped = asyncio.run(
+        guardian._reserve_delivery_steps(
+            "trace-1",
+            "uid-1",
+            [{"channel": "email", "target": "caregiver", "recipient_email": "caregiver@example.test"}],
+        )
+    )
+
+    assert pending == []
+    assert skipped[0]["skip_reason"] == "owner_mismatch"
+
+
+def test_delivery_claim_distinguishes_multiple_caregivers_without_exposing_identity(monkeypatch):
+    pool = _ClaimPool(
+        claim_rows=[
+            {"uid": "uid-1", "status": "pending"},
+            {"uid": "uid-1", "status": "pending"},
+        ]
+    )
+    monkeypatch.setattr(guardian, "_pool", pool)
+
+    pending, skipped = asyncio.run(
+        guardian._reserve_delivery_steps(
+            "trace-caregivers",
+            "uid-1",
+            [
+                {"channel": "email", "target": "emergency_caregiver", "caregiver_id": "caregiver-1"},
+                {"channel": "email", "target": "emergency_caregiver", "caregiver_id": "caregiver-2"},
+            ],
+        )
+    )
+
+    assert skipped == []
+    assert len(pending) == 2
+    claim_targets = [step["claim_target"] for step in pending]
+    assert len(set(claim_targets)) == 2
+    assert all(target.startswith("emergency_caregiver::recipient:") for target in claim_targets)
+    assert all("caregiver-" not in target for target in claim_targets)
+    assert [call[1][3] for call in pool.fetchrow_calls] == claim_targets
+
+
+def test_mark_dispatch_failed_is_bound_to_owner_and_pending_claim(monkeypatch):
+    pool = _ClaimPool()
+    monkeypatch.setattr(guardian, "_pool", pool)
+
+    asyncio.run(
+        guardian._mark_reserved_steps_dispatch_failed(
+            "trace-1",
+            "uid-1",
+            [{"channel": "imessage", "target": "user"}],
+            "dispatch failed",
+        )
+    )
+
+    query, args = pool.executed[0]
+    assert "uid = $3" in query
+    assert "status = 'pending'" in query
+    assert args == ("dispatch failed", "trace-1", "uid-1", "imessage", "user")
+
+
+def test_concurrent_deliver_calls_dispatch_only_atomic_claim_winner(monkeypatch):
+    pool = _AtomicDeliveryPool()
+    _FakeAsyncClient.posts = []
+    monkeypatch.setattr(guardian, "_pool", pool)
+    monkeypatch.setattr(guardian, "evaluate_escalation_policy", lambda *_args: _decision())
+    monkeypatch.setattr(guardian.httpx, "AsyncClient", _FakeAsyncClient)
+
+    async def run_calls():
+        request = guardian.DeliverRequest(
+            uid="uid-1",
+            trace_id="trace-atomic",
+            severity="critical",
+            summary="Needs help",
+        )
+        return await asyncio.gather(
+            guardian.deliver(
+                request.model_copy(deep=True),
+                x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+                subject_uid="uid-1",
+            ),
+            guardian.deliver(
+                request.model_copy(deep=True),
+                x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+                subject_uid="uid-1",
+            ),
+        )
+
+    results = asyncio.run(run_calls())
+
+    assert sorted(result["dispatched"] for result in results) == [False, True]
+    assert len(_FakeAsyncClient.posts) == 1
+    assert pool.claim_attempts == 2
+
+    replay = asyncio.run(
+        guardian.deliver(
+            guardian.DeliverRequest(
+                uid="uid-1",
+                trace_id="trace-atomic",
+                severity="critical",
+                summary="Needs help",
+            ),
+            x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+            subject_uid="uid-1",
+        )
+    )
+    assert replay["dispatched"] is False
+    assert len(_FakeAsyncClient.posts) == 1
+
+
+def test_concurrent_email_calls_send_only_atomic_claim_winner(monkeypatch):
+    class _SMTP:
+        sent = []
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def starttls(self):
+            return None
+
+        def login(self, *_args):
+            return None
+
+        def send_message(self, message):
+            self.sent.append(message)
+
+    pool = _AtomicDeliveryPool()
+    _SMTP.sent = []
+    monkeypatch.setattr(guardian, "_pool", pool)
+    monkeypatch.setattr(guardian.smtplib, "SMTP", _SMTP)
+
+    async def run_calls():
+        request = guardian.EmailSendRequest(
+            to="caregiver@example.test",
+            subject="Guardian alert",
+            body="Please check in.",
+            trace_id="trace-email-atomic",
+            uid="uid-1",
+            target="caregiver",
+        )
+        return await asyncio.gather(
+            guardian.email_send(
+                request.model_copy(deep=True),
+                x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+                subject_uid="uid-1",
+            ),
+            guardian.email_send(
+                request.model_copy(deep=True),
+                x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+                subject_uid="uid-1",
+            ),
+        )
+
+    results = asyncio.run(run_calls())
+
+    assert sorted(result["sent"] for result in results) == [False, True]
+    assert len(_SMTP.sent) == 1
+    assert pool.claim_attempts == 2
 
 
 def test_deliver_dispatches_pending_backend_resolved_recipient(monkeypatch):
@@ -475,6 +736,37 @@ def test_trace_log_requires_configured_key_and_rejects_bad_key(monkeypatch):
             )
         )
     assert exc.value.status_code == 403
+
+
+def test_trace_log_uses_same_recipient_specific_claim_target(monkeypatch):
+    pool = _ClaimPool()
+    monkeypatch.setattr(guardian, "_pool", pool)
+
+    result = asyncio.run(
+        guardian.log_pipeline_event(
+            guardian.TraceLogRequest(
+                trace_id="trace-caregiver",
+                uid="uid-1",
+                stage="delivery_sent",
+                metadata={
+                    "channel": "email",
+                    "target": "emergency_caregiver",
+                    "caregiver_id": "caregiver-1",
+                },
+            ),
+            x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+            subject_uid="uid-1",
+        )
+    )
+
+    assert result["logged"] is True
+    delivery_query, delivery_args = pool.executed[1]
+    expected_target = guardian._delivery_key(
+        {"channel": "email", "target": "emergency_caregiver", "caregiver_id": "caregiver-1"}
+    )[1]
+    assert "INSERT INTO guardian_delivery_log" in delivery_query
+    assert "guardian_delivery_log.uid = EXCLUDED.uid" in delivery_query
+    assert delivery_args[3] == expected_target
 
 
 def test_guardian_alert_history_normalizes_queue_event_delivery_rows(monkeypatch):
