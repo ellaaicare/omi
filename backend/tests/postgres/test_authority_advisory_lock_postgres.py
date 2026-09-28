@@ -2032,7 +2032,8 @@ def test_v10_to_v11_grant_preserves_null_guardian_mode_under_production_constrai
             scope_hash=v10.scope_hash,
         )
         async with pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 ALTER TABLE users
                 ADD CONSTRAINT guardian_mode_check
                 CHECK (
@@ -2041,7 +2042,8 @@ def test_v10_to_v11_grant_preserves_null_guardian_mode_under_production_constrai
                         'CUSTOM', 'CYBORG', 'CHATBOT', 'MEMORY_SUPPORT', 'DEMO'
                     )
                 )
-                """)
+                """
+            )
             user_id = await conn.fetchval(
                 """
                 INSERT INTO users (omi_uid, email, status, guardian_mode, profile_class)
