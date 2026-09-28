@@ -140,6 +140,12 @@ struct BlePeripheral: Hashable {
   var name: String
   var rssi: Int64
   var serviceUuids: [String]
+  /// Whether `CBAdvertisementDataLocalNameKey` was present on this advertisement.
+  /// Redacted discovery diagnostic; never paired with the name/UUID values themselves.
+  var hasAdvertisedLocalName: Bool
+  /// Whether `CBPeripheral.name` (the OS's cached GAP name) was present.
+  /// Redacted discovery diagnostic; never paired with the name/UUID values themselves.
+  var hasPeripheralName: Bool
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -148,12 +154,16 @@ struct BlePeripheral: Hashable {
     let name = pigeonVar_list[1] as! String
     let rssi = pigeonVar_list[2] as! Int64
     let serviceUuids = pigeonVar_list[3] as! [String]
+    let hasAdvertisedLocalName = pigeonVar_list[4] as! Bool
+    let hasPeripheralName = pigeonVar_list[5] as! Bool
 
     return BlePeripheral(
       uuid: uuid,
       name: name,
       rssi: rssi,
-      serviceUuids: serviceUuids
+      serviceUuids: serviceUuids,
+      hasAdvertisedLocalName: hasAdvertisedLocalName,
+      hasPeripheralName: hasPeripheralName
     )
   }
   func toList() -> [Any?] {
@@ -162,6 +172,8 @@ struct BlePeripheral: Hashable {
       name,
       rssi,
       serviceUuids,
+      hasAdvertisedLocalName,
+      hasPeripheralName,
     ]
   }
   static func == (lhs: BlePeripheral, rhs: BlePeripheral) -> Bool {
