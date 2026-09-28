@@ -26,10 +26,12 @@ class _FakeBleHostApi extends BleHostApi {
   final Future<void> Function()? stopScanHandler;
   int startScanCalls = 0;
   int stopScanCalls = 0;
+  List<String>? lastServiceUuids;
 
   @override
   Future<void> startScan(int timeoutSeconds, List<String> serviceUuids) async {
     startScanCalls++;
+    lastServiceUuids = serviceUuids;
     await startScanHandler?.call();
   }
 
@@ -146,6 +148,30 @@ void main() {
       expect(NativeBluetoothDiscoverer.isSupportedPeripheral(beeDevice), isTrue);
       expect(NativeBluetoothDiscoverer.peripheralToDevice(beeDevice).type, DeviceType.bee);
     });
+
+    // ellaaicare/ella-ai#1280 RUN-010 / #1287: `OmiBleManager.didDiscover` already falls
+    // back from the advertisement local name to `peripheral.name` (the OS's cached GAP
+    // name) via `OmiBleDiscoveryNaming.discoveredName` — confirmed identical to upstream.
+    // The admission classifier below must accept that fallback name exactly like an
+    // advertised local name; this only exercises the classifier (the two hasAdvName /
+    // hasPeripheralName booleans are diagnostics-only and don't affect admission).
+    test('admits a necklace whose name came only from peripheral.name, not the advertisement', () {
+      final peripheral = BlePeripheral(
+        uuid: '0000-aaaa-0005',
+        name: 'Friend',
+        rssi: -62,
+        serviceUuids: [],
+        hasAdvertisedLocalName: false,
+        hasPeripheralName: true,
+      );
+
+      expect(NativeBluetoothDiscoverer.isOmi(peripheral), isTrue);
+      expect(NativeBluetoothDiscoverer.isSupportedPeripheral(peripheral), isTrue);
+
+      final device = NativeBluetoothDiscoverer.peripheralToDevice(peripheral);
+      expect(device.type, DeviceType.omi);
+      expect(device.name, 'Friend');
+    });
   });
 
   group('NativeBluetoothDiscoverer host boundary', () {
@@ -213,6 +239,22 @@ void main() {
       expect(result.devices, isEmpty);
       expect(completed, isTrue);
       expect(BleBridge.instance.peripheralDiscoveredCallback, same(sentinel));
+    });
+
+    // ellaaicare/ella-ai#1287: verified the current serviceUuids: [] call site is already
+    // unfiltered — CoreBluetooth's scanForPeripherals(withServices:) only reports
+    // peripherals advertising an exact match, and production necklaces don't reliably
+    // advertise the Omi/Friend service UUID. This guards against a regression that would
+    // pass a non-empty filter and silently drop those necklaces again before the
+    // name/UUID admission classifier above ever sees them.
+    test('requests an unfiltered scan (no serviceUuids filter)', () async {
+      final host = _FakeBleHostApi();
+      final discoverer = NativeBluetoothDiscoverer(hostApi: host, bluetoothReadiness: _readyBluetooth());
+
+      await discoverer.discover(timeout: 0);
+
+      expect(host.startScanCalls, 1);
+      expect(host.lastServiceUuids, isEmpty);
     });
 
     test('handles stopScan failure and restores the callback', () async {
