@@ -222,8 +222,16 @@ def _delivery_key(step: dict) -> tuple[str, str]:
     return str(step.get("channel") or "unknown"), str(step.get("target") or "unknown")
 
 
-def _delivery_status_blocks_dispatch(status: Optional[str]) -> bool:
-    return str(status or "").lower() in {"pending", "sending", "sent", "success", "delivered"}
+# Terminal/in-flight states that mean "someone already owns this delivery" —
+# a claim attempt must never reclaim a row sitting in one of these.
+_BLOCKING_DELIVERY_STATUSES = frozenset({"pending", "sending", "sent", "success", "delivered"})
+
+# Terminal failure states that ARE safe to retry. Reclaim eligibility is an
+# explicit allowlist, not "anything not in the blocking set" — an unrecognized
+# status string must never be treated as retryable.
+_RETRYABLE_DELIVERY_STATUSES = frozenset({"dispatch_failed", "error"})
+
+assert _BLOCKING_DELIVERY_STATUSES.isdisjoint(_RETRYABLE_DELIVERY_STATUSES)
 
 
 def _caregiver_payload(caregiver: CaregiverPolicyContext) -> dict:
@@ -331,6 +339,80 @@ async def _load_delivery_context(uid: str) -> tuple[UserPolicyContext, list[Care
     return user, caregivers
 
 
+async def _claim_delivery_row(
+    pool: asyncpg.Pool,
+    *,
+    trace_id: str,
+    uid: str,
+    channel: str,
+    target: str,
+    status: str,
+    caregiver_id: Optional[str] = None,
+    recipient_phone: Optional[str] = None,
+    recipient_email: Optional[str] = None,
+    provider_response: Optional[dict] = None,
+) -> Optional[dict]:
+    """Atomically claim one (trace_id, channel, target) delivery row.
+
+    Single INSERT ... ON CONFLICT ... DO UPDATE ... RETURNING against the
+    live unique index — this is the ONLY authority for whether a caller may
+    dispatch. A fresh row always claims. An existing row only reclaims when
+    its status is in the explicit retryable set; every other status
+    (blocking or unrecognized) makes the DO UPDATE's WHERE clause match zero
+    rows, RETURNING nothing, and the caller must treat that as a skip.
+    """
+    row = await pool.fetchrow(
+        """
+        INSERT INTO guardian_delivery_log (
+            trace_id, uid, channel, target, caregiver_id, recipient_phone,
+            recipient_email, status, provider_response
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+        ON CONFLICT (trace_id, channel, target) DO UPDATE SET
+            uid = EXCLUDED.uid,
+            caregiver_id = EXCLUDED.caregiver_id,
+            recipient_phone = EXCLUDED.recipient_phone,
+            recipient_email = EXCLUDED.recipient_email,
+            status = EXCLUDED.status,
+            error_message = NULL,
+            provider_response = EXCLUDED.provider_response,
+            updated_at = NOW()
+        WHERE guardian_delivery_log.status = ANY($10::text[])
+        RETURNING trace_id, uid, channel, target, caregiver_id, recipient_phone, recipient_email, status
+        """,
+        trace_id,
+        uid,
+        channel,
+        target,
+        caregiver_id,
+        recipient_phone,
+        recipient_email,
+        status,
+        json.dumps(provider_response or {}),
+        sorted(_RETRYABLE_DELIVERY_STATUSES),
+    )
+    return dict(row) if row else None
+
+
+async def _describe_delivery_status(pool: asyncpg.Pool, trace_id: str, channel: str, target: str) -> Optional[str]:
+    """Best-effort read of the current status for a skipped claim's log message.
+
+    This is descriptive only — it must never be used to decide whether to
+    dispatch. That decision is made exclusively by whether the claim's
+    RETURNING clause produced a row.
+    """
+    return await pool.fetchval(
+        """
+        SELECT status
+        FROM guardian_delivery_log
+        WHERE trace_id = $1 AND channel = $2 AND target = $3
+        """,
+        trace_id,
+        channel,
+        target,
+    )
+
+
 async def _reserve_delivery_steps(
     trace_id: str,
     uid: str,
@@ -340,58 +422,27 @@ async def _reserve_delivery_steps(
         return [], []
 
     pool = await _get_pool()
-    channels = [channel for channel, _target in [_delivery_key(step) for step in steps]]
-    targets = [target for _channel, target in [_delivery_key(step) for step in steps]]
-    existing_rows = await pool.fetch(
-        """
-        SELECT channel, target, status
-        FROM guardian_delivery_log
-        WHERE trace_id = $1
-          AND channel = ANY($2::text[])
-          AND target = ANY($3::text[])
-        """,
-        trace_id,
-        channels,
-        targets,
-    )
-    existing_status = {(str(row["channel"]), str(row["target"])): row["status"] for row in existing_rows}
-
     pending_steps: list[dict] = []
     skipped_steps: list[dict] = []
     for step in steps:
         channel, target = _delivery_key(step)
-        status = existing_status.get((channel, target))
-        if _delivery_status_blocks_dispatch(status):
-            skipped_steps.append({**step, "skip_reason": f"already_{status}"})
+        claimed = await _claim_delivery_row(
+            pool,
+            trace_id=trace_id,
+            uid=uid,
+            channel=channel,
+            target=target,
+            status="pending",
+            caregiver_id=step.get("caregiver_id"),
+            recipient_phone=step.get("recipient_phone"),
+            recipient_email=step.get("recipient_email"),
+            provider_response={"reserved_by": "omi_backend", "step": step},
+        )
+        if claimed is None:
+            current_status = await _describe_delivery_status(pool, trace_id, channel, target)
+            skipped_steps.append({**step, "skip_reason": f"already_{current_status or 'claimed'}"})
             continue
 
-        await pool.execute(
-            """
-            INSERT INTO guardian_delivery_log (
-                trace_id, uid, channel, target, caregiver_id, recipient_phone,
-                recipient_email, status, provider_response
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8::jsonb)
-            ON CONFLICT (trace_id, channel, target) DO UPDATE SET
-                uid = EXCLUDED.uid,
-                caregiver_id = EXCLUDED.caregiver_id,
-                recipient_phone = EXCLUDED.recipient_phone,
-                recipient_email = EXCLUDED.recipient_email,
-                status = 'pending',
-                error_message = NULL,
-                provider_response = EXCLUDED.provider_response,
-                updated_at = NOW()
-            WHERE guardian_delivery_log.status NOT IN ('pending', 'sending', 'sent', 'success', 'delivered')
-            """,
-            trace_id,
-            uid,
-            channel,
-            target,
-            step.get("caregiver_id"),
-            step.get("recipient_phone"),
-            step.get("recipient_email"),
-            json.dumps({"reserved_by": "omi_backend", "step": step}),
-        )
         pending_steps.append(step)
 
     return pending_steps, skipped_steps
@@ -2400,38 +2451,23 @@ async def email_send(
     trace_id = req.trace_id or "unknown"
     uid = req.uid or "unknown"
     pool = await _get_pool()
-    existing = await pool.fetchval(
-        """
-        SELECT status
-        FROM guardian_delivery_log
-        WHERE trace_id = $1 AND channel = 'email' AND target = $2
-        """,
-        trace_id,
-        req.target,
+    claimed = await _claim_delivery_row(
+        pool,
+        trace_id=trace_id,
+        uid=uid,
+        channel="email",
+        target=req.target,
+        status="sending",
+        recipient_email=req.to,
+        provider_response={"to": req.to, "subject": req.subject},
     )
-    if _delivery_status_blocks_dispatch(existing):
-        return {"ok": True, "sent": False, "reason": f"already_{existing}", "trace_id": trace_id}
+    if claimed is None:
+        current_status = await _describe_delivery_status(pool, trace_id, "email", req.target)
+        return {"ok": True, "sent": False, "reason": f"already_{current_status}", "trace_id": trace_id}
 
-    await pool.execute(
-        """
-        INSERT INTO guardian_delivery_log (trace_id, uid, channel, target, recipient_email, status, provider_response)
-        VALUES ($1, $2, 'email', $3, $4, 'sending', $5::jsonb)
-        ON CONFLICT (trace_id, channel, target) DO UPDATE SET
-            uid = EXCLUDED.uid,
-            recipient_email = EXCLUDED.recipient_email,
-            status = 'sending',
-            error_message = NULL,
-            provider_response = EXCLUDED.provider_response,
-            updated_at = NOW()
-        WHERE guardian_delivery_log.status NOT IN ('pending', 'sending', 'sent', 'success', 'delivered')
-        """,
-        trace_id,
-        uid,
-        req.target,
-        req.to,
-        json.dumps({"to": req.to, "subject": req.subject}),
-    )
-
+    # Only the caller that won the claim above ever reaches this point — the
+    # unique (trace_id, channel, target) index plus the claim's RETURNING
+    # check means at most one concurrent request calls SMTP for this email.
     message = MIMEText(req.body)
     message["Subject"] = req.subject
     message["To"] = req.to
