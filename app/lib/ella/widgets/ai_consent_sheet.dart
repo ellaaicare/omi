@@ -19,6 +19,7 @@ class AiConsentSheet extends StatefulWidget {
     this.onRequestDeletion,
     this.canPersistDecision,
     this.reviewMode = false,
+    this.preserveExistingAuthorityOnDecline = false,
   });
 
   final Future<AiConsentGrantOutcome> Function()? onAccept;
@@ -26,6 +27,7 @@ class AiConsentSheet extends StatefulWidget {
   final Future<void> Function()? onRequestDeletion;
   final bool Function()? canPersistDecision;
   final bool reviewMode;
+  final bool preserveExistingAuthorityOnDecline;
 
   static Future<bool?> show(
     BuildContext context, {
@@ -34,6 +36,7 @@ class AiConsentSheet extends StatefulWidget {
     Future<void> Function()? onRequestDeletion,
     bool Function()? canPersistDecision,
     bool reviewMode = false,
+    bool preserveExistingAuthorityOnDecline = false,
     bool pilotLocaleRestricted = isEllaInternalPilotEnabled,
   }) {
     if (pilotLocaleRestricted && !isEllaInternalPilotLocaleSupported(Localizations.localeOf(context).languageCode)) {
@@ -55,6 +58,7 @@ class AiConsentSheet extends StatefulWidget {
           onRequestDeletion: onRequestDeletion,
           canPersistDecision: canPersistDecision,
           reviewMode: reviewMode,
+          preserveExistingAuthorityOnDecline: preserveExistingAuthorityOnDecline,
         ),
       ),
     );
@@ -120,6 +124,8 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
     final preferences = SharedPreferencesUtil();
     if (widget.reviewMode) {
       preferences.declineAiConsent();
+    } else if (widget.preserveExistingAuthorityOnDecline) {
+      preferences.deferAiConsentUpgrade();
     } else {
       preferences.deferAiConsent();
     }
@@ -223,6 +229,12 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                       title: context.l10n.aiConsentOpenAiArtworkTitle,
                       body: context.l10n.aiConsentOpenAiArtworkBody,
                     ),
+                    const SizedBox(height: 10),
+                    _processorDisclosure(
+                      icon: Icons.shield_outlined,
+                      title: context.l10n.aiConsentTypesafeTitle,
+                      body: context.l10n.aiConsentTypesafeBody,
+                    ),
                     const SizedBox(height: 12),
                     Container(
                       width: double.infinity,
@@ -236,7 +248,12 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                     const SizedBox(height: 16),
                     Text(context.l10n.aiConsentCompactSummary, style: bodyStyle),
                     const SizedBox(height: 12),
-                    Text(context.l10n.aiConsentNoSharingBeforeAllow, style: bodyStyle),
+                    Text(
+                      widget.preserveExistingAuthorityOnDecline
+                          ? context.l10n.aiConsentUpgradeExistingAuthority
+                          : context.l10n.aiConsentNoSharingBeforeAllow,
+                      style: bodyStyle,
+                    ),
                     const SizedBox(height: 14),
                     Text.rich(
                       TextSpan(

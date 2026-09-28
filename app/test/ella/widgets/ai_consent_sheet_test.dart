@@ -180,6 +180,9 @@ void main() {
     expect(disclosure, contains('OpenAI and Ella’s artwork designer'));
     expect(disclosure, contains('OpenAI’s Codex and image services'));
     expect(disclosure, contains('saved memory'));
+    expect(disclosure, contains('TypeSafe (Jev), via OpenRouter'));
+    expect(disclosure, contains('extra support may be helpful'));
+    expect(disclosure, contains('Guardian and Whispers'));
     expect(disclosure, isNot(contains('Daily Note')));
     expect(disclosure, contains('does not receive raw microphone audio, source photos, or your full memory history'));
     expect(disclosure, contains('ElevenLabs'));
@@ -189,6 +192,18 @@ void main() {
     expect(disclosure, contains('details from your saved memories'));
     expect(disclosure, contains('Full processor details in Privacy Policy'));
     expect(find.text('Not now'), findsOneWidget);
+
+    // First-time consent (no prior authority) must be unchanged by the v10-to-v11
+    // upgrade-copy fix: still says nothing is shared and Not now keeps everything off.
+    expect(
+      disclosure,
+      contains(
+        'Ella will not send what you say or type, messages, details from your saved memories, or Photon '
+        'messages to these companies until you choose Allow. Not now keeps these cloud AI, memory, voice, '
+        'and messaging features off. You can review or remove this permission in Settings.',
+      ),
+    );
+    expect(disclosure, isNot(contains('Your previously approved v10 processing continues')));
 
     final normalizedDisclosure = disclosure.toLowerCase();
     for (final bannedWord in const [
@@ -319,6 +334,57 @@ void main() {
 
     expect(preferences.aiConsentAccepted, isFalse);
     expect(preferences.aiConsentContractVersion, isEmpty);
+    expect(preferences.isCurrentAiConsentDeferred, isTrue);
+  });
+
+  testWidgets('Not now on the v11 upgrade preserves exact v10 capture authority', (tester) async {
+    final preferences = SharedPreferencesUtil()..uid = 'uid-a';
+    preferences.acceptAiConsent(
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}v10-receipt',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
+      policyVersion: SharedPreferencesUtil.legacyAiConsentContractVersionV10,
+      processorSetHash: SharedPreferencesUtil.legacyAiConsentProcessorSetHashV10,
+    );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}v10-receipt',
+      policyVersion: SharedPreferencesUtil.legacyAiConsentContractVersionV10,
+      processorSetHash: SharedPreferencesUtil.legacyAiConsentProcessorSetHashV10,
+      profileBindingId: 'profile-binding-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+
+    await tester.pumpWidget(
+      const MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(body: AiConsentSheet(preserveExistingAuthorityOnDecline: true)),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final disclosure =
+        tester.widgetList<RichText>(find.byType(RichText)).map((widget) => widget.text.toPlainText()).join(' ');
+    expect(disclosure, contains('Your previously approved v10 processing continues under your existing consent.'));
+    expect(
+      disclosure,
+      contains(
+        'Not now keeps your existing consent active and withholds only the newly disclosed '
+        'TypeSafe (Jev), via OpenRouter processing.',
+      ),
+    );
+    expect(disclosure, isNot(contains('until you choose Allow')));
+    expect(disclosure, isNot(contains('Not now keeps these cloud AI, memory, voice, and messaging features off.')));
+
+    await tester.ensureVisible(find.text('Not now'));
+    await tester.tap(find.text('Not now'));
+    await tester.pumpAndSettle();
+
+    expect(preferences.aiConsentAccepted, isTrue);
+    expect(preferences.aiConsentContractVersion, SharedPreferencesUtil.legacyAiConsentContractVersionV10);
     expect(preferences.isCurrentAiConsentDeferred, isTrue);
   });
 

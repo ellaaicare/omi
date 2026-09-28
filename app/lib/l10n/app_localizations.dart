@@ -16572,7 +16572,7 @@ abstract class AppLocalizations {
   /// No description provided for @aiConsentCompactSummary.
   ///
   /// In en, this message translates to:
-  /// **'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; OpenAI and Ella’s dedicated artwork designer to illustrate a saved memory; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.'**
+  /// **'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; TypeSafe, via OpenRouter, to help Ella recognize when extra support may be helpful for Guardian and Whispers; OpenAI and Ella’s dedicated artwork designer to illustrate a saved memory; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.'**
   String get aiConsentCompactSummary;
 
   /// No description provided for @aiConsentProcessorDetailsLink.
@@ -16586,6 +16586,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Ella will not send what you say or type, messages, details from your saved memories, or Photon messages to these companies until you choose Allow. Not now keeps these cloud AI, memory, voice, and messaging features off. You can review or remove this permission in Settings.'**
   String get aiConsentNoSharingBeforeAllow;
+
+  /// No description provided for @aiConsentUpgradeExistingAuthority.
+  ///
+  /// In en, this message translates to:
+  /// **'Your previously approved v10 processing continues under your existing consent. Choose Allow to add TypeSafe (Jev), via OpenRouter, for Guardian and Whispers conversation-text classification. Not now keeps your existing consent active and withholds only the newly disclosed TypeSafe (Jev), via OpenRouter processing. You can review or remove this permission in Settings.'**
+  String get aiConsentUpgradeExistingAuthority;
 
   /// No description provided for @aiConsentRevokeAction.
   ///
@@ -16718,6 +16724,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Creates an illustration for a saved memory using OpenAI’s Codex and image services. It receives only that memory’s title and summary, plus your chosen artwork style; it does not receive raw microphone audio, source photos, or your full memory history.'**
   String get aiConsentOpenAiArtworkBody;
+
+  /// Legal recipient and routing partner for the Guardian/Whispers conversation safety classifier
+  ///
+  /// In en, this message translates to:
+  /// **'TypeSafe (Jev), via OpenRouter'**
+  String get aiConsentTypesafeTitle;
+
+  /// Plain-language data categories and purpose for the TypeSafe safety classifier
+  ///
+  /// In en, this message translates to:
+  /// **'Reviews conversation text so Ella can recognize when extra support may be helpful, as part of Guardian and Whispers.'**
+  String get aiConsentTypesafeBody;
 
   /// Explains the exact managed-cloud profile and messaging scope
   ///

@@ -1,6 +1,6 @@
 import 'dart:convert';
-import 'dart:ui';
 
+import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 
 import 'package:omi/backend/http/shared.dart';
@@ -89,19 +89,49 @@ class AiConsentStatus {
   final String accountEpochToken;
 
   bool isCurrentGrantFor(String uid, {String? expectedProfileBindingId}) {
+    return _isGrantFor(
+      uid,
+      expectedProfileBindingId: expectedProfileBindingId,
+      contractMatches: policy?.isBundledCurrent ?? false,
+      supportedContractOnly: false,
+    );
+  }
+
+  bool isOperationalGrantFor(String uid, {String? expectedProfileBindingId}) {
+    return _isGrantFor(
+      uid,
+      expectedProfileBindingId: expectedProfileBindingId,
+      contractMatches: policy?.isSupportedOperational ?? false,
+      supportedContractOnly: true,
+    );
+  }
+
+  bool _isGrantFor(
+    String uid, {
+    required String? expectedProfileBindingId,
+    required bool contractMatches,
+    required bool supportedContractOnly,
+  }) {
     return uid.isNotEmpty &&
         subjectUid == uid &&
         authorized &&
         decision == AiConsentDecision.granted.wireValue &&
         receiptId.startsWith(SharedPreferencesUtil.currentAiConsentReceiptPrefix) &&
-        policyVersion == SharedPreferencesUtil.currentAiConsentContractVersion &&
-        processorSetHash == SharedPreferencesUtil.currentAiConsentProcessorSetHash &&
+        (supportedContractOnly
+            ? SharedPreferencesUtil.isSupportedAiConsentContract(
+                policyVersion: policyVersion,
+                processorSetHash: processorSetHash,
+                scopeVersion: scopeVersion,
+                scopeHash: scopeHash,
+              )
+            : policyVersion == SharedPreferencesUtil.currentAiConsentContractVersion &&
+                processorSetHash == SharedPreferencesUtil.currentAiConsentProcessorSetHash &&
+                scopeVersion == SharedPreferencesUtil.currentAiConsentScopeVersion &&
+                scopeHash == SharedPreferencesUtil.currentAiConsentScopeHash) &&
         profileBindingId.isNotEmpty &&
         (expectedProfileBindingId == null || profileBindingId == expectedProfileBindingId) &&
-        scopeVersion == SharedPreferencesUtil.currentAiConsentScopeVersion &&
-        scopeHash == SharedPreferencesUtil.currentAiConsentScopeHash &&
         serverDecidedAt != null &&
-        (policy?.isBundledCurrent ?? false);
+        contractMatches;
   }
 }
 
@@ -247,6 +277,14 @@ class EllaAiConsentHttpTransport implements EllaAiConsentTransport {
 
   static String get _endpoint => '${Env.apiBaseUrl}v1/users/ai-consent';
 
+  @visibleForTesting
+  static String negotiatedEndpoint(String endpoint) => Uri.parse(endpoint).replace(
+        queryParameters: {
+          ...Uri.parse(endpoint).queryParameters,
+          'policy_version': SharedPreferencesUtil.currentAiConsentContractVersion,
+        },
+      ).toString();
+
   static Map<String, dynamic>? _decodeMap(String body) {
     try {
       final decoded = jsonDecode(body);
@@ -259,7 +297,7 @@ class EllaAiConsentHttpTransport implements EllaAiConsentTransport {
   @override
   Future<AiConsentPolicy?> fetchPolicy() async {
     final response = await makeApiCall(
-      url: '$_endpoint/policy',
+      url: negotiatedEndpoint('$_endpoint/policy'),
       headers: const {},
       method: 'GET',
       body: '',
@@ -279,7 +317,7 @@ class EllaAiConsentHttpTransport implements EllaAiConsentTransport {
   @override
   Future<AiConsentFetchResult> fetchStatusWithDetails() async {
     final response = await makeApiCall(
-      url: _endpoint,
+      url: negotiatedEndpoint(_endpoint),
       headers: const {},
       method: 'GET',
       body: '',
@@ -474,14 +512,11 @@ class EllaAiConsentService {
     // matches the bundled contract. A server-authorized same/newer receipt may
     // still keep this active lease alive across non-material deploy drift.
     var persistedVerifiedGrant = false;
-    if (status.isCurrentGrantFor(uid)) {
+    if (status.isOperationalGrantFor(uid)) {
       persistedVerifiedGrant = _persistVerifiedGrant(persistenceAuthority, status);
     }
     if (persistedVerifiedGrant) {
-      _preferences.markAiConsentLastServerConfirmed(
-        uid: uid,
-        receiptId: status.receiptId,
-      );
+      _preferences.markAiConsentLastServerConfirmed(uid: uid, receiptId: status.receiptId);
     }
     return AiConsentAuthorityRefreshResult(
       AiConsentAuthorityRefreshDisposition.verified,
@@ -544,14 +579,12 @@ class EllaAiConsentService {
       }
 
       final status = await _transport.fetchStatus();
-      if (!_requireCurrentAuthority(authority) ||
-          status == null ||
-          status.policy?.processorSetHash != policy.processorSetHash) {
+      if (!_requireCurrentAuthority(authority) || status == null) {
         SharedPreferencesUtil.clearAiConsentServerVerification();
         return false;
       }
       final expectedProfileBindingId = authority.profileBindingId;
-      if (!status.isCurrentGrantFor(
+      if (!status.isOperationalGrantFor(
         uid,
         expectedProfileBindingId: expectedProfileBindingId.isEmpty ? null : expectedProfileBindingId,
       )) {
@@ -774,6 +807,10 @@ class EllaAiConsentService {
       locale: status.locale,
       profileBindingId: status.profileBindingId,
       serverDecidedAt: status.serverDecidedAt!.toUtc().toIso8601String(),
+      policyVersion: status.policyVersion,
+      processorSetHash: status.processorSetHash,
+      scopeVersion: status.scopeVersion,
+      scopeHash: status.scopeHash,
     );
     final persistedAuthority = _captureAuthority(authority.uid);
     if (persistedAuthority == null ||

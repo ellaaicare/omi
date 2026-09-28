@@ -44,6 +44,7 @@ class EllaProvisioningGatePage extends StatefulWidget {
 
 class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> with WidgetsBindingObserver {
   bool _consentDeferred = false;
+  bool _upgradePromptInFlight = false;
 
   String _authenticatedUid() => widget.authenticatedUidProvider?.call() ?? FirebaseAuth.instance.currentUser?.uid ?? '';
 
@@ -96,6 +97,10 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
         return;
       }
     }
+    final shouldOfferConsentUpgrade = allowConsentPrompt &&
+        preferences.hasPriorAccountBoundAiConsent(uid) &&
+        !preferences.isCurrentAiConsentDeferred &&
+        !_upgradePromptInFlight;
     setState(() => _consentDeferred = false);
 
     String timezone;
@@ -117,6 +122,33 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
       ),
       forceRevalidate: forceProvisioningRevalidation,
     );
+    if (!_isCurrentAuthenticatedUid(uid) || !shouldOfferConsentUpgrade) return;
+    await _offerConsentUpgrade(uid, consentService, provisioningProvider);
+  }
+
+  Future<void> _offerConsentUpgrade(
+    String uid,
+    EllaAiConsentService consentService,
+    EllaProvisioningProvider provisioningProvider,
+  ) async {
+    if (_upgradePromptInFlight || !mounted) return;
+    _upgradePromptInFlight = true;
+    try {
+      await AiConsentSheet.show(
+        context,
+        preserveExistingAuthorityOnDecline: true,
+        onAccept: () async {
+          final outcome = await consentService.grantCurrentConsentWithOutcome(uid: uid);
+          final receiptId = outcome.receiptId;
+          if (receiptId != null && _isCurrentAuthenticatedUid(uid)) {
+            provisioningProvider.setConsentReceiptId(receiptId);
+          }
+          return outcome;
+        },
+      );
+    } finally {
+      _upgradePromptInFlight = false;
+    }
   }
 
   @override
