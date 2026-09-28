@@ -719,15 +719,24 @@ extension OmiBleManager: CBCentralManagerDelegate {
 
         let serviceUuids = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID])?.map { $0.uuidString } ?? []
 
+        // ellaaicare/ella-ai#1280 RUN-010 / #1287: forward which source(s) actually
+        // carried a name alongside the resolved name itself, so redacted discovery
+        // diagnostics on the Dart side can tell "advertised no local name" apart
+        // from "iOS hasn't cached a GAP name for this never-bonded peripheral yet"
+        // without ever forwarding the name/UUIDs themselves for logging.
+        let nameResult = OmiBleDiscoveryNaming.discoveredNameResult(
+            advertisedLocalName: advertisementData[CBAdvertisementDataLocalNameKey] as? String,
+            cachedName: peripheral.name,
+            advertisementData: advertisementData
+        )
+
         let blePeripheral = BlePeripheral(
             uuid: uuid,
-            name: OmiBleDiscoveryNaming.discoveredName(
-                advertisedLocalName: advertisementData[CBAdvertisementDataLocalNameKey] as? String,
-                cachedName: peripheral.name,
-                advertisementData: advertisementData
-            ),
+            name: nameResult.name,
             rssi: Int64(RSSI.intValue),
-            serviceUuids: serviceUuids
+            serviceUuids: serviceUuids,
+            hasAdvertisedLocalName: nameResult.hasAdvertisedLocalName,
+            hasPeripheralName: nameResult.hasPeripheralName
         )
 
         flutterApi?.onPeripheralDiscovered(peripheral: blePeripheral) { _ in }
