@@ -5,6 +5,7 @@ from ella.services.guardian_echo_classifier import EchoClassification
 from ella.services.guardian_playback_ledger import PlaybackCandidate
 from utils.ella.scanner import (
     _build_wake_ack_payload,
+    _segments_matching_live_spans,
     prepare_scanner_segments_for_dispatch,
     select_playback_ledger_candidates,
 )
@@ -98,18 +99,24 @@ def _send_to_scanner_with_mocks(monkeypatch, *, segments, candidates, classifica
     """Drive the real `send_to_scanner` with only the two external
     boundaries mocked: the ledger candidate lookup (already covered by its
     own tests above) and the classifier call itself. Everything in between
-    — the echo/mixed/fail-open branching in `send_to_scanner` — runs for
-    real."""
+    — the echo/mixed/fail-open branching in `send_to_scanner`, including
+    whether and with what segments the wake ack is enqueued — runs for
+    real; `_enqueue_wake_ack` itself is spied on (not stubbed away) so
+    callers can assert whether/how it was invoked."""
     import utils.ella.scanner as scanner
 
     posts = []
+    wake_ack_calls = []
 
     def fake_post(_url, json, headers, timeout):
         posts.append(json)
         return _FakeWebhookResponse(200)
 
+    def spy_enqueue_wake_ack(uid, conversation_id, trace_id, scanner_segments):
+        wake_ack_calls.append(scanner_segments)
+
     monkeypatch.setattr(scanner, "_log_trace_event", lambda *args, **kwargs: None)
-    monkeypatch.setattr(scanner, "_enqueue_wake_ack", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scanner, "_enqueue_wake_ack", spy_enqueue_wake_ack)
     monkeypatch.setattr(scanner, "SCANNER_WEBHOOK_KEY", "configured-scanner-webhook-key")
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
     monkeypatch.setattr(scanner, "_post_scanner_webhook", fake_post)
@@ -126,7 +133,7 @@ def _send_to_scanner_with_mocks(monkeypatch, *, segments, candidates, classifica
         segments,
         guardian_mode="active_support",
     )
-    return status, posts
+    return status, posts, wake_ack_calls
 
 
 def test_confirmed_ella_playback_echo_is_not_dispatched(monkeypatch):
@@ -134,7 +141,7 @@ def test_confirmed_ella_playback_echo_is_not_dispatched(monkeypatch):
     webhook: dispatch is the only path that could create a Guardian
     queue row from this window, so skipping it is what makes a confirmed
     echo unable to create one."""
-    status, posts = _send_to_scanner_with_mocks(
+    status, posts, wake_ack_calls = _send_to_scanner_with_mocks(
         monkeypatch,
         segments=[{"text": "Hey Ella, I heard my name.", "speaker": "SPEAKER_1"}],
         candidates=[_candidate().to_classifier_candidate()],
@@ -145,12 +152,29 @@ def test_confirmed_ella_playback_echo_is_not_dispatched(monkeypatch):
     assert posts == []
 
 
+def test_confirmed_ella_playback_echo_never_enqueues_a_wake_ack(monkeypatch):
+    """GUARDIAN-ECHO-006: the wake acknowledgement is itself a
+    queue-producing action, so a confirmed echo containing "Hey Ella" must
+    suppress it exactly like it suppresses dispatch — the ack must never
+    be enqueued at all, not enqueued-then-cancelled."""
+    status, posts, wake_ack_calls = _send_to_scanner_with_mocks(
+        monkeypatch,
+        segments=[{"text": "Hey Ella, I heard my name.", "speaker": "SPEAKER_1"}],
+        candidates=[_candidate().to_classifier_candidate()],
+        classification=_echo_classification(source="ella_playback"),
+    )
+
+    assert status is None
+    assert posts == []
+    assert wake_ack_calls == []
+
+
 def test_mixed_confirmed_echo_dispatches_only_the_validated_live_span(monkeypatch):
     segments = [
         {"text": "Hey Ella, I heard my name.", "speaker": "SPEAKER_1"},
         {"text": "what did you just say about dinner", "speaker": "SPEAKER_1"},
     ]
-    status, posts = _send_to_scanner_with_mocks(
+    status, posts, wake_ack_calls = _send_to_scanner_with_mocks(
         monkeypatch,
         segments=segments,
         candidates=[_candidate().to_classifier_candidate()],
@@ -164,13 +188,42 @@ def test_mixed_confirmed_echo_dispatches_only_the_validated_live_span(monkeypatc
     assert status == 200
     assert len(posts) == 1
     assert [s["text"] for s in posts[0]["segments"]] == ["what did you just say about dinner"]
+    # The wake ack is judged against the same live-only window that gets
+    # dispatched — the echoed "Hey Ella" segment was dropped, so no ack.
+    assert len(wake_ack_calls) == 1
+    assert [s["text"] for s in wake_ack_calls[0]] == ["what did you just say about dinner"]
+
+
+def test_mixed_confirmed_echo_wake_ack_fires_when_wake_phrase_is_in_the_live_span(monkeypatch):
+    """GUARDIAN-ECHO-006 mixed case: a wake ack is only ever justified when
+    the wake phrase itself survives inside a validated live span."""
+    segments = [
+        {"text": "Hi Greg, I heard my name.", "speaker": "SPEAKER_1"},
+        {"text": "Hey Ella what did you just say about dinner", "speaker": "SPEAKER_1"},
+    ]
+    status, posts, wake_ack_calls = _send_to_scanner_with_mocks(
+        monkeypatch,
+        segments=segments,
+        candidates=[_candidate().to_classifier_candidate()],
+        classification=_echo_classification(
+            source="mixed",
+            contains_additional_live_speech=True,
+            live_speech_spans=["Hey Ella what did you just say about dinner"],
+        ),
+    )
+
+    assert status == 200
+    assert len(posts) == 1
+    assert [s["text"] for s in posts[0]["segments"]] == ["Hey Ella what did you just say about dinner"]
+    assert len(wake_ack_calls) == 1
+    assert [s["text"] for s in wake_ack_calls[0]] == ["Hey Ella what did you just say about dinner"]
 
 
 def test_classifier_fail_open_dispatches_original_window_unchanged(monkeypatch):
     """Timeout, provider error, or any other fail-open result must never
     suppress or alter the window — the untouched transcript continues."""
     segments = [{"text": "Hey Ella, did you catch that?", "speaker": "SPEAKER_1"}]
-    status, posts = _send_to_scanner_with_mocks(
+    status, posts, wake_ack_calls = _send_to_scanner_with_mocks(
         monkeypatch,
         segments=segments,
         candidates=[_candidate().to_classifier_candidate()],
@@ -180,6 +233,10 @@ def test_classifier_fail_open_dispatches_original_window_unchanged(monkeypatch):
     assert status == 200
     assert len(posts) == 1
     assert [s["text"] for s in posts[0]["segments"]] == ["Hey Ella, did you catch that?"]
+    # Fail-open is unchanged current behavior: the wake ack still fires
+    # against the original, untouched window.
+    assert len(wake_ack_calls) == 1
+    assert [s["text"] for s in wake_ack_calls[0]] == ["Hey Ella, did you catch that?"]
 
 
 def test_non_echo_classification_dispatches_unchanged(monkeypatch):
@@ -187,7 +244,7 @@ def test_non_echo_classification_dispatches_unchanged(monkeypatch):
     (live_user/other_person/tv_media) must dispatch the window unchanged —
     only a confirmed echo ever changes what gets dispatched."""
     segments = [{"text": "Hey Ella, remind me to call my daughter.", "speaker": "SPEAKER_1"}]
-    status, posts = _send_to_scanner_with_mocks(
+    status, posts, wake_ack_calls = _send_to_scanner_with_mocks(
         monkeypatch,
         segments=segments,
         candidates=[_candidate().to_classifier_candidate()],
@@ -202,6 +259,7 @@ def test_non_echo_classification_dispatches_unchanged(monkeypatch):
     assert status == 200
     assert len(posts) == 1
     assert [s["text"] for s in posts[0]["segments"]] == ["Hey Ella, remind me to call my daughter."]
+    assert len(wake_ack_calls) == 1
 
 
 def test_no_playback_candidates_never_calls_the_classifier(monkeypatch):
@@ -214,7 +272,7 @@ def test_no_playback_candidates_never_calls_the_classifier(monkeypatch):
         calls.append((args, kwargs))
         return _echo_classification()
 
-    status, posts = _send_to_scanner_with_mocks(
+    status, posts, wake_ack_calls = _send_to_scanner_with_mocks(
         monkeypatch,
         segments=[{"text": "Hey Ella, are you there?", "speaker": "SPEAKER_1"}],
         candidates=[],
@@ -224,6 +282,7 @@ def test_no_playback_candidates_never_calls_the_classifier(monkeypatch):
     assert status == 200
     assert len(posts) == 1
     assert calls == []
+    assert len(wake_ack_calls) == 1
 
 
 def test_short_wake_prefix_dispatches_immediately():
@@ -281,3 +340,71 @@ def test_wake_ack_payload_ignores_non_wake_ambient_text():
     segments = [{"speaker": "SPEAKER_1", "text": "The cats on the video are clean animals."}]
 
     assert _build_wake_ack_payload("uid-1", "conv-1", "trace-1", segments) is None
+
+
+def test_segments_matching_live_spans_extracts_only_the_live_text_from_a_mixed_segment():
+    """GUARDIAN-ECHO-007: a single ASR segment containing both the echoed
+    playback and live speech must forward only the validated live
+    substring — the playback portion must never reach the outgoing text."""
+    segments = [
+        {
+            "text": "Hi Greg, I heard my name. what did you just say about dinner",
+            "speaker": "SPEAKER_1",
+            "start": 1.0,
+            "end": 4.5,
+        }
+    ]
+
+    kept = _segments_matching_live_spans(segments, ["what did you just say about dinner"])
+
+    assert len(kept) == 1
+    assert kept[0]["text"] == "what did you just say about dinner"
+    # Safe metadata (speaker, timing bounds) carries over; the echoed text
+    # itself never does.
+    assert kept[0]["speaker"] == "SPEAKER_1"
+    assert kept[0]["start"] == 1.0
+    assert kept[0]["end"] == 4.5
+    assert "Hi Greg" not in kept[0]["text"]
+    assert "heard my name" not in kept[0]["text"]
+
+
+def test_segments_matching_live_spans_keeps_a_fully_live_segment_unchanged():
+    segments = [{"text": "what did you just say about dinner", "speaker": "SPEAKER_1", "person_id": "p1"}]
+
+    kept = _segments_matching_live_spans(segments, ["what did you just say about dinner"])
+
+    assert kept == segments
+
+
+def test_segments_matching_live_spans_drops_a_segment_with_no_live_overlap():
+    segments = [{"text": "Hi Greg, I heard my name.", "speaker": "SPEAKER_1"}]
+
+    assert _segments_matching_live_spans(segments, ["what did you just say about dinner"]) == []
+
+
+def test_mixed_confirmed_echo_in_the_same_segment_dispatches_only_the_live_text(monkeypatch):
+    """End-to-end through `send_to_scanner`: echo and live speech arriving
+    as one ASR segment must still result in only the live portion being
+    dispatched (and only that portion driving the wake ack)."""
+    segments = [
+        {
+            "text": "Hi Greg, I heard my name. Hey Ella what did you just say about dinner",
+            "speaker": "SPEAKER_1",
+        }
+    ]
+    status, posts, wake_ack_calls = _send_to_scanner_with_mocks(
+        monkeypatch,
+        segments=segments,
+        candidates=[_candidate().to_classifier_candidate()],
+        classification=_echo_classification(
+            source="mixed",
+            contains_additional_live_speech=True,
+            live_speech_spans=["Hey Ella what did you just say about dinner"],
+        ),
+    )
+
+    assert status == 200
+    assert len(posts) == 1
+    assert [s["text"] for s in posts[0]["segments"]] == ["Hey Ella what did you just say about dinner"]
+    assert len(wake_ack_calls) == 1
+    assert [s["text"] for s in wake_ack_calls[0]] == ["Hey Ella what did you just say about dinner"]
