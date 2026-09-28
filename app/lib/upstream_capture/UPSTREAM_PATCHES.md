@@ -8,18 +8,37 @@ Tracks ellaaicare/ella-ai#1280.
 
 | File | Manifest kind | Pin blob (unchanged upstream) | Approved local blob |
 | --- | --- | --- | --- |
-| `app/lib/services/devices/discovery/native_bluetooth_discoverer.dart` | `patched` | `0a7aec27f031d61972599823158d8f77731dc2b4` | `223d602be35592ea1ee64bff78d379978e9a8429` |
+| `app/lib/services/devices/discovery/native_bluetooth_discoverer.dart` | `patched` | `0a7aec27f031d61972599823158d8f77731dc2b4` | `e4b26c6f0eccccdcef0f6cf8a449baad6f4c187d` |
+
+**Two**, tracking ellaaicare/ella-ai#1280 RUN-010 / #1287 (layers on top of **One** above — see
+below):
+
+| File | Manifest kind | Pin blob (unchanged upstream) | Approved local blob |
+| --- | --- | --- | --- |
+| `app/lib/services/devices/discovery/native_bluetooth_discoverer.dart` | `patched` | `0a7aec27f031d61972599823158d8f77731dc2b4` | `e4b26c6f0eccccdcef0f6cf8a449baad6f4c187d` |
+| `app/ios/Runner/Ble/OmiBleDiscoveryNaming.swift` | `patched` | `d078da9cb337a4a2a176861f91951e469bc3efcb` | `82da0ef8a59db3e5917a31bb61f15957a3cbbb87` |
+| `app/ios/Runner/Ble/OmiBleManager.swift` | `patched` | `889d135a5a3fe1cbfccbb5baf88d980003df5c77` | `8b819ba660b115440bae942fe63e70695b85666a` |
+| `app/ios/Runner/PigeonCommunicator.g.swift` | `patched` | `b774502d0c755cecdab9efefbb7db7d7606c287a` | `f68687905bdfd76fe884e8a3e1c33488a6c62c7e` |
+| `app/lib/gen/pigeon_communicator.g.dart` | `patched` | `25034c9152ceac9b4a4cc9a264027697b372a539` | `a49cdc1a0503909b5caa801fac96ed9ffde7b8a2` |
+
+(`native_bluetooth_discoverer.dart`'s row is the same file in both tables — patch **Two**'s diff
+for it is incremental on top of patch **One**, not a second independent patch to the same file;
+the manifest carries one row per file with the final approved blob.)
 
 Every other file listed in `UPSTREAM_OWNED.txt` is byte-identical to the pin except for the
 mechanical Dart import relocation
 `'package:omi/<rel>'` → `'package:omi/upstream_capture/<rel>'` (only for `<rel>` that are
 themselves vendored). Swift/ObjC/Markdown files and the two `in-place` Dart files are
-byte-identical with no rewrite at all. `scripts/verify_upstream_capture_identity.py` (and
+byte-identical with no rewrite at all, unless listed as `patched` in a table above.
+`scripts/verify_upstream_capture_identity.py` (and
 `app/test/ella/upstream_capture/upstream_capture_byte_identity_test.dart`) fail on any other
-difference. A `patched` entry is relocated and placed exactly like `dart-relocated`, so the
-import graph still resolves. It records both the upstream pin blob and the exact approved local
-git blob. Both identity guards fail if the upstream base moves or if the local patch changes
-without an explicit manifest update.
+difference. A `patched` entry is relocated and placed exactly like it would be if unpatched
+(`dart-relocated` placement for a vendored `.dart` file, `verbatim` placement for a native/doc
+file at its upstream path), so the import graph still resolves. It records both the upstream pin
+blob and the exact approved local git blob. Both identity guards fail if the upstream base moves
+or if the local patch changes without an explicit manifest update. `scripts/verify_upstream_capture_identity.py`
+was extended by patch **Two** to recognize `patched` for non-Dart (Swift) files — until then the
+guard only structurally supported `patched` on vendored `.dart` files, which patch **One** was.
 
 ### `native_bluetooth_discoverer.dart`: native BLE discovery admission drops production necklaces
 
@@ -99,6 +118,166 @@ constructor seams from Ella adapter code outside the vendored trees:
 | Transcription socket (Dart → network) | `CaptureController(openSocket: CaptureConversationSocketOpen)` | `EllaGatedTranscriptSocket` / `ellaGatedConversationSocketOpen` |
 | WAL upload (disk → network) | `RecordingTransferCoordinator.configure(autoUploadEnabled: ...)` | `EllaUpstreamCaptureRuntime.configureTransferCoordinator` |
 | Native batch writers (no Dart frames) | upstream `CapturePolicy` latch (`SharedPreferencesUtil.setCaptureMuted` → `com.omi/capture_policy` → `CaptureAdmissionPolicy`) | `EllaUpstreamCaptureRuntime._stopUpstreamCapture` |
+
+### Two: native discovery still finds no necklace on build 872 (RUN-010) — diagnostics, not a naming-fallback bug
+
+**Symptom** (ellaaicare/ella-ai#1280 RUN-010, ellaaicare/ella-ai#1287): build 872 — which already
+carries the upstream-capture flag ON and patch **One** above — still lists no necklace during BLE
+discovery on the same phone/necklace that build 869 (the old `flutter_blue_plus` path) finds
+within seconds.
+
+**Hypothesis given for this investigation, and what was actually found**: the task hypothesized
+that `OmiBleManager.didDiscover` forwards only the advertisement's local name
+(`CBAdvertisementDataLocalNameKey`) and the advertised service UUIDs, and that the Dart classifier
+never sees a fallback to `peripheral.name` (the OS's cached GAP name). **That hypothesis does not
+match this code.** `didDiscover` already calls `OmiBleDiscoveryNaming.discoveredName`, which:
+
+```swift
+static func discoveredName(
+    advertisedLocalName: String?,
+    cachedName: String?,
+    advertisementData: [String: Any]
+) -> String {
+    if let advertised = normalized(advertisedLocalName) { return advertised }
+    if let cached = normalized(cachedName) { return cached }
+    if isNotePinAdvertisement(advertisementData) { return notePinFallbackName }
+    return ""
+}
+```
+
+— i.e. it already falls back from the advertised local name to `peripheral.name`, then to a
+NotePin-specific fallback. `OmiBleDiscoveryNaming.swift` was, before this patch, listed `verbatim`
+in the manifest (byte-identical to the pin) — so **upstream itself already has this same
+fallback**; it is not a fork-only fix and there is no "local-name-or-nothing" bug to fix here.
+
+A second hypothesis (from new evidence attached mid-investigation, ellaaicare/ella-ai#1287 comment
+5879501816) was that `NativeBluetoothDiscoverer` passes a non-empty `serviceUuids` filter down to
+`CBCentralManager.scanForPeripherals(withServices:)`, so CoreBluetooth silently drops any necklace
+that doesn't advertise the exact Omi/Friend service UUID before the Dart classifier ever runs.
+**This also does not match this code**: `NativeBluetoothDiscoverer.discover()` already calls
+`_hostApi.startScan(timeout, [])` — an empty list — and `OmiBleManager.startScan` already maps an
+empty `serviceUuids` to `nil` before calling `scanForPeripherals(withServices:)`, which is an
+unfiltered scan. A regression test (`requests an unfiltered scan (no serviceUuids filter)` in
+`upstream_capture_discovery_admission_test.dart`) now guards this.
+
+**What is actually still true**: with both the naming fallback and the scan already correct, the
+one remaining gap for a genuinely unnamed, never-bonded necklace is that `peripheral.name` is
+itself `nil` on iOS until the OS has done a GAP name lookup (typically only after a prior
+connection) — a first-ever scan of a virgin necklace that advertises neither a local name nor a
+service UUID can still resolve to an empty name, and `NativeBluetoothDiscoverer` correctly (if
+silently) drops it as `no_name`. This can't be fixed by reclassifying names or unfiltering the
+scan; it needs to be *observable*. So this patch is diagnostics, not another admission-logic
+change:
+
+1. `OmiBleDiscoveryNaming` gains `discoveredNameResult`, returning the resolved name alongside
+   `hasAdvertisedLocalName` / `hasPeripheralName` — which source, if either, actually carried a
+   name.
+2. `OmiBleManager.didDiscover` forwards those two booleans on `BlePeripheral` (extended in both
+   generated Pigeon definitions — `PigeonCommunicator.g.swift` and `app/lib/gen/pigeon_communicator.g.dart`
+   — with the two new fields appended after `serviceUuids`, and a `false` default on the Dart side
+   so every existing construction site keeps compiling).
+3. `NativeBluetoothDiscoverer` records per-candidate redacted diagnostics (`hasAdvName`,
+   `hasPeripheralName`, `uuidCount`, a coarse 10dBm RSSI bucket — never the raw device name, UUID,
+   or precise RSSI) plus scan-started/stopped and rejected-by-reason counters, routed into
+   `DebugLogManager`'s new always-on (not gated by the "Debug Logs" dev toggle) in-memory buffer,
+   surfaced at Settings → Developer → Device Diagnostics with a "Copy Diagnostics" button. It also
+   explicitly documents (see the code comment at the `startScan` call) that the scan is
+   deliberately unfiltered, so a future change can't silently reintroduce the service-UUID filter
+   hypothesis above.
+
+**Confirmed identical upstream**: `OmiBleDiscoveryNaming.swift`, `OmiBleManager.swift`, and
+`PigeonCommunicator.g.swift` were all `verbatim` (byte-identical to the pin) before this patch —
+this fork has not diverged from upstream's discovery/naming/Pigeon-struct behavior at
+`f16699aea7fe9ba089baceb628922f2882c51153`. Diffed against `BasedHardware/omi` at
+`a74e4cfca376a7c8212687a23d9354e7e755671d` (`main`, same reference commit patch **One** used) —
+these files were unchanged there too, so upstream's `didDiscover` has the identical
+local-name-then-`peripheral.name` fallback, and there is no upstream fix to re-vendor.
+
+**Upstream base SHA**: `a74e4cfca376a7c8212687a23d9354e7e755671d`. Upstream PR: none — same as
+patch **One**, this is recorded as a local patch only.
+
+**Upstreamable patch artifact**: `patches/upstream_capture/0002-native-discovery-diagnostics.patch`.
+It applies to the upstream paths at the base SHA, on top of patch **One** already applied to
+`native_bluetooth_discoverer.dart` (patch **Two**'s hunks for that file are incremental, not a
+second independent diff against the pristine pin).
+
+`scripts/verify_upstream_capture_identity.py` was extended by this patch: the `patched` manifest
+kind previously only worked structurally for vendored `.dart` files (`structural_kind` was
+hard-coded to `'dart-relocated'`); it now derives the expected structural kind from the file
+extension, so `verbatim` native files (Swift here) can be `patched` too. The corresponding
+assertions in `upstream_capture_byte_identity_test.dart` were generalized from a single
+`entries.singleWhere(kind == 'patched')` to iterate all patched entries.
+
+**Upstreamability**: the diagnostics addition is self-contained (new fields on an existing Pigeon
+struct, new counters/buffer in a fork-owned utility class, redacted logging calls) with no
+fork-specific dependencies in the touched upstream-owned files themselves. Local regressions live
+in `upstream_capture_discovery_admission_test.dart` (peripheral.name-only admission, unfiltered
+scan) and `upstream_capture_byte_identity_test.dart` (the five patched entries); the patch artifact
+contains no private identifiers or environment assignments.
+
+### Three: cross-layer discovery diagnostics (native / bridge / Dart) for a one-run diagnosis
+
+**Symptom**: patch **Two** surfaced Dart-side discovery counters (candidates seen/admitted/
+rejected-by-reason), but a review of that work (DISCOVERY-DIAGNOSTICS-001) found the in-app view
+still could not distinguish which of the three layers dropped a discovery on a single run.
+`OmiBleManager.startScan` only logged the CoreBluetooth state and the queued-vs-started outcome to
+`NSLog`, not to Device Diagnostics. `OmiBleManager.didDiscover` had no native counter incremented
+before the Pigeon call and no recorded `flutterApi != nil` state — the optional call at that call
+site can silently drop every discovery (`onPeripheralDiscovered` is a no-op when `flutterApi` is
+nil) while the Dart summary still reads `candidatesSeen=0`, with nothing to tell the two failure
+modes apart. `BleFlutterApi.setUp(BleBridge.instance)` (the bridge registration) had no diagnostic
+timestamp either.
+
+| File | Manifest kind | Pin blob (unchanged upstream) | Approved local blob |
+| --- | --- | --- | --- |
+| `app/ios/Runner/Ble/BleHostApiImpl.swift` | `patched` (was `verbatim`) | `415903a72829adfc83ca4c1321158db3b1ee059c` | `21618a4c26f51b5cce2c22e9db7588c8a5607797` |
+| `app/ios/Runner/Ble/OmiBleManager.swift` | `patched` | `889d135a5a3fe1cbfccbb5baf88d980003df5c77` | `f6904c00f7b9cf28ed127e3ea95f60b6e9c10daf` |
+| `app/ios/Runner/PigeonCommunicator.g.swift` | `patched` | `b774502d0c755cecdab9efefbb7db7d7606c287a` | `23bc2e8eaa23d20b116bf09cffb0902880ea1a8d` |
+| `app/lib/gen/pigeon_communicator.g.dart` | `patched` | `25034c9152ceac9b4a4cc9a264027697b372a539` | `93c039f0938575adb3ec3929e6024506f07c3407` |
+
+(`OmiBleDiscoveryNaming.swift` and `native_bluetooth_discoverer.dart` are unchanged by this patch;
+their rows in patch **Two**'s table above still carry the current approved blobs.)
+
+**What changed**:
+
+1. A new `OmiBleDiagnostics` singleton (defined in `OmiBleManager.swift`, lock-guarded) records:
+   the CoreBluetooth state observed at each `startScan` call and whether it started immediately or
+   was queued; when a queued scan fires once CoreBluetooth reaches `poweredOn`; the native
+   `didDiscover` count, incremented before the Pigeon call to Dart; and a count of `didDiscover`
+   calls where `flutterApi` was nil (the silent-drop path above). Counts and a CoreBluetooth state
+   label only — never a device name or UUID.
+2. `BleNativeDiscoveryDiagnostics` (a new struct, codec discriminator `136`) and
+   `BleHostApi.getNativeDiscoveryDiagnostics()` (a new host method) expose that snapshot to Dart —
+   added to both generated Pigeon definitions, `PigeonCommunicator.g.swift` and
+   `app/lib/gen/pigeon_communicator.g.dart`. `BleHostApiImpl.swift` implements the new method by
+   forwarding to `OmiBleManager.getNativeDiscoveryDiagnostics()`, which is the only reason it moves
+   from `verbatim` to `patched` in this patch.
+3. `DebugLogManager.recordBleFlutterApiSetUp()` (fork-owned, not upstream-owned) records a
+   wall-clock timestamp; `EllaUpstreamCaptureRuntime._bootProduction` (fork-owned) calls it
+   immediately after `BleFlutterApi.setUp(BleBridge.instance)` — the "bridge" layer.
+4. `DeviceDiagnosticsPage` (fork-owned) now fetches the native snapshot via
+   `BleHostApi.getNativeDiscoveryDiagnostics()`, reads the bridge timestamp from
+   `DebugLogManager`, and renders native + bridge + the existing Dart counters together; the Copy
+   button's exported text includes all three layers.
+
+**Confirmed identical upstream (before this patch)**: `BleHostApiImpl.swift` was `verbatim`
+(byte-identical to the pin) before this patch — it exposes exactly upstream's own BLE host
+surface, with no discovery-diagnostics accessor. `OmiBleManager.swift` and
+`PigeonCommunicator.g.swift` were already `patched` by patch **Two** for the naming-diagnostics
+fields; this patch layers a second, independent change onto each (the new diagnostics recorder and
+Pigeon method) rather than replacing patch **Two**'s hunks.
+
+**Upstream base SHA**: same pin, `f16699aea7fe9ba089baceb628922f2882c51153`. Upstream PR: none —
+recorded as a local patch only, same as patches **One** and **Two**.
+
+**Upstreamable patch artifact**: `patches/upstream_capture/0003-native-discovery-cross-layer-diagnostics.patch`.
+It applies to the upstream paths at the base SHA, on top of patches **One** and **Two**.
+
+**Upstreamability**: the new host method and struct are additive (a new Pigeon method + struct, a
+new fork-owned singleton) with no fork-specific dependencies in the touched upstream-owned files.
+Local regressions live in `app/test/ella/upstream_capture/upstream_capture_native_discovery_diagnostics_test.dart`
+(Dart, via a fake `BleHostApi`) and `upstream_capture_byte_identity_test.dart` (now six patched
+entries); the patch artifact contains no private identifiers or environment assignments.
 
 ## Fork-side changes that are NOT upstream patches
 

@@ -12,6 +12,29 @@ enum OmiBleDiscoveryNaming {
     /// so this makes the device surface and route to `DeviceType.plaud`.
     static let notePinFallbackName = "NotePin"
 
+    /// `discoveredName` plus which source(s) actually carried a name, for
+    /// redacted (no names/UUIDs) discovery diagnostics on the Dart side.
+    /// ellaaicare/ella-ai#1280 RUN-010 / #1287: a candidate that advertises
+    /// no local name AND has no cached `peripheral.name` (e.g. the first-ever
+    /// scan of a never-bonded necklace) still resolves to an empty name here;
+    /// these two flags let testers see which source(s) were empty without a
+    /// Mac console.
+    static func discoveredNameResult(
+        advertisedLocalName: String?,
+        cachedName: String?,
+        advertisementData: [String: Any]
+    ) -> (name: String, hasAdvertisedLocalName: Bool, hasPeripheralName: Bool) {
+        (
+            discoveredName(
+                advertisedLocalName: advertisedLocalName,
+                cachedName: cachedName,
+                advertisementData: advertisementData
+            ),
+            normalized(advertisedLocalName) != nil,
+            normalized(cachedName) != nil
+        )
+    }
+
     /// PLAUD manufacturer id 93 (0x5D), little-endian in the advertisement,
     /// matching macOS discovery in `desktop/macos/.../BtDevice.swift`.
     private static let plaudManufacturerId: UInt16 = 93

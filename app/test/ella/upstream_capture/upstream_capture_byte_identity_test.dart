@@ -98,13 +98,51 @@ void main() {
     // advertised service UUID). Confirmed identical at BasedHardware/omi main
     // (a74e4cfca376a7c8212687a23d9354e7e755671d), so it's patched here in upstream
     // style rather than diverging from a fixed upstream. See UPSTREAM_PATCHES.md.
+    //
+    // RUN-010 / ellaaicare/ella-ai#1287: a second, related patch forwards which
+    // source (advertised local name vs. cached peripheral.name) actually named a
+    // discovered candidate, for redacted discovery diagnostics — touching the
+    // native didDiscover path and the two generated BlePeripheral definitions it
+    // and native_bluetooth_discoverer.dart share.
     final patched = entries.where((e) => e.kind == 'patched').toList();
+    final patchedByPath = {for (final e in patched) e.localPath: e};
     expect(
-      patched.map((e) => e.localPath),
-      ['app/lib/upstream_capture/services/devices/discovery/native_bluetooth_discoverer.dart'],
+      patchedByPath.keys.toSet(),
+      {
+        'app/lib/upstream_capture/services/devices/discovery/native_bluetooth_discoverer.dart',
+        'app/ios/Runner/Ble/BleHostApiImpl.swift',
+        'app/ios/Runner/Ble/OmiBleDiscoveryNaming.swift',
+        'app/ios/Runner/Ble/OmiBleManager.swift',
+        'app/ios/Runner/PigeonCommunicator.g.swift',
+        'app/lib/upstream_capture/gen/pigeon_communicator.g.dart',
+      },
     );
-    expect(patched.single.blob, '0a7aec27f031d61972599823158d8f77731dc2b4');
-    expect(patched.single.localBlob, '223d602be35592ea1ee64bff78d379978e9a8429');
+    expect(
+      patchedByPath['app/lib/upstream_capture/services/devices/discovery/native_bluetooth_discoverer.dart']!.blob,
+      '0a7aec27f031d61972599823158d8f77731dc2b4',
+    );
+    expect(
+      patchedByPath['app/lib/upstream_capture/services/devices/discovery/native_bluetooth_discoverer.dart']!.localBlob,
+      'e4b26c6f0eccccdcef0f6cf8a449baad6f4c187d',
+    );
+    expect(patchedByPath['app/ios/Runner/Ble/OmiBleDiscoveryNaming.swift']!.blob,
+        'd078da9cb337a4a2a176861f91951e469bc3efcb');
+    expect(patchedByPath['app/ios/Runner/Ble/OmiBleDiscoveryNaming.swift']!.localBlob,
+        '82da0ef8a59db3e5917a31bb61f15957a3cbbb87');
+    expect(patchedByPath['app/ios/Runner/Ble/OmiBleManager.swift']!.blob, '889d135a5a3fe1cbfccbb5baf88d980003df5c77');
+    expect(
+        patchedByPath['app/ios/Runner/Ble/OmiBleManager.swift']!.localBlob, 'f6904c00f7b9cf28ed127e3ea95f60b6e9c10daf');
+    expect(
+        patchedByPath['app/ios/Runner/PigeonCommunicator.g.swift']!.blob, 'b774502d0c755cecdab9efefbb7db7d7606c287a');
+    expect(patchedByPath['app/ios/Runner/PigeonCommunicator.g.swift']!.localBlob,
+        '23bc2e8eaa23d20b116bf09cffb0902880ea1a8d');
+    expect(patchedByPath['app/lib/upstream_capture/gen/pigeon_communicator.g.dart']!.blob,
+        '25034c9152ceac9b4a4cc9a264027697b372a539');
+    expect(patchedByPath['app/lib/upstream_capture/gen/pigeon_communicator.g.dart']!.localBlob,
+        '93c039f0938575adb3ec3929e6024506f07c3407');
+    expect(patchedByPath['app/ios/Runner/Ble/BleHostApiImpl.swift']!.blob, '415903a72829adfc83ca4c1321158db3b1ee059c');
+    expect(patchedByPath['app/ios/Runner/Ble/BleHostApiImpl.swift']!.localBlob,
+        '21618a4c26f51b5cce2c22e9db7588c8a5607797');
   });
 
   test('scripts/verify_upstream_capture_identity.py passes on this checkout', () async {
@@ -125,18 +163,22 @@ void main() {
     expect(entries.length, greaterThan(190));
   });
 
-  test('the patched discoverer differs from relocated upstream and matches its exact approved local blob', () {
+  test('every patched file differs from relocated upstream and matches its exact approved local blob', () {
     final entries = _entries();
     final rels = _relocatedRels(entries);
-    final entry = entries.singleWhere((e) => e.kind == 'patched');
-    final file = File('$_repoRoot/${entry.localPath}');
-    expect(file.existsSync(), isTrue);
-    final bytes = file.readAsBytesSync();
-    expect(_matchesPin(entry, bytes, rels), isFalse,
-        reason: 'the patch changes admission logic, so it must NOT byte-match the pin');
-    expect(entry.localBlob, matches(RegExp(r'^[0-9a-f]{40}$')));
-    expect(_gitBlobId(bytes), entry.localBlob, reason: 'the patched kind must be content-bound');
-    expect(_gitBlobId([...bytes, 0]), isNot(entry.localBlob), reason: 'any later unrecorded change must fail');
+    final patched = entries.where((e) => e.kind == 'patched').toList();
+    expect(patched, isNotEmpty);
+    for (final entry in patched) {
+      final file = File('$_repoRoot/${entry.localPath}');
+      expect(file.existsSync(), isTrue, reason: entry.localPath);
+      final bytes = file.readAsBytesSync();
+      expect(_matchesPin(entry, bytes, rels), isFalse,
+          reason: '${entry.localPath}: the patch changes behavior, so it must NOT byte-match the pin');
+      expect(entry.localBlob, matches(RegExp(r'^[0-9a-f]{40}$')), reason: entry.localPath);
+      expect(_gitBlobId(bytes), entry.localBlob, reason: '${entry.localPath}: the patched kind must be content-bound');
+      expect(_gitBlobId([...bytes, 0]), isNot(entry.localBlob),
+          reason: '${entry.localPath}: any later unrecorded change must fail');
+    }
     expect(entries.where((e) => e.kind != 'patched').every((e) => e.localBlob == null), isTrue);
   });
 

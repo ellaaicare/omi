@@ -140,6 +140,12 @@ struct BlePeripheral: Hashable {
   var name: String
   var rssi: Int64
   var serviceUuids: [String]
+  /// Whether `CBAdvertisementDataLocalNameKey` was present on this advertisement.
+  /// Redacted discovery diagnostic; never paired with the name/UUID values themselves.
+  var hasAdvertisedLocalName: Bool
+  /// Whether `CBPeripheral.name` (the OS's cached GAP name) was present.
+  /// Redacted discovery diagnostic; never paired with the name/UUID values themselves.
+  var hasPeripheralName: Bool
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -148,12 +154,16 @@ struct BlePeripheral: Hashable {
     let name = pigeonVar_list[1] as! String
     let rssi = pigeonVar_list[2] as! Int64
     let serviceUuids = pigeonVar_list[3] as! [String]
+    let hasAdvertisedLocalName = pigeonVar_list[4] as! Bool
+    let hasPeripheralName = pigeonVar_list[5] as! Bool
 
     return BlePeripheral(
       uuid: uuid,
       name: name,
       rssi: rssi,
-      serviceUuids: serviceUuids
+      serviceUuids: serviceUuids,
+      hasAdvertisedLocalName: hasAdvertisedLocalName,
+      hasPeripheralName: hasPeripheralName
     )
   }
   func toList() -> [Any?] {
@@ -162,6 +172,8 @@ struct BlePeripheral: Hashable {
       name,
       rssi,
       serviceUuids,
+      hasAdvertisedLocalName,
+      hasPeripheralName,
     ]
   }
   static func == (lhs: BlePeripheral, rhs: BlePeripheral) -> Bool {
@@ -363,6 +375,55 @@ struct BleDeviceDiagnostics: Hashable {
   }
 }
 
+/// Redacted cross-layer BLE discovery diagnostics recorded natively — counts
+/// and state labels only, never device names or UUIDs.
+struct BleNativeDiscoveryDiagnostics: Hashable {
+  /// CoreBluetooth state observed at the most recent startScan call.
+  var lastStartScanCbState: String
+  var scansStartedImmediately: Int64
+  var scansQueued: Int64
+  var queuedScansFired: Int64
+  /// Incremented before the didDiscover Pigeon call reaches Dart.
+  var didDiscoverCount: Int64
+  /// Count of didDiscover callbacks dropped because flutterApi was nil.
+  var flutterApiNilDropCount: Int64
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> BleNativeDiscoveryDiagnostics? {
+    let lastStartScanCbState = pigeonVar_list[0] as! String
+    let scansStartedImmediately = pigeonVar_list[1] as! Int64
+    let scansQueued = pigeonVar_list[2] as! Int64
+    let queuedScansFired = pigeonVar_list[3] as! Int64
+    let didDiscoverCount = pigeonVar_list[4] as! Int64
+    let flutterApiNilDropCount = pigeonVar_list[5] as! Int64
+
+    return BleNativeDiscoveryDiagnostics(
+      lastStartScanCbState: lastStartScanCbState,
+      scansStartedImmediately: scansStartedImmediately,
+      scansQueued: scansQueued,
+      queuedScansFired: queuedScansFired,
+      didDiscoverCount: didDiscoverCount,
+      flutterApiNilDropCount: flutterApiNilDropCount
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      lastStartScanCbState,
+      scansStartedImmediately,
+      scansQueued,
+      queuedScansFired,
+      didDiscoverCount,
+      flutterApiNilDropCount,
+    ]
+  }
+  static func == (lhs: BleNativeDiscoveryDiagnostics, rhs: BleNativeDiscoveryDiagnostics) -> Bool {
+    return deepEqualsPigeonCommunicator(lhs.toList(), rhs.toList())  }
+  func hash(into hasher: inout Hasher) {
+    deepHashPigeonCommunicator(value: toList(), hasher: &hasher)
+  }
+}
+
 /// A pair of Ray-Ban Meta glasses reported by the Meta Wearables toolkit.
 ///
 /// Generated class from Pigeon that represents data sent in messages.
@@ -442,6 +503,8 @@ private class PigeonCommunicatorPigeonCodecReader: FlutterStandardReader {
       return RayBanMetaGlasses.fromList(self.readValue() as! [Any?])
     case 135:
       return BluetoothHfpInput.fromList(self.readValue() as! [Any?])
+    case 136:
+      return BleNativeDiscoveryDiagnostics.fromList(self.readValue() as! [Any?])
     default:
       return super.readValue(ofType: type)
     }
@@ -470,6 +533,9 @@ private class PigeonCommunicatorPigeonCodecWriter: FlutterStandardWriter {
       super.writeValue(value.toList())
     } else if let value = value as? BluetoothHfpInput {
       super.writeByte(135)
+      super.writeValue(value.toList())
+    } else if let value = value as? BleNativeDiscoveryDiagnostics {
+      super.writeByte(136)
       super.writeValue(value.toList())
     } else {
       super.writeValue(value)
@@ -909,6 +975,9 @@ protocol BleHostApi {
   func stopRssiStreaming(uuid: String) throws
   func getDeviceDiagnostics(uuid: String, completion: @escaping (Result<BleDeviceDiagnostics, Error>) -> Void)
   func getBatteryHistory(uuid: String, completion: @escaping (Result<[BleBatteryPoint], Error>) -> Void)
+  /// Cross-layer discovery diagnostics recorded natively (CoreBluetooth state,
+  /// started-vs-queued, didDiscover count, flutterApi-nil drop count).
+  func getNativeDiscoveryDiagnostics(completion: @escaping (Result<BleNativeDiscoveryDiagnostics, Error>) -> Void)
   /// (Android only) Check if any CompanionDeviceManager association exists.
   func hasCompanionDeviceAssociation() throws -> Bool
   /// (Android only) Initiate CompanionDeviceManager association for a device.
@@ -1179,6 +1248,23 @@ class BleHostApiSetup {
       }
     } else {
       getBatteryHistoryChannel.setMessageHandler(nil)
+    }
+    /// Cross-layer discovery diagnostics recorded natively (CoreBluetooth state,
+    /// started-vs-queued, didDiscover count, flutterApi-nil drop count).
+    let getNativeDiscoveryDiagnosticsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.omi_pigeon.BleHostApi.getNativeDiscoveryDiagnostics\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      getNativeDiscoveryDiagnosticsChannel.setMessageHandler { _, reply in
+        api.getNativeDiscoveryDiagnostics { result in
+          switch result {
+          case .success(let res):
+            reply(wrapResult(res))
+          case .failure(let error):
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      getNativeDiscoveryDiagnosticsChannel.setMessageHandler(nil)
     }
     /// (Android only) Check if any CompanionDeviceManager association exists.
     let hasCompanionDeviceAssociationChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.omi_pigeon.BleHostApi.hasCompanionDeviceAssociation\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
