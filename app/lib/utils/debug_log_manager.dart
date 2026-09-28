@@ -208,6 +208,17 @@ class DebugLogManager {
   static int deviceCandidatesAdmitted = 0;
   static final Map<String, int> deviceCandidatesRejectedByReason = {};
 
+  /// Bridge-layer timestamp (ms since epoch, UTC) recorded when
+  /// `BleFlutterApi.setUp(BleBridge.instance)` runs during upstream-capture
+  /// boot. Null until that registration has happened this process lifetime.
+  /// See ellaaicare/ella-ai#1280 RUN-010: this is the "bridge" layer of the
+  /// native/bridge/Dart discovery diagnostics.
+  static int? bleFlutterApiSetUpAtMs;
+
+  static void recordBleFlutterApiSetUp() {
+    bleFlutterApiSetUpAtMs = DateTime.now().toUtc().millisecondsSinceEpoch;
+  }
+
   static const int _maxDeviceDiagnosticsLines = 200;
   static final List<String> _deviceDiagnosticsBuffer = [];
 
@@ -222,6 +233,7 @@ class DebugLogManager {
     deviceCandidatesAdmitted = 0;
     deviceCandidatesRejectedByReason.clear();
     _deviceDiagnosticsBuffer.clear();
+    bleFlutterApiSetUpAtMs = null;
   }
 
   static void recordCandidateRejected(String reason) {
