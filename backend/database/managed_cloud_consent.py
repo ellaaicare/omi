@@ -867,7 +867,7 @@ async def synchronize_denial(
                 disabled = await conn.execute(
                     """
                     UPDATE users
-                    SET guardian_mode = 'OFF',
+                    SET guardian_mode = NULL,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = $1
                     """,
@@ -888,4 +888,5 @@ async def synchronize_denial(
     except ManagedCloudAuthorityUnavailable:
         raise
     except Exception as exc:
+        logger.warning("managed_cloud_consent_denial_failed error=%s", type(exc).__name__)
         raise ManagedCloudAuthorityUnavailable("managed_cloud_authority_unavailable") from exc

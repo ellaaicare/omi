@@ -1305,6 +1305,9 @@ jobs:
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_v10_to_v11_grant_preserves_null_guardian_mode_under_production_constraint" \
             <<<"$authority_lock_ids"
           grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_v11_denial_uses_null_guardian_mode_under_production_constraint" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_consented_pending_user_can_enable_guardian_and_activates_atomically" \
             <<<"$authority_lock_ids"
           grep -Fqx \
@@ -1328,7 +1331,7 @@ jobs:
           grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_delete_re_resolves_email_owner_created_while_waiting_on_uid_lock" \
             <<<"$authority_lock_ids"
-          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 88
+          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 89
           pytest \
             tests/unit/test_authority_advisory_lock.py \
             tests/unit/test_authority_writer_guard.py \
