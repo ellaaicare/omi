@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 from ella.services.guardian_echo_classifier import EchoClassification
@@ -266,7 +267,14 @@ def test_wake_ack_payload_is_built_for_wake_question():
     assert payload["trigger"] == "wake_word_ack"
     assert payload["metadata"]["ack_only"] is True
     assert payload["metadata"]["parent_conversation_id"] == "conv-1"
-    assert payload["metadata"]["segments_preview"][0]["text"] == "Hey Ella, are cats clean animals?"
+    # Content-free only: this metadata is persisted into `guardian_queue`,
+    # so it must never carry transcript text — only ids/counts/statuses.
+    assert payload["metadata"]["segments_summary"] == {
+        "segment_count": 1,
+        "speakers": ["SPEAKER_1"],
+        "text_lengths": [len("Hey Ella, are cats clean animals?")],
+    }
+    assert "Hey Ella" not in json.dumps(payload)
 
 
 def test_wake_ack_payload_ignores_non_wake_ambient_text():

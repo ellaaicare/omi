@@ -763,16 +763,20 @@ def prepare_scanner_segments_for_dispatch(
     )
 
 
-def scanner_payload_preview(segments: List[dict], *, limit: int = 4) -> List[dict]:
-    preview = []
-    for segment in segments[:limit]:
-        preview.append(
-            {
-                "speaker": segment.get("speaker") or f"SPEAKER_{segment.get('speaker_id', 0)}",
-                "text": (segment.get("text") or "")[:120],
-            }
-        )
-    return preview
+def scanner_payload_metadata_summary(segments: List[dict], *, limit: int = 4) -> dict:
+    """Content-free summary of a segment list for trace metadata and logs.
+
+    Never includes transcript text or any derived quote from it — only
+    ids/counts/statuses (speaker labels and per-segment character counts),
+    so this is safe to persist (e.g. into `guardian_queue.metadata`) or
+    print without ever leaking what anyone said.
+    """
+    limited = segments[:limit]
+    return {
+        "segment_count": len(segments),
+        "speakers": [segment.get("speaker") or f"SPEAKER_{segment.get('speaker_id', 0)}" for segment in limited],
+        "text_lengths": [len(segment.get("text") or "") for segment in limited],
+    }
 
 
 def scanner_model_name() -> str:
@@ -1099,7 +1103,7 @@ def _build_wake_ack_payload(uid: str, conversation_id: str, trace_id: str, scann
             "ack_only": True,
             "source": "omi_backend_fast_wake_ack",
             "detected_at": time.time(),
-            "segments_preview": scanner_payload_preview(scanner_segments, limit=2),
+            "segments_summary": scanner_payload_metadata_summary(scanner_segments, limit=2),
         },
     }
 
@@ -1120,7 +1124,7 @@ def _enqueue_wake_ack(uid: str, conversation_id: str, trace_id: str, scanner_seg
         metadata={
             "conversation_id": str(conversation_id),
             "wake_turn_id": wake_turn_id,
-            "segments_preview": scanner_payload_preview(scanner_segments, limit=2),
+            "segments_summary": scanner_payload_metadata_summary(scanner_segments, limit=2),
         },
     )
 
@@ -1509,8 +1513,8 @@ def send_to_scanner(
                 "scanner_batch": batch_metadata,
                 "latency": latency_metadata or {},
                 "rate_limit": rate_limit_status,
-                "segments_preview": scanner_payload_preview(scanner_segments),
-                "recent_segments_preview": scanner_payload_preview(payload.get("recent_segments", [])),
+                "segments_summary": scanner_payload_metadata_summary(scanner_segments),
+                "recent_segments_summary": scanner_payload_metadata_summary(payload.get("recent_segments", [])),
                 "wake_prefix_recent": payload.get("wake_prefix_recent"),
             },
         )
@@ -1518,8 +1522,8 @@ def send_to_scanner(
             f"📡 Scanner: trace={trace_id} {len(scanner_segments)} segments → {resp.status_code} "
             f"batch={batch_metadata.get('flush_reason')} words={batch_metadata.get('batch_word_count')} "
             f"rate_limited={rate_limit_status.get('limited')} "
-            f"payload={scanner_payload_preview(scanner_segments)} "
-            f"recent={scanner_payload_preview(payload.get('recent_segments', []))} "
+            f"payload={scanner_payload_metadata_summary(scanner_segments)} "
+            f"recent={scanner_payload_metadata_summary(payload.get('recent_segments', []))} "
             f"wake_prefix_recent={payload.get('wake_prefix_recent')}",
             flush=True,
         )
@@ -1538,8 +1542,8 @@ def send_to_scanner(
                 "timeout_s": timeout,
                 "scanner_batch": batch_metadata,
                 "latency": latency_metadata or {},
-                "segments_preview": scanner_payload_preview(scanner_segments),
-                "recent_segments_preview": scanner_payload_preview(payload.get("recent_segments", [])),
+                "segments_summary": scanner_payload_metadata_summary(scanner_segments),
+                "recent_segments_summary": scanner_payload_metadata_summary(payload.get("recent_segments", [])),
                 "wake_prefix_recent": payload.get("wake_prefix_recent"),
             },
         )
@@ -1559,8 +1563,8 @@ def send_to_scanner(
                 "error": str(e)[:200],
                 "scanner_batch": batch_metadata,
                 "latency": latency_metadata or {},
-                "segments_preview": scanner_payload_preview(scanner_segments),
-                "recent_segments_preview": scanner_payload_preview(payload.get("recent_segments", [])),
+                "segments_summary": scanner_payload_metadata_summary(scanner_segments),
+                "recent_segments_summary": scanner_payload_metadata_summary(payload.get("recent_segments", [])),
                 "wake_prefix_recent": payload.get("wake_prefix_recent"),
             },
         )

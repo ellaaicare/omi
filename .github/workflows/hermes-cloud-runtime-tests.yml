@@ -1437,7 +1437,7 @@ jobs:
           grep -Fqx \
             "tests/unit/test_ella_scanner_batching.py::test_scanner_webhook_ignores_proxy_environment_and_rejects_redirect" \
             <<<"$scanner_batching_ids"
-          test "$(grep -c '::' <<<"$scanner_batching_ids")" -eq 52
+          test "$(grep -c '::' <<<"$scanner_batching_ids")" -eq 56
           pytest tests/unit/test_ella_scanner_batching.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_scanner_echo_suppression.py | grep -c '::')" -eq 11
           pytest tests/unit/test_ella_scanner_echo_suppression.py -v
