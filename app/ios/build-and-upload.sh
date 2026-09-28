@@ -136,6 +136,14 @@ fi
 if [ "$ELLA_GUARDIAN_ENABLED" = "true" ] || [ "$ELLA_GUARDIAN_ENABLED" = "1" ]; then
   DART_DEFINES+=(--dart-define=ELLA_GUARDIAN_ENABLED=true)
 fi
+# Upstream capture port (ellaaicare/ella-ai#1280): ONE activation setting,
+# ELLA_UPSTREAM_CAPTURE_ENABLED in ios/Flutter/EllaUpstreamCapture.xcconfig (default NO).
+# Xcode derives the Swift sources/#if condition from it; this derives the Dart
+# define JSON and the Flutter entry point from the same value.
+eval "$(bash "$IOS_DIR/scripts/ella_upstream_capture_build_config.sh" "$APP_DIR/build/ella_upstream_capture_dart_defines.json")"
+DART_DEFINES+=(--dart-define-from-file="$ELLA_UPSTREAM_CAPTURE_DART_DEFINE_FILE")
+FLUTTER_TARGET_ARGS=(-t "$ELLA_UPSTREAM_CAPTURE_FLUTTER_TARGET")
+echo "Upstream capture: ELLA_UPSTREAM_CAPTURE_ENABLED=$ELLA_UPSTREAM_CAPTURE_ENABLED target=$ELLA_UPSTREAM_CAPTURE_FLUTTER_TARGET"
 if { [ "$ELLA_PUBLIC_BUILD" = "true" ] || [ "$ELLA_PUBLIC_BUILD" = "1" ]; } &&
   { [ "${ELLA_ENTITLEMENT_STUBS:-false}" = "true" ] || [ "${ELLA_ENTITLEMENT_STUBS:-false}" = "1" ]; }; then
   echo "ERROR: ELLA_ENTITLEMENT_STUBS cannot be enabled in a public build."
@@ -274,6 +282,7 @@ FLUTTER_BUILD_ARGS=(
   --no-codesign \
   --build-name "$EXPECTED_BUILD_NAME" \
   --build-number "$EXPECTED_BUILD_NUMBER"
+  "${FLUTTER_TARGET_ARGS[@]}"
 )
 if [ "${#DART_DEFINES[@]}" -gt 0 ]; then
   FLUTTER_BUILD_ARGS+=("${DART_DEFINES[@]}")
