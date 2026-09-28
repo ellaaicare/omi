@@ -16572,7 +16572,7 @@ abstract class AppLocalizations {
   /// No description provided for @aiConsentCompactSummary.
   ///
   /// In en, this message translates to:
-  /// **'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; OpenAI and Ella’s dedicated artwork designer to illustrate a saved memory; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.'**
+  /// **'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; TypeSafe, via OpenRouter, to help Ella recognize when extra support may be helpful for Guardian and Whispers; OpenAI and Ella’s dedicated artwork designer to illustrate a saved memory; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.'**
   String get aiConsentCompactSummary;
 
   /// No description provided for @aiConsentProcessorDetailsLink.
@@ -16718,6 +16718,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Creates an illustration for a saved memory using OpenAI’s Codex and image services. It receives only that memory’s title and summary, plus your chosen artwork style; it does not receive raw microphone audio, source photos, or your full memory history.'**
   String get aiConsentOpenAiArtworkBody;
+
+  /// Legal recipient and routing partner for the Guardian/Whispers conversation safety classifier
+  ///
+  /// In en, this message translates to:
+  /// **'TypeSafe (Jev), via OpenRouter'**
+  String get aiConsentTypesafeTitle;
+
+  /// Plain-language data categories and purpose for the TypeSafe safety classifier
+  ///
+  /// In en, this message translates to:
+  /// **'Reviews conversation text so Ella can recognize when extra support may be helpful, as part of Guardian and Whispers.'**
+  String get aiConsentTypesafeBody;
 
   /// Explains the exact managed-cloud profile and messaging scope
   ///

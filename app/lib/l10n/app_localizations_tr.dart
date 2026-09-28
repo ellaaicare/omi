@@ -8900,7 +8900,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get aiConsentCompactSummary =>
-      'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; OpenAI and Ella’s dedicated artwork designer to illustrate a saved memory; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.';
+      'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; TypeSafe, via OpenRouter, to help Ella recognize when extra support may be helpful for Guardian and Whispers; OpenAI and Ella’s dedicated artwork designer to illustrate a saved memory; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.';
 
   @override
   String get aiConsentProcessorDetailsLink => 'Full processor details in Privacy Policy';
@@ -8985,6 +8985,13 @@ class AppLocalizationsTr extends AppLocalizations {
   @override
   String get aiConsentOpenAiArtworkBody =>
       'Creates an illustration for a saved memory using OpenAI’s Codex and image services. It receives only that memory’s title and summary, plus your chosen artwork style; it does not receive raw microphone audio, source photos, or your full memory history.';
+
+  @override
+  String get aiConsentTypesafeTitle => 'TypeSafe (Jev), via OpenRouter';
+
+  @override
+  String get aiConsentTypesafeBody =>
+      'Reviews conversation text so Ella can recognize when extra support may be helpful, as part of Guardian and Whispers.';
 
   @override
   String get aiConsentManagedCloudScope =>
