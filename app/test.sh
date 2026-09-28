@@ -59,11 +59,37 @@ if [[ ${#missing_files[@]} -gt 0 ]]; then
   dart run build_runner build --delete-conflicting-outputs
 fi
 
-flutter_test test/backend/http/conversation_finalization_test.dart
-flutter_test test/providers/capture_provider_test.dart
-flutter_test test/widgets/transcript_test.dart
+
+# Each suite runs regardless of an earlier one's outcome, so a pre-existing
+# failure in one suite (e.g. environment-only plugin-channel flakiness) can
+# never silently skip a later suite — every suite's real result is reported,
+# and the script's final exit code reflects all of them together.
+overall_status=0
+
+run_step() {
+  local description="$1"
+  shift
+  echo "==> $description"
+  if "$@"; then
+    echo "==> $description: PASSED"
+  else
+    echo "==> $description: FAILED"
+    overall_status=1
+  fi
+}
+
+run_step "test/backend/http/conversation_finalization_test.dart" \
+  flutter_test test/backend/http/conversation_finalization_test.dart
+run_step "test/providers/capture_provider_test.dart" \
+  flutter_test test/providers/capture_provider_test.dart
+run_step "test/widgets/transcript_test.dart" \
+  flutter_test test/widgets/transcript_test.dart
 
 # Upstream capture port (ellaaicare/ella-ai#1280): identity guard, upstream's own
 # capture tests on the vendored stack, and the Ella adapter/wiring tests.
-python3 ../scripts/verify_upstream_capture_identity.py
-flutter_test test/upstream_capture test/ella/upstream_capture
+run_step "scripts/verify_upstream_capture_identity.py" \
+  python3 ../scripts/verify_upstream_capture_identity.py
+run_step "test/upstream_capture test/ella/upstream_capture" \
+  flutter_test test/upstream_capture test/ella/upstream_capture
+
+exit "$overall_status"
