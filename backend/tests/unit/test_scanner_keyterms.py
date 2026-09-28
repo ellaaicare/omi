@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ella.utils import provision_authority
 from utils.ella import scanner_keyterms
 
 SCANNER_TUNING = """
@@ -46,6 +47,19 @@ SCANNER_TUNING = """
 
 def setup_function():
     scanner_keyterms.clear_scanner_keyterm_cache()
+
+
+def _configure_hermes_provision_authority(monkeypatch):
+    url = provision_authority.APPROVED_HERMES_PROVISION_URL
+    token = "synthetic-hermes-keyterm-token"
+    binding_name = "ELLA_HERMES_PROVISION_KEYTERM_BINDING"
+    monkeypatch.setenv(provision_authority.HERMES_PROVISION_URL_ENV, url)
+    monkeypatch.setenv(provision_authority.HERMES_PROVISION_TOKEN_ENV, token)
+    monkeypatch.setenv(provision_authority.HERMES_PROVISION_ALLOWLIST_ENV, url)
+    monkeypatch.setenv(provision_authority.HERMES_PROVISION_BINDING_REF_ENV, f"env:{binding_name}")
+    monkeypatch.setenv(binding_name, provision_authority._authority_binding_value(url, token))
+    monkeypatch.setenv(provision_authority.LEGACY_PROVISION_URL_ENV, provision_authority.DEFAULT_LEGACY_PROVISION_URL)
+    monkeypatch.setenv(provision_authority.LEGACY_PROVISION_TOKEN_ENV, "synthetic-distinct-legacy-token")
 
 
 @pytest.fixture(autouse=True)
@@ -223,8 +237,9 @@ def test_isolated_scanner_uses_hermes_workspace_and_drops_legacy_cache(monkeypat
             return None
 
     class FakeClient:
-        def __init__(self, timeout):
+        def __init__(self, timeout, trust_env):
             self.timeout = timeout
+            assert trust_env is False
 
         async def __aenter__(self):
             return self
@@ -245,8 +260,7 @@ def test_isolated_scanner_uses_hermes_workspace_and_drops_legacy_cache(monkeypat
     scanner_keyterms._uid_agent_ids["uid-isolated"] = "legacy-agent"
     monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
     monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED_UIDS", "uid-isolated")
-    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_URL", "http://hermes-provision")
-    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_TOKEN", "hermes-token")
+    _configure_hermes_provision_authority(monkeypatch)
     monkeypatch.setenv("ELLA_SCANNER_KEYTERMS_ALLOW_SHARED_FALLBACK", "true")
     monkeypatch.setattr(scanner_keyterms, "runtime_authority_enabled", authority_enabled)
     monkeypatch.setattr(scanner_keyterms, "resolve_isolated_runtime", fake_runtime)
@@ -258,11 +272,179 @@ def test_isolated_scanner_uses_hermes_workspace_and_drops_legacy_cache(monkeypat
     assert "shared-term" not in terms
     assert requests == [
         (
-            "http://hermes-provision/workspace/omi-isolated/files/scanner-tuning.md",
-            {"Authorization": "Bearer hermes-token"},
+            f"{provision_authority.APPROVED_HERMES_PROVISION_URL}/workspace/omi-isolated/files/scanner-tuning.md",
+            {
+                "Authorization": "Bearer synthetic-hermes-keyterm-token",
+                "X-Ella-Owner-Uid": "uid-isolated",
+            },
         )
     ]
     assert scanner_keyterms._cache["uid-isolated"].source == "isolated:hermes"
+
+
+def test_isolated_scanner_ignores_environment_proxies(monkeypatch):
+    client_options = {}
+
+    async def authority_enabled(_uid):
+        return True
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"content": SCANNER_TUNING}
+
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            client_options.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    _configure_hermes_provision_authority(monkeypatch)
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:8080")
+    monkeypatch.setenv("ALL_PROXY", "socks5://proxy.invalid:1080")
+    monkeypatch.setattr(scanner_keyterms, "runtime_authority_enabled", authority_enabled)
+    monkeypatch.setattr(scanner_keyterms.httpx, "AsyncClient", FakeClient)
+
+    asyncio.run(scanner_keyterms._fetch_scanner_tuning("omi-isolated", uid="uid-isolated"))
+
+    assert client_options == {
+        "timeout": scanner_keyterms.DEFAULT_TIMEOUT_SECONDS,
+        "trust_env": False,
+    }
+
+
+def test_isolated_scanner_fails_before_request_without_bound_authority(monkeypatch):
+    async def authority_enabled(_uid):
+        return True
+
+    class ForbiddenClient:
+        def __init__(self, **_kwargs):
+            raise AssertionError("Missing isolated authority must fail before network egress")
+
+    monkeypatch.setattr(scanner_keyterms, "runtime_authority_enabled", authority_enabled)
+    monkeypatch.delenv(provision_authority.HERMES_PROVISION_URL_ENV, raising=False)
+    monkeypatch.delenv(provision_authority.HERMES_PROVISION_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(provision_authority.HERMES_PROVISION_BINDING_REF_ENV, raising=False)
+    monkeypatch.setattr(scanner_keyterms.httpx, "AsyncClient", ForbiddenClient)
+
+    with pytest.raises(scanner_keyterms.ProvisioningError) as raised:
+        asyncio.run(scanner_keyterms._fetch_scanner_tuning("omi-isolated", uid="uid-isolated"))
+
+    assert raised.value.code == "hermes_provision_authority_incomplete"
+    assert raised.value.retryable is True
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    [
+        ("missing_url", "hermes_provision_authority_incomplete"),
+        ("missing_binding", "hermes_provision_authority_incomplete"),
+        ("malformed_binding", "hermes_provision_authority_binding_invalid"),
+        ("binding_mismatch", "hermes_provision_authority_binding_invalid"),
+        ("rejected_destination", "hermes_provision_authority_destination_rejected"),
+        ("legacy_coordinate_conflict", "provision_authority_pair_conflict"),
+    ],
+)
+def test_isolated_scanner_rejects_incomplete_or_conflicting_authority_before_egress(
+    monkeypatch,
+    mutation,
+    expected_code,
+):
+    async def authority_enabled(_uid):
+        return True
+
+    class ForbiddenClient:
+        def __init__(self, **_kwargs):
+            raise AssertionError("Invalid isolated authority must fail before network egress")
+
+    _configure_hermes_provision_authority(monkeypatch)
+    if mutation == "missing_url":
+        monkeypatch.delenv(provision_authority.HERMES_PROVISION_URL_ENV)
+    elif mutation == "missing_binding":
+        monkeypatch.delenv(provision_authority.HERMES_PROVISION_BINDING_REF_ENV)
+    elif mutation == "malformed_binding":
+        monkeypatch.setenv(provision_authority.HERMES_PROVISION_BINDING_REF_ENV, "literal-not-a-secret-ref")
+    elif mutation == "binding_mismatch":
+        monkeypatch.setenv("ELLA_HERMES_PROVISION_KEYTERM_BINDING", "sha256:" + "0" * 64)
+    elif mutation == "rejected_destination":
+        monkeypatch.setenv(provision_authority.HERMES_PROVISION_URL_ENV, "http://127.0.0.1:8210")
+    elif mutation == "legacy_coordinate_conflict":
+        monkeypatch.setenv(
+            provision_authority.LEGACY_PROVISION_URL_ENV,
+            provision_authority.APPROVED_HERMES_PROVISION_URL,
+        )
+
+    monkeypatch.setattr(scanner_keyterms, "runtime_authority_enabled", authority_enabled)
+    monkeypatch.setattr(scanner_keyterms.httpx, "AsyncClient", ForbiddenClient)
+
+    with pytest.raises(scanner_keyterms.ProvisioningError) as raised:
+        asyncio.run(scanner_keyterms._fetch_scanner_tuning("omi-isolated", uid="uid-isolated"))
+
+    assert raised.value.code == expected_code
+    assert raised.value.retryable is True
+
+
+def test_isolated_scanner_revalidates_authority_snapshot_immediately_before_egress(monkeypatch):
+    async def authority_enabled(_uid):
+        return True
+
+    class ForbiddenClient:
+        def __init__(self, timeout, trust_env):
+            self.timeout = timeout
+            assert trust_env is False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, *_args, **_kwargs):
+            raise AssertionError("Authority drift must fail before network egress")
+
+    _configure_hermes_provision_authority(monkeypatch)
+    actual_authority = scanner_keyterms.hermes_provision_authority
+    calls = 0
+
+    def drifting_authority(expected_snapshot=None):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            drifted_token = "synthetic-drifted-hermes-keyterm-token"
+            monkeypatch.setenv(
+                provision_authority.HERMES_PROVISION_TOKEN_ENV,
+                drifted_token,
+            )
+            monkeypatch.setenv(
+                "ELLA_HERMES_PROVISION_KEYTERM_BINDING",
+                provision_authority._authority_binding_value(
+                    provision_authority.APPROVED_HERMES_PROVISION_URL,
+                    drifted_token,
+                ),
+            )
+        return actual_authority(expected_snapshot)
+
+    monkeypatch.setattr(scanner_keyterms, "runtime_authority_enabled", authority_enabled)
+    monkeypatch.setattr(scanner_keyterms, "hermes_provision_authority", drifting_authority)
+    monkeypatch.setattr(scanner_keyterms.httpx, "AsyncClient", ForbiddenClient)
+
+    with pytest.raises(scanner_keyterms.ProvisioningError) as raised:
+        asyncio.run(scanner_keyterms._fetch_scanner_tuning("omi-isolated", uid="uid-isolated"))
+
+    assert raised.value.code == "hermes_provision_authority_drift"
+    assert calls == 3
 
 
 def test_cloud_scanner_never_calls_mini_or_returns_retained_cache(monkeypatch):
