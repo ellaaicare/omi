@@ -4,16 +4,74 @@ Tracks ellaaicare/ella-ai#1280.
 
 ## Behavior patches to upstream-owned files
 
-**None.**
+**One**, tracking ellaaicare/ella-ai#1280 RUN-009:
 
-Every file listed in `UPSTREAM_OWNED.txt` is byte-identical to the pin except for the
+| File | Manifest kind | Pin blob (unchanged upstream) |
+| --- | --- | --- |
+| `app/lib/services/devices/discovery/native_bluetooth_discoverer.dart` | `patched` | `0a7aec27f031d61972599823158d8f77731dc2b4` |
+
+Every other file listed in `UPSTREAM_OWNED.txt` is byte-identical to the pin except for the
 mechanical Dart import relocation
 `'package:omi/<rel>'` → `'package:omi/upstream_capture/<rel>'` (only for `<rel>` that are
-themselves vendored). Swift/ObjC/Markdown files and the one `in-place` Dart file are
+themselves vendored). Swift/ObjC/Markdown files and the two `in-place` Dart files are
 byte-identical with no rewrite at all. `scripts/verify_upstream_capture_identity.py` (and
 `app/test/ella/upstream_capture/upstream_capture_byte_identity_test.dart`) fail on any other
-difference, and the manifest format has no "patched" kind: patching a file would require
-removing it from the manifest, which the guard and tests would also notice.
+difference. A `patched` entry is exempt from the content-equality assertion (it is relocated
+and placed exactly like `dart-relocated`, so the import graph still resolves) but the guard
+still checks that its recorded pin blob tracks the pin's current blob for that upstream path.
+
+### `native_bluetooth_discoverer.dart`: native BLE discovery admission drops production necklaces
+
+**Symptom** (ellaaicare/ella-ai#1280 RUN-009): with the upstream-capture flag ON, the app
+lists no necklace during BLE discovery, reproduced on two phones and two necklace
+generations. With the flag OFF (the legacy `flutter_blue_plus` path), discovery works.
+
+**Root cause**: `OmiBleManager.didDiscover` (iOS, unpatched, forwards the scan-time name and
+the advertised service UUIDs as-is) is fine. The bug is in this file's admission classifier.
+`_isOmi` only ever checked the advertised service UUID:
+
+```dart
+static bool _isOmi(BlePeripheral p) {
+  return _hasService(p, omiServiceUuid);
+}
+```
+
+Production necklaces advertise as the bare local name `Friend` (the product's pre-rebrand
+name) or `Omi`, with **no service UUID in the advertisement packet** — so every production
+necklace is silently dropped before a GATT connection is ever attempted. `_isFriendPendant`
+already had a case-insensitive name fallback (`friend_` prefix) for the *separate* Friend
+Pendant product; `_isOmi` had no equivalent name fallback at all.
+
+**Confirmed identical upstream**: diffed against `BasedHardware/omi` at
+`a74e4cfca376a7c8212687a23d9354e7e755671d` (`main`, checked live for this patch) — the file's
+blob (`0a7aec27f031d61972599823158d8f77731dc2b4`) is byte-for-byte the same as at this fork's
+pin (`f16699aea7fe9ba089baceb628922f2882c51153`); upstream has not touched this file since the
+pin, and carries the identical bug. Same for every other file this port's discovery path
+touches (`OmiBleManager.swift`, `OmiBleDiscoveryNaming.swift`, `bt_device.dart`,
+`ble_bridge.dart`, `device_discoverer.dart`, `models.dart`) — all identical to `main` modulo
+the mechanical import relocation. So this is patched here, in upstream style, rather than
+re-vendored from a fixed upstream (there isn't one yet).
+
+**Fix** — the smallest change that admits the missing names while leaving every other
+signature (and the GATT service check at connect time, which stays authoritative) untouched:
+
+```dart
+static bool _isOmi(BlePeripheral p) {
+  final name = p.name.toLowerCase();
+  return name == 'friend' || name.startsWith('omi') || _hasService(p, omiServiceUuid);
+}
+```
+
+`_isFriendPendant`'s existing `friend_`-prefix check is unchanged and still wins for that
+distinct product (checked earlier in the `_isSupportedPeripheral` / `peripheralToDevice`
+chains), so a `friend_`-prefixed name is never reclassified as `DeviceType.omi`.
+
+Also added: redacted, count-only discovery telemetry behind `Logger.debug` (seen / admitted /
+rejected-by-reason — `no_name`, `no_signature_match`), with no names or UUIDs logged.
+
+**Upstreamability**: this is written as a minimal, self-contained diff to
+`native_bluetooth_discoverer.dart` with no Ella-specific dependencies, suitable to propose to
+BasedHardware/omi as-is.
 
 The consent/account gate (review item 4) is wired entirely through upstream's existing
 constructor seams from Ella adapter code outside the vendored trees:

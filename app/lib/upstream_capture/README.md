@@ -8,20 +8,23 @@ The necklace + phone-mic capture layer is **upstream code as-is**, pinned at
 
 | Kind | Where | Count |
 | --- | --- | --- |
-| `dart-relocated` | `app/lib/<rel>` → `app/lib/upstream_capture/<rel>` (capture, devices, mic, sockets, wals, audio_sources, bridges, providers, Pigeon Dart bindings, and the upstream schema/http/prefs/env files they need) | 163 |
+| `dart-relocated` | `app/lib/<rel>` → `app/lib/upstream_capture/<rel>` (capture, devices, mic, sockets, wals, audio_sources, bridges, providers, Pigeon Dart bindings, and the upstream schema/http/prefs/env files they need) | 162 |
 | `dart-relocated` | upstream capture tests + replay fixtures: `app/test/<rel>` → `app/test/upstream_capture/<rel>` | 9 |
 | `verbatim` | native hosts at their upstream paths: `app/ios/Runner/{Ble,PhoneMic,Batch,Limitless}/**`, `PigeonCommunicator.g.swift`, `SyncTransferBackgroundLease.swift` (27) + the 3 upstream capture docs | 30 |
 | `in-place` | `app/lib/models/stt_response_schema.dart` (pin bytes replacing the fork copy; strict superset) and `app/lib/services/auth/auth_token_result.dart` (new, dependency-free upstream types) — shared by the fork and vendored code | 2 |
+| `patched` | `app/lib/services/devices/discovery/native_bluetooth_discoverer.dart` — same admission bug confirmed still present upstream; see below | 1 |
 
 The only permitted difference is the mechanical Dart import relocation
 `'package:omi/<rel>'` → `'package:omi/upstream_capture/<rel>'`, applied only when `<rel>` is
-itself vendored. Nothing else (no reformatting — `scripts/pre-commit` and CI skip these files).
+itself vendored. Nothing else (no reformatting — `scripts/pre-commit` and CI skip these files),
+except the one `patched` file below, which is deliberately exempt from byte-identity.
 
 * Check: `python3 scripts/verify_upstream_capture_identity.py [--require-pin]` (offline: recorded
   upstream blob ids; online, after `git fetch https://github.com/BasedHardware/omi.git <pin>`:
   also a byte diff against the real pin).
 * Re-vendor: `python3 scripts/vendor_upstream_capture.py --pin <pin> --list scripts/upstream_capture_files.txt`.
-* Patches to upstream-owned files: none — see `UPSTREAM_PATCHES.md`.
+* Patches to upstream-owned files: one, `native_bluetooth_discoverer.dart` (BLE discovery
+  admission, ellaaicare/ella-ai#1280 RUN-009) — see `UPSTREAM_PATCHES.md`.
 
 ## One activation setting
 
