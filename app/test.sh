@@ -62,3 +62,8 @@ fi
 flutter_test test/backend/http/conversation_finalization_test.dart
 flutter_test test/providers/capture_provider_test.dart
 flutter_test test/widgets/transcript_test.dart
+
+# Upstream capture port (ellaaicare/ella-ai#1280): identity guard, upstream's own
+# capture tests on the vendored stack, and the Ella adapter/wiring tests.
+python3 ../scripts/verify_upstream_capture_identity.py
+flutter_test test/upstream_capture test/ella/upstream_capture
