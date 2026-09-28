@@ -4698,6 +4698,59 @@ def test_identity_gate_allows_name_grounded_in_title(monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    "fictional_name",
+    ["O’Fable", "Élora", "FABLE", "Anne-Marie"],
+    ids=["apostrophe", "unicode-letter", "all-caps", "hyphenated"],
+)
+@pytest.mark.parametrize("field", ["title", "overview"])
+def test_identity_gate_rejects_ungrounded_unicode_and_all_caps_name_forms(monkeypatch, fictional_name, field):
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    # The original `[A-Z][a-z]+` token regex misses an apostrophe-joined name
+    # ("O'Fable"), a non-Latin-script Unicode name ("Élora"), an all-caps
+    # name ("FABLE"), and a hyphenated name ("Anne-Marie"), so an ungrounded
+    # instance of any of these forms must still be rejected -- whether it
+    # appears in the title or the overview.
+    corrected = {
+        "title": f"{fictional_name} stopped by" if field == "title" else "coffee chat",
+        "overview": (
+            f"[Ella] {fictional_name} stopped by for coffee." if field == "overview" else "[Ella] coffee chat happened."
+        ),
+    }
+
+    with pytest.raises(corrections.CorrectionIdentityGateError) as exc_info:
+        corrections._enforce_correction_identity_gate(
+            uid="user-1",
+            transcript="A friend stopped by for coffee.",
+            structured={},
+            correction_text="Fix the summary.",
+            corrected=corrected,
+        )
+
+    assert exc_info.value.reason == "ungrounded_name_detected"
+
+
+@pytest.mark.parametrize(
+    "fictional_name",
+    ["O’Fable", "Élora", "FABLE", "Anne-Marie"],
+    ids=["apostrophe", "unicode-letter", "all-caps", "hyphenated"],
+)
+def test_identity_gate_allows_unicode_and_all_caps_name_forms_when_grounded(monkeypatch, fictional_name):
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    corrected = {
+        "title": f"{fictional_name}'s visit",
+        "overview": f"[Ella] {fictional_name} stopped by for coffee.",
+    }
+
+    corrections._enforce_correction_identity_gate(
+        uid="user-1",
+        transcript=f"{fictional_name} said she'd bring pastries.",
+        structured={},
+        correction_text="Fix the summary.",
+        corrected=corrected,
+    )
+
+
 def test_identity_gate_rejects_leading_vocative(monkeypatch):
     monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
     # "Will" is grounded by the transcript, but direct address is rejected
