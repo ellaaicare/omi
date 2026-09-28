@@ -7,12 +7,12 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ai_consent_policy.dart';
 
 void main() {
-  test('v10 fallback manifest matches the managed-cloud and illustration contract', () {
+  test('v11 fallback manifest matches the managed-cloud and illustration contract', () {
     const policy = AiConsentPolicy.bundled;
     expect(policy.version, SharedPreferencesUtil.currentAiConsentContractVersion);
-    expect(policy.version, 'ai-data-processors-v10');
+    expect(policy.version, 'ai-data-processors-v11');
     expect(policy.processorSetHash, SharedPreferencesUtil.currentAiConsentProcessorSetHash);
-    expect(policy.processorSetHash, 'sha256:84c1007429613ba0f5cdee2e64194e262c6fec8f296af2219f7ad6c8b2da1b2d');
+    expect(policy.processorSetHash, 'sha256:16a0ca2b738ce6b4f31e9619960ef5d611be51a43a1a43b83dbf8f391ef1a591');
     expect(policy.processorSetHash, 'sha256:${sha256.convert(utf8.encode(policy.canonicalProcessorSet))}');
     expect(policy.scopeVersion, SharedPreferencesUtil.currentAiConsentScopeVersion);
     expect(policy.scopeVersion, 'managed-cloud-internal-pilot-v4');
@@ -41,11 +41,12 @@ void main() {
         'xAI Grok',
         'Inworld AI',
         'ElevenLabs',
+        'TypeSafe (Jev), via OpenRouter',
       }),
     );
     expect(
       ids,
-      containsAll({'honcho-self-hosted', 'nous-hermes-cloud', 'hermes-profile-memory', 'openai-codex'}),
+      containsAll({'honcho-self-hosted', 'nous-hermes-cloud', 'hermes-profile-memory', 'openai-codex', 'typesafe'}),
     );
     expect(ids, isNot(contains('xai-imagine')));
     expect(ids, isNot(contains('honcho-cloud')));
@@ -53,6 +54,7 @@ void main() {
     expect(policy.processors.every((processor) => processor.function.isNotEmpty), isTrue);
     expect(policy.processors.every((processor) => processor.data.isNotEmpty), isTrue);
     expect(policy.canonicalProcessorSet, contains('hermes-profile-memory:profile-scoped-memory'));
+    expect(policy.canonicalProcessorSet, contains('typesafe:guardian-whispers-safety-classification'));
     expect(policy.canonicalProcessorSet, isNot(contains('honcho-cloud')));
     expect(policy.canonicalScope, contains('openai-codex/gpt-5.6-terra'));
     expect(policy.canonicalScope, contains('memory_provider=hermes_profile_scoped_memory'));
@@ -81,7 +83,7 @@ void main() {
     expect(policy.isBundledCurrent, isFalse);
   });
 
-  test('a v9 policy cannot authorize the forward-only OpenAI image-purpose v10 disclosure', () {
+  test('a v9 policy cannot authorize the forward-only current-version disclosure', () {
     final policy = AiConsentPolicy.fromJson({
       'version': 'ai-data-processors-v9',
       'processor_set_hash': SharedPreferencesUtil.currentAiConsentProcessorSetHash,
