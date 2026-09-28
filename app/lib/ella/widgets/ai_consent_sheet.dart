@@ -248,7 +248,12 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                     const SizedBox(height: 16),
                     Text(context.l10n.aiConsentCompactSummary, style: bodyStyle),
                     const SizedBox(height: 12),
-                    Text(context.l10n.aiConsentNoSharingBeforeAllow, style: bodyStyle),
+                    Text(
+                      widget.preserveExistingAuthorityOnDecline
+                          ? context.l10n.aiConsentUpgradeExistingAuthority
+                          : context.l10n.aiConsentNoSharingBeforeAllow,
+                      style: bodyStyle,
+                    ),
                     const SizedBox(height: 14),
                     Text.rich(
                       TextSpan(

@@ -353,6 +353,20 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+
+    final disclosure =
+        tester.widgetList<RichText>(find.byType(RichText)).map((widget) => widget.text.toPlainText()).join(' ');
+    expect(disclosure, contains('Your previously approved v10 processing continues under your existing consent.'));
+    expect(
+      disclosure,
+      contains(
+        'Not now keeps your existing consent active and withholds only the newly disclosed '
+        'TypeSafe (Jev), via OpenRouter processing.',
+      ),
+    );
+    expect(disclosure, isNot(contains('until you choose Allow')));
+    expect(disclosure, isNot(contains('Not now keeps these cloud AI, memory, voice, and messaging features off.')));
+
     await tester.ensureVisible(find.text('Not now'));
     await tester.tap(find.text('Not now'));
     await tester.pumpAndSettle();

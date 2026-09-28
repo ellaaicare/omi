@@ -16587,6 +16587,12 @@ abstract class AppLocalizations {
   /// **'Ella will not send what you say or type, messages, details from your saved memories, or Photon messages to these companies until you choose Allow. Not now keeps these cloud AI, memory, voice, and messaging features off. You can review or remove this permission in Settings.'**
   String get aiConsentNoSharingBeforeAllow;
 
+  /// No description provided for @aiConsentUpgradeExistingAuthority.
+  ///
+  /// In en, this message translates to:
+  /// **'Your previously approved v10 processing continues under your existing consent. Choose Allow to add TypeSafe (Jev), via OpenRouter, for Guardian and Whispers conversation-text classification. Not now keeps your existing consent active and withholds only the newly disclosed TypeSafe (Jev), via OpenRouter processing. You can review or remove this permission in Settings.'**
+  String get aiConsentUpgradeExistingAuthority;
+
   /// No description provided for @aiConsentRevokeAction.
   ///
   /// In en, this message translates to:
