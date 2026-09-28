@@ -1,0 +1,229 @@
+{
+  "version": "ai-data-processors-v11",
+  "minimum_required_version": "ai-data-processors-v11",
+  "processor_set_hash": "sha256:16a0ca2b738ce6b4f31e9619960ef5d611be51a43a1a43b83dbf8f391ef1a591",
+  "canonical_processor_set": "deepgram:stt|soniox:stt|speechmatics:stt|firebase:auth-infrastructure|hermes-self-hosted:agent-runtime|honcho-self-hosted:memory-context|ella-self-hosted-tts:tts|nous-hermes-cloud:managed-agent-runtime|hermes-profile-memory:profile-scoped-memory|openai-codex:managed-agent-model-memory-illustration|photon:messaging-delivery|openrouter:model-routing|google-gemini:language-live-voice|openai:language-live-voice|groq:language|xai-grok:language-live-voice|inworld:tts|elevenlabs:tts-fallback|typesafe:guardian-whispers-safety-classification",
+  "scope_version": "managed-cloud-internal-pilot-v4",
+  "scope_hash": "sha256:9c23f344b752c91c6ae252c628e9c603a8c87072e31bc9e599f2cc5257c7d72c",
+  "canonical_scope": "profile_binding=server-profile-v1|runtime_provider=hermes_cloud|model_route=openai-codex/gpt-5.6-terra|memory_provider=hermes_profile_scoped_memory|photon_scope=shared_test_line_explicit_contact_v1;allow_all=false;caregiver=false;attachments=false|artwork_provider=openai-codex/gpt-image-2-medium;reasoning_host=openai-codex/gpt-5.6-luna;source=selected_memory_summary_only;raw_audio=false;source_photos=false",
+  "processors": [
+    {
+      "id": "deepgram",
+      "legal_recipient": "Deepgram",
+      "function": "Speech transcription",
+      "data": "Live or stored microphone audio",
+      "provider_aliases": [
+        "deepgram",
+        "deepgram-streaming"
+      ],
+      "third_party": true
+    },
+    {
+      "id": "soniox",
+      "legal_recipient": "Soniox",
+      "function": "Speech transcription",
+      "data": "Live or stored microphone audio",
+      "provider_aliases": [
+        "soniox",
+        "soniox-streaming"
+      ],
+      "third_party": true
+    },
+    {
+      "id": "speechmatics",
+      "legal_recipient": "Speechmatics",
+      "function": "Speech transcription",
+      "data": "Live or stored microphone audio",
+      "provider_aliases": [
+        "speechmatics",
+        "speechmatics-streaming"
+      ],
+      "third_party": true
+    },
+    {
+      "id": "firebase",
+      "legal_recipient": "Google Firebase",
+      "function": "Authentication and service infrastructure",
+      "data": "Account and service metadata",
+      "provider_aliases": [
+        "firebase",
+        "google-firebase"
+      ],
+      "third_party": true
+    },
+    {
+      "id": "hermes-self-hosted",
+      "legal_recipient": "Ella self-hosted Hermes",
+      "function": "Agent reasoning",
+      "data": "Messages, transcripts, and selected memory context",
+      "provider_aliases": [
+        "hermes",
+        "hermes-self-hosted",
+        "hermes-retained",
+        "hermes-isolated"
+      ],
+      "third_party": false
+    },
+    {
+      "id": "honcho-self-hosted",
+      "legal_recipient": "Ella self-hosted Honcho",
+      "function": "Memory context",
+      "data": "Derived text and selected memory relationships",
+      "provider_aliases": [
+        "honcho",
+        "honcho-self-hosted"
+      ],
+      "third_party": false
+    },
+    {
+      "id": "ella-self-hosted-tts",
+      "legal_recipient": "Ella self-hosted voice synthesis",
+      "function": "Voice synthesis",
+      "data": "Response text",
+      "provider_aliases": [
+        "fish-audio",
+        "fish-audio-s1",
+        "fish-audio-s2",
+        "kokoro"
+      ],
+      "third_party": false
+    },
+    {
+      "id": "nous-hermes-cloud",
+      "legal_recipient": "Nous Research / Hermes Cloud",
+      "function": "Managed agent runtime",
+      "data": "What the person says or types, details they choose to share, and basic session information",
+      "provider_aliases": [
+        "hermes-cloud",
+        "hermes_cloud",
+        "nous-hermes-cloud"
+      ],
+      "third_party": true
+    },
+    {
+      "id": "hermes-profile-memory",
+      "legal_recipient": "Nous Research / Hermes Cloud",
+      "function": "Built-in profile-scoped memory and context inside the managed Hermes Cloud runtime",
+      "data": "Profile-bound conversation text, saved facts, derived memory context, and session identifiers needed to retrieve memory for the same account/profile scope",
+      "provider_aliases": [
+        "hermes-profile-memory",
+        "hermes_profile_scoped_memory"
+      ],
+      "third_party": true
+    },
+    {
+      "id": "openai-codex",
+      "legal_recipient": "OpenAI",
+      "function": "Managed agent processing and saved-memory illustration",
+      "data": "Model input and output, plus a selected memory title and summary for an illustration, through the approved OpenAI Codex OAuth route; no raw microphone audio or source photos for artwork",
+      "provider_aliases": [
+        "openai-codex",
+        "openai-codex/gpt-5.6-terra",
+        "openai-codex/gpt-5.6-luna",
+        "gpt-image-2-medium"
+      ],
+      "third_party": true
+    },
+    {
+      "id": "photon",
+      "legal_recipient": "Photon",
+      "function": "Test/shared-line message delivery",
+      "data": "Message content and messaging identifiers for one explicitly allowed test contact",
+      "provider_aliases": [
+        "photon",
+        "hermes-cloud-photon"
+      ],
+      "third_party": true
+    },
+    {
+      "id": "openrouter",
+      "legal_recipient": "OpenRouter",
+      "function": "Model routing",
+      "data": "Messages, transcripts, and selected memory context",
+      "provider_aliases": [
+        "openrouter"
+      ],
+      "third_party": true
+    },
+    {
+      "id": "google-gemini",
+      "legal_recipient": "Google Gemini",
+      "function": "Language processing and live voice",
+      "data": "Text, selected context, or live microphone audio",
+      "provider_aliases": [
+        "gemini",
+        "gemini-live",
+        "gemini-native-live",
+        "google-gemini"
+      ],
+      "third_party": true
+    },
+    {
+      "id": "openai",
+      "legal_recipient": "OpenAI",
+      "function": "Language processing and live voice",
+      "data": "Text, selected context, or live microphone audio",
+      "provider_aliases": [
+        "openai",
+        "openai-native-realtime"
+      ],
+      "third_party": true
+    },
+    {
+      "id": "groq",
+      "legal_recipient": "Groq",
+      "function": "Language processing",
+      "data": "Text and selected context",
+      "provider_aliases": [
+        "groq"
+      ],
+      "third_party": true
+    },
+    {
+      "id": "xai-grok",
+      "legal_recipient": "xAI Grok",
+      "function": "Language processing and live voice",
+      "data": "Text, selected context, or live microphone audio",
+      "provider_aliases": [
+        "grok",
+        "grok-voice",
+        "xai",
+        "xai-grok",
+        "xai-tts"
+      ],
+      "third_party": true
+    },
+    {
+      "id": "typesafe",
+      "legal_recipient": "TypeSafe (Jev), via OpenRouter",
+      "function": "Conversation safety classification for Guardian and Whispers",
+      "data": "Conversation transcript text windows (no audio)",
+      "provider_aliases": [
+        "typesafe",
+        "typesafe-jev",
+        "jev"
+      ],
+      "third_party": true
+    },
+    {
+      "id": "inworld",
+      "legal_recipient": "Inworld AI",
+      "function": "Voice synthesis",
+      "data": "Response text",
+      "provider_aliases": [
+        "inworld"
+      ],
+      "third_party": true
+    },
+    {
+      "id": "elevenlabs",
+      "legal_recipient": "ElevenLabs",
+      "function": "Fallback voice synthesis",
+      "data": "Response text",
+      "provider_aliases": [
+        "elevenlabs"
+      ],
+      "third_party": true
+    }
+  ]
+}
