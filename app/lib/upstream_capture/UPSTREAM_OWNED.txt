@@ -34,6 +34,7 @@ verbatim	fbe6aebefd76141978fb1492fc0675f228e6378d	app/ios/Runner/PhoneMic/PhoneM
 verbatim	7aaaebfefaaa163d91d395324bb40f3127b60dcd	app/ios/Runner/PhoneMic/PhoneMicPigeon.g.swift	app/ios/Runner/PhoneMic/PhoneMicPigeon.g.swift
 verbatim	1bcf4ba2c31df28f72f7007c9202ec96ece6fe5c	app/ios/Runner/PhoneMic/PhoneMicSessionConfigurator.swift	app/ios/Runner/PhoneMic/PhoneMicSessionConfigurator.swift
 verbatim	b774502d0c755cecdab9efefbb7db7d7606c287a	app/ios/Runner/PigeonCommunicator.g.swift	app/ios/Runner/PigeonCommunicator.g.swift
+verbatim	a3797f15782044e0c4fabec93ae1fa4273ddb437	app/ios/Runner/SyncTransferBackgroundLease.swift	app/ios/Runner/SyncTransferBackgroundLease.swift
 dart-relocated	519d7af87c4708e67d597532787c419596289790	app/lib/app_globals.dart	app/lib/upstream_capture/app_globals.dart
 dart-relocated	f23bfdca3b0ac80ed765676e126133e3d230e11c	app/lib/backend/http/api/conversations.dart	app/lib/upstream_capture/backend/http/api/conversations.dart
 dart-relocated	884d1e8f37359f0b70a04e5a839acfacfdec4203	app/lib/backend/http/api/phone_calls.dart	app/lib/upstream_capture/backend/http/api/phone_calls.dart

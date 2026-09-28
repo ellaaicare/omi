@@ -198,3 +198,4 @@ app/ios/Runner/Batch/BatchAudioWriter.swift
 app/ios/Runner/Batch/LimitlessBatchAudioWriter.swift
 app/ios/Runner/Limitless/LimitlessFlashDrainEngine.swift
 app/ios/Runner/Limitless/LimitlessProtocol.swift
+app/ios/Runner/SyncTransferBackgroundLease.swift
