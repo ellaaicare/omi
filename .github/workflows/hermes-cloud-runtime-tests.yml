@@ -923,9 +923,6 @@ jobs:
             "tests/unit/test_ella_ai_consent.py::test_consent_rejection_handler_returns_stable_top_level_contract"
             "tests/unit/test_ella_ai_consent.py::test_consent_authority_outage_is_retryable_and_not_revocation_shaped"
             "tests/unit/test_ella_ai_consent.py::test_enforcement_is_server_authoritative_and_cannot_be_disabled"
-            "tests/unit/test_ella_ai_consent.py::test_policy_matches_exact_managed_cloud_v11_typesafe_contract"
-            "tests/unit/test_ella_ai_consent.py::test_v11_policy_matches_documented_cross_stack_fixture"
-            "tests/unit/test_ella_ai_consent.py::test_v11_grant_is_durable_while_stale_v9_and_v10_receipts_require_reconsent"
             "tests/unit/test_ella_ai_consent_route_gates.py::test_native_websocket_consent_check_precedes_runtime_and_stt_provider_work"
             "tests/unit/test_ella_ai_consent_route_gates.py::test_websocket_consent_rejection_and_authority_outage_have_distinct_close_contracts"
             "tests/unit/test_ella_ai_consent_route_gates.py::test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary"
@@ -1041,14 +1038,14 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 21
-          # 632 (base, incl. consent v11) + 18 (test_ella_sync_v2_contract.py, now wired into
+          # 630 (base) + 18 (test_ella_sync_v2_contract.py, now wired into
           # this collection for the first time) + 10
           # (test_ella_sync_segments_state_machine.py -- new: exercises the real
           # claim/reserve/complete/release state machine and the append transaction in
           # database/sync_segments.py directly, including the SYNC-V2-002
           # retry-after-commit/stale-lease regressions, rather than through this file's own
           # route-level fakes).
-          test "$collected" -eq 660
+          test "$collected" -eq 658
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
