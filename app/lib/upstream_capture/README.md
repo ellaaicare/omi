@@ -17,7 +17,8 @@ The necklace + phone-mic capture layer is **upstream code as-is**, pinned at
 The only permitted difference is the mechanical Dart import relocation
 `'package:omi/<rel>'` → `'package:omi/upstream_capture/<rel>'`, applied only when `<rel>` is
 itself vendored. Nothing else (no reformatting — `scripts/pre-commit` and CI skip these files),
-except the one `patched` file below, which is deliberately exempt from byte-identity.
+except the one `patched` file below. That exception records both the upstream pin blob and the
+exact approved local blob, so it remains content-bound and fails on any unrecorded later change.
 
 * Check: `python3 scripts/verify_upstream_capture_identity.py [--require-pin]` (offline: recorded
   upstream blob ids; online, after `git fetch https://github.com/BasedHardware/omi.git <pin>`:

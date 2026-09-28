@@ -1,0 +1,133 @@
+--- a/app/lib/services/devices/discovery/native_bluetooth_discoverer.dart
++++ b/app/lib/services/devices/discovery/native_bluetooth_discoverer.dart
+@@ -13,7 +13,12 @@
+ /// BLE discoverer backed by native platform APIs via Pigeon.
+ /// iOS: CoreBluetooth. Android: BluetoothLeScanner + CompanionDeviceManager.
+ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
+-  final BleHostApi _hostApi = BleHostApi();
++  NativeBluetoothDiscoverer({BleHostApi? hostApi, BluetoothReadiness? bluetoothReadiness})
++      : _hostApi = hostApi ?? BleHostApi(),
++        _bluetoothReadiness = bluetoothReadiness ?? BluetoothReadiness.instance;
++
++  final BleHostApi _hostApi;
++  final BluetoothReadiness _bluetoothReadiness;
+   Timer? _timeoutTimer;
+   Completer<void>? _scanCompleter;
+ 
+@@ -25,46 +30,71 @@
+ 
+   @override
+   Future<DeviceDiscoveryResult> discover({int timeout = 5}) async {
+-    if (!await BluetoothReadiness.instance.ensureReady(BluetoothUse.discovery)) {
++    if (!await _bluetoothReadiness.ensureReady(BluetoothUse.discovery)) {
+       return const DeviceDiscoveryResult(devices: [], isBlocked: true);
+     }
+     final List<BlePeripheral> results = [];
+     final completer = Completer<void>();
+     _scanCompleter = completer;
+ 
++    // Redacted discovery counters: counts only, never names/UUIDs.
++    int seenCount = 0;
++    int noNameCount = 0;
++
+     final previousCallback = BleBridge.instance.peripheralDiscoveredCallback;
+ 
+     BleBridge.instance.peripheralDiscoveredCallback = (BlePeripheral peripheral) {
+-      if (peripheral.name.isNotEmpty) {
+-        // Deduplicate by UUID
+-        results.removeWhere((p) => p.uuid == peripheral.uuid);
+-        results.add(peripheral);
++      seenCount++;
++      if (peripheral.name.isEmpty) {
++        noNameCount++;
++        return;
+       }
++      // Deduplicate by UUID
++      results.removeWhere((p) => p.uuid == peripheral.uuid);
++      results.add(peripheral);
+     };
+ 
++    var scanStarted = false;
+     try {
+-      _hostApi.startScan(timeout, []);
++      try {
++        await _hostApi.startScan(timeout, []);
++        scanStarted = true;
+ 
+-      _timeoutTimer?.cancel();
+-      _timeoutTimer = Timer(Duration(seconds: timeout), () {
+-        if (!completer.isCompleted) completer.complete();
+-      });
+-      await completer.future;
+-
+-      _hostApi.stopScan();
+-
+-      final devices = results.where(_isSupportedPeripheral).map(_peripheralToDevice).toList()
+-        ..sort((a, b) => b.rssi.compareTo(a.rssi));
+-
+-      return DeviceDiscoveryResult(devices: devices);
++        _timeoutTimer?.cancel();
++        _timeoutTimer = Timer(Duration(seconds: timeout), () {
++          if (!completer.isCompleted) completer.complete();
++        });
++        await completer.future;
++      } catch (error, stackTrace) {
++        Logger.warning('NativeBluetoothDiscoverer: start scan error: $error');
++        Logger.debug('$stackTrace');
++        return const DeviceDiscoveryResult(devices: []);
++      }
+     } finally {
+       _timeoutTimer?.cancel();
+       _timeoutTimer = null;
+       if (identical(_scanCompleter, completer)) {
+         _scanCompleter = null;
+       }
++      if (scanStarted) {
++        try {
++          await _hostApi.stopScan();
++        } catch (error, stackTrace) {
++          Logger.warning('NativeBluetoothDiscoverer: stop scan error: $error');
++          Logger.debug('$stackTrace');
++        }
++      }
+       BleBridge.instance.peripheralDiscoveredCallback = previousCallback;
+     }
++
++    final devices = results.where(_isSupportedPeripheral).map(_peripheralToDevice).toList()
++      ..sort((a, b) => b.rssi.compareTo(a.rssi));
++
++    final noSignatureMatchCount = results.length - devices.length;
++    Logger.debug('NativeBluetoothDiscoverer: seen=$seenCount admitted=${devices.length} '
++        'rejected(no_name=$noNameCount, no_signature_match=$noSignatureMatchCount)');
++
++    return DeviceDiscoveryResult(devices: devices);
+   }
+ 
+   @override
+@@ -91,6 +121,12 @@
+   static bool isPlaud(BlePeripheral p) => _isPlaud(p);
+ 
+   @visibleForTesting
++  static bool isFriendPendant(BlePeripheral p) => _isFriendPendant(p);
++
++  @visibleForTesting
++  static bool isOmi(BlePeripheral p) => _isOmi(p);
++
++  @visibleForTesting
+   static BtDevice peripheralToDevice(BlePeripheral p) => _peripheralToDevice(p);
+ 
+   static bool _isSupportedPeripheral(BlePeripheral p) {
+@@ -121,7 +157,12 @@
+   }
+ 
+   static bool _isOmi(BlePeripheral p) {
+-    return _hasService(p, omiServiceUuid);
++    // Necklaces can advertise as bare 'Friend' (the pre-rebrand name) or an
++    // 'Omi'-prefixed local name with no service UUID in the advertisement packet.
++    // 'friend_'-prefixed names remain the distinct Friend Pendant product,
++    // matched by _isFriendPendant above.
++    final name = p.name.toLowerCase();
++    return name == 'friend' || name.startsWith('omi') || _hasService(p, omiServiceUuid);
+   }
+ 
+   static bool _hasService(BlePeripheral p, String serviceUuid) {

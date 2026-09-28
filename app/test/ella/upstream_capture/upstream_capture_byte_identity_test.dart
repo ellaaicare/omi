@@ -18,19 +18,20 @@ final _manifest = File('$_repoRoot/app/lib/upstream_capture/UPSTREAM_OWNED.txt')
 final _quotedPackageUri = RegExp(r'''(['"])package:omi/([^'"\s]+)\1''');
 
 class _Entry {
-  _Entry(this.kind, this.blob, this.upstreamPath, this.localPath);
+  _Entry(this.kind, this.blob, this.upstreamPath, this.localPath, this.localBlob);
 
   final String kind;
   final String blob;
   final String upstreamPath;
   final String localPath;
+  final String? localBlob;
 }
 
 List<_Entry> _entries() => _manifest
     .readAsLinesSync()
     .where((line) => line.isNotEmpty && !line.startsWith('#') && !line.startsWith('pin '))
     .map((line) => line.split('\t'))
-    .map((p) => _Entry(p[0], p[1], p[2], p[3]))
+    .map((p) => _Entry(p[0], p[1], p[2], p[3], p.length == 5 ? p[4] : null))
     .toList();
 
 Set<String> _relocatedRels(List<_Entry> entries) => entries
@@ -51,8 +52,9 @@ String _gitBlobId(List<int> bytes) => sha1.convert([...utf8.encode('blob ${bytes
 
 /// True when [localBytes] is the relocated form of the upstream blob [blob].
 bool _matchesPin(_Entry entry, List<int> localBytes, Set<String> rels) {
-  final original =
-      entry.kind == 'dart-relocated' ? utf8.encode(_unrelocate(utf8.decode(localBytes), rels)) : localBytes;
+  final original = entry.kind == 'dart-relocated' || entry.kind == 'patched'
+      ? utf8.encode(_unrelocate(utf8.decode(localBytes), rels))
+      : localBytes;
   return _gitBlobId(original) == entry.blob;
 }
 
@@ -101,6 +103,8 @@ void main() {
       patched.map((e) => e.localPath),
       ['app/lib/upstream_capture/services/devices/discovery/native_bluetooth_discoverer.dart'],
     );
+    expect(patched.single.blob, '0a7aec27f031d61972599823158d8f77731dc2b4');
+    expect(patched.single.localBlob, '223d602be35592ea1ee64bff78d379978e9a8429');
   });
 
   test('scripts/verify_upstream_capture_identity.py passes on this checkout', () async {
@@ -121,14 +125,19 @@ void main() {
     expect(entries.length, greaterThan(190));
   });
 
-  test('the patched discoverer still exists, decodes and intentionally differs from its pin blob', () {
+  test('the patched discoverer differs from relocated upstream and matches its exact approved local blob', () {
     final entries = _entries();
     final rels = _relocatedRels(entries);
     final entry = entries.singleWhere((e) => e.kind == 'patched');
     final file = File('$_repoRoot/${entry.localPath}');
     expect(file.existsSync(), isTrue);
-    expect(_matchesPin(entry, file.readAsBytesSync(), rels), isFalse,
+    final bytes = file.readAsBytesSync();
+    expect(_matchesPin(entry, bytes, rels), isFalse,
         reason: 'the patch changes admission logic, so it must NOT byte-match the pin');
+    expect(entry.localBlob, matches(RegExp(r'^[0-9a-f]{40}$')));
+    expect(_gitBlobId(bytes), entry.localBlob, reason: 'the patched kind must be content-bound');
+    expect(_gitBlobId([...bytes, 0]), isNot(entry.localBlob), reason: 'any later unrecorded change must fail');
+    expect(entries.where((e) => e.kind != 'patched').every((e) => e.localBlob == null), isTrue);
   });
 
   group('the identity check rejects everything except the mechanical relocation', () {

@@ -28,10 +28,10 @@ Checks (all must pass, exit status 1 otherwise):
 A file patched relative to the pin is declared in the manifest with kind
 ``patched`` (see UPSTREAM_PATCHES.md for the list and rationale). A ``patched``
 entry is placed exactly like ``dart-relocated`` (so its own imports and any
-importer's relocated import of it still resolve) but is exempt from the
-byte-identity assertion against its recorded pin blob; the guard still checks
-that the recorded pin blob matches the pin's current blob for that upstream
-path, so a stale patch is flagged when upstream's own file moves on.
+importer's relocated import of it still resolve). Its manifest row records both
+the upstream pin blob and the exact approved local blob. The guard checks both,
+so an upstream change flags the patch as stale and any unrecorded local change
+fails closed.
 """
 
 from __future__ import annotations
@@ -74,6 +74,7 @@ class Entry:
     blob: str
     upstream_path: str
     local_path: str
+    local_blob: str | None = None
 
 
 def git_blob_id(data: bytes) -> str:
@@ -134,9 +135,14 @@ def read_manifest(path: str) -> tuple[str, list[Entry]]:
                 pin = line.split()[1]
                 continue
             parts = line.split('\t')
-            if len(parts) != 4:
+            if len(parts) not in (4, 5):
                 raise SystemExit(f'Malformed manifest line: {line!r}')
-            entries.append(Entry(*parts))
+            entry = Entry(*parts)
+            if entry.kind == 'patched' and not re.fullmatch(r'[0-9a-f]{40}', entry.local_blob or ''):
+                raise SystemExit(f'Patched manifest line has no approved 40-hex local blob: {line!r}')
+            if entry.kind != 'patched' and entry.local_blob is not None:
+                raise SystemExit(f'Only patched manifest lines may record a local blob: {line!r}')
+            entries.append(entry)
     if not re.fullmatch(r'[0-9a-f]{40}', pin):
         raise SystemExit('Manifest has no 40-hex pin line')
     return pin, entries
@@ -196,8 +202,9 @@ def verify(require_pin: bool, verbose: bool) -> int:
             continue
         data = open(path, 'rb').read()
         if e.kind == 'patched':
-            # Deliberately diverges from the pin; see UPSTREAM_PATCHES.md.
-            pass
+            local_blob = git_blob_id(data)
+            if local_blob != e.local_blob:
+                failures.append(f'{e.local_path}: local blob {local_blob} != approved patched blob {e.local_blob}')
         elif e.kind == 'dart-relocated':
             try:
                 text = data.decode('utf-8')
@@ -235,8 +242,8 @@ def verify(require_pin: bool, verbose: bool) -> int:
             if blob != e.blob:
                 failures.append(f'{e.upstream_path}: manifest blob {e.blob} != pin blob {blob}')
             if e.kind == 'patched':
-                # The recorded blob (checked above) still has to track the pin so a
-                # patch does not silently go stale; the content itself is exempt.
+                # The upstream blob still has to track the pin so the patch does not
+                # silently go stale. The exact local content was checked above.
                 continue
             path = os.path.join(REPO_ROOT, e.local_path)
             if not os.path.isfile(path):

@@ -6,9 +6,9 @@ Tracks ellaaicare/ella-ai#1280.
 
 **One**, tracking ellaaicare/ella-ai#1280 RUN-009:
 
-| File | Manifest kind | Pin blob (unchanged upstream) |
-| --- | --- | --- |
-| `app/lib/services/devices/discovery/native_bluetooth_discoverer.dart` | `patched` | `0a7aec27f031d61972599823158d8f77731dc2b4` |
+| File | Manifest kind | Pin blob (unchanged upstream) | Approved local blob |
+| --- | --- | --- | --- |
+| `app/lib/services/devices/discovery/native_bluetooth_discoverer.dart` | `patched` | `0a7aec27f031d61972599823158d8f77731dc2b4` | `223d602be35592ea1ee64bff78d379978e9a8429` |
 
 Every other file listed in `UPSTREAM_OWNED.txt` is byte-identical to the pin except for the
 mechanical Dart import relocation
@@ -16,9 +16,10 @@ mechanical Dart import relocation
 themselves vendored). Swift/ObjC/Markdown files and the two `in-place` Dart files are
 byte-identical with no rewrite at all. `scripts/verify_upstream_capture_identity.py` (and
 `app/test/ella/upstream_capture/upstream_capture_byte_identity_test.dart`) fail on any other
-difference. A `patched` entry is exempt from the content-equality assertion (it is relocated
-and placed exactly like `dart-relocated`, so the import graph still resolves) but the guard
-still checks that its recorded pin blob tracks the pin's current blob for that upstream path.
+difference. A `patched` entry is relocated and placed exactly like `dart-relocated`, so the
+import graph still resolves. It records both the upstream pin blob and the exact approved local
+git blob. Both identity guards fail if the upstream base moves or if the local patch changes
+without an explicit manifest update.
 
 ### `native_bluetooth_discoverer.dart`: native BLE discovery admission drops production necklaces
 
@@ -52,6 +53,14 @@ touches (`OmiBleManager.swift`, `OmiBleDiscoveryNaming.swift`, `bt_device.dart`,
 the mechanical import relocation. So this is patched here, in upstream style, rather than
 re-vendored from a fixed upstream (there isn't one yet).
 
+**Upstream base SHA**: `a74e4cfca376a7c8212687a23d9354e7e755671d`.
+
+Upstream PR: pending Greg's approval to file on BasedHardware/omi.
+
+**Upstreamable patch artifact**:
+`patches/upstream_capture/0001-native-discovery-admission.patch`. It applies to the upstream
+path at the base SHA without the fork's import relocation.
+
 **Fix** — the smallest change that admits the missing names while leaving every other
 signature (and the GATT service check at connect time, which stays authoritative) untouched:
 
@@ -69,9 +78,16 @@ chains), so a `friend_`-prefixed name is never reclassified as `DeviceType.omi`.
 Also added: redacted, count-only discovery telemetry behind `Logger.debug` (seen / admitted /
 rejected-by-reason — `no_name`, `no_signature_match`), with no names or UUIDs logged.
 
-**Upstreamability**: this is written as a minimal, self-contained diff to
-`native_bluetooth_discoverer.dart` with no Ella-specific dependencies, suitable to propose to
-BasedHardware/omi as-is.
+The same patch also hardens the Pigeon host boundary: `startScan()` must succeed before the timeout is
+armed, `stopScan()` is awaited before callbacks are restored, and host/channel failures return a
+safe empty result while restoring the previous callback. Constructor injection is limited to the
+existing `BleHostApi` and `BluetoothReadiness` types so delayed and failing host calls are covered
+without changing production defaults.
+
+**Upstreamability**: this is a minimal, self-contained diff to
+`native_bluetooth_discoverer.dart` with no fork-specific dependencies. Local regressions live in
+`app/test/ella/upstream_capture/upstream_capture_discovery_admission_test.dart`; the patch artifact
+contains no private identifiers or environment assignments.
 
 The consent/account gate (review item 4) is wired entirely through upstream's existing
 constructor seams from Ella adapter code outside the vendored trees:

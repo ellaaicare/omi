@@ -9,3 +9,5 @@ app/ios/Runner/Batch/** -whitespace
 app/ios/Runner/Limitless/** -whitespace
 app/ios/Runner/PigeonCommunicator.g.swift -whitespace
 app/ios/Runner/SyncTransferBackgroundLease.swift -whitespace
+# Unified patches contain a one-space prefix on blank context lines by format.
+patches/upstream_capture/*.patch -whitespace
