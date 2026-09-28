@@ -1,7 +1,9 @@
 import asyncio
 import hashlib
+import json
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -51,12 +53,13 @@ def _service(repository=None):
     )
 
 
-def test_policy_matches_exact_managed_cloud_v10_artwork_contract():
+def test_policy_matches_exact_managed_cloud_v11_typesafe_contract():
     policy = consent.AiConsentService.policy()
 
-    assert policy["version"] == "ai-data-processors-v10"
-    assert policy["minimum_required_version"] == "ai-data-processors-v10"
+    assert policy["version"] == "ai-data-processors-v11"
+    assert policy["minimum_required_version"] == "ai-data-processors-v11"
     assert policy["processor_set_hash"] == consent.CURRENT_PROCESSOR_SET_HASH
+    assert policy["processor_set_hash"] == "sha256:16a0ca2b738ce6b4f31e9619960ef5d611be51a43a1a43b83dbf8f391ef1a591"
     assert policy["scope_version"] == "managed-cloud-internal-pilot-v4"
     assert policy["scope_hash"] == consent.CURRENT_SCOPE_HASH
     assert (
@@ -80,6 +83,7 @@ def test_policy_matches_exact_managed_cloud_v10_artwork_contract():
                 "xai-grok:language-live-voice",
                 "inworld:tts",
                 "elevenlabs:tts-fallback",
+                "typesafe:guardian-whispers-safety-classification",
             ]
         )
         == policy["canonical_processor_set"]
@@ -116,6 +120,14 @@ def test_policy_matches_exact_managed_cloud_v10_artwork_contract():
             "hermes-profile-memory",
             "hermes_profile_scoped_memory",
         ],
+        "third_party": True,
+    }
+    assert processors["typesafe"] == {
+        "id": "typesafe",
+        "legal_recipient": "TypeSafe (Jev), via OpenRouter",
+        "function": "Conversation safety classification for Guardian and Whispers",
+        "data": "Conversation transcript text windows (no audio)",
+        "provider_aliases": ["typesafe", "typesafe-jev", "jev"],
         "third_party": True,
     }
     assert [
@@ -226,6 +238,13 @@ def test_policy_matches_exact_managed_cloud_v10_artwork_contract():
             "xAI Grok",
             "Language processing and live voice",
             "Text, selected context, or live microphone audio",
+            True,
+        ),
+        (
+            "typesafe",
+            "TypeSafe (Jev), via OpenRouter",
+            "Conversation safety classification for Guardian and Whispers",
+            "Conversation transcript text windows (no audio)",
             True,
         ),
         ("inworld", "Inworld AI", "Voice synthesis", "Response text", True),
@@ -598,7 +617,7 @@ def test_nonmaterial_policy_metadata_drift_keeps_explicit_grant_current(monkeypa
     }
     repository.states["user-a"].update(archived_metadata)
     repository.receipts[("user-a", receipt_id)].update(archived_metadata)
-    monkeypatch.setattr(consent, "CURRENT_POLICY_VERSION", "ai-data-processors-v11")
+    monkeypatch.setattr(consent, "CURRENT_POLICY_VERSION", "ai-data-processors-v12")
     monkeypatch.setattr(consent, "CURRENT_PROCESSOR_SET_HASH", "sha256:deployed-descriptor")
     monkeypatch.setattr(consent, "CURRENT_SCOPE_VERSION", "deployed-scope-descriptor")
     monkeypatch.setattr(consent, "CURRENT_SCOPE_HASH", "sha256:deployed-scope-descriptor")
@@ -618,8 +637,8 @@ def test_future_explicit_grant_remains_current_after_server_rollback():
     service = _service(repository)
     result = service.submit("user-a", _submission())
     receipt_id = result["receipt"]["receipt_id"]
-    repository.states["user-a"]["policy_version"] = "ai-data-processors-v11"
-    repository.receipts[("user-a", receipt_id)]["policy_version"] = "ai-data-processors-v11"
+    repository.states["user-a"]["policy_version"] = "ai-data-processors-v12"
+    repository.receipts[("user-a", receipt_id)]["policy_version"] = "ai-data-processors-v12"
 
     status = service.status("user-a")
 
@@ -634,9 +653,9 @@ def test_human_bumped_minimum_policy_requires_reconsent(monkeypatch):
     monkeypatch.setattr(
         consent,
         "CONSENT_POLICY_VERSION_ORDER",
-        (*consent.CONSENT_POLICY_VERSION_ORDER, "ai-data-processors-v11"),
+        (*consent.CONSENT_POLICY_VERSION_ORDER, "ai-data-processors-v12"),
     )
-    monkeypatch.setattr(consent, "MINIMUM_REQUIRED_POLICY_VERSION", "ai-data-processors-v11")
+    monkeypatch.setattr(consent, "MINIMUM_REQUIRED_POLICY_VERSION", "ai-data-processors-v12")
     monkeypatch.setattr(consent, "_repository", repository)
     monkeypatch.setenv("ELLA_AI_CONSENT_ENFORCEMENT_UIDS", "user-a")
 
@@ -1619,3 +1638,83 @@ def test_authenticated_api_allows_terminal_decisions_without_verified_email(monk
         }
     ]
     assert erasures == ["user-a"]
+
+
+def test_v11_policy_matches_documented_cross_stack_fixture():
+    """The server's v11 manifest must be byte-for-byte equal to the fixture the
+    client's `AiConsentPolicy.bundled` (app/lib/ella/services/ai_consent_policy.dart)
+    is documented to match. See backend/tests/fixtures/ella_ai_consent_policy_v11.json.
+    """
+    fixture_path = Path(__file__).resolve().parents[1] / "fixtures" / "ella_ai_consent_policy_v11.json"
+    fixture = json.loads(fixture_path.read_text())
+
+    assert fixture == consent.AiConsentService.policy()
+    assert fixture["processor_set_hash"] == "sha256:16a0ca2b738ce6b4f31e9619960ef5d611be51a43a1a43b83dbf8f391ef1a591"
+    assert fixture["scope_hash"] == "sha256:9c23f344b752c91c6ae252c628e9c603a8c87072e31bc9e599f2cc5257c7d72c"
+
+
+def test_v11_grant_is_durable_while_stale_v9_and_v10_receipts_require_reconsent(monkeypatch):
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    monkeypatch.setattr(consent, "_repository", repository)
+    monkeypatch.setenv("ELLA_AI_CONSENT_ENFORCEMENT_UIDS", "user-a,user-b,user-c")
+
+    granted = service.submit("user-a", _submission())
+    assert granted["authorized"] is True
+    assert granted["receipt"]["policy_version"] == "ai-data-processors-v11"
+    assert granted["receipt"]["processor_set_hash"] == consent.CURRENT_PROCESSOR_SET_HASH
+    assert "typesafe" in granted["receipt"]["processor_ids"]
+
+    # A durable re-fetch (new status() call, same stored receipt) stays authorized.
+    refetched = service.status("user-a")
+    assert refetched["authorized"] is True
+    assert refetched["authority_state"] == "authorized"
+    assert refetched["consent"]["receipt_id"] == granted["receipt"]["receipt_id"]
+
+    app = FastAPI()
+    app.add_exception_handler(consent.AiConsentHTTPException, consent.ai_consent_http_exception_handler)
+
+    @app.get("/protected")
+    def protected(uid: str):
+        consent.assert_current_ai_consent(uid)
+
+    client = TestClient(app)
+    assert client.get("/protected", params={"uid": "user-a"}).status_code == 200
+
+    for uid, stale_version, stale_hash in (
+        ("user-b", consent.LEGACY_POLICY_VERSION_V9, "sha256:stale-v9-processor-set"),
+        (
+            "user-c",
+            consent.LEGACY_POLICY_VERSION_V10,
+            "sha256:84c1007429613ba0f5cdee2e64194e262c6fec8f296af2219f7ad6c8b2da1b2d",
+        ),
+    ):
+        # These stale versions predate TypeSafe and could never be submitted as a
+        # fresh grant; simulate an old, already-stored receipt from before the
+        # v11 rollout the same way test_v6_grant_is_rejected_and_cannot_pass_protected_route_gate does.
+        result = service.submit(uid, _submission(request_id=f"request-{uid}"))
+        receipt_id = result["receipt"]["receipt_id"]
+        repository.states[uid]["policy_version"] = stale_version
+        repository.states[uid]["processor_set_hash"] = stale_hash
+        repository.receipts[(uid, receipt_id)]["policy_version"] = stale_version
+        repository.receipts[(uid, receipt_id)]["processor_set_hash"] = stale_hash
+
+        status = service.status(uid)
+        assert status["authorized"] is False
+        assert status["authority_state"] == "reconsent_required"
+        assert status["retryable"] is False
+
+        response = client.get("/protected", params={"uid": uid})
+        assert response.status_code == 403
+        assert response.json() == {"code": "ai_consent_required"}
+
+        with pytest.raises(HTTPException) as error:
+            consent.assert_current_ai_consent(uid)
+        assert error.value.status_code == 403
+        assert error.value.detail == {"code": "ai_consent_required"}
+
+    # The listen (websocket) path maps this exact 403/ai_consent_required
+    # rejection to the fixed 4403 close code — see
+    # test_websocket_consent_rejection_and_authority_outage_have_distinct_close_contracts
+    # in test_ella_ai_consent_route_gates.py for the close-code mapping itself.
+    assert consent.AI_CONSENT_WEBSOCKET_CLOSE_CODE == 4403

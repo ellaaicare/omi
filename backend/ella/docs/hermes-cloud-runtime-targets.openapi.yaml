@@ -143,7 +143,7 @@ paths:
       x-ella-runtime-target:
         mode: hermes-cloud-chat
         fallback: none
-      x-ella-ai-data-processors-v10:
+      x-ella-ai-data-processors-v11:
         - nous-hermes-cloud
         - hermes-profile-memory
         - openai-codex
@@ -176,7 +176,7 @@ paths:
       x-ella-runtime-target:
         mode: hermes-cloud-voice
         fallback: none
-      x-ella-ai-data-processors-v10:
+      x-ella-ai-data-processors-v11:
         always:
           - nous-hermes-cloud
           - hermes-profile-memory
@@ -266,7 +266,7 @@ paths:
       x-ella-runtime-target:
         mode: hermes-cloud-transcript
         fallback: none
-      x-ella-ai-data-processors-v10:
+      x-ella-ai-data-processors-v11:
         always:
           - nous-hermes-cloud
           - hermes-profile-memory
@@ -290,7 +290,7 @@ paths:
       x-ella-runtime-target:
         mode: hermes-cloud-transcript
         fallback: none
-      x-ella-ai-data-processors-v10:
+      x-ella-ai-data-processors-v11:
         always:
           - nous-hermes-cloud
           - hermes-profile-memory
@@ -381,7 +381,7 @@ paths:
       x-ella-runtime-target:
         mode: hermes-cloud-transcript
         fallback: none
-      x-ella-ai-data-processors-v10:
+      x-ella-ai-data-processors-v11:
         when-extractor-mode-is-hermes:
           - nous-hermes-cloud
           - hermes-profile-memory
@@ -405,10 +405,11 @@ paths:
       x-ella-runtime-target:
         mode: hermes-cloud-guardian
         fallback: none
-      x-ella-ai-data-processors-v10:
+      x-ella-ai-data-processors-v11:
         - nous-hermes-cloud
         - hermes-profile-memory
         - openai-codex
+        - typesafe
       responses:
         "200":
           description: Proposal-only Observer run receipt.
@@ -622,7 +623,7 @@ components:
         - processors
       properties:
         version:
-          const: ai-data-processors-v10
+          const: ai-data-processors-v11
         processor_set_hash:
           type: string
           pattern: '^sha256:[0-9a-f]{64}$'
@@ -636,10 +637,11 @@ components:
           items:
             type: object
       description: >
-        v10 names Hermes Cloud, OpenAI Codex, Photon, built-in Hermes
-        profile-scoped memory, and the xAI memory-artwork image purpose.
-        Honcho Cloud is not part of the Cloud route processor set; retained
-        Plato/Honcho remains separate.
+        v11 names Hermes Cloud, OpenAI Codex, Photon, built-in Hermes
+        profile-scoped memory, and TypeSafe (Jev), via OpenRouter, for
+        Guardian/Whispers safety classification of conversation transcript
+        text windows (no audio). Honcho Cloud is not part of the Cloud route
+        processor set; retained Plato/Honcho remains separate.
     AiConsentSubmission:
       type: object
       required:
@@ -656,7 +658,7 @@ components:
         decision:
           enum: [granted, declined, revoked]
         policy_version:
-          const: ai-data-processors-v10
+          const: ai-data-processors-v11
         processor_set_hash:
           type: string
         scope_version:

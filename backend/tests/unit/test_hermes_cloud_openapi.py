@@ -116,7 +116,7 @@ def test_openapi_documents_exact_parallel_grounding_callback_contract():
     assert replay_fields <= set(conversation_data["properties"])
 
 
-def test_openapi_processor_disclosure_uses_only_exact_v10_processor_ids():
+def test_openapi_processor_disclosure_uses_only_exact_v11_processor_ids():
     contract = yaml.safe_load(
         (Path(__file__).resolve().parents[2] / "ella" / "docs" / "hermes-cloud-runtime-targets.openapi.yaml").read_text(
             encoding="utf-8"
@@ -124,13 +124,31 @@ def test_openapi_processor_disclosure_uses_only_exact_v10_processor_ids():
     )
     processors = {str(processor["id"]) for processor in ai_consent.PROCESSORS if isinstance(processor, dict)}
     paths = contract["paths"]
-    voice = paths["/v1/voice/session"]["post"]["x-ella-ai-data-processors-v10"]
-    listen = paths["/v4/listen"]["get"]["x-ella-ai-data-processors-v10"]
-    web_listen = paths["/v4/web/listen"]["get"]["x-ella-ai-data-processors-v10"]
+    processor_key = "x-ella-ai-data-processors-v11"
+    chat = paths["/v1/ella/chat/stream"]["post"][processor_key]
+    voice = paths["/v1/voice/session"]["post"][processor_key]
+    listen = paths["/v4/listen"]["get"][processor_key]
+    web_listen = paths["/v4/web/listen"]["get"][processor_key]
+    retry = paths["/v1/conversations/{conversation_id}/processing-retries"]["post"][processor_key]
+    guardian = paths["/v1/ella/observer/run"]["post"][processor_key]
 
+    assert set(chat) <= processors
     assert set(voice["always"]) | set(voice["selected-live-voice-provider-one-of"]) <= processors
     assert set(listen["always"]) | set(listen["selected-stt-provider-one-of"]) <= processors
     assert web_listen == listen
+    assert set(retry["when-extractor-mode-is-hermes"]) <= processors
+    assert retry["when-extractor-mode-is-structured-or-heuristic"] == []
+    assert set(guardian) <= processors
+    assert "typesafe" in guardian
+    assert all(
+        "x-ella-ai-data-processors-v10" not in operation
+        for path_item in paths.values()
+        for operation in path_item.values()
+        if isinstance(operation, dict)
+    )
     assert contract["components"]["schemas"]["AiConsentPolicy"]["properties"]["version"]["const"] == (
+        ai_consent.CURRENT_POLICY_VERSION
+    )
+    assert contract["components"]["schemas"]["AiConsentSubmission"]["properties"]["policy_version"]["const"] == (
         ai_consent.CURRENT_POLICY_VERSION
     )
