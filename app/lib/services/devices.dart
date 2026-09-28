@@ -350,9 +350,22 @@ class DeviceService implements IDeviceService {
     }
   }
 
+  /// ellaaicare/ella-ai#1280 RUN-010 / #1287: this runs on the app-termination
+  /// path (`AppLifecycleState.detached` -> `ServiceManager.deinit()` ->
+  /// `DeviceService.stop()`), which has a ~5s OS watchdog budget. A plain
+  /// `_mutex.acquire()` would wait indefinitely if the mutex were already
+  /// held by a stuck `ensureConnection` (e.g. a native BLE connect that
+  /// never completes), so this gives up after a bound well under that
+  /// budget instead of leaving the cleanup hung.
+  static const _disconnectMutexTimeout = Duration(seconds: 2);
+
   @override
   Future<void> disconnectDevice() async {
-    await _mutex.acquire();
+    if (!await _mutex.tryAcquire(_disconnectMutexTimeout)) {
+      Logger.debug("DeviceService: disconnectDevice() gave up waiting for the device mutex after "
+          "${_disconnectMutexTimeout.inSeconds}s");
+      return;
+    }
     try {
       if (_connection != null) {
         Logger.debug("DeviceService: Disconnecting device...");

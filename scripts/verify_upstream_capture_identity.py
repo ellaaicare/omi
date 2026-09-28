@@ -186,9 +186,13 @@ def verify(require_pin: bool, verbose: bool) -> int:
             continue
         if e.local_path != local_path_for(e.upstream_path, e.kind):
             failures.append(f'{e.local_path}: placement does not follow the relocation rule for {e.upstream_path}')
-        # 'patched' is placed and relocated exactly like 'dart-relocated'; only its
-        # byte-identity assertion (below) differs.
-        structural_kind = 'dart-relocated' if e.kind == 'patched' else e.kind
+        # 'patched' is placed and relocated exactly like whatever kind the file would
+        # otherwise be ('dart-relocated' for a vendored .dart file, 'verbatim' for a
+        # native/doc file at its upstream path); only its byte-identity assertion
+        # (below) differs.
+        structural_kind = e.kind
+        if e.kind == 'patched':
+            structural_kind = 'dart-relocated' if e.upstream_path.endswith('.dart') else 'verbatim'
         if structural_kind != kind_for(e.upstream_path, structural_kind == 'in-place') or (
             structural_kind == 'in-place' and not e.upstream_path.endswith('.dart')
         ):

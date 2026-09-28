@@ -1,0 +1,257 @@
+diff --git a/app/ios/Runner/Ble/OmiBleDiscoveryNaming.swift b/app/ios/Runner/Ble/OmiBleDiscoveryNaming.swift
+index d078da9..82da0ef 100644
+--- a/app/ios/Runner/Ble/OmiBleDiscoveryNaming.swift
++++ b/app/ios/Runner/Ble/OmiBleDiscoveryNaming.swift
+@@ -12,6 +12,29 @@ enum OmiBleDiscoveryNaming {
+     /// so this makes the device surface and route to `DeviceType.plaud`.
+     static let notePinFallbackName = "NotePin"
+ 
++    /// `discoveredName` plus which source(s) actually carried a name, for
++    /// redacted (no names/UUIDs) discovery diagnostics on the Dart side.
++    /// ellaaicare/ella-ai#1280 RUN-010 / #1287: a candidate that advertises
++    /// no local name AND has no cached `peripheral.name` (e.g. the first-ever
++    /// scan of a never-bonded necklace) still resolves to an empty name here;
++    /// these two flags let testers see which source(s) were empty without a
++    /// Mac console.
++    static func discoveredNameResult(
++        advertisedLocalName: String?,
++        cachedName: String?,
++        advertisementData: [String: Any]
++    ) -> (name: String, hasAdvertisedLocalName: Bool, hasPeripheralName: Bool) {
++        (
++            discoveredName(
++                advertisedLocalName: advertisedLocalName,
++                cachedName: cachedName,
++                advertisementData: advertisementData
++            ),
++            normalized(advertisedLocalName) != nil,
++            normalized(cachedName) != nil
++        )
++    }
++
+     /// PLAUD manufacturer id 93 (0x5D), little-endian in the advertisement,
+     /// matching macOS discovery in `desktop/macos/.../BtDevice.swift`.
+     private static let plaudManufacturerId: UInt16 = 93
+diff --git a/app/ios/Runner/Ble/OmiBleManager.swift b/app/ios/Runner/Ble/OmiBleManager.swift
+index 889d135..8b819ba 100644
+--- a/app/ios/Runner/Ble/OmiBleManager.swift
++++ b/app/ios/Runner/Ble/OmiBleManager.swift
+@@ -719,15 +719,24 @@ extension OmiBleManager: CBCentralManagerDelegate {
+ 
+         let serviceUuids = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID])?.map { $0.uuidString } ?? []
+ 
++        // ellaaicare/ella-ai#1280 RUN-010 / #1287: forward which source(s) actually
++        // carried a name alongside the resolved name itself, so redacted discovery
++        // diagnostics on the Dart side can tell "advertised no local name" apart
++        // from "iOS hasn't cached a GAP name for this never-bonded peripheral yet"
++        // without ever forwarding the name/UUIDs themselves for logging.
++        let nameResult = OmiBleDiscoveryNaming.discoveredNameResult(
++            advertisedLocalName: advertisementData[CBAdvertisementDataLocalNameKey] as? String,
++            cachedName: peripheral.name,
++            advertisementData: advertisementData
++        )
++
+         let blePeripheral = BlePeripheral(
+             uuid: uuid,
+-            name: OmiBleDiscoveryNaming.discoveredName(
+-                advertisedLocalName: advertisementData[CBAdvertisementDataLocalNameKey] as? String,
+-                cachedName: peripheral.name,
+-                advertisementData: advertisementData
+-            ),
++            name: nameResult.name,
+             rssi: Int64(RSSI.intValue),
+-            serviceUuids: serviceUuids
++            serviceUuids: serviceUuids,
++            hasAdvertisedLocalName: nameResult.hasAdvertisedLocalName,
++            hasPeripheralName: nameResult.hasPeripheralName
+         )
+ 
+         flutterApi?.onPeripheralDiscovered(peripheral: blePeripheral) { _ in }
+diff --git a/app/ios/Runner/PigeonCommunicator.g.swift b/app/ios/Runner/PigeonCommunicator.g.swift
+index b774502..f686879 100644
+--- a/app/ios/Runner/PigeonCommunicator.g.swift
++++ b/app/ios/Runner/PigeonCommunicator.g.swift
+@@ -140,6 +140,12 @@ struct BlePeripheral: Hashable {
+   var name: String
+   var rssi: Int64
+   var serviceUuids: [String]
++  /// Whether `CBAdvertisementDataLocalNameKey` was present on this advertisement.
++  /// Redacted discovery diagnostic; never paired with the name/UUID values themselves.
++  var hasAdvertisedLocalName: Bool
++  /// Whether `CBPeripheral.name` (the OS's cached GAP name) was present.
++  /// Redacted discovery diagnostic; never paired with the name/UUID values themselves.
++  var hasPeripheralName: Bool
+ 
+ 
+   // swift-format-ignore: AlwaysUseLowerCamelCase
+@@ -148,12 +154,16 @@ struct BlePeripheral: Hashable {
+     let name = pigeonVar_list[1] as! String
+     let rssi = pigeonVar_list[2] as! Int64
+     let serviceUuids = pigeonVar_list[3] as! [String]
++    let hasAdvertisedLocalName = pigeonVar_list[4] as! Bool
++    let hasPeripheralName = pigeonVar_list[5] as! Bool
+ 
+     return BlePeripheral(
+       uuid: uuid,
+       name: name,
+       rssi: rssi,
+-      serviceUuids: serviceUuids
++      serviceUuids: serviceUuids,
++      hasAdvertisedLocalName: hasAdvertisedLocalName,
++      hasPeripheralName: hasPeripheralName
+     )
+   }
+   func toList() -> [Any?] {
+@@ -162,6 +172,8 @@ struct BlePeripheral: Hashable {
+       name,
+       rssi,
+       serviceUuids,
++      hasAdvertisedLocalName,
++      hasPeripheralName,
+     ]
+   }
+   static func == (lhs: BlePeripheral, rhs: BlePeripheral) -> Bool {
+diff --git a/app/lib/gen/pigeon_communicator.g.dart b/app/lib/gen/pigeon_communicator.g.dart
+index 25034c9..a49cdc1 100644
+--- a/app/lib/gen/pigeon_communicator.g.dart
++++ b/app/lib/gen/pigeon_communicator.g.dart
+@@ -44,6 +44,8 @@ class BlePeripheral {
+     required this.name,
+     required this.rssi,
+     required this.serviceUuids,
++    this.hasAdvertisedLocalName = false,
++    this.hasPeripheralName = false,
+   });
+ 
+   String uuid;
+@@ -54,12 +56,22 @@ class BlePeripheral {
+ 
+   List<String> serviceUuids;
+ 
++  /// Whether the advertisement's `CBAdvertisementDataLocalNameKey` was present.
++  /// Redacted discovery diagnostic; never paired with the name/UUID values themselves.
++  bool hasAdvertisedLocalName;
++
++  /// Whether `CBPeripheral.name` (the OS's cached GAP name) was present.
++  /// Redacted discovery diagnostic; never paired with the name/UUID values themselves.
++  bool hasPeripheralName;
++
+   List<Object?> _toList() {
+     return <Object?>[
+       uuid,
+       name,
+       rssi,
+       serviceUuids,
++      hasAdvertisedLocalName,
++      hasPeripheralName,
+     ];
+   }
+ 
+@@ -74,6 +86,8 @@ class BlePeripheral {
+       name: result[1]! as String,
+       rssi: result[2]! as int,
+       serviceUuids: (result[3] as List<Object?>?)!.cast<String>(),
++      hasAdvertisedLocalName: result.length > 4 ? (result[4] as bool?) ?? false : false,
++      hasPeripheralName: result.length > 5 ? (result[5] as bool?) ?? false : false,
+     );
+   }
+ 
+diff --git a/app/lib/services/devices/discovery/native_bluetooth_discoverer.dart b/app/lib/services/devices/discovery/native_bluetooth_discoverer.dart
+index 223d602..e4b26c6 100644
+--- a/app/lib/services/devices/discovery/native_bluetooth_discoverer.dart
++++ b/app/lib/services/devices/discovery/native_bluetooth_discoverer.dart
+@@ -7,6 +7,7 @@ import 'package:omi/services/bridges/ble_bridge.dart';
+ import 'package:omi/services/devices/bluetooth_readiness.dart';
+ import 'package:omi/services/devices/discovery/device_locator.dart';
+ import 'package:omi/services/devices/models.dart';
++import 'package:omi/utils/debug_log_manager.dart';
+ import 'package:omi/utils/logger.dart';
+ import 'device_discoverer.dart';
+ 
+@@ -45,8 +46,15 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
+ 
+     BleBridge.instance.peripheralDiscoveredCallback = (BlePeripheral peripheral) {
+       seenCount++;
++      DebugLogManager.deviceCandidatesSeen++;
++      DebugLogManager.recordDeviceDiagnostic(
++        'NativeBluetoothDiscoverer: candidate hasAdvName=${peripheral.hasAdvertisedLocalName} '
++        'hasPeripheralName=${peripheral.hasPeripheralName} uuidCount=${peripheral.serviceUuids.length} '
++        'rssiBucket=${_rssiBucket(peripheral.rssi)}',
++      );
+       if (peripheral.name.isEmpty) {
+         noNameCount++;
++        DebugLogManager.recordCandidateRejected('no_name');
+         return;
+       }
+       // Deduplicate by UUID
+@@ -57,8 +65,18 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
+     var scanStarted = false;
+     try {
+       try {
++        // ellaaicare/ella-ai#1287: this scan is already unfiltered (no serviceUuids) —
++        // CoreBluetooth's scanForPeripherals(withServices:) only reports peripherals
++        // advertising an exact match, and production necklaces don't reliably
++        // advertise one. Passing [] keeps CoreBluetooth from filtering candidates
++        // out before the name/UUID admission classifier below ever sees them.
+         await _hostApi.startScan(timeout, []);
+         scanStarted = true;
++        DebugLogManager.deviceScansStarted++;
++        final btState = await _hostApi.getBluetoothState().catchError((_) => 'unknown');
++        DebugLogManager.recordDeviceDiagnostic(
++          'NativeBluetoothDiscoverer: startScan btState=$btState serviceUuidFilterCount=0 timeoutSeconds=$timeout',
++        );
+ 
+         _timeoutTimer?.cancel();
+         _timeoutTimer = Timer(Duration(seconds: timeout), () {
+@@ -68,6 +86,7 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
+       } catch (error, stackTrace) {
+         Logger.warning('NativeBluetoothDiscoverer: start scan error: $error');
+         Logger.debug('$stackTrace');
++        DebugLogManager.recordDeviceDiagnostic('NativeBluetoothDiscoverer: startScan error');
+         return const DeviceDiscoveryResult(devices: []);
+       }
+     } finally {
+@@ -79,9 +98,12 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
+       if (scanStarted) {
+         try {
+           await _hostApi.stopScan();
++          DebugLogManager.deviceScansStopped++;
++          DebugLogManager.recordDeviceDiagnostic('NativeBluetoothDiscoverer: stopScan');
+         } catch (error, stackTrace) {
+           Logger.warning('NativeBluetoothDiscoverer: stop scan error: $error');
+           Logger.debug('$stackTrace');
++          DebugLogManager.recordDeviceDiagnostic('NativeBluetoothDiscoverer: stopScan error');
+         }
+       }
+       BleBridge.instance.peripheralDiscoveredCallback = previousCallback;
+@@ -91,12 +113,28 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
+       ..sort((a, b) => b.rssi.compareTo(a.rssi));
+ 
+     final noSignatureMatchCount = results.length - devices.length;
+-    Logger.debug('NativeBluetoothDiscoverer: seen=$seenCount admitted=${devices.length} '
+-        'rejected(no_name=$noNameCount, no_signature_match=$noSignatureMatchCount)');
++    if (noSignatureMatchCount > 0) {
++      DebugLogManager.deviceCandidatesRejectedByReason['no_signature_match'] =
++          (DebugLogManager.deviceCandidatesRejectedByReason['no_signature_match'] ?? 0) + noSignatureMatchCount;
++    }
++    DebugLogManager.deviceCandidatesAdmitted += devices.length;
++
++    final summary = 'NativeBluetoothDiscoverer: seen=$seenCount admitted=${devices.length} '
++        'rejected(no_name=$noNameCount, no_signature_match=$noSignatureMatchCount)';
++    Logger.debug(summary);
++    DebugLogManager.recordDeviceDiagnostic(summary);
+ 
+     return DeviceDiscoveryResult(devices: devices);
+   }
+ 
++  /// Coarse 10dBm-wide RSSI bucket for redacted diagnostics — never the raw
++  /// precise reading, which combined with other signals could help fingerprint
++  /// a specific device/location.
++  static String _rssiBucket(int rssi) {
++    final lower = (rssi / 10).floor() * 10;
++    return '$lower..${lower + 10}';
++  }
++
+   @override
+   Future<void> stop() async {
+     _timeoutTimer?.cancel();

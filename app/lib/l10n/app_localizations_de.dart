@@ -10191,4 +10191,16 @@ class AppLocalizationsDe extends AppLocalizations {
   @override
   String get aiConsentUpgradeRetryNotice =>
       'We couldn’t update your AI permission. Your existing permission is still active, and we’ll retry later.';
+
+  @override
+  String get deviceDiagnostics => 'Device Diagnostics';
+
+  @override
+  String get deviceDiagnosticsDescription => 'Redacted BLE scan counters for troubleshooting missing devices';
+
+  @override
+  String get copyDiagnostics => 'Copy Diagnostics';
+
+  @override
+  String get noDiagnosticsYet => 'No diagnostics recorded yet. Run a device scan to populate this.';
 }
