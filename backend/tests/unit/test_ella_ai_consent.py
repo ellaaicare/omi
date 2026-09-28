@@ -1756,6 +1756,7 @@ def test_v11_grant_is_durable_and_authorizes_typesafe_egress(monkeypatch):
     assert refetched["authority_state"] == "authorized"
     assert refetched["consent"]["receipt_id"] == granted["receipt"]["receipt_id"]
     assert consent.assert_typesafe_egress_consent("user-a") == "user-a"
+    assert consent.is_typesafe_egress_authorized("user-a") is True
 
 
 def test_v10_receipt_keeps_capture_working_without_forced_reconsent(monkeypatch):
@@ -1846,6 +1847,17 @@ def test_v10_receipt_cannot_authorize_typesafe_egress(monkeypatch):
     assert error.value.status_code == 403
     assert error.value.detail == {"code": "ai_consent_required"}
     assert consent.assert_current_ai_consent("user-v10") == "user-v10"
+    assert consent.is_typesafe_egress_authorized("user-v10") is False
+
+
+def test_typesafe_egress_authorization_fails_closed_on_consent_service_error(monkeypatch):
+    class UnavailableConsentService:
+        def status(self, _uid):
+            raise RuntimeError("consent service unavailable")
+
+    monkeypatch.setattr(consent, "get_ai_consent_service", lambda: UnavailableConsentService())
+
+    assert consent.is_typesafe_egress_authorized("user-unavailable") is False
 
 
 def test_v9_receipt_still_requires_reconsent(monkeypatch):

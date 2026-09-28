@@ -1290,6 +1290,15 @@ def assert_typesafe_egress_consent(uid: str) -> str:
     )
 
 
+def is_typesafe_egress_authorized(uid: str) -> bool:
+    """Return a fail-closed TypeSafe egress decision without raising."""
+    try:
+        assert_typesafe_egress_consent(uid)
+    except Exception:
+        return False
+    return True
+
+
 def require_current_ai_consent(
     authenticated_uid: str = Depends(get_exact_firebase_uid),
 ) -> str:

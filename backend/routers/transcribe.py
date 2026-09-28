@@ -139,6 +139,7 @@ from ella.services.ai_consent import (
     AI_CONSENT_WEBSOCKET_CLOSE_CODE,
     AI_CONSENT_WEBSOCKET_RETRY_CLOSE_CODE,
     assert_current_ai_consent,
+    is_typesafe_egress_authorized,
     resolve_processor,
 )
 from utils.ella.exact_firebase_auth import get_exact_firebase_uid
@@ -472,6 +473,7 @@ async def _run_sync_provider_with_current_consent(
 async def _dispatch_scanner_with_current_consent(
     subject_uid: str,
     consent_checker: Callable[[str], str],
+    typesafe_egress_authorizer: Callable[[str], bool],
     reject_consent: Callable[[HTTPException], Awaitable[AiConsentWebSocketRejected]],
     provider_call: Callable,
     *,
@@ -481,6 +483,10 @@ async def _dispatch_scanner_with_current_consent(
     mode_loader: Callable[[str], Awaitable[tuple[object, Optional[str]]]],
     provider_kwargs: dict,
 ) -> None:
+    def call_provider_with_typesafe_authority(*args, **kwargs):
+        kwargs["typesafe_egress_authorized"] = typesafe_egress_authorizer(subject_uid) is True
+        return provider_call(*args, **kwargs)
+
     try:
         guardian_mode, mode_error = await mode_loader(subject_uid)
         if mode_error is not None:
@@ -490,7 +496,7 @@ async def _dispatch_scanner_with_current_consent(
             subject_uid,
             consent_checker,
             reject_consent,
-            provider_call,
+            call_provider_with_typesafe_authority,
             guardian_mode=guardian_mode,
             **provider_kwargs,
         )
@@ -1774,6 +1780,7 @@ async def _stream_handler(
         await _dispatch_scanner_with_current_consent(
             uid,
             assert_current_ai_consent,
+            is_typesafe_egress_authorized,
             reject_stt_egress,
             send_to_scanner,
             on_consent_rejected=lambda: _delivery_log(

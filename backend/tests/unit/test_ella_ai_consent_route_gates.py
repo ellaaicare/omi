@@ -416,12 +416,66 @@ def test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary():
     )
     assert "await _run_sync_provider_with_current_consent(" in scanner_source
     assert "await mode_loader(subject_uid)" in scanner_source
+    assert 'kwargs["typesafe_egress_authorized"]' in scanner_source
+    assert "typesafe_egress_authorizer(subject_uid) is True" in scanner_source
     assert "guardian_mode=guardian_mode" in scanner_source
     assert "except AiConsentWebSocketRejected" in scanner_source
     assert "except Exception" in scanner_source
     assert "audio_bytes_send(data, last_audio_received_time)" in stream_source
     assert "except AiConsentWebSocketRejected" in stream_source
     assert "not ai_consent_egress_rejected.is_set()" in stream_source
+
+
+def test_scanner_dispatch_passes_server_typesafe_authority_to_provider():
+    provider_calls = []
+    failures = []
+
+    class AiConsentWebSocketRejected(RuntimeError):
+        pass
+
+    async def run_sync_provider(
+        subject_uid,
+        consent_checker,
+        _reject_consent,
+        provider_call,
+        **kwargs,
+    ):
+        consent_checker(subject_uid)
+        provider_call(**kwargs)
+
+    dispatch = types.FunctionType(
+        _function_code(
+            BACKEND / "routers" / "transcribe.py",
+            "_dispatch_scanner_with_current_consent",
+        ),
+        {
+            "_run_sync_provider_with_current_consent": run_sync_provider,
+            "AiConsentWebSocketRejected": AiConsentWebSocketRejected,
+        },
+    )
+
+    async def mode_loader(_uid):
+        return "active_support", None
+
+    async def scenario():
+        for authorized in (False, True):
+            await dispatch(
+                "user-a",
+                lambda uid: uid,
+                lambda _uid, result=authorized: result,
+                lambda _exc: None,
+                lambda **kwargs: provider_calls.append(kwargs),
+                on_consent_rejected=lambda: failures.append("consent"),
+                on_failure=lambda: failures.append("provider"),
+                on_mode_authority_failure=lambda reason: failures.append(reason),
+                mode_loader=mode_loader,
+                provider_kwargs={"uid": "user-a"},
+            )
+
+    asyncio.run(scenario())
+
+    assert failures == []
+    assert [call["typesafe_egress_authorized"] for call in provider_calls] == [False, True]
 
 
 def test_scanner_dispatch_queue_is_bounded_ordered_and_drains_on_close():

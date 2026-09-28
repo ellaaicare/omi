@@ -452,6 +452,7 @@ def test_scanner_payload_preserves_stt_identity_and_latency_metadata(monkeypatch
         ],
         latency_metadata={"first_audio_frame_at": "2026-05-09T18:00:00+00:00"},
         guardian_mode="active_support",
+        typesafe_egress_authorized=True,
     )
 
     assert status == 200
@@ -464,6 +465,7 @@ def test_scanner_payload_preserves_stt_identity_and_latency_metadata(monkeypatch
     assert posts[0]["guardian_mode_source"] == "users.guardian_mode"
     assert posts[0]["guardian_mode_enabled"] is True
     assert posts[0]["emergency_only_dispatch"] is False
+    assert posts[0]["typesafe_egress_authorized"] is True
 
 
 @pytest.mark.parametrize("mode", [None, "", "OFF", "none", "disabled", "null", "guardian_off"])
@@ -515,6 +517,7 @@ def test_scanner_preserves_emergency_only_dispatch_when_guardian_is_off(monkeypa
         assert posts[index]["emergency_only_dispatch"] is True
 
     assert len(posts) == 2
+    assert all(post["typesafe_egress_authorized"] is False for post in posts)
 
 
 def test_scanner_fails_closed_when_mode_authority_is_unavailable(monkeypatch):
