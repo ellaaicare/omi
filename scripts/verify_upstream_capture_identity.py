@@ -25,8 +25,13 @@ Checks (all must pass, exit status 1 otherwise):
    upstream bytes equals the vendored bytes; mismatches print a unified diff.
    Pass ``--require-pin`` to make the pin's absence an error.
 
-Files listed in UPSTREAM_PATCHES.md as patched would have to be declared in the
-manifest with kind ``patched``; there are none, and the guard refuses that kind.
+A file patched relative to the pin is declared in the manifest with kind
+``patched`` (see UPSTREAM_PATCHES.md for the list and rationale). A ``patched``
+entry is placed exactly like ``dart-relocated`` (so its own imports and any
+importer's relocated import of it still resolve). Its manifest row records both
+the upstream pin blob and the exact approved local blob. The guard checks both,
+so an upstream change flags the patch as stale and any unrecorded local change
+fails closed.
 """
 
 from __future__ import annotations
@@ -56,7 +61,9 @@ LOCAL_TEST_ROOT = 'app/test/upstream_capture/'
 # verbatim:       non-Dart file (Swift/ObjC/Markdown) at its upstream path, byte-identical.
 # in-place:       shared fork Dart file replaced by the pin's bytes at its ORIGINAL path (a strict,
 #                 compatible superset of the fork copy), byte-identical and NOT relocated.
-KINDS = ('dart-relocated', 'verbatim', 'in-place')
+# patched:        Dart file under app/lib/upstream_capture/, relocated like dart-relocated, but
+#                 deliberately NOT byte-identical to the pin. Documented in UPSTREAM_PATCHES.md.
+KINDS = ('dart-relocated', 'verbatim', 'in-place', 'patched')
 
 _QUOTED_PACKAGE_URI = re.compile(r"""(['"])package:omi/([^'"\s]+)\1""")
 
@@ -67,6 +74,7 @@ class Entry:
     blob: str
     upstream_path: str
     local_path: str
+    local_blob: str | None = None
 
 
 def git_blob_id(data: bytes) -> str:
@@ -127,9 +135,14 @@ def read_manifest(path: str) -> tuple[str, list[Entry]]:
                 pin = line.split()[1]
                 continue
             parts = line.split('\t')
-            if len(parts) != 4:
+            if len(parts) not in (4, 5):
                 raise SystemExit(f'Malformed manifest line: {line!r}')
-            entries.append(Entry(*parts))
+            entry = Entry(*parts)
+            if entry.kind == 'patched' and not re.fullmatch(r'[0-9a-f]{40}', entry.local_blob or ''):
+                raise SystemExit(f'Patched manifest line has no approved 40-hex local blob: {line!r}')
+            if entry.kind != 'patched' and entry.local_blob is not None:
+                raise SystemExit(f'Only patched manifest lines may record a local blob: {line!r}')
+            entries.append(entry)
     if not re.fullmatch(r'[0-9a-f]{40}', pin):
         raise SystemExit('Manifest has no 40-hex pin line')
     return pin, entries
@@ -139,7 +152,7 @@ def vendored_dart_rels(entries: list[Entry]) -> set[str]:
     return {
         e.upstream_path[len(UPSTREAM_DART_ROOT) :]
         for e in entries
-        if e.kind == 'dart-relocated' and e.upstream_path.startswith(UPSTREAM_DART_ROOT)
+        if e.kind in ('dart-relocated', 'patched') and e.upstream_path.startswith(UPSTREAM_DART_ROOT)
     }
 
 
@@ -169,12 +182,15 @@ def verify(require_pin: bool, verbose: bool) -> int:
     seen_local: set[str] = set()
     for e in entries:
         if e.kind not in KINDS:
-            failures.append(f'{e.local_path}: kind {e.kind!r} is not allowed (patched files must not be listed)')
+            failures.append(f'{e.local_path}: kind {e.kind!r} is not one of {KINDS}')
             continue
         if e.local_path != local_path_for(e.upstream_path, e.kind):
             failures.append(f'{e.local_path}: placement does not follow the relocation rule for {e.upstream_path}')
-        if e.kind != kind_for(e.upstream_path, e.kind == 'in-place') or (
-            e.kind == 'in-place' and not e.upstream_path.endswith('.dart')
+        # 'patched' is placed and relocated exactly like 'dart-relocated'; only its
+        # byte-identity assertion (below) differs.
+        structural_kind = 'dart-relocated' if e.kind == 'patched' else e.kind
+        if structural_kind != kind_for(e.upstream_path, structural_kind == 'in-place') or (
+            structural_kind == 'in-place' and not e.upstream_path.endswith('.dart')
         ):
             failures.append(f'{e.local_path}: kind {e.kind} does not match file type')
         if e.local_path in seen_local:
@@ -185,17 +201,23 @@ def verify(require_pin: bool, verbose: bool) -> int:
             failures.append(f'{e.local_path}: missing')
             continue
         data = open(path, 'rb').read()
-        if e.kind == 'dart-relocated':
+        if e.kind == 'patched':
+            local_blob = git_blob_id(data)
+            if local_blob != e.local_blob:
+                failures.append(f'{e.local_path}: local blob {local_blob} != approved patched blob {e.local_blob}')
+        elif e.kind == 'dart-relocated':
             try:
                 text = data.decode('utf-8')
             except UnicodeDecodeError:
                 failures.append(f'{e.local_path}: not UTF-8')
                 continue
             original = unrelocate(text, rels).encode('utf-8')
+            if git_blob_id(original) != e.blob:
+                failures.append(f'{e.local_path}: differs from upstream {e.upstream_path}@{pin[:12]} (blob {e.blob})')
         else:
             original = data
-        if git_blob_id(original) != e.blob:
-            failures.append(f'{e.local_path}: differs from upstream {e.upstream_path}@{pin[:12]} (blob {e.blob})')
+            if git_blob_id(original) != e.blob:
+                failures.append(f'{e.local_path}: differs from upstream {e.upstream_path}@{pin[:12]} (blob {e.blob})')
 
     # No stray files inside the vendored Dart trees (Ella code must live outside them).
     for root in (VENDOR_ROOT, VENDOR_TEST_ROOT):
@@ -219,6 +241,10 @@ def verify(require_pin: bool, verbose: bool) -> int:
                 continue
             if blob != e.blob:
                 failures.append(f'{e.upstream_path}: manifest blob {e.blob} != pin blob {blob}')
+            if e.kind == 'patched':
+                # The upstream blob still has to track the pin so the patch does not
+                # silently go stale. The exact local content was checked above.
+                continue
             path = os.path.join(REPO_ROOT, e.local_path)
             if not os.path.isfile(path):
                 continue
