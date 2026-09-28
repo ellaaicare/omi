@@ -22,6 +22,7 @@ import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/debouncer.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:omi/widgets/confirmation_dialog.dart';
+import 'package:omi/ella/capture_host/ella_capture_host.dart';
 
 typedef DeviceConnectionResolver = Future<BtDevice?> Function(String deviceId);
 typedef DeviceScanConnector = Future<BtDevice?> Function();
@@ -913,6 +914,8 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   }
 
   Future periodicConnect(String printer, {bool boundDeviceOnly = false, int? operationGeneration}) async {
+    // Flag-ON graph: upstream capture owns the pendant; the legacy stack must not scan/connect.
+    if (EllaCaptureHost.legacyCaptureSuppressed) return;
     final generation = operationGeneration ?? _deviceOperationGeneration;
     if (!_isDeviceOperationCurrent(generation)) return;
     _reconnectionTimer?.cancel();
@@ -1062,6 +1065,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     bool startCaptureWhenConnected = false,
     BtDevice? explicitlySelectedDevice,
   }) async {
+    if (EllaCaptureHost.legacyCaptureSuppressed) return false;
     return _runConnectionAttempt(
       (token) => _scanAndConnectToDevice(
         operationGeneration: operationGeneration,
