@@ -3,6 +3,28 @@ import Foundation
 import AVFoundation
 #endif
 
+struct GuardianPollingHTTPFailure: Error {
+    let statusCode: Int
+    let refreshedCredential: Bool
+
+    var diagnosticCode: String {
+        let refresh = refreshedCredential ? "after_refresh" : "without_refresh"
+        return "http_\(statusCode)_\(refresh)"
+    }
+}
+
+enum GuardianPollingFailureDiagnostic {
+    static func code(for error: Error) -> String {
+        if let failure = error as? GuardianPollingHTTPFailure {
+            return failure.diagnosticCode
+        }
+        if error is GuardianCredentialError {
+            return "credential_unavailable"
+        }
+        return "request_failed"
+    }
+}
+
 final class GuardianModePollingService: @unchecked Sendable {
 #if !GUARDIAN_NATIVE_POLICY_TESTS
     static let shared = GuardianModePollingService()
@@ -264,6 +286,7 @@ final class GuardianModePollingService: @unchecked Sendable {
             ])
         }
 
+        var refreshedCredential = false
         var credential = try await tokenProvider(lease, false)
         try validate(credential: credential, lease: lease)
         var request = authorizedRequest(url: url, credential: credential)
@@ -273,6 +296,7 @@ final class GuardianModePollingService: @unchecked Sendable {
                 throw GuardianCredentialError.ownerChanged
             }
             credential = try await tokenProvider(lease, true)
+            refreshedCredential = true
             try validate(credential: credential, lease: lease)
             request = authorizedRequest(url: url, credential: credential)
             (data, response) = try await performAuthorizedTransport(request, lease: lease)
@@ -288,9 +312,10 @@ final class GuardianModePollingService: @unchecked Sendable {
         }
 
         guard httpResponse.statusCode == 200 else {
-            throw NSError(domain: "GuardianPolling", code: httpResponse.statusCode, userInfo: [
-                NSLocalizedDescriptionKey: "HTTP \(httpResponse.statusCode)"
-            ])
+            throw GuardianPollingHTTPFailure(
+                statusCode: httpResponse.statusCode,
+                refreshedCredential: refreshedCredential
+            )
         }
 
         let pollResponse = try JSONDecoder().decode(PollResponse.self, from: data)
@@ -403,8 +428,8 @@ final class GuardianModePollingService: @unchecked Sendable {
                     guard isPolling else { return }
                     consecutiveErrors += 1
                     if consecutiveErrors <= 3 || consecutiveErrors % 10 == 0 {
-                        let category = error is GuardianCredentialError ? "authentication" : "request"
-                        NSLog("GuardianPolling: \(category) failure (\(consecutiveErrors)x)")
+                        let diagnostic = GuardianPollingFailureDiagnostic.code(for: error)
+                        NSLog("GuardianPolling: failure=\(diagnostic) count=\(consecutiveErrors)")
                     }
                 }
                 return true

@@ -1,7 +1,64 @@
 import Foundation
+
 #if canImport(FirebaseAuth) && !GUARDIAN_NATIVE_POLICY_TESTS
 import FirebaseAuth
 #endif
+
+enum GuardianPlaybackQueuePolicy {
+    static func shouldRemoveForIncomingClip(isCurrentItem: Bool, isSilenceItem: Bool) -> Bool {
+        !isCurrentItem && isSilenceItem
+    }
+}
+
+enum GuardianInterruptionRecoveryPolicy {
+    static func shouldResume(
+        isActive: Bool,
+        wasInterrupted: Bool,
+        systemAllowsResume: Bool,
+        authorityIsCurrent: Bool
+    ) -> Bool {
+        isActive && wasInterrupted && systemAllowsResume && authorityIsCurrent
+    }
+}
+
+struct GuardianInterruptionRecoveryState {
+    private(set) var isInterrupted = false
+    private(set) var resumeAuthorized = false
+
+    var canResume: Bool {
+        isInterrupted && resumeAuthorized
+    }
+
+    mutating func began() {
+        isInterrupted = true
+        resumeAuthorized = false
+    }
+
+    @discardableResult
+    mutating func ended(
+        systemAllowsResume: Bool,
+        isActive: Bool,
+        authorityIsCurrent: Bool
+    ) -> Bool {
+        resumeAuthorized = GuardianInterruptionRecoveryPolicy.shouldResume(
+            isActive: isActive,
+            wasInterrupted: isInterrupted,
+            systemAllowsResume: systemAllowsResume,
+            authorityIsCurrent: authorityIsCurrent
+        )
+        return resumeAuthorized
+    }
+
+    mutating func resumed() {
+        isInterrupted = false
+        resumeAuthorized = false
+    }
+
+    mutating func reset() {
+        isInterrupted = false
+        resumeAuthorized = false
+    }
+}
 
 final class GuardianModeAvailability {
     static let shared = GuardianModeAvailability()
@@ -83,8 +140,9 @@ final class GuardianFirebaseTokenBridge: @unchecked Sendable {
     ) async throws -> GuardianBearerCredential {
         let credential = try await provider(lease.uid, forcingRefresh)
         guard credential.uid == lease.uid,
-              !credential.token.isEmpty,
-              GuardianModeAvailability.shared.isCurrent(lease) else {
+            !credential.token.isEmpty,
+            GuardianModeAvailability.shared.isCurrent(lease)
+        else {
             throw GuardianCredentialError.ownerChanged
         }
         return credential
@@ -189,8 +247,9 @@ final class GuardianWorkLeaseGate {
 
     private static func normalized(_ uid: String?) -> String? {
         guard let uid = uid?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !uid.isEmpty,
-              uid != "unknown" else { return nil }
+            !uid.isEmpty,
+            uid != "unknown"
+        else { return nil }
         return uid
     }
 }
@@ -233,9 +292,10 @@ final class GuardianPlaybackReporter: @unchecked Sendable {
         do {
             let credential = try await tokenProvider(lease)
             guard credential.uid == lease.uid,
-                  !Task.isCancelled,
-                  GuardianModeAvailability.shared.isCurrent(lease),
-                  let url = URL(string: "\(backendURL())/v1/ella/guardian/playback-event") else {
+                !Task.isCancelled,
+                GuardianModeAvailability.shared.isCurrent(lease),
+                let url = URL(string: "\(backendURL())/v1/ella/guardian/playback-event")
+            else {
                 return false
             }
 
@@ -287,6 +347,7 @@ final class GuardianModeManagerEffectPath {
     struct Operations {
         let perform: (GuardianWorkLease, () -> Bool) -> Bool
         let insert: () -> Bool
+        let refillSilence: () -> Void
         let awaitReadiness: () async -> GuardianPlaybackReadiness
         let reportStarted: (Int) -> Void
         let reportFailed: (String) -> Void
@@ -297,7 +358,11 @@ final class GuardianModeManagerEffectPath {
     @discardableResult
     func execute(lease: GuardianWorkLease, operations: Operations) async -> Bool {
         guard !Task.isCancelled else { return false }
-        let inserted = operations.perform(lease, operations.insert)
+        let inserted = operations.perform(lease) {
+            guard operations.insert() else { return false }
+            operations.refillSilence()
+            return true
+        }
         guard inserted else { return false }
 
         let readiness = await operations.awaitReadiness()
@@ -379,7 +444,7 @@ enum GuardianNotificationPolicy {
         lifecycle: GuardianNotificationLifecycle,
         encodedDartDefines: String?
     ) -> GuardianNotificationDisposition {
-        _ = lifecycle // The boundary is intentionally identical in every lifecycle.
+        _ = lifecycle  // The boundary is intentionally identical in every lifecycle.
         guard isGuardianPayload(userInfo) else { return .forward }
         return allowsGuardianDelivery(encodedDartDefines: encodedDartDefines) ? .forward : .suppress
     }
@@ -397,9 +462,8 @@ enum GuardianNotificationPolicy {
         threadIdentifier: String,
         categoryIdentifier: String
     ) -> Bool {
-        threadIdentifier == notificationGroupKey ||
-            categoryIdentifier == notificationCategoryIdentifier ||
-            isGuardianPayload(userInfo)
+        threadIdentifier == notificationGroupKey || categoryIdentifier == notificationCategoryIdentifier
+            || isGuardianPayload(userInfo)
     }
 
     private static func decodeDartDefines(_ encoded: String?) -> [String: String]? {
@@ -407,8 +471,9 @@ enum GuardianNotificationPolicy {
         var result: [String: String] = [:]
         for value in encoded.split(separator: ",", omittingEmptySubsequences: true) {
             guard let data = Data(base64Encoded: String(value)),
-                  let decoded = String(data: data, encoding: .utf8),
-                  let separator = decoded.firstIndex(of: "=") else {
+                let decoded = String(data: data, encoding: .utf8),
+                let separator = decoded.firstIndex(of: "=")
+            else {
                 return nil
             }
             let key = String(decoded[..<separator])

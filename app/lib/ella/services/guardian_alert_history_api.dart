@@ -83,7 +83,7 @@ class GuardianAlertHistoryApi {
       );
       if (response == null || response.statusCode == 404 || response.statusCode == 501) return null;
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        Logger.debug('Guardian alert history fetch failed: ${response.statusCode} ${response.body}');
+        Logger.debug('Guardian alert history fetch failed: status=${response.statusCode}');
         return null;
       }
 

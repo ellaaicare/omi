@@ -42,14 +42,10 @@ class GuardianModeService {
       _updateState(GuardianModeState.idle);
       throw StateError('Guardian is unavailable in this build');
     }
-    if (_currentState == GuardianModeState.active) {
-      print('GuardianMode: Already active');
-      return;
-    }
-
     try {
       await _channel.invokeMethod('configureAvailability', {'enabled': true});
-      // Call iOS native to start silent loop
+      // Always reconcile with native. Dart may still say active after iOS
+      // stopped playback for an interruption or process lifecycle transition.
       await _channel.invokeMethod('start');
       print('GuardianMode: Native started');
 
@@ -58,11 +54,6 @@ class GuardianModeService {
       // Start test audio injection timer (every 5 seconds)
       // _startTestAudioTimer(); // Disabled - using polling service instead
     } catch (e) {
-      try {
-        await _channel.invokeMethod('configureAvailability', {'enabled': false});
-      } catch (_) {
-        // Native setup may already be unavailable; local state still fails closed.
-      }
       print('GuardianMode: Error starting: $e');
       _updateState(GuardianModeState.error);
       rethrow;

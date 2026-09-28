@@ -11079,5 +11079,8 @@
   "diagnosticsWsRate": "Transcription upload rate",
   "ellaServerUnreachableBanner": "Ella can't reach the server right now. Messages will send when you're back online.",
   "aiConsentNeededReview": "AI permission needed · Review",
-  "aiConsentNeededReviewBody": "Ella will wait until you review AI permission."
+  "aiConsentNeededReviewBody": "Ella will wait until you review AI permission.",
+  "todayWhispersPendingSetup": "Whispers will be available when your account finishes setup.",
+  "whispersHistoryUnavailableTitle": "Whispers couldn't load",
+  "whispersHistoryUnavailableBody": "Your Whispers history is still safe. Pull down or try again."
 }

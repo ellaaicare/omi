@@ -18608,6 +18608,24 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Ella will wait until you review AI permission.'**
   String get aiConsentNeededReviewBody;
+
+  /// No description provided for @todayWhispersPendingSetup.
+  ///
+  /// In en, this message translates to:
+  /// **'Whispers will be available when your account finishes setup.'**
+  String get todayWhispersPendingSetup;
+
+  /// No description provided for @whispersHistoryUnavailableTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Whispers couldn\'t load'**
+  String get whispersHistoryUnavailableTitle;
+
+  /// No description provided for @whispersHistoryUnavailableBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Your Whispers history is still safe. Pull down or try again.'**
+  String get whispersHistoryUnavailableBody;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

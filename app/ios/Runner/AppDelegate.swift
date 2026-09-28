@@ -228,10 +228,14 @@ extension FlutterError: Error {}
       switch type {
       case .began:
           print("AppDelegate: Audio session interrupted")
+          GuardianModeManager.shared.handleAudioSessionInterruptionBegan()
       case .ended:
           print("AppDelegate: Audio session interruption ended")
-          // The active feature owns reactivation. AppDelegate must not revive a
-          // stale playAndRecord category after that feature has already stopped.
+          let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+          let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+          GuardianModeManager.shared.handleAudioSessionInterruptionEnded(
+              shouldResume: options.contains(.shouldResume)
+          )
       @unknown default:
           break
       }

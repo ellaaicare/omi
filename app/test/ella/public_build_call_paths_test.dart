@@ -365,6 +365,20 @@ void main() {
       );
       await expectLater(GuardianModeService().start(), throwsA(isA<StateError>()));
       expect(nativeCalls, isEmpty);
+    } else {
+      const channel = MethodChannel('com.ellaaicare.ella/guardian_mode');
+      final nativeCalls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
+        nativeCalls.add(call);
+        return {'status': 'active'};
+      });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null),
+      );
+      await GuardianModeService().start();
+      await GuardianModeService().start();
+      expect(nativeCalls.where((call) => call.method == 'start'), hasLength(2));
+      await GuardianModeService().stop();
     }
 
     expect(
@@ -385,6 +399,8 @@ void main() {
     var guardianReadbackSucceeds = true;
     var guardianNativeStartSucceeds = true;
     var guardianAvailable = false;
+    var guardianPendingSetup = false;
+    ClientApiFailure? guardianReadFailure;
     guardian_model.GuardianModeState? writtenGuardianState;
     final runtimeNow = DateTime(2032, 5, 6, 9, 41);
     final previewNow = DateTime(2025, 7, 24, 9, 41);
@@ -472,16 +488,20 @@ void main() {
                   guardianAvailability: () => guardianAvailable,
                   guardianModeLoader: () async {
                     guardianModeReads++;
-                    return guardianReadbackSucceeds
-                        ? guardian_model.GuardianModeInfo(
-                            currentMode: guardianServerEnabled
-                                ? guardian_model.GuardianModeKey.activeSupport
-                                : guardian_model.GuardianModeKey.off,
-                            twoTierState: guardianServerEnabled
-                                ? const guardian_model.GuardianModeState(features: ['ACTIVE_SUPPORT'])
-                                : const guardian_model.GuardianModeState(),
-                          )
-                        : null;
+                    if (guardianPendingSetup) return const GuardianModeReadResult(pendingSetup: true);
+                    if (guardianReadFailure != null) return GuardianModeReadResult(failure: guardianReadFailure);
+                    return GuardianModeReadResult(
+                      info: guardianReadbackSucceeds
+                          ? guardian_model.GuardianModeInfo(
+                              currentMode: guardianServerEnabled
+                                  ? guardian_model.GuardianModeKey.activeSupport
+                                  : guardian_model.GuardianModeKey.off,
+                              twoTierState: guardianServerEnabled
+                                  ? const guardian_model.GuardianModeState(features: ['ACTIVE_SUPPORT'])
+                                  : const guardian_model.GuardianModeState(),
+                            )
+                          : null,
+                    );
                   },
                   guardianModeSetter: (state) async {
                     guardianModeWrites++;
@@ -596,6 +616,7 @@ void main() {
       // If readback is also unavailable, keep the last verified switch value
       // but disable the control and show no OFF claim until authority returns.
       guardianReadbackSucceeds = false;
+      guardianReadFailure = const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true);
       await tester.tap(
         find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
       );
@@ -611,9 +632,25 @@ void main() {
       expect(find.textContaining('Whispers are off'), findsNothing);
       expect(find.byKey(const Key('whispers-history-entry')), findsOneWidget);
 
-      // Initial reconciliation must also fail closed. If the server says ON,
-      // native start fails, and the compensating server disable is rejected,
-      // Home must not publish a verified OFF state.
+      final stopsBeforeRetryableRefresh = guardianNativeStops;
+      authorityChanges.value++;
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(guardianNativeStops, stopsBeforeRetryableRefresh);
+
+      // Same-UID authority loss is not an offline read. Native polling and
+      // playback must quiesce even though the Firebase UID did not change.
+      final stopsBeforeAuthorityLoss = guardianNativeStops;
+      guardianReadFailure = const ClientApiFailure(ClientApiFailureKind.authenticationRequired);
+      authorityChanges.value++;
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(guardianNativeStops, stopsBeforeAuthorityLoss + 1);
+
+      guardianReadFailure = null;
+
+      // Initial reconciliation preserves the server choice when native start
+      // fails. It must not compensate by writing OFF.
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
       final writesBeforeInitialFailure = guardianModeWrites;
@@ -629,13 +666,28 @@ void main() {
       final initialFailureSwitch = tester.widget<Switch>(
         find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
       );
-      expect(guardianModeWrites, writesBeforeInitialFailure + 1);
+      expect(guardianModeWrites, writesBeforeInitialFailure);
       expect(guardianServerEnabled, isTrue);
       expect(initialFailureSwitch.value, isTrue);
       expect(initialFailureSwitch.onChanged, isNull);
       expect(find.textContaining('Whispers are on'), findsNothing);
       expect(find.textContaining('Whispers are off'), findsNothing);
       expect(find.byKey(const Key('whispers-history-entry')), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+      guardianPendingSetup = true;
+      guardianNativeStartSucceeds = true;
+      await tester.pumpWidget(buildHome(todayKey: UniqueKey()));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      await openHomeControls();
+
+      expect(find.text('Whispers will be available when your account finishes setup.'), findsOneWidget);
+      final pendingSwitch = tester.widget<Switch>(
+        find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
+      );
+      expect(pendingSwitch.onChanged, isNull);
     } else if (!allowsGuardianSurface()) {
       expect(find.byKey(const Key('guardian-whispers-control')), findsNothing);
       expect(find.byKey(const Key('whispers-history-entry')), findsNothing);
