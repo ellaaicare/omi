@@ -541,12 +541,12 @@ def test_scanner_fails_closed_when_mode_authority_is_unavailable(monkeypatch):
 def test_scanner_fails_before_webhook_egress_without_authority(monkeypatch):
     posts = []
     wake_acks = []
-    echo_inspections = []
+    candidate_lookups = []
     monkeypatch.setattr(scanner, "_enqueue_wake_ack", lambda *args, **kwargs: wake_acks.append((args, kwargs)))
     monkeypatch.setattr(
         scanner,
-        "should_suppress_guardian_echo",
-        lambda *args, **kwargs: echo_inspections.append((args, kwargs)) or True,
+        "select_playback_ledger_candidates",
+        lambda *args, **kwargs: candidate_lookups.append((args, kwargs)) or [],
     )
     monkeypatch.setattr(
         scanner,
@@ -568,7 +568,7 @@ def test_scanner_fails_before_webhook_egress_without_authority(monkeypatch):
 
     assert status is None
     assert wake_acks == []
-    assert echo_inspections == []
+    assert candidate_lookups == []
     assert posts == []
 
 
