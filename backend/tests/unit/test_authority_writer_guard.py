@@ -84,6 +84,7 @@ EXPECTED_GLOBAL_USER_WRITERS = {
     ("database/invitations.py", "_bind_verified_identity_on_connection"),
     ("database/invitation_operator.py", "_cleanup_locked"),
     ("database/managed_cloud_consent.py", "synchronize_denial"),
+    ("database/managed_cloud_consent.py", "synchronize_grant"),
     ("database/managed_cloud_consent.py", "unlink_self_owner_account_on_deletion"),
     ("ella/utils/auto_provision.py", "auto_provision_user"),
 }

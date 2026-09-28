@@ -43,6 +43,7 @@ CREATE TABLE users (
     omi_uid TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL DEFAULT 'Synthetic User',
     status TEXT NOT NULL DEFAULT 'ACTIVE',
+    guardian_mode TEXT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

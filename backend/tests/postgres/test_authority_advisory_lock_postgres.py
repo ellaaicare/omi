@@ -908,6 +908,23 @@ async def _prepare_writer_case(
                         "UPDATE users SET status = 'ACTIVE' WHERE id = $1",
                         user_id,
                     )
+                    await conn.execute(
+                        """
+                        INSERT INTO ella_managed_cloud_consent_authority (
+                            user_id, decision, consent_receipt_ref,
+                            profile_binding_id, policy_version,
+                            processor_set_hash, scope_version, scope_hash
+                        ) VALUES (
+                            $1, 'granted', $2, 'synthetic-profile',
+                            'ai-data-processors-v8', $3,
+                            'managed-cloud-internal-pilot-v2', $4
+                        )
+                        """,
+                        user_id,
+                        "sha256:" + ("a" * 64),
+                        "sha256:" + ("b" * 64),
+                        "sha256:" + ("c" * 64),
+                    )
         owner = authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
         if name == "identity_bind":
 
@@ -1884,8 +1901,8 @@ def test_consent_bootstrap_creates_users_row_and_grant():
         async with pool.acquire() as observer:
             row = await observer.fetchrow(
                 """
-                SELECT id, omi_uid, email, name, timezone, status, identities,
-                       updated_at
+                SELECT id, omi_uid, email, name, timezone, status,
+                       guardian_mode, identities, updated_at
                 FROM users
                 WHERE omi_uid = $1
                 """,
@@ -1915,7 +1932,8 @@ def test_consent_bootstrap_creates_users_row_and_grant():
             "fresh-consent@example.invalid",
             "Synthetic User",
             "UTC",
-            "PENDING",
+            "ACTIVE",
+            "OFF",
         )
         assert identities == {"omi_uid": uid, "email": "fresh-consent@example.invalid"}
         assert row["updated_at"] is not None
@@ -1986,6 +2004,122 @@ def test_consent_bootstrap_creates_users_row_and_grant():
                 strict_uid,
             )
         assert strict_count == 0
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_consented_pending_user_can_enable_guardian_and_activates_atomically():
+    async def scenario(pool):
+        uid = "synthetic-consented-pending-guardian"
+        await managed_cloud_consent.synchronize_grant(
+            grant=_managed_cloud_grant(uid),
+            allow_fresh_uid_bootstrap=True,
+            bootstrap_email="consented-pending@example.invalid",
+        )
+        await pool.execute(
+            "UPDATE users SET status = 'PENDING', guardian_mode = NULL WHERE omi_uid = $1",
+            uid,
+        )
+
+        updated = await EllaProvisioningRepository(pool).update_guardian_mode(uid, "ACTIVE_SUPPORT")
+
+        row = await pool.fetchrow(
+            "SELECT status, guardian_mode FROM users WHERE omi_uid = $1",
+            uid,
+        )
+        assert updated == "ACTIVE_SUPPORT"
+        assert tuple(row.values()) == ("ACTIVE", "ACTIVE_SUPPORT")
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_unconsented_pending_user_cannot_enable_guardian():
+    async def scenario(pool):
+        uid = "synthetic-unconsented-pending-guardian"
+        repository = EllaProvisioningRepository(pool)
+        await repository.ensure_user_identity(
+            uid=uid,
+            email="unconsented-pending@example.invalid",
+            name="Pending User",
+            timezone_name="UTC",
+        )
+
+        with pytest.raises(LookupError, match="active_or_currently_consented_user_not_found"):
+            await repository.update_guardian_mode(uid, "ACTIVE_SUPPORT")
+
+        row = await pool.fetchrow(
+            "SELECT status, guardian_mode FROM users WHERE omi_uid = $1",
+            uid,
+        )
+        assert tuple(row.values()) == ("PENDING", "OFF")
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_guardian_reenable_fails_closed_after_consent_revocation():
+    async def scenario(pool):
+        uid = "synthetic-guardian-revoked"
+        await managed_cloud_consent.synchronize_grant(
+            grant=_managed_cloud_grant(uid),
+            allow_fresh_uid_bootstrap=True,
+            bootstrap_email="guardian-revoked@example.invalid",
+        )
+        repository = EllaProvisioningRepository(pool)
+        assert await repository.update_guardian_mode(uid, "ACTIVE_SUPPORT") == "ACTIVE_SUPPORT"
+
+        await managed_cloud_consent.synchronize_denial(
+            uid=uid,
+            decision="revoked",
+            verified_email="guardian-revoked@example.invalid",
+        )
+
+        row = await pool.fetchrow(
+            """
+            SELECT account.status, account.guardian_mode, authority.decision,
+                   authority.consent_receipt_ref
+            FROM users account
+            JOIN ella_managed_cloud_consent_authority authority
+              ON authority.user_id = account.id
+            WHERE account.omi_uid = $1
+            """,
+            uid,
+        )
+        assert tuple(row.values()) == ("ACTIVE", "OFF", "revoked", None)
+
+        with pytest.raises(LookupError, match="active_or_currently_consented_user_not_found"):
+            await repository.update_guardian_mode(uid, "ACTIVE_SUPPORT")
+
+        assert (
+            await pool.fetchval(
+                "SELECT guardian_mode FROM users WHERE omi_uid = $1",
+                uid,
+            )
+            == "OFF"
+        )
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_runtime_activation_initializes_explicit_guardian_default():
+    async def scenario(pool):
+        uid = "synthetic-runtime-activation-default"
+        user_id = await pool.fetchval(
+            """
+            INSERT INTO users (omi_uid, email, status, guardian_mode, profile_class)
+            VALUES ($1, $2, 'PENDING', NULL, 'synthetic')
+            RETURNING id
+            """,
+            uid,
+            "runtime-activation@example.invalid",
+        )
+
+        await EllaProvisioningRepository(pool).activate_user(uid)
+
+        row = await pool.fetchrow(
+            "SELECT id, status, guardian_mode FROM users WHERE omi_uid = $1",
+            uid,
+        )
+        assert tuple(row.values()) == (user_id, "ACTIVE", "OFF")
 
     asyncio.run(_run_with_database(scenario))
 
