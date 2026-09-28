@@ -211,8 +211,25 @@ class FakeSyncSegmentStore:
                 return {"outcome": "done", "kind": receipt["kind"], "conversation_id": receipt["conversation_id"]}
             if receipt and receipt["state"] == "processing":
                 return {"outcome": "busy"}
-            self._segments[key] = {"state": "processing", "claimant": claimant}
-            return {"outcome": "claimed", "claimant": claimant}
+            # SYNC-V2-002 (new-conversation branch): the reserved id is deterministic from
+            # (uid, segment_id) alone, same as the real `reserved_new_conversation_id`. On a
+            # (re)claim -- no prior receipt, or a prior attempt that failed/expired -- check
+            # whether an earlier attempt's `process_conversation` already durably committed a
+            # conversation at that exact id even though this segment's own completion write
+            # never landed (or its claimant just never got that far). If so, resume that result
+            # instead of letting the caller re-run STT/LLM/persistence.
+            reserved_id = (receipt or {}).get("reserved_conversation_id") or f"reserved-{uid}-{segment_id}"
+            if reserved_id in self.conversations.conversations:
+                self._segments[key] = {
+                    "state": "done",
+                    "claimant": claimant,
+                    "kind": "new_memories",
+                    "conversation_id": reserved_id,
+                    "reserved_conversation_id": reserved_id,
+                }
+                return {"outcome": "done", "kind": "new_memories", "conversation_id": reserved_id}
+            self._segments[key] = {"state": "processing", "claimant": claimant, "reserved_conversation_id": reserved_id}
+            return {"outcome": "claimed", "claimant": claimant, "reserved_conversation_id": reserved_id}
 
     def complete_new_conversation(self, uid, segment_id, claimant, conversation_id, **_kwargs):
         with self._lock:
@@ -610,28 +627,105 @@ def test_v2_sync_local_files_claim_outage_fails_closed_not_false_success(monkeyp
 def test_v2_sync_local_files_new_conversation_completion_outage_fails_closed(monkeypatch, tmp_path):
     """SYNC-V2-001 (new-conversation branch): if the durable-completion write after creating a
     brand-new conversation fails, the segment must still be reported failed, never a false-success
-    200 — otherwise a later replay has no durable record to dedupe against."""
+    200 — otherwise a later replay has no durable record to dedupe against.
+
+    SYNC-V2-002 (round 3 review): that "later replay" is exactly what happens next in real life —
+    the client retries the same segment. `process_segment` persists the new conversation via
+    `process_conversation` *before* this best-effort completion write, so a retry after this exact
+    failure must not re-run STT/LLM/persistence and must not create a second conversation: it must
+    recognize the reserved deterministic id already has a durable conversation sitting at it and
+    resume that result. Wires its own claim/conversation stores (rather than the shared
+    `_stub_stt_and_llm` helper) so the fake `process_conversation` can honor
+    `CreateConversation.explicit_id` — the actual mechanism this fix depends on — and so the test
+    can inspect exactly what got durably created."""
     segment_path = str(tmp_path / f"{BIN_TIMESTAMP + 61}.wav")
-    Path(segment_path).write_bytes(b"completion-outage-segment-bytes")
+    segment_bytes = b"completion-outage-segment-bytes"
     _stub_vad_with_fixed_segment(monkeypatch, segment_path)
-    created = _stub_stt_and_llm(monkeypatch)
+
+    conversations = FakeConversationStore()
+    segments = FakeSyncSegmentStore(conversations)
+    monkeypatch.setattr(sync, "claim_or_get_sync_segment", segments.claim_or_get)
+    monkeypatch.setattr(sync, "release_sync_segment", segments.release)
+    monkeypatch.setattr(sync, "get_closest_conversation_to_timestamps", lambda uid, s, e: None)
+
+    stt_calls = {"n": 0}
+
+    def counting_deepgram(url, speakers_count=3, attempts=0, return_language=True):
+        stt_calls["n"] += 1
+        return (["stub-words"], "en")
+
+    def fake_postprocess_words(words, offset):
+        return [TranscriptSegment(text="hello there", is_user=False, start=0.0, end=3.0)]
+
+    created = {"calls": 0}
+
+    def fake_process_conversation(uid, language, create_memory):
+        created["calls"] += 1
+        conversation_id = create_memory.explicit_id
+        assert conversation_id, "process_segment must reserve and pass an explicit conversation id"
+        # Mirrors what the real `process_conversation` durably commits: a conversation document
+        # at exactly the reserved id.
+        conversations.conversations[conversation_id] = {
+            "id": conversation_id,
+            "started_at": create_memory.started_at,
+            "finished_at": create_memory.finished_at,
+            "transcript_segments": [],
+            "discarded": False,
+            "_version": 0,
+        }
+        return SimpleNamespace(id=conversation_id)
+
+    monkeypatch.setattr(sync, "deepgram_prerecorded", counting_deepgram)
+    monkeypatch.setattr(sync, "postprocess_words", fake_postprocess_words)
+    monkeypatch.setattr(sync, "process_conversation", fake_process_conversation)
+
+    complete_calls = {"n": 0}
 
     def broken_complete(uid, segment_id, claimant, conversation_id, **_kwargs):
+        complete_calls["n"] += 1
         raise ConnectionError("firestore unavailable")
 
     monkeypatch.setattr(sync, "complete_new_conversation_sync_segment", broken_complete)
 
     app = _app_with_uid_override("uid-completion-outage")
     client = TestClient(app)
-    resp = client.post(
+
+    Path(segment_path).write_bytes(segment_bytes)
+    first = client.post(
         "/v2/sync-local-files",
-        files=_bin_upload(f"audio_omibatch_opus_16000_1_fs160_{BIN_TIMESTAMP}.bin", b"raw-bin-bytes"),
+        files=_bin_upload(f"audio_omibatch_opus_16000_1_fs160_{BIN_TIMESTAMP}.bin", b"raw-bin-bytes-1"),
     )
 
-    assert resp.status_code == 500
+    assert first.status_code == 500
     # Processing itself succeeded (STT ran, a conversation was created) — it's specifically the
     # durable-completion write that failed, and that alone must still fail the segment closed.
     assert created["calls"] == 1
+    assert stt_calls["n"] == 1
+    assert complete_calls["n"] == 1
+    assert len(conversations.conversations) == 1
+    reserved_id = next(iter(conversations.conversations))
+
+    # The client retries with the exact same audio content after the failure. The completion
+    # write is deliberately left broken: the retry must succeed WITHOUT ever needing it to work,
+    # because the claim step itself recognizes the reserved id's conversation already exists.
+    Path(segment_path).write_bytes(segment_bytes)
+    second = client.post(
+        "/v2/sync-local-files",
+        files=_bin_upload(f"audio_omibatch_opus_16000_1_fs160_{BIN_TIMESTAMP + 1}.bin", b"raw-bin-bytes-2"),
+    )
+
+    assert second.status_code == 200
+    body = second.json()
+    assert body["new_memories"] == [reserved_id]
+    assert body["updated_memories"] == []
+    assert body["failed_segments"] == 0
+    # The pipeline ran exactly once in total: the retry replayed the reserved id's durable
+    # conversation instead of re-running STT/LLM/persistence, and never called (let alone
+    # depended on) the still-broken completion write again.
+    assert created["calls"] == 1
+    assert stt_calls["n"] == 1
+    assert complete_calls["n"] == 1
+    assert len(conversations.conversations) == 1
 
 
 def test_v2_sync_local_files_append_transaction_outage_then_retry_writes_segment_exactly_once(monkeypatch, tmp_path):

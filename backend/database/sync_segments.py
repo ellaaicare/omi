@@ -29,10 +29,23 @@ one execution reaches that point per lease window.
 
 Redis may remain in this codebase as an optional read-through cache elsewhere, but it is never the
 source of truth for whether a sync segment was already processed.
+
+**New-conversation retries (SYNC-V2-002, round 3):** creating a brand-new conversation still can't
+be folded into the segment's own Firestore transaction -- `process_conversation` is a whole
+LLM/STT pipeline, not a Firestore write. What closes the gap instead is a *deterministic* target:
+`reserved_new_conversation_id(uid, segment_id)` always returns the same id for the same segment, so
+it is reserved into the claim record *before* the pipeline ever runs (`claim_or_get_sync_segment`).
+If a later attempt (a retry after the completion write failed, or a successor claiming after the
+original claimant's lease expired) finds a conversation already durably sitting at that exact id,
+it means an earlier attempt's pipeline already committed it -- so `claim_or_get_sync_segment`
+short-circuits straight to `'done'` with that id, and the caller never re-runs STT/LLM/persistence.
+`process_conversation` itself (see `utils/conversations/process_conversation.py`) is also made
+idempotent for an explicit id as a second, independent line of defense.
 """
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -47,6 +60,24 @@ SYNC_SEGMENTS_COLLECTION = 'sync_v2_segments'
 # Generous relative to one segment's STT + LLM + persistence latency, short relative to a human
 # noticing a stuck upload.
 SEGMENT_LEASE_SECONDS = 15 * 60
+
+# Fixed, never-changing namespace for the UUIDv5 conversation ids `reserved_new_conversation_id`
+# derives below. Changing this constant would change every future reservation's id -- it must
+# stay fixed for the lifetime of this feature.
+_RESERVED_CONVERSATION_ID_NAMESPACE = uuid.UUID('c9f6b1d2-5b8e-4c3a-9d7b-2f6a3b8e1c0d')
+
+
+def reserved_new_conversation_id(uid: str, segment_id: str) -> str:
+    """Deterministic id for the conversation a sync-v2 segment would create *if* it turns out to
+    start a brand new conversation (never used for the append-to-existing-conversation outcome).
+    Same (uid, segment_id) always yields the same id, independent of the audio content and of
+    which attempt/claimant ultimately runs the pipeline -- so a retry can recognize its own prior
+    attempt's conversation purely from (uid, segment_id), before ever touching STT/LLM."""
+    return str(uuid.uuid5(_RESERVED_CONVERSATION_ID_NAMESPACE, f'{uid}:{segment_id}'))
+
+
+def _conversation_ref(uid: str, conversation_id: str):
+    return db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
 
 
 def _segment_ref(uid: str, segment_id: str):
@@ -73,7 +104,13 @@ def _done_result(receipt: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _claim_sync_segment_transaction(
-    transaction, segment_ref, claimant: str, now: datetime, lease_seconds: int
+    transaction,
+    segment_ref,
+    conversation_ref,
+    reserved_conversation_id: str,
+    claimant: str,
+    now: datetime,
+    lease_seconds: int,
 ) -> Dict[str, Any]:
     snapshot = segment_ref.get(transaction=transaction)
     if snapshot.exists:
@@ -82,8 +119,24 @@ def _claim_sync_segment_transaction(
             return _done_result(receipt)
         if receipt.get('state') == 'processing' and _is_future(receipt.get('lease_expires_at'), now):
             return {'outcome': 'busy'}
-        # 'failed', or 'processing' with an expired lease (claimant died mid-work): fall through
-        # and (re)claim.
+        # 'failed', or 'processing' with an expired lease (claimant died mid-work): before
+        # (re)claiming, check whether an earlier attempt already durably created the
+        # deterministically-reserved conversation for this exact segment (SYNC-V2-002) -- e.g. its
+        # `process_conversation` commit succeeded but the completion write after it failed, or its
+        # lease simply expired before it got that far. If so, resume that result instead of
+        # re-running STT/LLM/persistence: mark the segment done and hand back the same id.
+        reserved_id = receipt.get('reserved_conversation_id') or reserved_conversation_id
+        existing_conversation = conversation_ref.get(transaction=transaction)
+        if existing_conversation.exists:
+            done_update = {
+                'state': 'done',
+                'kind': 'new_memories',
+                'conversation_id': reserved_id,
+                'completed_at': now,
+                'reserved_conversation_id': reserved_id,
+            }
+            transaction.set(segment_ref, done_update, merge=True)
+            return _done_result(done_update)
     transaction.set(
         segment_ref,
         {
@@ -91,14 +144,19 @@ def _claim_sync_segment_transaction(
             'claimant': claimant,
             'claimed_at': now,
             'lease_expires_at': now + timedelta(seconds=lease_seconds),
+            'reserved_conversation_id': reserved_conversation_id,
         },
     )
-    return {'outcome': 'claimed', 'claimant': claimant}
+    return {'outcome': 'claimed', 'claimant': claimant, 'reserved_conversation_id': reserved_conversation_id}
 
 
 @transactional
-def _claim_sync_segment(transaction, segment_ref, claimant: str, now: datetime, lease_seconds: int) -> Dict[str, Any]:
-    return _claim_sync_segment_transaction(transaction, segment_ref, claimant, now, lease_seconds)
+def _claim_sync_segment(
+    transaction, segment_ref, conversation_ref, reserved_conversation_id, claimant, now, lease_seconds
+) -> Dict[str, Any]:
+    return _claim_sync_segment_transaction(
+        transaction, segment_ref, conversation_ref, reserved_conversation_id, claimant, now, lease_seconds
+    )
 
 
 def claim_or_get_sync_segment(
@@ -114,13 +172,25 @@ def claim_or_get_sync_segment(
 
     Outcomes:
       * 'done' (+ kind/conversation_id) -- this segment was already durably processed (including
-        by an attempt whose HTTP response never reached the client). Report this result; never
-        re-run STT/LLM/persistence.
+        by an attempt whose HTTP response never reached the client, or whose new-conversation
+        commit succeeded but whose completion write afterward failed -- see
+        `reserved_new_conversation_id`). Report this result; never re-run STT/LLM/persistence.
       * 'busy' -- another execution currently holds the claim; back off as retryable.
-      * 'claimed' -- this claimant may proceed with STT/LLM/persistence for this segment id.
+      * 'claimed' (+ reserved_conversation_id) -- this claimant may proceed with STT/LLM/persistence
+        for this segment id. If the pipeline decides to start a brand new conversation, it must
+        create it at exactly [reserved_conversation_id] (see `routers/sync.py::process_segment`).
     """
     now = now or datetime.now(timezone.utc)
-    return _claim_sync_segment(db.transaction(), _segment_ref(uid, segment_id), claimant, now, lease_seconds)
+    reserved_conversation_id = reserved_new_conversation_id(uid, segment_id)
+    return _claim_sync_segment(
+        db.transaction(),
+        _segment_ref(uid, segment_id),
+        _conversation_ref(uid, reserved_conversation_id),
+        reserved_conversation_id,
+        claimant,
+        now,
+        lease_seconds,
+    )
 
 
 # **********************************************
@@ -238,9 +308,7 @@ def append_segment_to_conversation_and_complete(
     """
     now = now or datetime.now(timezone.utc)
     segment_ref = _segment_ref(uid, segment_id)
-    conversation_ref = (
-        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
-    )
+    conversation_ref = _conversation_ref(uid, conversation_id)
     return _append_segment_to_conversation_and_complete(
         db.transaction(), segment_ref, conversation_ref, uid, claimant, new_transcript_segments, segment_timestamp, now
     )

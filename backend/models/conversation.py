@@ -561,6 +561,12 @@ class CreateConversation(BaseModel):
     processing_conversation_id: Optional[str] = None
     calendar_meeting_context: Optional[CalendarMeetingContext] = None
 
+    # When set, the conversation this creates must be persisted at exactly this id instead of a
+    # fresh uuid4 (see `utils/conversations/process_conversation.py::_get_conversation_obj` and
+    # `database/sync_segments.py::reserved_new_conversation_id`). Every other caller leaves this
+    # unset and keeps today's random-id behavior.
+    explicit_id: Optional[str] = None
+
     def get_transcript(self, include_timestamps: bool, people: List[Person] = None) -> str:
         return TranscriptSegment.segments_as_string(
             self.transcript_segments, include_timestamps=include_timestamps, people=people

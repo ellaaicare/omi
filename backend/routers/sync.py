@@ -674,6 +674,7 @@ def process_segment(
     geolocation: Optional[Geolocation] = None,
     segment_id: Optional[str] = None,
     claimant: Optional[str] = None,
+    reserved_conversation_id: Optional[str] = None,
 ):
     """Transcribe one VAD-segmented audio file and attach it to a conversation.
 
@@ -691,6 +692,12 @@ def process_segment(
     `done` never re-runs STT/LLM/persistence, and a failure never leaves the two out of sync.
     Without them (the `/v1/sync-local-files` path), the conversation write is still concurrency-safe
     on its own, just not idempotency-tracked.
+
+    [reserved_conversation_id], when given (always alongside [segment_id]/[claimant] — see
+    `database.sync_segments.claim_or_get_sync_segment`'s `'claimed'` outcome), is the deterministic
+    id this exact segment must create its conversation at if it turns out to start a brand new one
+    (SYNC-V2-002): the *reason* a retry after a post-commit completion failure can recognize its
+    own prior attempt's conversation and resume rather than duplicate it.
 
     Returns `(kind, conversation_id)` — `kind` is `'new_memories'` or `'updated_memories'` — for the
     conversation this segment ended up in, or `None` when nothing was transcribed.
@@ -727,6 +734,7 @@ def process_segment(
             transcript_segments=transcript_segments,
             source=source,
             geolocation=geolocation,
+            explicit_id=reserved_conversation_id,
         )
         created = process_conversation(uid, language, create_memory)
         kind, result_conversation_id = 'new_memories', created.id
@@ -1038,6 +1046,7 @@ async def sync_local_files_v2(
                         geolocation=geolocation,
                         segment_id=segment_id,
                         claimant=claimant,
+                        reserved_conversation_id=claim.get('reserved_conversation_id'),
                     )
                     if outcome is None:
                         # Nothing transcribed — nothing durable to record. Release the claim so a
