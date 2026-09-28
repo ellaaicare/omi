@@ -44,6 +44,8 @@ class BlePeripheral {
     required this.name,
     required this.rssi,
     required this.serviceUuids,
+    this.hasAdvertisedLocalName = false,
+    this.hasPeripheralName = false,
   });
 
   String uuid;
@@ -54,12 +56,22 @@ class BlePeripheral {
 
   List<String> serviceUuids;
 
+  /// Whether the advertisement's `CBAdvertisementDataLocalNameKey` was present.
+  /// Redacted discovery diagnostic; never paired with the name/UUID values themselves.
+  bool hasAdvertisedLocalName;
+
+  /// Whether `CBPeripheral.name` (the OS's cached GAP name) was present.
+  /// Redacted discovery diagnostic; never paired with the name/UUID values themselves.
+  bool hasPeripheralName;
+
   List<Object?> _toList() {
     return <Object?>[
       uuid,
       name,
       rssi,
       serviceUuids,
+      hasAdvertisedLocalName,
+      hasPeripheralName,
     ];
   }
 
@@ -74,6 +86,8 @@ class BlePeripheral {
       name: result[1]! as String,
       rssi: result[2]! as int,
       serviceUuids: (result[3] as List<Object?>?)!.cast<String>(),
+      hasAdvertisedLocalName: result.length > 4 ? (result[4] as bool?) ?? false : false,
+      hasPeripheralName: result.length > 5 ? (result[5] as bool?) ?? false : false,
     );
   }
 
