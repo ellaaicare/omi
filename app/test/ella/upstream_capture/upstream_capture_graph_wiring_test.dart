@@ -164,9 +164,10 @@ void main() {
     final settings =
         xcconfig.split('\n').map((l) => l.replaceFirst(RegExp(r'//.*$'), '').trim()).where((l) => l.isNotEmpty);
 
-    test('one activation setting, default NO', () {
+    test('the immutable internal build source explicitly pairs flag ON with build 873', () {
       final assignments = settings.where((l) => RegExp(r'^ELLA_UPSTREAM_CAPTURE_ENABLED\s*=').hasMatch(l)).toList();
-      expect(assignments, ['ELLA_UPSTREAM_CAPTURE_ENABLED = NO']);
+      expect(assignments, ['ELLA_UPSTREAM_CAPTURE_ENABLED = YES']);
+      expect(_read('pubspec.yaml'), contains('version: 1.0.572+873'));
     });
 
     test('the same value drives source exclusion, the Swift #if condition and the C define', () {
@@ -293,8 +294,9 @@ void main() {
       addTearDown(() => tmp.deleteSync(recursive: true));
       Directory('${tmp.path}/app/ios/Flutter').createSync(recursive: true);
       Directory('${tmp.path}/app/ios/scripts').createSync(recursive: true);
-      File('${tmp.path}/app/ios/Flutter/EllaUpstreamCapture.xcconfig').writeAsStringSync(
-          xcconfig.replaceFirst('ELLA_UPSTREAM_CAPTURE_ENABLED = NO', 'ELLA_UPSTREAM_CAPTURE_ENABLED = $value'));
+      File('${tmp.path}/app/ios/Flutter/EllaUpstreamCapture.xcconfig').writeAsStringSync(xcconfig.replaceFirst(
+          RegExp(r'^ELLA_UPSTREAM_CAPTURE_ENABLED\s*=\s*(?:YES|NO)\s*$', multiLine: true),
+          'ELLA_UPSTREAM_CAPTURE_ENABLED = $value'));
       File('$_app/ios/scripts/ella_upstream_capture_build_config.sh').copySync('${tmp.path}/app/ios/scripts/cfg.sh');
       final out = '${tmp.path}/defines.json';
       final result = await Process.run('bash', ['${tmp.path}/app/ios/scripts/cfg.sh', out]);
