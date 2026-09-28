@@ -122,6 +122,13 @@ extension FlutterError: Error {}
       // Create WiFi Network plugin for device AP connection
       _ = WifiNetworkPlugin(messenger: controller.binaryMessenger)
 
+#if ELLA_UPSTREAM_CAPTURE_ENABLED_YES
+      // Upstream capture port (ellaaicare/ella-ai#1280): register the vendored
+      // BasedHardware/omi BLE + PhoneMic Pigeon hosts. Compiled only when
+      // ios/Flutter/EllaUpstreamCapture.xcconfig sets ELLA_UPSTREAM_CAPTURE_ENABLED = YES.
+      EllaUpstreamCaptureNativeHost.shared.register(binaryMessenger: controller.binaryMessenger)
+#endif
+
     // here, Without this code the task will not work.
     SwiftFlutterForegroundTaskPlugin.setPluginRegistrantCallback { registry in
       GeneratedPluginRegistrant.register(with: registry)
@@ -540,6 +547,9 @@ extension FlutterError: Error {}
   }
 
   override func applicationWillTerminate(_ application: UIApplication) {
+#if ELLA_UPSTREAM_CAPTURE_ENABLED_YES
+    EllaUpstreamCaptureNativeHost.shared.applicationWillTerminate()
+#endif
     // Remove audio session observers
     NotificationCenter.default.removeObserver(self, name: AVAudioSession.interruptionNotification, object: nil)
     NotificationCenter.default.removeObserver(self, name: AVAudioSession.routeChangeNotification, object: nil)

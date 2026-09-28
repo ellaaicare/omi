@@ -48,6 +48,33 @@
 		EAVR11111111111111111111 /* EllaVoiceAudioRoutePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = EAVR00000000000000000001 /* EllaVoiceAudioRoutePolicy.swift */; };
 		ELLA01000000000000000002 /* EllaLaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = ELLA01000000000000000001 /* EllaLaunchScreen.storyboard */; };
 		FAD7504969BE8B6F6D8D0BD1 /* devLaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = EF770A936DE2AA63387FD198 /* devLaunchScreen.storyboard */; };
+		E11AC0DE2B00000000000002 /* BleHostApiImpl.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000001 /* BleHostApiImpl.swift */; };
+		E11AC0DE2B00000000000004 /* OmiBleConnectionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000003 /* OmiBleConnectionPolicy.swift */; };
+		E11AC0DE2B00000000000006 /* OmiBleDiscoveryNaming.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000005 /* OmiBleDiscoveryNaming.swift */; };
+		E11AC0DE2B00000000000008 /* OmiBleEnergyPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000007 /* OmiBleEnergyPolicy.swift */; };
+		E11AC0DE2B0000000000000A /* OmiBleManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000009 /* OmiBleManager.swift */; };
+		E11AC0DE2B0000000000000C /* OmiBlePairingPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F0000000000000B /* OmiBlePairingPolicy.swift */; };
+		E11AC0DE2B0000000000000F /* PhoneMicBatchAudioWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F0000000000000E /* PhoneMicBatchAudioWriter.swift */; };
+		E11AC0DE2B00000000000011 /* PhoneMicCaptureEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000010 /* PhoneMicCaptureEngine.swift */; };
+		E11AC0DE2B00000000000013 /* PhoneMicController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000012 /* PhoneMicController.swift */; };
+		E11AC0DE2B00000000000015 /* PhoneMicControllerSeams.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000014 /* PhoneMicControllerSeams.swift */; };
+		E11AC0DE2B00000000000017 /* PhoneMicConverterPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000016 /* PhoneMicConverterPipeline.swift */; };
+		E11AC0DE2B00000000000019 /* PhoneMicEventEmitter.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000018 /* PhoneMicEventEmitter.swift */; };
+		E11AC0DE2B0000000000001B /* PhoneMicHostApiImpl.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F0000000000001A /* PhoneMicHostApiImpl.swift */; };
+		E11AC0DE2B0000000000001D /* PhoneMicInterruptionMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F0000000000001C /* PhoneMicInterruptionMonitor.swift */; };
+		E11AC0DE2B0000000000001F /* PhoneMicOpusEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F0000000000001E /* PhoneMicOpusEncoder.swift */; };
+		E11AC0DE2B00000000000022 /* PhoneMicOpusShim.m in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000021 /* PhoneMicOpusShim.m */; };
+		E11AC0DE2B00000000000024 /* PhoneMicPermissionGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000023 /* PhoneMicPermissionGate.swift */; };
+		E11AC0DE2B00000000000026 /* PhoneMicPigeon.g.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000025 /* PhoneMicPigeon.g.swift */; };
+		E11AC0DE2B00000000000028 /* PhoneMicSessionConfigurator.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000027 /* PhoneMicSessionConfigurator.swift */; };
+		E11AC0DE2B0000000000002B /* BaseBatchAudioWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F0000000000002A /* BaseBatchAudioWriter.swift */; };
+		E11AC0DE2B0000000000002D /* BatchAudioWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F0000000000002C /* BatchAudioWriter.swift */; };
+		E11AC0DE2B0000000000002F /* LimitlessBatchAudioWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F0000000000002E /* LimitlessBatchAudioWriter.swift */; };
+		E11AC0DE2B00000000000032 /* LimitlessFlashDrainEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000031 /* LimitlessFlashDrainEngine.swift */; };
+		E11AC0DE2B00000000000034 /* LimitlessProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000033 /* LimitlessProtocol.swift */; };
+		E11AC0DE2B00000000000037 /* PigeonCommunicator.g.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000036 /* PigeonCommunicator.g.swift */; };
+		E11AC0DE2B00000000000039 /* SyncTransferBackgroundLease.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000038 /* SyncTransferBackgroundLease.swift */; };
+		E11AC0DE5E0000000000B001 /* EllaUpstreamCaptureNativeHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE5E0000000000A001 /* EllaUpstreamCaptureNativeHost.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -149,6 +176,35 @@
 		EAVR00000000000000000001 /* EllaVoiceAudioRoutePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EllaVoiceAudioRoutePolicy.swift; sourceTree = "<group>"; };
 		ELLA01000000000000000001 /* EllaLaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = EllaLaunchScreen.storyboard; path = Runner/Base.lproj/EllaLaunchScreen.storyboard; sourceTree = "<group>"; };
 		FG12345678901234567890FG /* WifiNetworkPlugin.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = WifiNetworkPlugin.swift; sourceTree = "<group>"; };
+		E11AC0DE1F00000000000001 /* BleHostApiImpl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BleHostApiImpl.swift; sourceTree = "<group>"; };
+		E11AC0DE1F00000000000003 /* OmiBleConnectionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OmiBleConnectionPolicy.swift; sourceTree = "<group>"; };
+		E11AC0DE1F00000000000005 /* OmiBleDiscoveryNaming.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OmiBleDiscoveryNaming.swift; sourceTree = "<group>"; };
+		E11AC0DE1F00000000000007 /* OmiBleEnergyPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OmiBleEnergyPolicy.swift; sourceTree = "<group>"; };
+		E11AC0DE1F00000000000009 /* OmiBleManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OmiBleManager.swift; sourceTree = "<group>"; };
+		E11AC0DE1F0000000000000B /* OmiBlePairingPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OmiBlePairingPolicy.swift; sourceTree = "<group>"; };
+		E11AC0DE1F0000000000000E /* PhoneMicBatchAudioWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMicBatchAudioWriter.swift; sourceTree = "<group>"; };
+		E11AC0DE1F00000000000010 /* PhoneMicCaptureEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMicCaptureEngine.swift; sourceTree = "<group>"; };
+		E11AC0DE1F00000000000012 /* PhoneMicController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMicController.swift; sourceTree = "<group>"; };
+		E11AC0DE1F00000000000014 /* PhoneMicControllerSeams.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMicControllerSeams.swift; sourceTree = "<group>"; };
+		E11AC0DE1F00000000000016 /* PhoneMicConverterPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMicConverterPipeline.swift; sourceTree = "<group>"; };
+		E11AC0DE1F00000000000018 /* PhoneMicEventEmitter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMicEventEmitter.swift; sourceTree = "<group>"; };
+		E11AC0DE1F0000000000001A /* PhoneMicHostApiImpl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMicHostApiImpl.swift; sourceTree = "<group>"; };
+		E11AC0DE1F0000000000001C /* PhoneMicInterruptionMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMicInterruptionMonitor.swift; sourceTree = "<group>"; };
+		E11AC0DE1F0000000000001E /* PhoneMicOpusEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMicOpusEncoder.swift; sourceTree = "<group>"; };
+		E11AC0DE1F00000000000020 /* PhoneMicOpusShim.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PhoneMicOpusShim.h; sourceTree = "<group>"; };
+		E11AC0DE1F00000000000021 /* PhoneMicOpusShim.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PhoneMicOpusShim.m; sourceTree = "<group>"; };
+		E11AC0DE1F00000000000023 /* PhoneMicPermissionGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMicPermissionGate.swift; sourceTree = "<group>"; };
+		E11AC0DE1F00000000000025 /* PhoneMicPigeon.g.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMicPigeon.g.swift; sourceTree = "<group>"; };
+		E11AC0DE1F00000000000027 /* PhoneMicSessionConfigurator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMicSessionConfigurator.swift; sourceTree = "<group>"; };
+		E11AC0DE1F0000000000002A /* BaseBatchAudioWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BaseBatchAudioWriter.swift; sourceTree = "<group>"; };
+		E11AC0DE1F0000000000002C /* BatchAudioWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchAudioWriter.swift; sourceTree = "<group>"; };
+		E11AC0DE1F0000000000002E /* LimitlessBatchAudioWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LimitlessBatchAudioWriter.swift; sourceTree = "<group>"; };
+		E11AC0DE1F00000000000031 /* LimitlessFlashDrainEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LimitlessFlashDrainEngine.swift; sourceTree = "<group>"; };
+		E11AC0DE1F00000000000033 /* LimitlessProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LimitlessProtocol.swift; sourceTree = "<group>"; };
+		E11AC0DE1F00000000000036 /* PigeonCommunicator.g.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PigeonCommunicator.g.swift; sourceTree = "<group>"; };
+		E11AC0DE1F00000000000038 /* SyncTransferBackgroundLease.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncTransferBackgroundLease.swift; sourceTree = "<group>"; };
+		E11AC0DE4D0000000000003A /* EllaUpstreamCapture.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = EllaUpstreamCapture.xcconfig; path = Flutter/EllaUpstreamCapture.xcconfig; sourceTree = "<group>"; };
+		E11AC0DE5E0000000000A001 /* EllaUpstreamCaptureNativeHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EllaUpstreamCaptureNativeHost.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -226,6 +282,7 @@
 				556416C8748DD3DD2C06A9DB /* devProfile.xcconfig */,
 				79B00761CB247C7EC7C8983B /* devRelease.xcconfig */,
 				CF0FE6142D61FDC10072C10D /* Custom.xcconfig */,
+				E11AC0DE4D0000000000003A /* EllaUpstreamCapture.xcconfig */,
 			);
 			name = Flutter;
 			sourceTree = "<group>";
@@ -268,6 +325,13 @@
 				GDGRP00000000000GUARDIAN /* GuardianMode */,
 				4255287C2E7C4B8300FD5CFB /* RecorderHostApiImpl.swift */,
 				422906C82E75B0A100F49E67 /* FlutterCommunicator.g.swift */,
+				E11AC0DE5E0000000000A001 /* EllaUpstreamCaptureNativeHost.swift */,
+				E11AC0DE3C0000000000000D /* Ble */,
+				E11AC0DE3C00000000000029 /* PhoneMic */,
+				E11AC0DE3C00000000000030 /* Batch */,
+				E11AC0DE3C00000000000035 /* Limitless */,
+				E11AC0DE1F00000000000036 /* PigeonCommunicator.g.swift */,
+				E11AC0DE1F00000000000038 /* SyncTransferBackgroundLease.swift */,
 				5FCEB2FF2C2758C000B17EE8 /* RunnerRelease-dev.entitlements */,
 				5FCEB2FE2C2758BD00B17EE8 /* RunnerProfile-dev.entitlements */,
 				5FCEB2FD2C2758BA00B17EE8 /* RunnerDebug-dev.entitlements */,
@@ -311,6 +375,59 @@
 				GDMP300000000000000004 /* test_audio_4.mp3 */,
 			);
 			path = GuardianMode;
+			sourceTree = "<group>";
+		};
+		E11AC0DE3C0000000000000D /* Ble */ = {
+			isa = PBXGroup;
+			children = (
+				E11AC0DE1F00000000000001 /* BleHostApiImpl.swift */,
+				E11AC0DE1F00000000000003 /* OmiBleConnectionPolicy.swift */,
+				E11AC0DE1F00000000000005 /* OmiBleDiscoveryNaming.swift */,
+				E11AC0DE1F00000000000007 /* OmiBleEnergyPolicy.swift */,
+				E11AC0DE1F00000000000009 /* OmiBleManager.swift */,
+				E11AC0DE1F0000000000000B /* OmiBlePairingPolicy.swift */,
+			);
+			path = Ble;
+			sourceTree = "<group>";
+		};
+		E11AC0DE3C00000000000029 /* PhoneMic */ = {
+			isa = PBXGroup;
+			children = (
+				E11AC0DE1F0000000000000E /* PhoneMicBatchAudioWriter.swift */,
+				E11AC0DE1F00000000000010 /* PhoneMicCaptureEngine.swift */,
+				E11AC0DE1F00000000000012 /* PhoneMicController.swift */,
+				E11AC0DE1F00000000000014 /* PhoneMicControllerSeams.swift */,
+				E11AC0DE1F00000000000016 /* PhoneMicConverterPipeline.swift */,
+				E11AC0DE1F00000000000018 /* PhoneMicEventEmitter.swift */,
+				E11AC0DE1F0000000000001A /* PhoneMicHostApiImpl.swift */,
+				E11AC0DE1F0000000000001C /* PhoneMicInterruptionMonitor.swift */,
+				E11AC0DE1F0000000000001E /* PhoneMicOpusEncoder.swift */,
+				E11AC0DE1F00000000000020 /* PhoneMicOpusShim.h */,
+				E11AC0DE1F00000000000021 /* PhoneMicOpusShim.m */,
+				E11AC0DE1F00000000000023 /* PhoneMicPermissionGate.swift */,
+				E11AC0DE1F00000000000025 /* PhoneMicPigeon.g.swift */,
+				E11AC0DE1F00000000000027 /* PhoneMicSessionConfigurator.swift */,
+			);
+			path = PhoneMic;
+			sourceTree = "<group>";
+		};
+		E11AC0DE3C00000000000030 /* Batch */ = {
+			isa = PBXGroup;
+			children = (
+				E11AC0DE1F0000000000002A /* BaseBatchAudioWriter.swift */,
+				E11AC0DE1F0000000000002C /* BatchAudioWriter.swift */,
+				E11AC0DE1F0000000000002E /* LimitlessBatchAudioWriter.swift */,
+			);
+			path = Batch;
+			sourceTree = "<group>";
+		};
+		E11AC0DE3C00000000000035 /* Limitless */ = {
+			isa = PBXGroup;
+			children = (
+				E11AC0DE1F00000000000031 /* LimitlessFlashDrainEngine.swift */,
+				E11AC0DE1F00000000000033 /* LimitlessProtocol.swift */,
+			);
+			path = Limitless;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -574,6 +691,33 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E11AC0DE5E0000000000B001 /* EllaUpstreamCaptureNativeHost.swift in Sources */,
+				E11AC0DE2B00000000000002 /* BleHostApiImpl.swift in Sources */,
+				E11AC0DE2B00000000000004 /* OmiBleConnectionPolicy.swift in Sources */,
+				E11AC0DE2B00000000000006 /* OmiBleDiscoveryNaming.swift in Sources */,
+				E11AC0DE2B00000000000008 /* OmiBleEnergyPolicy.swift in Sources */,
+				E11AC0DE2B0000000000000A /* OmiBleManager.swift in Sources */,
+				E11AC0DE2B0000000000000C /* OmiBlePairingPolicy.swift in Sources */,
+				E11AC0DE2B0000000000000F /* PhoneMicBatchAudioWriter.swift in Sources */,
+				E11AC0DE2B00000000000011 /* PhoneMicCaptureEngine.swift in Sources */,
+				E11AC0DE2B00000000000013 /* PhoneMicController.swift in Sources */,
+				E11AC0DE2B00000000000015 /* PhoneMicControllerSeams.swift in Sources */,
+				E11AC0DE2B00000000000017 /* PhoneMicConverterPipeline.swift in Sources */,
+				E11AC0DE2B00000000000019 /* PhoneMicEventEmitter.swift in Sources */,
+				E11AC0DE2B0000000000001B /* PhoneMicHostApiImpl.swift in Sources */,
+				E11AC0DE2B0000000000001D /* PhoneMicInterruptionMonitor.swift in Sources */,
+				E11AC0DE2B0000000000001F /* PhoneMicOpusEncoder.swift in Sources */,
+				E11AC0DE2B00000000000022 /* PhoneMicOpusShim.m in Sources */,
+				E11AC0DE2B00000000000024 /* PhoneMicPermissionGate.swift in Sources */,
+				E11AC0DE2B00000000000026 /* PhoneMicPigeon.g.swift in Sources */,
+				E11AC0DE2B00000000000028 /* PhoneMicSessionConfigurator.swift in Sources */,
+				E11AC0DE2B0000000000002B /* BaseBatchAudioWriter.swift in Sources */,
+				E11AC0DE2B0000000000002D /* BatchAudioWriter.swift in Sources */,
+				E11AC0DE2B0000000000002F /* LimitlessBatchAudioWriter.swift in Sources */,
+				E11AC0DE2B00000000000032 /* LimitlessFlashDrainEngine.swift in Sources */,
+				E11AC0DE2B00000000000034 /* LimitlessProtocol.swift in Sources */,
+				E11AC0DE2B00000000000037 /* PigeonCommunicator.g.swift in Sources */,
+				E11AC0DE2B00000000000039 /* SyncTransferBackgroundLease.swift in Sources */,
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
 				EAVR11111111111111111111 /* EllaVoiceAudioRoutePolicy.swift in Sources */,
 				AB12345678901234567890AB /* AppleRemindersService.swift in Sources */,
@@ -802,7 +946,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = H6S4582TRM;
 				ENABLE_BITCODE = NO;
-				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*]" = omiWatchApp.app;
+				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*]" = "$(inherited) omiWatchApp.app";
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(PROJECT_DIR)/Flutter",
@@ -1354,7 +1498,7 @@
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*]" = omiWatchApp.app;
+				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*]" = "$(inherited) omiWatchApp.app";
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(PROJECT_DIR)/Flutter",
@@ -1639,7 +1783,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = H6S4582TRM;
 				ENABLE_BITCODE = NO;
-				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*]" = omiWatchApp.app;
+				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*]" = "$(inherited) omiWatchApp.app";
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(PROJECT_DIR)/Flutter",
@@ -1779,7 +1923,7 @@
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*]" = omiWatchApp.app;
+				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*]" = "$(inherited) omiWatchApp.app";
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(PROJECT_DIR)/Flutter",
@@ -1850,7 +1994,7 @@
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*]" = omiWatchApp.app;
+				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*]" = "$(inherited) omiWatchApp.app";
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(PROJECT_DIR)/Flutter",
@@ -1921,7 +2065,7 @@
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*]" = omiWatchApp.app;
+				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*]" = "$(inherited) omiWatchApp.app";
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(PROJECT_DIR)/Flutter",

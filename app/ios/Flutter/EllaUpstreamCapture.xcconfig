@@ -1,0 +1,25 @@
+// Ella upstream capture port (ellaaicare/ella-ai#1280) — THE single activation setting.
+//
+// ELLA_UPSTREAM_CAPTURE_ENABLED is the only value to flip (NO by default). Everything else is derived:
+//   * Swift sources: when NO, the vendored BasedHardware/omi@f16699a native hosts (Runner/Ble/**,
+//     Runner/PhoneMic/**, and their Swift dependencies) are excluded from compilation via
+//     EXCLUDED_SOURCE_FILE_NAMES; when YES they compile and the fork's FlutterCommunicator.g.swift
+//     (whose Watch Pigeon symbols collide with upstream's PigeonCommunicator.g.swift) is excluded.
+//   * Swift #if: SWIFT_ACTIVE_COMPILATION_CONDITIONS gains ELLA_UPSTREAM_CAPTURE_ENABLED_YES or
+//     ELLA_UPSTREAM_CAPTURE_ENABLED_NO (AppDelegate registers the Pigeon hosts under the YES branch).
+//   * ObjC/C: GCC_PREPROCESSOR_DEFINITIONS gains ELLA_UPSTREAM_CAPTURE_ENABLED_<value>=1.
+//   * Dart: ios/scripts/ella_upstream_capture_build_config.sh reads this file and emits the
+//     --dart-define-from-file JSON (ELLA_UPSTREAM_CAPTURE_ENABLED=true|false) and the Flutter target
+//     (lib/main_upstream_capture.dart when YES, lib/main.dart when NO). build-and-upload.sh uses it.
+// See app/lib/upstream_capture/README.md.
+
+ELLA_UPSTREAM_CAPTURE_ENABLED = NO
+
+ELLA_UPSTREAM_CAPTURE_NATIVE_SOURCES = BaseBatchAudioWriter.swift BatchAudioWriter.swift BleHostApiImpl.swift LimitlessBatchAudioWriter.swift LimitlessFlashDrainEngine.swift LimitlessProtocol.swift OmiBleConnectionPolicy.swift OmiBleDiscoveryNaming.swift OmiBleEnergyPolicy.swift OmiBleManager.swift OmiBlePairingPolicy.swift PhoneMicBatchAudioWriter.swift PhoneMicCaptureEngine.swift PhoneMicController.swift PhoneMicControllerSeams.swift PhoneMicConverterPipeline.swift PhoneMicEventEmitter.swift PhoneMicHostApiImpl.swift PhoneMicInterruptionMonitor.swift PhoneMicOpusEncoder.swift PhoneMicOpusShim.h PhoneMicOpusShim.m PhoneMicPermissionGate.swift PhoneMicPigeon.g.swift PhoneMicSessionConfigurator.swift PigeonCommunicator.g.swift SyncTransferBackgroundLease.swift
+
+ELLA_UPSTREAM_CAPTURE_EXCLUDED_NO = $(ELLA_UPSTREAM_CAPTURE_NATIVE_SOURCES)
+ELLA_UPSTREAM_CAPTURE_EXCLUDED_YES = FlutterCommunicator.g.swift
+
+EXCLUDED_SOURCE_FILE_NAMES = $(inherited) $(ELLA_UPSTREAM_CAPTURE_EXCLUDED_$(ELLA_UPSTREAM_CAPTURE_ENABLED))
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) ELLA_UPSTREAM_CAPTURE_ENABLED_$(ELLA_UPSTREAM_CAPTURE_ENABLED)
+GCC_PREPROCESSOR_DEFINITIONS = $(inherited) ELLA_UPSTREAM_CAPTURE_ENABLED_$(ELLA_UPSTREAM_CAPTURE_ENABLED)=1
