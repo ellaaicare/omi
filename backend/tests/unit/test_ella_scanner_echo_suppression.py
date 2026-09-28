@@ -1,39 +1,68 @@
+from datetime import datetime, timezone
+
+from ella.services.guardian_playback_ledger import PlaybackCandidate
 from utils.ella.scanner import (
     _build_wake_ack_payload,
     prepare_scanner_segments_for_dispatch,
-    should_suppress_guardian_echo,
+    select_playback_ledger_candidates,
 )
 
 
-def test_suppresses_recent_high_risk_guardian_playback_echo():
-    segments = [
+def _candidate(playback_id="guardian_abc123", text="Hi, Greg. I heard my name."):
+    return PlaybackCandidate(
+        playback_id=playback_id,
+        queue_item_id=playback_id,
+        trace_id="trace-1",
+        purpose="wake_word",
+        playback_text=text,
+        route="Speaker",
+        device_class="high",
+        duration_ms=2500,
+        started_at=datetime(2026, 9, 28, 15, 4, 5, tzinfo=timezone.utc),
+        completed_at=datetime(2026, 9, 28, 15, 4, 7, 500000, tzinfo=timezone.utc),
+    )
+
+
+def test_select_playback_ledger_candidates_is_owner_scoped_selection_only(monkeypatch):
+    """Selection returns the classifier-ready shape and never suppresses anything itself."""
+    import utils.ella.scanner as scanner
+
+    seen_calls = []
+
+    async def fake_get_pool():
+        return "fake-pool"
+
+    async def fake_get_played_candidates(pool, uid, *, window_seconds, limit):
+        seen_calls.append((pool, uid, window_seconds, limit))
+        return [_candidate()]
+
+    monkeypatch.setattr(scanner.guardian_playback_ledger, "get_pool", fake_get_pool)
+    monkeypatch.setattr(scanner.guardian_playback_ledger, "get_played_candidates", fake_get_played_candidates)
+
+    candidates = select_playback_ledger_candidates("uid-1", window_seconds=45, limit=5)
+
+    assert seen_calls == [("fake-pool", "uid-1", 45, 5)]
+    assert candidates == [
         {
-            "speaker": "SPEAKER_2",
-            "text": "Hi, Greg. I heard my name. I'm here with you. Tell me what you need.",
+            "playback_id": "guardian_abc123",
+            "text": "Hi, Greg. I heard my name.",
+            "started_at": "2026-09-28T15:04:05+00:00",
+            "completed_at": "2026-09-28T15:04:07.500000+00:00",
+            "duration_ms": 2500,
         }
     ]
 
-    assert should_suppress_guardian_echo(
-        "uid-1",
-        segments,
-        playback_event={"echo_risk": "high", "recorded_at": 1},
-    )
 
+def test_select_playback_ledger_candidates_fails_open_to_empty_list(monkeypatch):
+    """A ledger outage must never block scanner dispatch — it just yields no candidates."""
+    import utils.ella.scanner as scanner
 
-def test_does_not_suppress_real_wake_word_question():
-    segments = [{"speaker": "SPEAKER_1", "text": "Hey Ella, where did I put my glasses?"}]
+    async def failing_get_pool():
+        raise RuntimeError("db unavailable")
 
-    assert not should_suppress_guardian_echo(
-        "uid-1",
-        segments,
-        playback_event={"echo_risk": "high", "recorded_at": 1},
-    )
+    monkeypatch.setattr(scanner.guardian_playback_ledger, "get_pool", failing_get_pool)
 
-
-def test_does_not_suppress_echo_like_text_without_risky_playback_event():
-    segments = [{"speaker": "SPEAKER_1", "text": "Why did it say hi Greg I heard my name?"}]
-
-    assert not should_suppress_guardian_echo("uid-1", segments, playback_event={})
+    assert select_playback_ledger_candidates("uid-1") == []
 
 
 def test_short_wake_prefix_dispatches_immediately():
