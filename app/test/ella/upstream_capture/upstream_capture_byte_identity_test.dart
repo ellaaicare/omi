@@ -110,6 +110,7 @@ void main() {
       patchedByPath.keys.toSet(),
       {
         'app/lib/upstream_capture/services/devices/discovery/native_bluetooth_discoverer.dart',
+        'app/ios/Runner/Ble/BleHostApiImpl.swift',
         'app/ios/Runner/Ble/OmiBleDiscoveryNaming.swift',
         'app/ios/Runner/Ble/OmiBleManager.swift',
         'app/ios/Runner/PigeonCommunicator.g.swift',
@@ -130,15 +131,18 @@ void main() {
         '82da0ef8a59db3e5917a31bb61f15957a3cbbb87');
     expect(patchedByPath['app/ios/Runner/Ble/OmiBleManager.swift']!.blob, '889d135a5a3fe1cbfccbb5baf88d980003df5c77');
     expect(
-        patchedByPath['app/ios/Runner/Ble/OmiBleManager.swift']!.localBlob, '8b819ba660b115440bae942fe63e70695b85666a');
+        patchedByPath['app/ios/Runner/Ble/OmiBleManager.swift']!.localBlob, 'f6904c00f7b9cf28ed127e3ea95f60b6e9c10daf');
     expect(
         patchedByPath['app/ios/Runner/PigeonCommunicator.g.swift']!.blob, 'b774502d0c755cecdab9efefbb7db7d7606c287a');
     expect(patchedByPath['app/ios/Runner/PigeonCommunicator.g.swift']!.localBlob,
-        'f68687905bdfd76fe884e8a3e1c33488a6c62c7e');
+        '23bc2e8eaa23d20b116bf09cffb0902880ea1a8d');
     expect(patchedByPath['app/lib/upstream_capture/gen/pigeon_communicator.g.dart']!.blob,
         '25034c9152ceac9b4a4cc9a264027697b372a539');
     expect(patchedByPath['app/lib/upstream_capture/gen/pigeon_communicator.g.dart']!.localBlob,
-        'a49cdc1a0503909b5caa801fac96ed9ffde7b8a2');
+        '93c039f0938575adb3ec3929e6024506f07c3407');
+    expect(patchedByPath['app/ios/Runner/Ble/BleHostApiImpl.swift']!.blob, '415903a72829adfc83ca4c1321158db3b1ee059c');
+    expect(patchedByPath['app/ios/Runner/Ble/BleHostApiImpl.swift']!.localBlob,
+        '21618a4c26f51b5cce2c22e9db7588c8a5607797');
   });
 
   test('scripts/verify_upstream_capture_identity.py passes on this checkout', () async {
