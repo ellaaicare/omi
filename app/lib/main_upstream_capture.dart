@@ -18,6 +18,10 @@ void main() {
   EllaCaptureHost.installUpstreamCapture(
     homeCaptureDockBuilder: (context) => const EllaUpstreamCaptureDock(),
   );
+  // Device Diagnostics reads native BLE discovery diagnostics through this
+  // seam instead of importing lib/upstream_capture/ directly, so the flag-OFF
+  // graph never reaches it.
+  EllaCaptureHost.installNativeDiscoveryDiagnosticsLoader(loadNativeDiscoveryDiagnostics);
   // Account transitions (sign-out / switch) revoke the bound capture session
   // through the existing Ella account-isolation hook before the next account.
   EllaAccountIsolationService.registerCaptureProducer(() => EllaUpstreamCaptureRuntime.instance.releaseAccount());
