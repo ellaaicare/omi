@@ -3,7 +3,7 @@ import json
 import uuid
 import zlib
 from datetime import datetime, timedelta, timezone
-from typing import List, Tuple, Optional, Dict, Any
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from google.cloud import firestore
 from google.cloud.firestore_v1 import FieldFilter, transactional
@@ -36,6 +36,17 @@ conversation_enriched_summary_kinds = {
     'recovered_enriched',
 }
 conversation_processing_retry_lease_seconds = 900
+_pre_delete_hooks: list[Callable[[str, str], None]] = []
+
+
+def register_conversation_pre_delete_hook(callback: Callable[[str, str], None]) -> None:
+    if callback not in _pre_delete_hooks:
+        _pre_delete_hooks.append(callback)
+
+
+def _run_conversation_pre_delete_hooks(uid: str, conversation_id: str) -> None:
+    for callback in tuple(_pre_delete_hooks):
+        callback(uid, conversation_id)
 
 
 def _active_summary_version(conversation: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -870,6 +881,7 @@ def delete_conversation(uid, conversation_id):
         uid: User ID
         conversation_id: Conversation ID
     """
+    _run_conversation_pre_delete_hooks(uid, conversation_id)
     # Delete photos subcollection first
     delete_conversation_photos(uid, conversation_id)
 
@@ -927,6 +939,7 @@ def delete_conversations_by_source(uid: str, source: str, batch_size: int = 450)
 
         batch = db.batch()
         for doc in docs:
+            _run_conversation_pre_delete_hooks(uid, doc.id)
             batch.delete(doc.reference)
             total_deleted += 1
         batch.commit()

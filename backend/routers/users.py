@@ -67,6 +67,7 @@ from ella.services.imessage_enrollment import (
     ImessageEnrollmentError,
     cleanup_imessage_for_account_deletion,
 )
+from ella.services.dream_media import DreamMediaError, prepare_account_dream_media_deletion
 
 
 class _MemoryArtworkStorageUnavailable(RuntimeError):
@@ -143,6 +144,7 @@ async def delete_account(uid: str = Depends(auth.get_current_user_uid)):
                     uid,
                     lock_proof=artwork_lock_proof,
                 )
+        await run_in_threadpool(prepare_account_dream_media_deletion, uid)
         imessage_cleanup = await cleanup_imessage_for_account_deletion(uid=uid)
         if imessage_cleanup.get('local_absence_proven') is not True:
             raise ImessageEnrollmentError('imessage_account_cleanup_unproven', status_code=503)
@@ -152,6 +154,14 @@ async def delete_account(uid: str = Depends(auth.get_current_user_uid)):
             status_code=503,
             detail={
                 'code': str(exc),
+                'retryable': True,
+            },
+        ) from exc
+    except DreamMediaError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                'code': exc.code,
                 'retryable': True,
             },
         ) from exc

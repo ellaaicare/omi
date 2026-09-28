@@ -14,6 +14,7 @@ pytest tests/unit/test_speaker_sample_migration.py -v
 pytest tests/unit/test_users_add_sample_transaction.py -v
 pytest tests/unit/test_voice_message_language.py -v
 pytest tests/unit/test_speaker_assignment.py -v
+pytest tests/unit/test_dream_media.py -v
 pytest tests/unit/test_voice_canary.py -v
 pytest tests/unit/test_voice_proxy_auth.py -v
 pytest tests/postgres/test_voice_canary_postgres.py -v

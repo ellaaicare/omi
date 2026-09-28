@@ -1,6 +1,6 @@
 import copy
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
+from typing import Any, Callable, Dict, List, Optional
 
 from google.cloud import firestore
 from google.cloud.firestore_v1 import FieldFilter
@@ -12,6 +12,17 @@ from .helpers import set_data_protection_level, prepare_for_write, prepare_for_r
 
 memories_collection = 'memories'
 users_collection = 'users'
+_pre_delete_hooks: list[Callable[[str, str], None]] = []
+
+
+def register_memory_pre_delete_hook(callback: Callable[[str, str], None]) -> None:
+    if callback not in _pre_delete_hooks:
+        _pre_delete_hooks.append(callback)
+
+
+def _run_memory_pre_delete_hooks(uid: str, memory_id: str) -> None:
+    for callback in tuple(_pre_delete_hooks):
+        callback(uid, memory_id)
 
 
 # *********************************
@@ -153,6 +164,7 @@ def delete_memories(uid: str):
     user_ref = db.collection(users_collection).document(uid)
     memories_ref = user_ref.collection(memories_collection)
     for doc in memories_ref.stream():
+        _run_memory_pre_delete_hooks(uid, doc.id)
         batch.delete(doc.reference)
     batch.commit()
 
@@ -245,6 +257,7 @@ def edit_memory(uid: str, memory_id: str, value: str):
 
 
 def delete_memory(uid: str, memory_id: str):
+    _run_memory_pre_delete_hooks(uid, memory_id)
     user_ref = db.collection(users_collection).document(uid)
     memories_ref = user_ref.collection(memories_collection)
     memory_ref = memories_ref.document(memory_id)
@@ -256,6 +269,7 @@ def delete_all_memories(uid: str):
     memories_ref = user_ref.collection(memories_collection)
     batch = db.batch()
     for doc in memories_ref.stream():
+        _run_memory_pre_delete_hooks(uid, doc.id)
         batch.delete(doc.reference)
     batch.commit()
 
@@ -278,6 +292,7 @@ def delete_memories_for_conversation(uid: str, memory_id: str):
 
     removed_ids = []
     for doc in query.stream():
+        _run_memory_pre_delete_hooks(uid, doc.id)
         batch.delete(doc.reference)
         removed_ids.append(doc.id)
     batch.commit()
