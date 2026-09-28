@@ -7,6 +7,7 @@ import 'package:omi/upstream_capture/services/bridges/ble_bridge.dart';
 import 'package:omi/upstream_capture/services/devices/bluetooth_readiness.dart';
 import 'package:omi/upstream_capture/services/devices/discovery/device_locator.dart';
 import 'package:omi/upstream_capture/services/devices/models.dart';
+import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
 import 'device_discoverer.dart';
 
@@ -45,8 +46,15 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
 
     BleBridge.instance.peripheralDiscoveredCallback = (BlePeripheral peripheral) {
       seenCount++;
+      DebugLogManager.deviceCandidatesSeen++;
+      DebugLogManager.recordDeviceDiagnostic(
+        'NativeBluetoothDiscoverer: candidate hasAdvName=${peripheral.hasAdvertisedLocalName} '
+        'hasPeripheralName=${peripheral.hasPeripheralName} uuidCount=${peripheral.serviceUuids.length} '
+        'rssiBucket=${_rssiBucket(peripheral.rssi)}',
+      );
       if (peripheral.name.isEmpty) {
         noNameCount++;
+        DebugLogManager.recordCandidateRejected('no_name');
         return;
       }
       // Deduplicate by UUID
@@ -57,8 +65,18 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
     var scanStarted = false;
     try {
       try {
+        // ellaaicare/ella-ai#1287: this scan is already unfiltered (no serviceUuids) —
+        // CoreBluetooth's scanForPeripherals(withServices:) only reports peripherals
+        // advertising an exact match, and production necklaces don't reliably
+        // advertise one. Passing [] keeps CoreBluetooth from filtering candidates
+        // out before the name/UUID admission classifier below ever sees them.
         await _hostApi.startScan(timeout, []);
         scanStarted = true;
+        DebugLogManager.deviceScansStarted++;
+        final btState = await _hostApi.getBluetoothState().catchError((_) => 'unknown');
+        DebugLogManager.recordDeviceDiagnostic(
+          'NativeBluetoothDiscoverer: startScan btState=$btState serviceUuidFilterCount=0 timeoutSeconds=$timeout',
+        );
 
         _timeoutTimer?.cancel();
         _timeoutTimer = Timer(Duration(seconds: timeout), () {
@@ -68,6 +86,7 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
       } catch (error, stackTrace) {
         Logger.warning('NativeBluetoothDiscoverer: start scan error: $error');
         Logger.debug('$stackTrace');
+        DebugLogManager.recordDeviceDiagnostic('NativeBluetoothDiscoverer: startScan error');
         return const DeviceDiscoveryResult(devices: []);
       }
     } finally {
@@ -79,9 +98,12 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
       if (scanStarted) {
         try {
           await _hostApi.stopScan();
+          DebugLogManager.deviceScansStopped++;
+          DebugLogManager.recordDeviceDiagnostic('NativeBluetoothDiscoverer: stopScan');
         } catch (error, stackTrace) {
           Logger.warning('NativeBluetoothDiscoverer: stop scan error: $error');
           Logger.debug('$stackTrace');
+          DebugLogManager.recordDeviceDiagnostic('NativeBluetoothDiscoverer: stopScan error');
         }
       }
       BleBridge.instance.peripheralDiscoveredCallback = previousCallback;
@@ -91,10 +113,26 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
       ..sort((a, b) => b.rssi.compareTo(a.rssi));
 
     final noSignatureMatchCount = results.length - devices.length;
-    Logger.debug('NativeBluetoothDiscoverer: seen=$seenCount admitted=${devices.length} '
-        'rejected(no_name=$noNameCount, no_signature_match=$noSignatureMatchCount)');
+    if (noSignatureMatchCount > 0) {
+      DebugLogManager.deviceCandidatesRejectedByReason['no_signature_match'] =
+          (DebugLogManager.deviceCandidatesRejectedByReason['no_signature_match'] ?? 0) + noSignatureMatchCount;
+    }
+    DebugLogManager.deviceCandidatesAdmitted += devices.length;
+
+    final summary = 'NativeBluetoothDiscoverer: seen=$seenCount admitted=${devices.length} '
+        'rejected(no_name=$noNameCount, no_signature_match=$noSignatureMatchCount)';
+    Logger.debug(summary);
+    DebugLogManager.recordDeviceDiagnostic(summary);
 
     return DeviceDiscoveryResult(devices: devices);
+  }
+
+  /// Coarse 10dBm-wide RSSI bucket for redacted diagnostics — never the raw
+  /// precise reading, which combined with other signals could help fingerprint
+  /// a specific device/location.
+  static String _rssiBucket(int rssi) {
+    final lower = (rssi / 10).floor() * 10;
+    return '$lower..${lower + 10}';
   }
 
   @override
