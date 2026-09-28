@@ -5,13 +5,20 @@ f16699aea7fe9ba089baceb628922f2882c51153) and the vendored client
 (`app/lib/upstream_capture/backend/http/api/conversations.dart::uploadLocalFilesV2` /
 `_createSyncCaptureManifest` on `origin/release/testflight-850-necklace-recovery`) actually
 require of the wire contract: response shape, auth/consent fail-closed behavior, idempotent
-segment replay, that a conversation_id can never resolve another account's conversation, that a
-cache outage or a lost claim race fails a segment closed rather than reporting false success, and
-that parallel segments targeting one explicit conversation never drop each other's writes.
+segment replay backed by a durable record (not a cache that can silently lose it), that a
+conversation_id can never resolve another account's conversation, that a claim-store outage or a
+lost claim race fails a segment closed rather than reporting false success, that a segment whose
+persisting transaction fails outright and is retried is written exactly once (never duplicated),
+and that parallel segments targeting one explicit conversation never drop each other's writes.
 
-The STT/LLM layer below `process_segment` (Deepgram, `process_conversation`) is stubbed so these
-tests exercise only this fork's `/v2` route logic — the same boundary `/v1/sync-local-files`
-already crosses untested at this layer.
+The STT/LLM layer below `process_segment` (Deepgram, `process_conversation`) is stubbed, and the
+durable idempotency/merge layer (`database.sync_segments`, `database.conversations`) is replaced
+by an in-memory fake faithful to its atomicity contract (see `FakeConversationStore` /
+`FakeSyncSegmentStore` below), so these tests exercise only this fork's `/v2` route logic — the
+same boundary `/v1/sync-local-files` already crosses untested at this layer. The real Firestore
+transaction machinery itself is out of scope here (it needs `FIRESTORE_EMULATOR_HOST`, which this
+focused contract suite deliberately avoids for speed), the same boundary this file already drew
+for Redis before this revision and continues to draw for `database.conversations`.
 """
 
 import copy
@@ -29,14 +36,18 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 # routers/sync.py pulls in the real Firestore/GCS clients (via database.conversations ->
-# utils.other.storage), a torch-backed VAD module, and the opus/pydub audio-decoding libraries,
-# none of which this file needs — every function that would touch them is monkeypatched per-test
-# below. Stub them the same way tests/unit/test_ella_incident_1182_route_isolation.py does for
-# other routers, so importing routers.sync here doesn't require real GCP credentials, a working
-# torch install, or the libopus system library the CI runner doesn't provide.
+# utils.other.storage), the real `redis` client (via database.redis_db, imported at module level
+# by utils/sync_capture_manifest.py), a torch-backed VAD module, and the opus/pydub
+# audio-decoding libraries, none of which this file needs or which this focused CI job installs
+# -- every function that would touch them is monkeypatched per-test below. Stub them the same way
+# tests/unit/test_ella_incident_1182_route_isolation.py does for other routers, so importing
+# routers.sync here doesn't require real GCP credentials, a working torch install, the libopus
+# system library, or the `redis` package, none of which this CI job provides.
 for _module_name in (
     "database._client",
     "database.conversations",
+    "database.sync_segments",
+    "database.redis_db",
     "database.memories",
     "database.users",
     "database.ella_contacts",
@@ -44,6 +55,7 @@ for _module_name in (
     "utils.other.storage",
     "utils.conversations.process_conversation",
     "utils.stt.vad",
+    "utils.stt.pre_recorded",
     "opuslib",
     "pydub",
 ):
@@ -60,8 +72,10 @@ BIN_TIMESTAMP = 1735689600  # 2025-01-01T00:00:00Z — well inside retrieve_file
 
 
 class FakeRedis:
-    """Minimal stand-in for `database.redis_db.r`'s subset used by utils/sync_capture_manifest.py.
-    Real redis-server semantics for SET ... NX: returns falsy when the key already exists."""
+    """Minimal stand-in for `database.redis_db.r`'s subset used by utils/sync_capture_manifest.py
+    for capture-manifest claims (unrelated to segment idempotency, which no longer uses Redis at
+    all -- see `database/sync_segments.py`). Real redis-server semantics for SET ... NX: returns
+    falsy when the key already exists."""
 
     def __init__(self):
         self._store: dict[str, str] = {}
@@ -84,6 +98,183 @@ def _fake_redis(monkeypatch):
     fake = FakeRedis()
     monkeypatch.setattr(capture_manifest, "redis_client", fake)
     return fake
+
+
+class FakeConversationStore:
+    """In-memory stand-in for the conversation documents `database.sync_segments`'s real
+    Firestore transaction merges into. Reproduces the merge algorithm in
+    `database.conversations.merge_transcript_segments_into_conversation_transaction` closely
+    enough to prove the *calling* code (the route + `process_segment`) is correct: existing
+    segments are placed on an absolute timeline via `started_at`, the incoming segment via
+    [segment_timestamp], the combined list is sorted and re-relativized.
+
+    [atomic=False] reproduces the pre-fix race (the read-merge-write is no longer serialized per
+    conversation) purely for a manual mutation check proving the regression test below actually
+    depends on the fix -- it is never used by a real test in this suite.
+    """
+
+    def __init__(self, *, atomic: bool = True):
+        self._lock = threading.Lock()
+        self._atomic = atomic
+        self.conversations: dict[str, dict] = {}
+        self.update_calls: list[list[dict]] = []
+
+    def seed(self, conversation_id: str, *, started_at, finished_at, segments=None, discarded=False):
+        self.conversations[conversation_id] = {
+            "id": conversation_id,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "transcript_segments": list(segments or []),
+            "discarded": discarded,
+            "_version": 0,
+        }
+
+    def merge(self, conversation_id: str, new_segments: list, segment_timestamp: float, *, barrier=None):
+        """Models a real Firestore transaction: reads are unlocked (so two concurrent merges can
+        genuinely both be mid-read at once -- [barrier], if given, forces that overlap on each
+        caller's *first* attempt), and the write only commits if the document hasn't changed since
+        the read (a version counter standing in for Firestore's real conflict detection). A
+        writer that loses the race doesn't corrupt anything -- with [atomic=True] (the default,
+        matching the real transactional merge and its `@transactional` auto-retry) it re-reads the
+        now-current state and recomputes the merge, exactly like Firestore retrying the whole
+        transaction function under contention. [atomic=False] reproduces the pre-fix plain
+        get+merge+set instead: no version check, so a losing writer just blindly overwrites."""
+        attempt = 0
+        while True:
+            attempt += 1
+            with self._lock:
+                conversation = self.conversations.get(conversation_id)
+                if conversation is None:
+                    return None
+                read_version = conversation.get("_version", 0)
+                existing = copy.deepcopy(conversation["transcript_segments"])
+                started_at_ts = conversation["started_at"].timestamp()
+                finished_at = conversation["finished_at"]
+                discarded = conversation["discarded"]
+
+            for segment in existing:
+                segment["timestamp"] = started_at_ts + segment["start"]
+            incoming = copy.deepcopy(new_segments)
+            for segment in incoming:
+                segment["timestamp"] = segment_timestamp + segment["start"]
+
+            if barrier and attempt == 1:
+                # Only the first attempt waits -- a retry after losing the race shouldn't make its
+                # rival wait for it a second time.
+                barrier()
+
+            segments = existing + incoming
+            segments.sort(key=lambda item: item["timestamp"])
+            for segment in segments:
+                duration = segment["end"] - segment["start"]
+                segment["start"] = segment["timestamp"] - started_at_ts
+                segment["end"] = segment["start"] + duration
+                segment.pop("timestamp", None)
+            last_end = segments[-1]["end"] if segments else 0
+            new_finished_at = datetime.fromtimestamp(started_at_ts + last_end, tz=timezone.utc)
+            if new_finished_at < finished_at:
+                new_finished_at = finished_at
+
+            with self._lock:
+                conversation = self.conversations.get(conversation_id)
+                if conversation is None:
+                    return None
+                if self._atomic and conversation.get("_version", 0) != read_version:
+                    # Contention: someone else committed since our read. A real Firestore
+                    # transaction would retry the whole function automatically -- loop and
+                    # recompute the merge against the now-current state.
+                    continue
+                conversation["transcript_segments"] = segments
+                conversation["finished_at"] = new_finished_at
+                conversation["_version"] = read_version + 1
+                self.update_calls.append(copy.deepcopy(segments))
+                return {"discarded": discarded}
+
+
+class FakeSyncSegmentStore:
+    """In-memory stand-in for `database.sync_segments`'s durable claim/idempotency record plus
+    transactional conversation merge. Faithful to its outcome contract (claimed/busy/done/lost)
+    so these tests prove the route's claim -> process -> complete/release call sequence is
+    correct, without needing a real Firestore (emulator-backed suites elsewhere in this repo cover
+    the transaction machinery itself)."""
+
+    def __init__(self, conversations: FakeConversationStore):
+        self._lock = threading.Lock()
+        self._segments: dict[tuple, dict] = {}
+        self.conversations = conversations
+
+    def claim_or_get(self, uid, segment_id, claimant, **_kwargs):
+        with self._lock:
+            key = (uid, segment_id)
+            receipt = self._segments.get(key)
+            if receipt and receipt["state"] == "done":
+                return {"outcome": "done", "kind": receipt["kind"], "conversation_id": receipt["conversation_id"]}
+            if receipt and receipt["state"] == "processing":
+                return {"outcome": "busy"}
+            self._segments[key] = {"state": "processing", "claimant": claimant}
+            return {"outcome": "claimed", "claimant": claimant}
+
+    def complete_new_conversation(self, uid, segment_id, claimant, conversation_id, **_kwargs):
+        with self._lock:
+            key = (uid, segment_id)
+            receipt = self._segments.get(key)
+            if receipt and receipt["state"] == "done":
+                return {"outcome": "done", "kind": receipt["kind"], "conversation_id": receipt["conversation_id"]}
+            if not receipt or receipt.get("claimant") != claimant:
+                return {"outcome": "lost"}
+            receipt.update(state="done", kind="new_memories", conversation_id=conversation_id)
+            return {"outcome": "done", "kind": "new_memories", "conversation_id": conversation_id}
+
+    def append_and_complete(
+        self, uid, segment_id, claimant, conversation_id, new_segments, segment_timestamp, **_kwargs
+    ):
+        key = (uid, segment_id)
+        with self._lock:
+            receipt = self._segments.get(key)
+            if receipt and receipt["state"] == "done":
+                return {"outcome": "done", "kind": receipt["kind"], "conversation_id": receipt["conversation_id"]}
+        # The conversation merge is a separate document/transaction from the segment claim in the
+        # real design (see database/sync_segments.py) -- don't hold this store's own lock across
+        # it; FakeConversationStore.merge has its own lock standing in for that transaction.
+        merge_result = self.conversations.merge(conversation_id, new_segments, segment_timestamp)
+        if merge_result is None:
+            return {"outcome": "conversation_missing"}
+        with self._lock:
+            self._segments[key] = {
+                "state": "done",
+                "claimant": claimant,
+                "kind": "updated_memories",
+                "conversation_id": conversation_id,
+            }
+        return {
+            "outcome": "done",
+            "kind": "updated_memories",
+            "conversation_id": conversation_id,
+            "discarded": merge_result["discarded"],
+        }
+
+    def release(self, uid, segment_id, claimant, **_kwargs):
+        with self._lock:
+            key = (uid, segment_id)
+            receipt = self._segments.get(key)
+            if receipt and receipt.get("claimant") == claimant and receipt.get("state") == "processing":
+                receipt["state"] = "failed"
+            return {"outcome": "released"}
+
+
+@pytest.fixture(autouse=True)
+def _fake_sync_segments(monkeypatch):
+    """Wires fresh, correctly-atomic fakes for every test. Individual tests may further
+    monkeypatch `sync.claim_or_get_sync_segment` / `sync.append_segment_to_conversation_and_complete`
+    / etc. afterward to inject failures, and may reach into `.conversations` to seed/inspect the
+    fake conversation store."""
+    conversations = FakeConversationStore()
+    segments = FakeSyncSegmentStore(conversations)
+    monkeypatch.setattr(sync, "claim_or_get_sync_segment", segments.claim_or_get)
+    monkeypatch.setattr(sync, "complete_new_conversation_sync_segment", segments.complete_new_conversation)
+    monkeypatch.setattr(sync, "append_segment_to_conversation_and_complete", segments.append_and_complete)
+    monkeypatch.setattr(sync, "release_sync_segment", segments.release)
+    return SimpleNamespace(conversations=conversations, segments=segments)
 
 
 @pytest.fixture(autouse=True)
@@ -175,7 +366,8 @@ def test_v2_sync_local_files_response_matches_vendored_client_shape(monkeypatch,
 
 def test_v2_sync_local_files_replay_of_same_segment_is_idempotent(monkeypatch, tmp_path):
     """Requirement: replaying the same manifest/audio content must not double-process or
-    double-create a conversation — it returns the same outcome as the first successful call."""
+    double-create a conversation — it returns the same outcome as the first successful call,
+    found via the durable claim record (not re-run STT/LLM/persistence)."""
     segment_path = str(tmp_path / f"{BIN_TIMESTAMP + 20}.wav")
     segment_bytes = b"identical-segment-bytes-across-both-uploads"
     _stub_vad_with_fixed_segment(monkeypatch, segment_path)
@@ -195,14 +387,16 @@ def test_v2_sync_local_files_replay_of_same_segment_is_idempotent(monkeypatch, t
 
     # The route's `finally` cleans up the segment file after the first call (as it would after a
     # real VAD run); recreate the *same* bytes at the *same* path to simulate the client replaying
-    # the same WAL content after a dropped response / app relaunch.
+    # the same WAL content after a dropped response / app relaunch -- i.e. a "post-write/
+    # pre-response failure": the first attempt's transaction fully committed (durable record
+    # 'done'), but the client never saw the 200 and retries.
     Path(segment_path).write_bytes(segment_bytes)
     second = client.post(
         "/v2/sync-local-files",
         files=_bin_upload(f"audio_omibatch_opus_16000_1_fs160_{BIN_TIMESTAMP + 1}.bin", b"raw-bin-bytes-2"),
     )
     assert second.status_code == 200
-    # Same segment content -> same segment id -> cached outcome replayed, no second STT/LLM call.
+    # Same segment content -> same segment id -> durable record replayed, no second STT/LLM call.
     assert second.json()["new_memories"] == ["conv-1"]
     assert second.json()["updated_memories"] == []
     assert created["calls"] == 1
@@ -386,20 +580,21 @@ def test_v2_routes_reject_unauthenticated_requests(path):
 # **********************************************
 
 
-def test_v2_sync_local_files_cache_read_outage_fails_closed_not_false_success(monkeypatch, tmp_path):
-    """SYNC-V2-001: a Redis outage on the idempotency-cache *read* must not be reported back as a
-    false-success 200 with failed_segments 0 — the segment was never actually processed."""
+def test_v2_sync_local_files_claim_outage_fails_closed_not_false_success(monkeypatch, tmp_path):
+    """SYNC-V2-001: an outage reading/claiming the durable idempotency record must not be reported
+    back as a false-success 200 with failed_segments 0 — the segment was never actually
+    processed."""
     segment_path = str(tmp_path / f"{BIN_TIMESTAMP + 60}.wav")
-    Path(segment_path).write_bytes(b"cache-read-outage-segment-bytes")
+    Path(segment_path).write_bytes(b"claim-outage-segment-bytes")
     _stub_vad_with_fixed_segment(monkeypatch, segment_path)
     created = _stub_stt_and_llm(monkeypatch)
 
-    def broken_get_cached(segment_id):
-        raise ConnectionError("redis unavailable")
+    def broken_claim(uid, segment_id, claimant, **_kwargs):
+        raise ConnectionError("firestore unavailable")
 
-    monkeypatch.setattr(sync, "get_cached_sync_segment_result", broken_get_cached)
+    monkeypatch.setattr(sync, "claim_or_get_sync_segment", broken_claim)
 
-    app = _app_with_uid_override("uid-cache-read-outage")
+    app = _app_with_uid_override("uid-claim-outage")
     client = TestClient(app)
     resp = client.post(
         "/v2/sync-local-files",
@@ -412,21 +607,21 @@ def test_v2_sync_local_files_cache_read_outage_fails_closed_not_false_success(mo
     assert created["calls"] == 0  # the outage was caught before STT ever ran
 
 
-def test_v2_sync_local_files_cache_write_outage_fails_closed_not_false_success(monkeypatch, tmp_path):
-    """SYNC-V2-001: a Redis outage writing the idempotency result — even though processing itself
-    already succeeded — must still be reported as a failed segment, never a false-success 200.
-    Otherwise a later replay of this exact audio has no cached result to dedupe against."""
+def test_v2_sync_local_files_new_conversation_completion_outage_fails_closed(monkeypatch, tmp_path):
+    """SYNC-V2-001 (new-conversation branch): if the durable-completion write after creating a
+    brand-new conversation fails, the segment must still be reported failed, never a false-success
+    200 — otherwise a later replay has no durable record to dedupe against."""
     segment_path = str(tmp_path / f"{BIN_TIMESTAMP + 61}.wav")
-    Path(segment_path).write_bytes(b"cache-write-outage-segment-bytes")
+    Path(segment_path).write_bytes(b"completion-outage-segment-bytes")
     _stub_vad_with_fixed_segment(monkeypatch, segment_path)
     created = _stub_stt_and_llm(monkeypatch)
 
-    def broken_cache_write(segment_id, kind, conversation_id):
-        raise ConnectionError("redis unavailable")
+    def broken_complete(uid, segment_id, claimant, conversation_id, **_kwargs):
+        raise ConnectionError("firestore unavailable")
 
-    monkeypatch.setattr(sync, "cache_sync_segment_result", broken_cache_write)
+    monkeypatch.setattr(sync, "complete_new_conversation_sync_segment", broken_complete)
 
-    app = _app_with_uid_override("uid-cache-write-outage")
+    app = _app_with_uid_override("uid-completion-outage")
     client = TestClient(app)
     resp = client.post(
         "/v2/sync-local-files",
@@ -434,15 +629,98 @@ def test_v2_sync_local_files_cache_write_outage_fails_closed_not_false_success(m
     )
 
     assert resp.status_code == 500
-    # Processing itself succeeded (STT ran) — it's specifically the idempotency-cache write that
-    # failed, and that alone must still fail the segment closed.
+    # Processing itself succeeded (STT ran, a conversation was created) — it's specifically the
+    # durable-completion write that failed, and that alone must still fail the segment closed.
     assert created["calls"] == 1
+
+
+def test_v2_sync_local_files_append_transaction_outage_then_retry_writes_segment_exactly_once(monkeypatch, tmp_path):
+    """Round-2 review regression: the prior design let persistence succeed and the *separate*
+    idempotency-cache write fail independently, so a retry couldn't tell and reprocessed —
+    duplicating the segment (2 provider/write executions for one logical segment). Here, the merge
+    and the durable completion record are the same atomic operation
+    (`append_segment_to_conversation_and_complete`); this proves that when that whole operation
+    fails outright (nothing persisted) and the client retries, the segment is written to the
+    conversation exactly once — never zero, never twice."""
+    segment_path = str(tmp_path / f"{BIN_TIMESTAMP + 62}.wav")
+    segment_bytes = b"append-transaction-outage-segment-bytes"
+    _stub_vad_with_fixed_segment(monkeypatch, segment_path)
+    _stub_stt_and_llm(monkeypatch)
+
+    stt_calls = {"n": 0}
+    original_deepgram = sync.deepgram_prerecorded
+
+    def counting_deepgram(*args, **kwargs):
+        stt_calls["n"] += 1
+        return original_deepgram(*args, **kwargs)
+
+    monkeypatch.setattr(sync, "deepgram_prerecorded", counting_deepgram)
+
+    def fake_get_conversation(uid, conversation_id):
+        if conversation_id != "conv-target":
+            return None
+        return {"id": "conv-target"}
+
+    monkeypatch.setattr(sync.conversations_db, "get_conversation", fake_get_conversation)
+
+    app = _app_with_uid_override("uid-append-outage")
+    client = TestClient(app)
+
+    # Wire a fresh fake conversation store directly (overriding the autouse fixture's default
+    # object) so this test can seed a target conversation and inspect it afterward.
+    conversations = FakeConversationStore()
+    conversations.seed(
+        "conv-target",
+        started_at=datetime.fromtimestamp(BIN_TIMESTAMP, tz=timezone.utc),
+        finished_at=datetime.fromtimestamp(BIN_TIMESTAMP + 5, tz=timezone.utc),
+    )
+    segments = FakeSyncSegmentStore(conversations)
+    monkeypatch.setattr(sync, "claim_or_get_sync_segment", segments.claim_or_get)
+    monkeypatch.setattr(sync, "release_sync_segment", segments.release)
+
+    calls = {"n": 0}
+    real_append = segments.append_and_complete
+
+    def flaky_append(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Simulate the whole transaction failing outright (e.g. a Firestore outage during
+            # commit) -- atomic, so nothing is persisted on this attempt.
+            raise ConnectionError("firestore unavailable")
+        return real_append(*args, **kwargs)
+
+    monkeypatch.setattr(sync, "append_segment_to_conversation_and_complete", flaky_append)
+
+    Path(segment_path).write_bytes(segment_bytes)
+    first = client.post(
+        "/v2/sync-local-files",
+        params={"conversation_id": "conv-target"},
+        files=_bin_upload(f"audio_omibatch_opus_16000_1_fs160_{BIN_TIMESTAMP}.bin", b"raw-bin-bytes-1"),
+    )
+    assert first.status_code == 500
+    assert stt_calls["n"] == 1
+    # Nothing persisted on the failed attempt.
+    assert conversations.conversations["conv-target"]["transcript_segments"] == []
+
+    # The client retries with the exact same audio content after the failure.
+    Path(segment_path).write_bytes(segment_bytes)
+    second = client.post(
+        "/v2/sync-local-files",
+        params={"conversation_id": "conv-target"},
+        files=_bin_upload(f"audio_omibatch_opus_16000_1_fs160_{BIN_TIMESTAMP + 1}.bin", b"raw-bin-bytes-2"),
+    )
+    assert second.status_code == 200
+    assert second.json()["updated_memories"] == ["conv-target"]
+
+    # Exactly one write applied the segment to the conversation -- not lost, not duplicated.
+    final_segments = conversations.conversations["conv-target"]["transcript_segments"]
+    assert len(final_segments) == 1
+    assert len([call for call in conversations.update_calls if call]) == 1
 
 
 def test_v2_sync_local_files_concurrent_retries_of_same_segment_process_once(monkeypatch, tmp_path):
     """SYNC-V2-002: two concurrent requests replaying the exact same segment content must result
-    in exactly one STT/LLM/persistence execution, never two racing on the old non-atomic
-    get/process/set idempotency check."""
+    in exactly one STT/LLM/persistence execution, never two racing on a non-atomic claim check."""
     segment_path = str(tmp_path / f"{BIN_TIMESTAMP + 70}.wav")
     Path(segment_path).write_bytes(b"concurrent-retry-segment-bytes")
     _stub_vad_with_fixed_segment(monkeypatch, segment_path)
@@ -488,9 +766,40 @@ def test_v2_sync_local_files_concurrent_retries_of_same_segment_process_once(mon
     assert results["second"].status_code == 500
 
 
+def test_v2_sync_local_files_release_never_stomps_a_successors_claim(monkeypatch):
+    """The old Redis releasers did GET, compare in Python, then DEL -- if the claim they were
+    releasing had already expired and been reclaimed by someone else, that non-atomic sequence
+    could delete the *new* claimant's lease. `release_sync_segment` closes this by only releasing
+    a claim it still atomically holds; prove the fake models that (a stale release does not affect
+    a fresh claim held by a different claimant)."""
+    conversations = FakeConversationStore()
+    segments = FakeSyncSegmentStore(conversations)
+
+    first_claim = segments.claim_or_get("uid-release", "seg-1", "claimant-a")
+    assert first_claim["outcome"] == "claimed"
+
+    # claimant-a's claim is released (e.g. after a failed attempt)...
+    segments.release("uid-release", "seg-1", "claimant-a")
+
+    # ...and a new claimant reclaims it.
+    second_claim = segments.claim_or_get("uid-release", "seg-1", "claimant-b")
+    assert second_claim["outcome"] == "claimed"
+
+    # A late/stale release from claimant-a (e.g. a delayed retry of its own cleanup) must not
+    # touch claimant-b's now-live claim.
+    segments.release("uid-release", "seg-1", "claimant-a")
+    third_claim = segments.claim_or_get("uid-release", "seg-1", "claimant-b")
+    assert third_claim["outcome"] == "busy"  # claimant-b's claim is still intact
+
+
 def test_v2_sync_local_files_parallel_segments_for_one_explicit_conversation_do_not_lose_writes(monkeypatch, tmp_path):
     """SYNC-V2-003: two VAD segments explicitly targeting the same conversation_id, processed
-    concurrently, must both survive in the final segment list — not last-writer-wins."""
+    concurrently, must both survive in the final segment list — not last-writer-wins. The barrier
+    below sits *inside* the transactional merge, between reading the existing segments and writing
+    the merged result back (the real read-modify-write window that must be atomic) rather than in
+    the STT stub — a barrier placed in STT only proves the two segments overlap in time, not that
+    the write itself is safe under that overlap, and would keep passing even with the
+    per-conversation transaction removed."""
     seg_a = str(tmp_path / f"{BIN_TIMESTAMP + 80}.wav")
     seg_b = str(tmp_path / f"{BIN_TIMESTAMP + 81}.wav")
     Path(seg_a).write_bytes(b"segment-a-bytes")
@@ -508,7 +817,6 @@ def test_v2_sync_local_files_parallel_segments_for_one_explicit_conversation_do_
     barrier = threading.Barrier(2, timeout=5)
 
     def fake_deepgram_prerecorded(url, speakers_count=3, attempts=0, return_language=True):
-        barrier.wait()
         return ([url], "en")  # smuggle the path through so postprocess_words can tell segments apart
 
     def fake_postprocess_words(words, offset):
@@ -519,30 +827,34 @@ def test_v2_sync_local_files_parallel_segments_for_one_explicit_conversation_do_
     monkeypatch.setattr(sync, "deepgram_prerecorded", fake_deepgram_prerecorded)
     monkeypatch.setattr(sync, "postprocess_words", fake_postprocess_words)
 
-    conversation_store = {
-        "id": "conv-target",
-        "started_at": datetime.fromtimestamp(BIN_TIMESTAMP, tz=timezone.utc),
-        "finished_at": datetime.fromtimestamp(BIN_TIMESTAMP + 5, tz=timezone.utc),
-        "transcript_segments": [],
-        "discarded": False,
-    }
-    update_calls = []
-    store_lock = threading.Lock()
-
     def fake_get_conversation(uid, conversation_id):
-        if conversation_id != "conv-target":
-            return None
-        with store_lock:
-            return copy.deepcopy(conversation_store)
-
-    def fake_update_conversation_segments(uid, conversation_id, segments, finished_at=None):
-        with store_lock:
-            conversation_store["transcript_segments"] = copy.deepcopy(segments)
-            conversation_store["finished_at"] = finished_at
-            update_calls.append(copy.deepcopy(segments))
+        return {"id": conversation_id} if conversation_id == "conv-target" else None
 
     monkeypatch.setattr(sync.conversations_db, "get_conversation", fake_get_conversation)
-    monkeypatch.setattr(sync, "update_conversation_segments", fake_update_conversation_segments)
+
+    conversations = FakeConversationStore()
+    conversations.seed(
+        "conv-target",
+        started_at=datetime.fromtimestamp(BIN_TIMESTAMP, tz=timezone.utc),
+        finished_at=datetime.fromtimestamp(BIN_TIMESTAMP + 5, tz=timezone.utc),
+    )
+    segments = FakeSyncSegmentStore(conversations)
+
+    # Put the barrier *inside* the atomic merge window, between the read and the write, so both
+    # segments are guaranteed to be mid-transaction at once -- and, protected by
+    # FakeConversationStore's lock, one fully commits before the other's write proceeds. If
+    # the underlying transaction/lock is removed, both threads read the same pre-merge snapshot
+    # and the second write drops the first's segment; this is exactly what the fix prevents.
+    real_merge = conversations.merge
+
+    def barriered_merge(conversation_id, new_segments, segment_timestamp, **kwargs):
+        return real_merge(conversation_id, new_segments, segment_timestamp, barrier=barrier.wait)
+
+    monkeypatch.setattr(conversations, "merge", barriered_merge)
+
+    monkeypatch.setattr(sync, "claim_or_get_sync_segment", segments.claim_or_get)
+    monkeypatch.setattr(sync, "append_segment_to_conversation_and_complete", segments.append_and_complete)
+    monkeypatch.setattr(sync, "release_sync_segment", segments.release)
 
     app = _app_with_uid_override("uid-parallel-conversation")
     client = TestClient(app)
@@ -557,8 +869,46 @@ def test_v2_sync_local_files_parallel_segments_for_one_explicit_conversation_do_
     assert body["updated_memories"] == ["conv-target"]
     assert body["failed_segments"] == 0
 
-    final_texts = {segment["text"] for segment in conversation_store["transcript_segments"]}
+    final_texts = {segment["text"] for segment in conversations.conversations["conv-target"]["transcript_segments"]}
     assert final_texts == {"segment a text", "segment b text"}
     # Both segments were merged one at a time (serialized), never overwriting each other.
-    assert len(update_calls) == 2
-    assert len(update_calls[-1]) == 2
+    assert len(conversations.update_calls) == 2
+    assert len(conversations.update_calls[-1]) == 2
+
+
+def test_v2_sync_local_files_parallel_segments_lose_writes_without_the_transaction(tmp_path):
+    """Mutation check for the regression above: with the per-conversation transaction disabled
+    (FakeConversationStore(atomic=False), reproducing the pre-fix plain get+merge+set), the exact
+    same barrier placement *does* lose a segment -- proving the previous test's guarantee comes
+    from the transaction, not from incidental timing. This directly exercises
+    `FakeConversationStore.merge`, not the route, since the route always goes through the atomic
+    fake; it documents, in-suite, the failure this PR's fix closes."""
+    conversations = FakeConversationStore(atomic=False)
+    conversations.seed(
+        "conv-target",
+        started_at=datetime.fromtimestamp(BIN_TIMESTAMP, tz=timezone.utc),
+        finished_at=datetime.fromtimestamp(BIN_TIMESTAMP + 5, tz=timezone.utc),
+    )
+    barrier = threading.Barrier(2, timeout=5)
+    results = {}
+
+    def run(key, text):
+        results[key] = conversations.merge(
+            "conv-target",
+            [{"text": text, "is_user": False, "start": 0.0, "end": 3.0}],
+            BIN_TIMESTAMP,
+            barrier=barrier.wait,
+        )
+
+    t1 = threading.Thread(target=run, args=("a", "segment a text"))
+    t2 = threading.Thread(target=run, args=("b", "segment b text"))
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    final_texts = {segment["text"] for segment in conversations.conversations["conv-target"]["transcript_segments"]}
+    # Without the transaction, the second writer's read-modify-write silently drops the first's
+    # segment -- only one of the two survives.
+    assert final_texts != {"segment a text", "segment b text"}
+    assert len(final_texts) == 1
