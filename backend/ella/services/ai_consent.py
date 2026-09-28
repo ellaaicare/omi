@@ -965,6 +965,7 @@ class AiConsentService:
         except ConsentIdempotencyConflict:
             raise
         except Exception as exc:
+            logger.warning("ai_consent_record_failed error=%s", type(exc).__name__)
             raise ConsentAuthorityUnavailable("ai_consent_authority_unavailable") from exc
         payload = _status_payload(uid, state, stored_receipt)
         payload["receipt"] = _public_receipt(stored_receipt)

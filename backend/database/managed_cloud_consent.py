@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal, Optional
@@ -16,6 +17,8 @@ from database.ella_provisioning import invalidate_self_hosted_authority_on_conne
 from database.runtime_targets import SELF_HOSTED_RUNTIME_TARGET_MODES
 
 AuthorityDecision = Literal["granted", "declined", "revoked"]
+
+logger = logging.getLogger(__name__)
 
 
 class ManagedCloudAuthorityDenied(RuntimeError):
@@ -596,7 +599,6 @@ async def synchronize_grant(
                     """
                     UPDATE users
                     SET status = 'ACTIVE',
-                        guardian_mode = COALESCE(guardian_mode, 'OFF'),
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = $1
                       AND status IN ('PENDING', 'ACTIVE')
@@ -609,6 +611,7 @@ async def synchronize_grant(
     except ManagedCloudAuthorityUnavailable:
         raise
     except Exception as exc:
+        logger.warning("managed_cloud_consent_grant_failed error=%s", type(exc).__name__)
         raise ManagedCloudAuthorityUnavailable("managed_cloud_authority_unavailable") from exc
 
 

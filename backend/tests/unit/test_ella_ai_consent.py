@@ -509,6 +509,128 @@ def test_firestore_transaction_replay_does_not_rewrite_current_state():
     assert state == current_state
 
 
+def test_firestore_shaped_v10_user_can_upgrade_to_v11_through_api(monkeypatch):
+    class Snapshot:
+        def __init__(self, data):
+            self.exists = data is not None
+            self._data = data or {}
+
+        def to_dict(self):
+            return dict(self._data)
+
+    class DocumentRef:
+        def __init__(self, database, path):
+            self.database = database
+            self.path = path
+
+        def get(self, transaction=None):
+            if transaction is not None:
+                assert transaction.database is self.database
+            return Snapshot(self.database.documents.get(self.path))
+
+        def collection(self, name):
+            return CollectionRef(self.database, (*self.path, name))
+
+    class CollectionRef:
+        def __init__(self, database, path):
+            self.database = database
+            self.path = path
+
+        def document(self, document_id):
+            return DocumentRef(self.database, (*self.path, document_id))
+
+    class Transaction:
+        def __init__(self, database):
+            self.database = database
+
+        def set(self, ref, data, merge=False):
+            current = dict(self.database.documents.get(ref.path) or {}) if merge else {}
+            self.database.documents[ref.path] = {**current, **data}
+
+    class FirestoreShapedDatabase:
+        def __init__(self):
+            self.documents = {}
+
+        def collection(self, name):
+            return CollectionRef(self, (name,))
+
+        def transaction(self):
+            return Transaction(self)
+
+    database = FirestoreShapedDatabase()
+    repository = consent.FirestoreConsentRepository()
+    service = _service(repository)
+    monkeypatch.setattr(consent, "_firestore_db", database)
+    monkeypatch.setattr(
+        consent,
+        "_record_firestore_receipt",
+        consent._record_firestore_receipt.to_wrap,
+    )
+    monkeypatch.setattr(
+        consent,
+        "_read_firestore_current_receipt",
+        consent._read_firestore_current_receipt.to_wrap,
+    )
+    monkeypatch.setattr(consent, "_repository", repository)
+    monkeypatch.setattr(ai_consent, "get_ai_consent_service", lambda: service)
+    monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED", "false")
+    monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", "")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "")
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "false")
+
+    service.submit("user-upgrade", _v10_submission(request_id="request-v10-original"))
+
+    app = FastAPI()
+    app.include_router(ai_consent.router)
+    app.dependency_overrides[get_firebase_token_identity] = lambda: FirebaseTokenIdentity(uid="user-upgrade")
+    response = TestClient(app).post(
+        "/v1/users/ai-consent",
+        json={
+            "decision": "granted",
+            "policy_version": consent.CURRENT_POLICY_VERSION,
+            "processor_set_hash": consent.CURRENT_PROCESSOR_SET_HASH,
+            "scope_version": consent.CURRENT_SCOPE_VERSION,
+            "scope_hash": consent.CURRENT_SCOPE_HASH,
+            "request_id": "request-v11-upgrade",
+            "app_version": "1.0.0",
+            "build_number": "872",
+            "locale": "en-US",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["authorized"] is True
+    assert payload["receipt"]["policy_version"] == consent.CURRENT_POLICY_VERSION
+    assert "typesafe" in payload["receipt"]["processor_ids"]
+    status = service.status(
+        "user-upgrade",
+        requested_policy_version=consent.CURRENT_POLICY_VERSION,
+    )
+    assert status["authorized"] is True
+    assert status["consent"]["receipt_id"] == payload["receipt"]["receipt_id"]
+    decision = consent.resolve_ai_consent_egress_decision("user-upgrade")
+    assert decision.authorized is True
+    assert decision.typesafe_egress_authorized is True
+
+
+def test_consent_record_failure_logs_only_exception_type(caplog):
+    class SyntheticFirestoreFailure(RuntimeError):
+        pass
+
+    class FailingRepository(consent.InMemoryConsentRepository):
+        def record(self, *_args, **_kwargs):
+            raise SyntheticFirestoreFailure("sensitive synthetic detail")
+
+    with caplog.at_level("WARNING"):
+        with pytest.raises(consent.ConsentAuthorityUnavailable):
+            _service(FailingRepository()).submit("user-a", _submission())
+
+    assert "ai_consent_record_failed error=SyntheticFirestoreFailure" in caplog.text
+    assert "sensitive synthetic detail" not in caplog.text
+
+
 def test_firestore_account_deletion_completion_updates_receipt_and_state_atomically():
     class Snapshot:
         def __init__(self, data):

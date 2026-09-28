@@ -2008,6 +2008,90 @@ def test_consent_bootstrap_creates_users_row_and_grant():
     asyncio.run(_run_with_database(scenario))
 
 
+def test_v10_to_v11_grant_preserves_null_guardian_mode_under_production_constraint():
+    async def scenario(pool):
+        uid = "synthetic-consent-v11-upgrade"
+        v10 = managed_cloud_consent.ManagedCloudGrant(
+            account_uid=uid,
+            profile_uid=uid,
+            consent_receipt_id="synthetic-v10-receipt",
+            profile_binding_id="synthetic-profile",
+            policy_version="ai-data-processors-v10",
+            processor_set_hash="sha256:" + ("1" * 64),
+            scope_version="managed-cloud-internal-pilot-v4",
+            scope_hash="sha256:" + ("2" * 64),
+        )
+        v11 = managed_cloud_consent.ManagedCloudGrant(
+            account_uid=uid,
+            profile_uid=uid,
+            consent_receipt_id="synthetic-v11-receipt",
+            profile_binding_id=v10.profile_binding_id,
+            policy_version="ai-data-processors-v11",
+            processor_set_hash="sha256:" + ("3" * 64),
+            scope_version=v10.scope_version,
+            scope_hash=v10.scope_hash,
+        )
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                ALTER TABLE users
+                ADD CONSTRAINT guardian_mode_check
+                CHECK (
+                    guardian_mode IS NULL OR guardian_mode IN (
+                        'EMERGENCY_ONLY', 'ACTIVE_SUPPORT', 'MAXIMUM_AWARENESS',
+                        'CUSTOM', 'CYBORG', 'CHATBOT', 'MEMORY_SUPPORT', 'DEMO'
+                    )
+                )
+                """)
+            user_id = await conn.fetchval(
+                """
+                INSERT INTO users (omi_uid, email, status, guardian_mode, profile_class)
+                VALUES ($1, $2, 'ACTIVE', NULL, 'real')
+                RETURNING id
+                """,
+                uid,
+                "synthetic-consent-v11-upgrade@example.invalid",
+            )
+            await conn.execute(
+                """
+                INSERT INTO ella_managed_cloud_consent_authority (
+                    user_id, decision, consent_receipt_ref, profile_binding_id,
+                    policy_version, processor_set_hash, scope_version, scope_hash
+                ) VALUES ($1, 'granted', $2, $3, $4, $5, $6, $7)
+                """,
+                user_id,
+                managed_cloud_consent.consent_receipt_ref(uid, v10.consent_receipt_id),
+                v10.profile_binding_id,
+                v10.policy_version,
+                v10.processor_set_hash,
+                v10.scope_version,
+                v10.scope_hash,
+            )
+
+        result = await managed_cloud_consent.synchronize_grant(grant=v11)
+
+        assert result["policy_version"] == v11.policy_version
+        async with pool.acquire() as observer:
+            row = await observer.fetchrow(
+                """
+                SELECT account.status, account.guardian_mode,
+                       authority.policy_version, authority.processor_set_hash
+                FROM users account
+                JOIN ella_managed_cloud_consent_authority authority
+                  ON authority.user_id = account.id
+                WHERE account.omi_uid = $1
+                """,
+                uid,
+            )
+        assert tuple(row.values()) == (
+            "ACTIVE",
+            None,
+            v11.policy_version,
+            v11.processor_set_hash,
+        )
+
+    asyncio.run(_run_with_database(scenario))
+
+
 def test_consented_pending_user_can_enable_guardian_and_activates_atomically():
     async def scenario(pool):
         uid = "synthetic-consented-pending-guardian"
