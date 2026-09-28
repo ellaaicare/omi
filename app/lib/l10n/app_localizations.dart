@@ -18704,6 +18704,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Looking for your necklace…'**
   String get upstreamCaptureSearching;
+
+  /// No description provided for @aiConsentUpgradeRetryNotice.
+  ///
+  /// In en, this message translates to:
+  /// **'We couldn’t update your AI permission. Your existing permission is still active, and we’ll retry later.'**
+  String get aiConsentUpgradeRetryNotice;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

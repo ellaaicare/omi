@@ -388,6 +388,129 @@ void main() {
     expect(preferences.isCurrentAiConsentDeferred, isTrue);
   });
 
+  testWidgets('failed v11 upgrade dismisses with a retry notice and preserves exact v10 authority', (tester) async {
+    final preferences = SharedPreferencesUtil()..uid = 'uid-a';
+    const receiptId = '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}v10-receipt';
+    preferences.acceptAiConsent(
+      receiptId: receiptId,
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
+      policyVersion: SharedPreferencesUtil.legacyAiConsentContractVersionV10,
+      processorSetHash: SharedPreferencesUtil.legacyAiConsentProcessorSetHashV10,
+    );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: receiptId,
+      policyVersion: SharedPreferencesUtil.legacyAiConsentContractVersionV10,
+      processorSetHash: SharedPreferencesUtil.legacyAiConsentProcessorSetHashV10,
+      profileBindingId: 'profile-binding-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Column(
+              children: [
+                const Text('Home content'),
+                TextButton(
+                  onPressed: () => AiConsentSheet.show(
+                    context,
+                    preserveExistingAuthorityOnDecline: true,
+                    onAccept: () async => const AiConsentGrantOutcome.failed(
+                      AiConsentGrantFailureKind.serverUnavailable,
+                      supportCode: 'managed_cloud_consent_authority_unavailable',
+                    ),
+                  ),
+                  child: const Text('Upgrade'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Upgrade'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Allow and continue'));
+    await tester.tap(find.text('Allow and continue'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.byType(AiConsentSheet), findsNothing);
+    expect(find.text('Home content'), findsOneWidget);
+    expect(
+      find.text(
+        'We couldn’t update your AI permission. Your existing permission is still active, and we’ll retry later.',
+      ),
+      findsOneWidget,
+    );
+    expect(preferences.aiConsentAccepted, isTrue);
+    expect(preferences.aiConsentReceiptId, receiptId);
+    expect(preferences.aiConsentContractVersion, SharedPreferencesUtil.legacyAiConsentContractVersionV10);
+    expect(preferences.aiConsentServerVerificationRemaining, isNotNull);
+    expect(preferences.isCurrentAiConsentDeferred, isFalse);
+  });
+
+  testWidgets('thrown v11 upgrade error also preserves exact v10 authority', (tester) async {
+    final preferences = SharedPreferencesUtil()..uid = 'uid-a';
+    const receiptId = '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}v10-receipt';
+    preferences.acceptAiConsent(
+      receiptId: receiptId,
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
+      policyVersion: SharedPreferencesUtil.legacyAiConsentContractVersionV10,
+      processorSetHash: SharedPreferencesUtil.legacyAiConsentProcessorSetHashV10,
+    );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: receiptId,
+      policyVersion: SharedPreferencesUtil.legacyAiConsentContractVersionV10,
+      processorSetHash: SharedPreferencesUtil.legacyAiConsentProcessorSetHashV10,
+      profileBindingId: 'profile-binding-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () => AiConsentSheet.show(
+                context,
+                preserveExistingAuthorityOnDecline: true,
+                onAccept: () => throw StateError('simulated upgrade failure'),
+              ),
+              child: const Text('Upgrade'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Upgrade'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Allow and continue'));
+    await tester.tap(find.text('Allow and continue'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.byType(AiConsentSheet), findsNothing);
+    expect(preferences.aiConsentAccepted, isTrue);
+    expect(preferences.aiConsentReceiptId, receiptId);
+    expect(preferences.aiConsentContractVersion, SharedPreferencesUtil.legacyAiConsentContractVersionV10);
+    expect(preferences.aiConsentServerVerificationRemaining, isNotNull);
+    expect(preferences.isCurrentAiConsentDeferred, isFalse);
+  });
+
   testWidgets('review mode exposes revoke and deletion actions', (tester) async {
     final preferences = SharedPreferencesUtil();
     preferences.uid = 'uid-a';

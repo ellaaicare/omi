@@ -122,6 +122,44 @@ void main() {
     expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
   });
 
+  test('503 v11 upgrade preserves the verified v10 authority', () async {
+    final preferences = SharedPreferencesUtil();
+    const receiptId = '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}v10-receipt';
+    preferences.acceptAiConsent(
+      receiptId: receiptId,
+      uid: uid,
+      profileBindingId: 'binding-1',
+      serverDecidedAt: '2026-08-07T00:00:00Z',
+      policyVersion: SharedPreferencesUtil.legacyAiConsentContractVersionV10,
+      processorSetHash: SharedPreferencesUtil.legacyAiConsentProcessorSetHashV10,
+    );
+    preferences.markAiConsentServerVerified(
+      uid: uid,
+      receiptId: receiptId,
+      policyVersion: SharedPreferencesUtil.legacyAiConsentContractVersionV10,
+      processorSetHash: SharedPreferencesUtil.legacyAiConsentProcessorSetHashV10,
+      profileBindingId: 'binding-1',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+    final transport = _FakeTransport(
+      policy: AiConsentPolicy.bundled,
+      submitResult: const AiConsentSubmitResult(
+        httpStatus: 503,
+        errorCode: 'managed_cloud_consent_authority_unavailable',
+      ),
+    );
+
+    final outcome = await _service(transport).grantCurrentConsentWithOutcome(uid: uid);
+
+    expect(outcome.failureKind, AiConsentGrantFailureKind.serverUnavailable);
+    expect(outcome.supportCode, 'managed_cloud_consent_authority_unavailable');
+    expect(preferences.aiConsentAccepted, isTrue);
+    expect(preferences.aiConsentReceiptId, receiptId);
+    expect(preferences.aiConsentContractVersion, SharedPreferencesUtil.legacyAiConsentContractVersionV10);
+    expect(preferences.aiConsentServerVerificationRemaining, isNotNull);
+  });
+
   test('409 policy mismatch maps to the policy-mismatch failure kind', () async {
     final transport = _FakeTransport(
       policy: AiConsentPolicy.bundled,
@@ -267,11 +305,7 @@ void main() {
       profileBindingId: 'binding-1',
       serverDecidedAt: '2026-08-07T00:00:00Z',
     );
-    preferences.markAiConsentLastServerConfirmed(
-      uid: uid,
-      receiptId: receiptId,
-      confirmedAt: previousConfirmation,
-    );
+    preferences.markAiConsentLastServerConfirmed(uid: uid, receiptId: receiptId, confirmedAt: previousConfirmation);
     final driftedStatus = AiConsentStatus(
       subjectUid: uid,
       authorized: true,
@@ -288,9 +322,7 @@ void main() {
       scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
       serverDecidedAt: DateTime.utc(2026, 8, 7),
     );
-    final transport = _FakeTransport(
-      fetchResult: AiConsentFetchResult(httpStatus: 200, status: driftedStatus),
-    );
+    final transport = _FakeTransport(fetchResult: AiConsentFetchResult(httpStatus: 200, status: driftedStatus));
 
     final result = await _service(transport).refreshActiveSessionAuthority(
       uid: uid,

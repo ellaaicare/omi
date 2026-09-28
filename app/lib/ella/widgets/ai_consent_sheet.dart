@@ -92,8 +92,24 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
         return;
       }
     } catch (_) {
-      // Keep the consent surface open and capture disabled on acknowledgement failure.
+      // First consent stays open and fail closed. Upgrade mode below can keep
+      // the already-verified v10 authority and dismiss this optional upgrade.
       outcome = _genericFailure;
+    }
+
+    if (mounted && widget.preserveExistingAuthorityOnDecline) {
+      final preferences = SharedPreferencesUtil();
+      final uid = preferences.uid;
+      if (preferences.hasPriorAccountBoundAiConsent(uid) &&
+          preferences.hasCurrentAiConsentAuthority(enforceEnglishPilotLocale: false)) {
+        final messenger = ScaffoldMessenger.maybeOf(context);
+        final notice = context.l10n.aiConsentUpgradeRetryNotice;
+        Navigator.of(context).pop(false);
+        messenger
+          ?..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(content: Text(notice)));
+        return;
+      }
     }
 
     if (mounted) {

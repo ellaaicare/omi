@@ -36,13 +36,15 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   @override
   void initState() {
     super.initState();
-    unawaited(_runtime.ensureBooted().then((provider) {
-      if (!mounted) return;
-      setState(() => _provider = provider);
-    }).catchError((Object error) {
-      if (!mounted) return;
-      setState(() => _message = context.l10n.upstreamCaptureUnavailable);
-    }));
+    unawaited(
+      _runtime.ensureBooted().then((provider) {
+        if (!mounted) return;
+        setState(() => _provider = provider);
+      }).catchError((Object error) {
+        if (!mounted) return;
+        setState(() => _message = context.l10n.upstreamCaptureUnavailable);
+      }),
+    );
   }
 
   Future<void> _run(Future<void> Function() action) async {
@@ -117,61 +119,63 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
         final phoneLive = state == RecordingState.record || provider.isPhoneMicBatchRecording;
         final necklaceLive = state == RecordingState.deviceRecord || provider.havingRecordingDevice;
         final starting = _busy || state == RecordingState.initialising;
+        final status = starting
+            ? context.l10n.upstreamCaptureStarting
+            : phoneLive
+                ? context.l10n.upstreamCaptureRecordingPhone
+                : necklaceLive
+                    ? context.l10n.upstreamCaptureRecordingNecklace
+                    : (_message ?? '');
         return _DockSurface(
           child: Column(
             key: const Key('upstream-capture-dock'),
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text(
-                starting
-                    ? context.l10n.upstreamCaptureStarting
-                    : phoneLive
-                        ? context.l10n.upstreamCaptureRecordingPhone
-                        : necklaceLive
-                            ? context.l10n.upstreamCaptureRecordingNecklace
-                            : (_message ?? ''),
-                style: const TextStyle(fontSize: 18, color: EllaColors.ink),
-              ),
+              if (status.isNotEmpty) Text(status, style: const TextStyle(fontSize: 18, color: EllaColors.ink)),
               if (_message != null && (phoneLive || necklaceLive || starting))
                 Text(_message!, style: const TextStyle(fontSize: 16, color: EllaColors.inkSoft)),
-              const SizedBox(height: 10),
-              Wrap(
-                spacing: 10,
-                runSpacing: 8,
+              if (status.isNotEmpty) const SizedBox(height: 10),
+              Row(
                 children: [
-                  if (!phoneLive)
-                    FilledButton(
-                      key: const Key('upstream-capture-record-phone'),
-                      onPressed: starting ? null : _startPhone,
-                      child: Text(context.l10n.upstreamCaptureRecordPhone),
-                    )
-                  else
-                    FilledButton(
-                      key: const Key('upstream-capture-stop-phone'),
-                      onPressed: starting ? null : () => _run(_runtime.stopPhoneCapture),
-                      child: Text(context.l10n.upstreamCaptureStop),
-                    ),
-                  if (!necklaceLive)
-                    OutlinedButton(
-                      key: const Key('upstream-capture-connect-necklace'),
-                      onPressed: starting ? null : _connectNecklace,
-                      child: Text(context.l10n.upstreamCaptureConnectNecklace),
-                    )
-                  else
-                    OutlinedButton(
-                      key: const Key('upstream-capture-disconnect-necklace'),
-                      onPressed: starting ? null : () => _run(_runtime.disconnectNecklace),
-                      child: Text(context.l10n.upstreamCaptureDisconnectNecklace),
-                    ),
-                  if (phoneLive || necklaceLive)
-                    TextButton(
-                      key: const Key('upstream-capture-finish'),
-                      onPressed: starting ? null : () => _run(_runtime.finishConversation),
-                      child: Text(context.l10n.upstreamCaptureFinish),
-                    ),
+                  Expanded(
+                    child: phoneLive
+                        ? FilledButton(
+                            key: const Key('upstream-capture-stop-phone'),
+                            onPressed: starting ? null : () => _run(_runtime.stopPhoneCapture),
+                            child: Text(context.l10n.upstreamCaptureStop),
+                          )
+                        : FilledButton(
+                            key: const Key('upstream-capture-record-phone'),
+                            onPressed: starting ? null : _startPhone,
+                            child: Text(context.l10n.upstreamCaptureRecordPhone),
+                          ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: necklaceLive
+                        ? OutlinedButton(
+                            key: const Key('upstream-capture-disconnect-necklace'),
+                            onPressed: starting ? null : () => _run(_runtime.disconnectNecklace),
+                            child: Text(context.l10n.upstreamCaptureDisconnectNecklace),
+                          )
+                        : OutlinedButton(
+                            key: const Key('upstream-capture-connect-necklace'),
+                            onPressed: starting ? null : _connectNecklace,
+                            child: Text(context.l10n.upstreamCaptureConnectNecklace),
+                          ),
+                  ),
                 ],
               ),
+              if (phoneLive || necklaceLive)
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    key: const Key('upstream-capture-finish'),
+                    onPressed: starting ? null : () => _run(_runtime.finishConversation),
+                    child: Text(context.l10n.upstreamCaptureFinish),
+                  ),
+                ),
             ],
           ),
         );

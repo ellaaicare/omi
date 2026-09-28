@@ -11101,5 +11101,6 @@
   "upstreamCaptureConnectNecklace": "Connect necklace",
   "upstreamCaptureStop": "Stop recording",
   "upstreamCaptureRecordingPhone": "Recording with your phone",
-  "upstreamCaptureSearching": "Looking for your necklace…"
+  "upstreamCaptureSearching": "Looking for your necklace…",
+  "aiConsentUpgradeRetryNotice": "We couldn’t update your AI permission. Your existing permission is still active, and we’ll retry later."
 }
