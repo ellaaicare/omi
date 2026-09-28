@@ -5,6 +5,7 @@ import re
 import struct
 import threading
 import time
+import uuid
 import wave
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -32,12 +33,16 @@ from utils.other.storage import (
     get_merged_audio_signed_url,
 )
 from utils.sync_capture_manifest import (
+    acquire_conversation_update_lock,
     cache_sync_segment_result,
     claim_conversation_manifest,
+    claim_sync_segment,
     compute_sync_segment_id,
     get_cached_sync_segment_result,
     issue_capture_manifest,
     manifest_claims_match_paths,
+    release_conversation_update_lock,
+    release_sync_segment_claim,
     verify_capture_manifest,
 )
 
@@ -719,42 +724,63 @@ def process_segment(
         response['new_memories'].add(created.id)
         return ('new_memories', created.id)
     else:
+        # Parallel VAD segments can explicitly target the same conversation (`target_conversation_id`,
+        # e.g. several segments from one live-capture batch). The merge below is a read-modify-replace
+        # of the conversation's full segment list, so two concurrent segments for that conversation
+        # would otherwise both read the same snapshot and the second write would silently drop the
+        # first's segments. Serialize the read-merge-write on that conversation with a short-lived
+        # Redis lock (this never engages for `/v1/sync-local-files`, which never passes
+        # target_conversation_id, or for the nearest-by-timestamp fallback match).
+        lock_conversation_id = target_conversation_id if target_conversation_id == closest_memory.get('id') else None
+        lock_claimant = uuid.uuid4().hex
+        if lock_conversation_id:
+            if not acquire_conversation_update_lock(uid, lock_conversation_id, lock_claimant):
+                raise RuntimeError(f'timed out waiting to update conversation {lock_conversation_id}')
+            # Re-read now that we hold the lock: another segment may have merged its own segments
+            # into this conversation while we were waiting.
+            refreshed = conversations_db.get_conversation(uid, lock_conversation_id)
+            if refreshed:
+                closest_memory = refreshed
 
-        transcript_segments = [s.dict() for s in transcript_segments]
+        try:
+            transcript_segments = [s.dict() for s in transcript_segments]
 
-        # assign timestamps to each segment
-        for segment in transcript_segments:
-            segment['timestamp'] = timestamp + segment['start']
-        for segment in closest_memory['transcript_segments']:
-            segment['timestamp'] = closest_memory['started_at'].timestamp() + segment['start']
+            # assign timestamps to each segment
+            for segment in transcript_segments:
+                segment['timestamp'] = timestamp + segment['start']
+            for segment in closest_memory['transcript_segments']:
+                segment['timestamp'] = closest_memory['started_at'].timestamp() + segment['start']
 
-        # merge and sort segments by start timestamp
-        segments = closest_memory['transcript_segments'] + transcript_segments
-        segments.sort(key=lambda x: x['timestamp'])
+            # merge and sort segments by start timestamp
+            segments = closest_memory['transcript_segments'] + transcript_segments
+            segments.sort(key=lambda x: x['timestamp'])
 
-        # fix segment.start .end to be relative to the memory
-        for i, segment in enumerate(segments):
-            duration = segment['end'] - segment['start']
-            segment['start'] = segment['timestamp'] - closest_memory['started_at'].timestamp()
-            segment['end'] = segment['start'] + duration
+            # fix segment.start .end to be relative to the memory
+            for i, segment in enumerate(segments):
+                duration = segment['end'] - segment['start']
+                segment['start'] = segment['timestamp'] - closest_memory['started_at'].timestamp()
+                segment['end'] = segment['start'] + duration
 
-        # Calculate new finished_at based on the latest segment
-        last_segment_end = segments[-1]['end'] if segments else 0
-        new_finished_at = datetime.fromtimestamp(
-            closest_memory['started_at'].timestamp() + last_segment_end, tz=timezone.utc
-        )
+            # Calculate new finished_at based on the latest segment
+            last_segment_end = segments[-1]['end'] if segments else 0
+            new_finished_at = datetime.fromtimestamp(
+                closest_memory['started_at'].timestamp() + last_segment_end, tz=timezone.utc
+            )
 
-        # Ensure finished_at doesn't go backwards
-        if new_finished_at < closest_memory['finished_at']:
-            new_finished_at = closest_memory['finished_at']
+            # Ensure finished_at doesn't go backwards
+            if new_finished_at < closest_memory['finished_at']:
+                new_finished_at = closest_memory['finished_at']
 
-        # remove timestamp field
-        for segment in segments:
-            segment.pop('timestamp')
+            # remove timestamp field
+            for segment in segments:
+                segment.pop('timestamp')
 
-        # save with updated finished_at
-        response['updated_memories'].add(closest_memory['id'])
-        update_conversation_segments(uid, closest_memory['id'], segments, finished_at=new_finished_at)
+            # save with updated finished_at
+            response['updated_memories'].add(closest_memory['id'])
+            update_conversation_segments(uid, closest_memory['id'], segments, finished_at=new_finished_at)
+        finally:
+            if lock_conversation_id:
+                release_conversation_update_lock(uid, lock_conversation_id, lock_claimant)
 
         # If the conversation was previously discarded, reprocess it with the new segments
         if closest_memory.get('discarded', False):
@@ -1000,30 +1026,56 @@ async def sync_local_files_v2(
         total_segments = len(segmented_paths)
 
         def _run_segment(path: str):
-            segment_id = compute_sync_segment_id(uid, path)
-            cached = get_cached_sync_segment_result(segment_id)
-            if cached is not None:
-                # Replay of already-durably-processed audio: no STT/LLM re-run, no duplicate
-                # conversation write. Just report the same outcome as the first successful call.
-                with result_lock:
-                    response[cached['kind']].add(cached['conversation_id'])
-                return
+            # Everything below — the cache read, the claim, processing, and the cache write — is
+            # inside this single try. A Redis outage on any of them (SYNC-V2-001) is a worker
+            # failure like any other: it lands in [errors] and counts against failed_segments,
+            # rather than silently vanishing (a thread's uncaught exception never reaches the
+            # caller) and being reported back as a false-success 200.
             try:
-                outcome = process_segment(
-                    path,
-                    uid,
-                    response,
-                    source,
-                    target_conversation_id=conversation_id,
-                    geolocation=geolocation,
-                )
+                segment_id = compute_sync_segment_id(uid, path)
+                cached = get_cached_sync_segment_result(segment_id)
+                if cached is not None:
+                    # Replay of already-durably-processed audio: no STT/LLM re-run, no duplicate
+                    # conversation write. Just report the same outcome as the first successful call.
+                    with result_lock:
+                        response[cached['kind']].add(cached['conversation_id'])
+                    return
+
+                # Atomic claim (SYNC-V2-002): the prior get/process/set was non-atomic, so two
+                # concurrent retries of the same segment could both miss the cache and both run
+                # STT/LLM/persistence. Only the claimant may process this segment id; a concurrent
+                # retry that loses the race backs off as retryable instead of racing it.
+                claimant = uuid.uuid4().hex
+                if not claim_sync_segment(segment_id, claimant):
+                    with result_lock:
+                        errors.append(f'{os.path.basename(path)}: segment is already being processed, retry')
+                    return
+
+                try:
+                    # Re-check: a concurrent execution may have finished and cached the result
+                    # while this one was racing for the claim.
+                    cached = get_cached_sync_segment_result(segment_id)
+                    if cached is not None:
+                        with result_lock:
+                            response[cached['kind']].add(cached['conversation_id'])
+                        return
+
+                    outcome = process_segment(
+                        path,
+                        uid,
+                        response,
+                        source,
+                        target_conversation_id=conversation_id,
+                        geolocation=geolocation,
+                    )
+                    if outcome is not None:
+                        kind, result_conversation_id = outcome
+                        cache_sync_segment_result(segment_id, kind, result_conversation_id)
+                finally:
+                    release_sync_segment_claim(segment_id, claimant)
             except Exception as e:
                 with result_lock:
                     errors.append(f'{os.path.basename(path)}: {e}')
-                return
-            if outcome is not None:
-                kind, result_conversation_id = outcome
-                cache_sync_segment_result(segment_id, kind, result_conversation_id)
 
         threads = [threading.Thread(target=_run_segment, args=(path,)) for path in segmented_paths]
         _run_threads_in_chunks(threads)
