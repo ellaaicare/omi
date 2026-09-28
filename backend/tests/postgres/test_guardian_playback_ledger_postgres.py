@@ -122,6 +122,57 @@ def test_expired_rows_are_deleted_by_cleanup_and_recent_rows_survive():
     asyncio.run(_run_with_database(scenario))
 
 
+def test_record_generated_triggers_rate_limited_retention_cleanup(monkeypatch):
+    """The declared retention window has no scheduler/cron of its own — it
+    is enforced only because `record_generated` (the ledger's most common
+    write) triggers a rate-limited `cleanup_expired()` sweep. Proves the
+    production trigger actually runs a sweep on a normal write, and that
+    the rate limit suppresses a second sweep immediately after."""
+
+    async def scenario(pool: asyncpg.Pool) -> None:
+        now = datetime.now(timezone.utc)
+        monkeypatch.setattr(ledger, "CLEANUP_MIN_INTERVAL_SECONDS", 3600.0)
+
+        # Suppress the sweep on this very first write (a fresh row can't be
+        # expired yet anyway) so it doesn't consume the rate-limit window
+        # before the row below is artificially aged.
+        monkeypatch.setattr(ledger, "_last_cleanup_at", now)
+        await ledger.record_generated(pool, uid="uid-1", playback_id="pb-old", playback_text="old")
+        old_cutoff = now - timedelta(days=30)
+        await pool.execute(
+            "UPDATE guardian_playback_ledger SET created_at = $1 WHERE playback_id = 'pb-old'",
+            old_cutoff,
+        )
+
+        # Now put the rate limiter in a state where the next write is
+        # allowed to sweep immediately. This write is what should trigger
+        # the sweep and delete the now-expired row above — proving
+        # `record_generated` really calls `cleanup_expired()` in
+        # production, not just that `cleanup_expired` itself works in
+        # isolation (covered separately above).
+        monkeypatch.setattr(ledger, "_last_cleanup_at", now - timedelta(hours=2))
+        await ledger.record_generated(pool, uid="uid-1", playback_id="pb-new", playback_text="new")
+
+        remaining = {row["playback_id"] for row in await pool.fetch("SELECT playback_id FROM guardian_playback_ledger")}
+        assert remaining == {"pb-new"}
+
+        # Immediately age the surviving row and write again: the sweep that
+        # just ran must suppress a second one inside the rate-limit window,
+        # so this row is NOT deleted yet even though it is now also expired.
+        await pool.execute(
+            "UPDATE guardian_playback_ledger SET created_at = $1 WHERE playback_id = 'pb-new'",
+            old_cutoff,
+        )
+        await ledger.record_generated(pool, uid="uid-1", playback_id="pb-newer", playback_text="newer")
+
+        remaining_after = {
+            row["playback_id"] for row in await pool.fetch("SELECT playback_id FROM guardian_playback_ledger")
+        }
+        assert remaining_after == {"pb-new", "pb-newer"}
+
+    asyncio.run(_run_with_database(scenario))
+
+
 def test_cross_owner_same_playback_id_are_independent_rows_with_no_leak():
     """The durable key is `(uid, playback_id)`, not `playback_id` alone
     (see the table's UNIQUE constraint). `_fetch_owner_row` used to query

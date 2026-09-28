@@ -1356,7 +1356,7 @@ jobs:
           ! grep -Eq '[0-9]+ skipped' /tmp/guardian-delivery-claim-pytest.log
           test "$(pytest --collect-only -q tests/unit/test_guardian_echo_classifier.py | grep -c '::')" -eq 19
           pytest tests/unit/test_guardian_echo_classifier.py -v
-          test "$(pytest --collect-only -q tests/postgres/test_guardian_playback_ledger_postgres.py | grep -c '::')" -eq 12
+          test "$(pytest --collect-only -q tests/postgres/test_guardian_playback_ledger_postgres.py | grep -c '::')" -eq 13
           pytest tests/postgres/test_guardian_playback_ledger_postgres.py -v
           test "$(pytest --collect-only -q tests/postgres/test_guardian_echo_classifier_scanner_e2e_postgres.py | grep -c '::')" -eq 3
           pytest tests/postgres/test_guardian_echo_classifier_scanner_e2e_postgres.py -v

@@ -37,6 +37,10 @@ import asyncpg
 from database.ella_postgres import get_ella_postgres_pool
 
 DEFAULT_RETENTION_DAYS = int(os.getenv("ELLA_GUARDIAN_PLAYBACK_LEDGER_RETENTION_DAYS", "7"))
+# Minimum time between automatic retention sweeps triggered by ledger
+# writes (see `_maybe_run_retention_cleanup`). Enforces the retention
+# window in production without a dedicated scheduler/background job.
+CLEANUP_MIN_INTERVAL_SECONDS = float(os.getenv("ELLA_GUARDIAN_PLAYBACK_LEDGER_CLEANUP_MIN_INTERVAL_SECONDS", "3600"))
 
 # Monotonic lifecycle ordering. `completed` and `failed` are both terminal
 # (rank 4): once a terminal receipt is recorded, later receipts of any kind
@@ -156,6 +160,36 @@ def _assert_owned(row: Optional[asyncpg.Record], uid: str, playback_id: str) -> 
         raise PlaybackLedgerOwnershipError(uid, playback_id)
 
 
+_last_cleanup_at: Optional[datetime] = None
+
+
+async def _maybe_run_retention_cleanup(pool: asyncpg.Pool) -> None:
+    """Best-effort, rate-limited retention sweep triggered by ledger writes.
+
+    There is no dedicated scheduler/cron for this table, so the declared
+    retention window (`DEFAULT_RETENTION_DAYS`) is only actually enforced
+    if something in the request path calls `cleanup_expired()`. Piggybacks
+    on `record_generated` (the ledger's most common write) rather than a
+    background task: runs at most once per `CLEANUP_MIN_INTERVAL_SECONDS`
+    regardless of how many writes happen in between, so it stays idempotent
+    and cheap under real traffic instead of running a table-wide DELETE on
+    every single write. Never raises — a cleanup failure must not block the
+    write that triggered it.
+    """
+    global _last_cleanup_at
+    now = datetime.now(timezone.utc)
+    if _last_cleanup_at is not None and (now - _last_cleanup_at).total_seconds() < CLEANUP_MIN_INTERVAL_SECONDS:
+        return
+    _last_cleanup_at = now
+    try:
+        await cleanup_expired(pool)
+    except Exception as exc:
+        print(
+            f"[FLOW:GUARDIAN-PLAYBACK-LEDGER] retention cleanup failed reason={type(exc).__name__}",
+            flush=True,
+        )
+
+
 async def record_generated(
     pool: asyncpg.Pool,
     *,
@@ -196,6 +230,7 @@ async def record_generated(
                 playback_text,
                 text_provenance,
             )
+    await _maybe_run_retention_cleanup(pool)
 
 
 async def record_queued(
