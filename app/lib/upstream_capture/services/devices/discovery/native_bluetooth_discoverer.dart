@@ -32,14 +32,21 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
     final completer = Completer<void>();
     _scanCompleter = completer;
 
+    // Redacted discovery counters: counts only, never names/UUIDs.
+    int seenCount = 0;
+    int noNameCount = 0;
+
     final previousCallback = BleBridge.instance.peripheralDiscoveredCallback;
 
     BleBridge.instance.peripheralDiscoveredCallback = (BlePeripheral peripheral) {
-      if (peripheral.name.isNotEmpty) {
-        // Deduplicate by UUID
-        results.removeWhere((p) => p.uuid == peripheral.uuid);
-        results.add(peripheral);
+      seenCount++;
+      if (peripheral.name.isEmpty) {
+        noNameCount++;
+        return;
       }
+      // Deduplicate by UUID
+      results.removeWhere((p) => p.uuid == peripheral.uuid);
+      results.add(peripheral);
     };
 
     try {
@@ -55,6 +62,10 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
 
       final devices = results.where(_isSupportedPeripheral).map(_peripheralToDevice).toList()
         ..sort((a, b) => b.rssi.compareTo(a.rssi));
+
+      final noSignatureMatchCount = results.length - devices.length;
+      Logger.debug('NativeBluetoothDiscoverer: seen=$seenCount admitted=${devices.length} '
+          'rejected(no_name=$noNameCount, no_signature_match=$noSignatureMatchCount)');
 
       return DeviceDiscoveryResult(devices: devices);
     } finally {
@@ -91,6 +102,12 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
   static bool isPlaud(BlePeripheral p) => _isPlaud(p);
 
   @visibleForTesting
+  static bool isFriendPendant(BlePeripheral p) => _isFriendPendant(p);
+
+  @visibleForTesting
+  static bool isOmi(BlePeripheral p) => _isOmi(p);
+
+  @visibleForTesting
   static BtDevice peripheralToDevice(BlePeripheral p) => _peripheralToDevice(p);
 
   static bool _isSupportedPeripheral(BlePeripheral p) {
@@ -121,7 +138,12 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
   }
 
   static bool _isOmi(BlePeripheral p) {
-    return _hasService(p, omiServiceUuid);
+    // Production necklaces advertise as bare 'Friend' (the pre-rebrand name) or
+    // an 'Omi'-prefixed local name with no service UUID in the advertisement
+    // packet (ellaaicare/ella-ai#1280 RUN-009). 'friend_'-prefixed names remain
+    // the distinct Friend Pendant product, matched by _isFriendPendant above.
+    final name = p.name.toLowerCase();
+    return name == 'friend' || name.startsWith('omi') || _hasService(p, omiServiceUuid);
   }
 
   static bool _hasService(BlePeripheral p, String serviceUuid) {
