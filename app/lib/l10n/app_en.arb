@@ -10212,5 +10212,9 @@
   "conversationEllaEnrichedLabel": "Summary enriched by Ella",
   "@conversationEllaEnrichedLabel": {
     "description": "Accessible label and tooltip for the Ella-enriched memory badge"
+  },
+  "correctionSheetHintExample": "Example: This was Avery and Jordan discussing weekend plans, not a work meeting.",
+  "@correctionSheetHintExample": {
+    "description": "Example placeholder text shown in the conversation correction text field"
   }
 }
