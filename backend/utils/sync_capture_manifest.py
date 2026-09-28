@@ -14,8 +14,13 @@ fork's simpler, synchronous sync pipeline:
   that same uid.
 - No Firestore-backed sync ledger / job queue (upstream's `claim_sync_content` /
   `database.sync_jobs`). This fork processes uploads synchronously like `/v1/sync-local-files`, so
-  idempotent replay is handled per-VAD-segment (see `compute_sync_segment_id` /
-  `get_cached_sync_segment_result` / `cache_sync_segment_result` below) rather than per-job.
+  idempotent replay is handled per-VAD-segment (see `compute_sync_segment_id` below, and
+  `database.sync_segments` for the durable claim/idempotency record keyed on it) rather than
+  per-job.
+
+`compute_sync_segment_id` is the only segment-idempotency piece still in this module; the claim,
+lease, and result-cache it used to back (previously Redis `SET NX EX` keys) now live in
+`database.sync_segments` as durable Firestore records -- see that module's docstring for why.
 """
 
 from __future__ import annotations
@@ -34,10 +39,6 @@ from database.redis_db import r as redis_client
 
 MANIFEST_TTL_SECONDS = 15 * 60
 MANIFEST_CLAIM_TTL_SECONDS = 6 * 60 * 60
-# How long a successfully-processed segment's outcome is remembered so a WAL replay (same audio
-# bytes re-uploaded after a dropped response / app relaunch) is a no-op instead of a duplicate
-# conversation write. Generous enough to cover realistic client retry windows.
-SEGMENT_RESULT_TTL_SECONDS = 7 * 24 * 60 * 60
 
 _SHA256_RE = re.compile(r'^[0-9a-f]{64}$')
 
@@ -159,92 +160,3 @@ def compute_sync_segment_id(uid: str, path: str) -> str:
     logical_name = Path(path).name
     payload = f'{uid}\n{logical_name}\n{digest.hexdigest()}'
     return hmac.new(_secret(), payload.encode(), hashlib.sha256).hexdigest()
-
-
-def get_cached_sync_segment_result(segment_id: str) -> Optional[dict[str, str]]:
-    """Returns {'kind': 'new_memories'|'updated_memories', 'conversation_id': str} if this exact
-    segment was already durably processed, else None."""
-    raw = redis_client.get(f'sync_v2_segment:{segment_id}')
-    if not raw:
-        return None
-    try:
-        if isinstance(raw, bytes):
-            raw = raw.decode()
-        data = json.loads(raw)
-        if data.get('kind') in ('new_memories', 'updated_memories') and data.get('conversation_id'):
-            return {'kind': data['kind'], 'conversation_id': data['conversation_id']}
-    except (TypeError, ValueError, json.JSONDecodeError):
-        pass
-    return None
-
-
-def cache_sync_segment_result(segment_id: str, kind: str, conversation_id: str) -> None:
-    redis_client.set(
-        f'sync_v2_segment:{segment_id}',
-        json.dumps({'kind': kind, 'conversation_id': conversation_id}),
-        ex=SEGMENT_RESULT_TTL_SECONDS,
-    )
-
-
-# How long one execution may hold exclusive processing rights over a single VAD segment. Bounds
-# how long a crashed/hung claimant can block a legitimate retry of the same segment (SYNC-V2-002):
-# generous relative to one segment's STT + LLM + persistence latency, short relative to a human
-# noticing a stuck upload.
-SEGMENT_CLAIM_TTL_SECONDS = 15 * 60
-
-
-def claim_sync_segment(segment_id: str, claimant: str) -> bool:
-    """Atomically claim exclusive processing rights for one VAD segment via Redis `SET NX EX`.
-
-    Returns True if [claimant] now holds the claim (safe to run STT/LLM/persistence for this
-    segment id); False if another claimant currently holds an unexpired lease. Combined with
-    `get_cached_sync_segment_result`, this makes concurrent retries of the same segment content
-    (e.g. two in-flight uploads racing after a dropped response) run STT/LLM/persistence exactly
-    once instead of both proceeding past a non-atomic get/process/set check.
-    """
-    return bool(
-        redis_client.set(f'sync_v2_segment_claim:{segment_id}', claimant, nx=True, ex=SEGMENT_CLAIM_TTL_SECONDS)
-    )
-
-
-def release_sync_segment_claim(segment_id: str, claimant: str) -> None:
-    """Release a claim early (e.g. after a failed attempt) so a retry doesn't have to wait out the
-    full lease TTL. No-ops if [claimant] no longer holds it — already expired and possibly
-    reclaimed by someone else — so this never deletes a lease it doesn't own."""
-    key = f'sync_v2_segment_claim:{segment_id}'
-    current = redis_client.get(key)
-    if isinstance(current, bytes):
-        current = current.decode()
-    if current == claimant:
-        redis_client.delete(key)
-
-
-# How long a per-conversation update lock may be held (SYNC-V2-003) and how long a segment will
-# wait to acquire one. One segment update (merge + Firestore write) is fast; this only needs to
-# outlast realistic contention between a handful of segments targeting the same conversation.
-CONVERSATION_UPDATE_LOCK_TTL_SECONDS = 60
-CONVERSATION_UPDATE_LOCK_WAIT_SECONDS = 30
-CONVERSATION_UPDATE_LOCK_POLL_INTERVAL_SECONDS = 0.1
-
-
-def acquire_conversation_update_lock(uid: str, conversation_id: str, claimant: str) -> bool:
-    """Blocking-with-timeout Redis mutex serializing read-modify-write updates to one
-    conversation's segments, so parallel VAD segments explicitly targeting the same conversation
-    can't both read a stale snapshot and drop each other's write. Returns False on timeout."""
-    key = f'sync_v2_conversation_lock:{uid}:{conversation_id}'
-    deadline = time.monotonic() + CONVERSATION_UPDATE_LOCK_WAIT_SECONDS
-    while True:
-        if redis_client.set(key, claimant, nx=True, ex=CONVERSATION_UPDATE_LOCK_TTL_SECONDS):
-            return True
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(CONVERSATION_UPDATE_LOCK_POLL_INTERVAL_SECONDS)
-
-
-def release_conversation_update_lock(uid: str, conversation_id: str, claimant: str) -> None:
-    key = f'sync_v2_conversation_lock:{uid}:{conversation_id}'
-    current = redis_client.get(key)
-    if isinstance(current, bytes):
-        current = current.decode()
-    if current == claimant:
-        redis_client.delete(key)
