@@ -142,6 +142,8 @@ on:
       - "backend/tests/unit/test_conversation_processing_callers.py"
       - "backend/tests/unit/test_ella_conversation_corrections.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
+      - "backend/tests/postgres/test_guardian_delivery_claim_postgres.py"
+      - "backend/migrations/006_create_guardian_delivery_log.sql"
       - "backend/tests/unit/test_ella_canonical_context.py"
       - "backend/tests/unit/test_ella_canonical_omi.py"
       - "backend/tests/unit/test_ella_debug_metadata.py"
@@ -312,6 +314,8 @@ on:
       - "backend/tests/unit/test_conversation_processing_callers.py"
       - "backend/tests/unit/test_ella_conversation_corrections.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
+      - "backend/tests/postgres/test_guardian_delivery_claim_postgres.py"
+      - "backend/migrations/006_create_guardian_delivery_log.sql"
       - "backend/tests/unit/test_ella_canonical_context.py"
       - "backend/tests/unit/test_ella_canonical_omi.py"
       - "backend/tests/unit/test_ella_debug_metadata.py"
@@ -633,6 +637,7 @@ jobs:
           tests/postgres/test_authority_advisory_lock_postgres.py
           tests/postgres/test_invitation_redemption_postgres.py
           tests/postgres/test_runtime_migration_atomicity_postgres.py
+          tests/postgres/test_guardian_delivery_claim_postgres.py
           &&
           black --check --line-length 120 --skip-string-normalization
           --line-ranges 900-925 --line-ranges 1210-1225 --line-ranges 1555-1585
@@ -1317,8 +1322,26 @@ jobs:
           pytest tests/unit/test_conversation_summary_cas.py -k "$baseline_summary_cas_selector" -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 85
           pytest tests/unit/test_ella_conversation_corrections.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 44
+          test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 50
           pytest tests/unit/test_ella_guardian_delivery.py -v
+          guardian_claim_ids="$(
+            pytest --collect-only -q tests/postgres/test_guardian_delivery_claim_postgres.py |
+              sed '/^$/d'
+          )"
+          required_guardian_claim_ids=(
+            "tests/postgres/test_guardian_delivery_claim_postgres.py::test_reserve_delivery_steps_concurrent_claim_is_exactly_one_winner_one_skip_one_row"
+            "tests/postgres/test_guardian_delivery_claim_postgres.py::test_email_send_concurrent_claim_is_exactly_one_mocked_send"
+            "tests/postgres/test_guardian_delivery_claim_postgres.py::test_reclaims_after_retryable_dispatch_failed_but_not_after_sent"
+            "tests/postgres/test_guardian_delivery_claim_postgres.py::test_unrecognized_status_is_not_inferred_as_retryable"
+            "tests/postgres/test_guardian_delivery_claim_postgres.py::test_claim_inside_rolled_back_transaction_leaves_no_residue"
+            "tests/postgres/test_guardian_delivery_claim_postgres.py::test_claim_survives_restart_and_blocks_reclaim_of_interrupted_pending"
+            "tests/postgres/test_guardian_delivery_claim_postgres.py::test_receiver_replay_with_same_idempotency_key_has_no_second_side_effect"
+          )
+          for required_id in "${required_guardian_claim_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$guardian_claim_ids"
+          done
+          test "$(grep -c '::' <<<"$guardian_claim_ids")" -eq 12
+          pytest tests/postgres/test_guardian_delivery_claim_postgres.py -v
           escalation_auth_ids="$(pytest --collect-only -q tests/unit/test_ella_escalations_router_auth.py | sed '/^$/d')"
           required_escalation_auth_ids=(
             "tests/unit/test_ella_escalations_router_auth.py::test_policy_view_internal_key_reaches_load_context_for_explicit_uid"
