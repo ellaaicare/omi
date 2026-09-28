@@ -2696,5 +2696,17 @@
   "ellaAlertChannelsDisabled": "Disabled",
   "ellaGuardianOffTooltip": "Guardian OFF: Audio and non-critical check-ins disabled. Emergency alerts to your contact remain active.",
   "ellaGuardianOnTooltip": "Guardian ON: Audio monitoring and care features active.",
-  "transcriptionPausedReconnecting": "A felvétel folytatódik — újrakapcsolódás az átíráshoz…"
+  "transcriptionPausedReconnecting": "A felvétel folytatódik — újrakapcsolódás az átíráshoz…",
+  "upstreamCaptureRecordingNecklace": "Recording with your necklace",
+  "upstreamCaptureRecordPhone": "Record with phone",
+  "upstreamCaptureStarting": "Starting…",
+  "upstreamCaptureFinish": "Finish conversation",
+  "upstreamCaptureDisconnectNecklace": "Disconnect necklace",
+  "upstreamCaptureConsentRequired": "Review AI permission before recording.",
+  "upstreamCaptureUnavailable": "Recording is unavailable right now.",
+  "upstreamCaptureNoNecklaceFound": "No necklace found. Make sure it is on and nearby.",
+  "upstreamCaptureConnectNecklace": "Connect necklace",
+  "upstreamCaptureStop": "Stop recording",
+  "upstreamCaptureRecordingPhone": "Recording with your phone",
+  "upstreamCaptureSearching": "Looking for your necklace…"
 }

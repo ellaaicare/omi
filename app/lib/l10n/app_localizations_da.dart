@@ -10057,4 +10057,40 @@ class AppLocalizationsDa extends AppLocalizations {
 
   @override
   String get transcriptionPausedReconnecting => 'Optager stadig — genopretter forbindelse til transskription…';
+
+  @override
+  String get upstreamCaptureRecordingNecklace => 'Recording with your necklace';
+
+  @override
+  String get upstreamCaptureRecordPhone => 'Record with phone';
+
+  @override
+  String get upstreamCaptureStarting => 'Starting…';
+
+  @override
+  String get upstreamCaptureFinish => 'Finish conversation';
+
+  @override
+  String get upstreamCaptureDisconnectNecklace => 'Disconnect necklace';
+
+  @override
+  String get upstreamCaptureConsentRequired => 'Review AI permission before recording.';
+
+  @override
+  String get upstreamCaptureUnavailable => 'Recording is unavailable right now.';
+
+  @override
+  String get upstreamCaptureNoNecklaceFound => 'No necklace found. Make sure it is on and nearby.';
+
+  @override
+  String get upstreamCaptureConnectNecklace => 'Connect necklace';
+
+  @override
+  String get upstreamCaptureStop => 'Stop recording';
+
+  @override
+  String get upstreamCaptureRecordingPhone => 'Recording with your phone';
+
+  @override
+  String get upstreamCaptureSearching => 'Looking for your necklace…';
 }
