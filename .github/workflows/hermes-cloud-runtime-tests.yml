@@ -879,6 +879,7 @@ jobs:
             pytest --collect-only -q \
               tests/unit/test_ella_ai_consent.py \
               tests/unit/test_ella_ai_consent_route_gates.py \
+              tests/unit/test_ella_sync_v2_contract.py \
               tests/unit/test_ella_chat_stream_resilience.py \
               tests/unit/test_voice_honcho.py \
               tests/unit/test_hermes_cloud_migration.py \
@@ -1026,10 +1027,12 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 21
-          test "$collected" -eq 630
+          # 630 + 15 (test_ella_sync_v2_contract.py, now wired into this collection).
+          test "$collected" -eq 645
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
+            tests/unit/test_ella_sync_v2_contract.py \
             tests/unit/test_ella_chat_stream_resilience.py \
             tests/unit/test_voice_honcho.py \
             tests/unit/test_hermes_cloud_migration.py \
