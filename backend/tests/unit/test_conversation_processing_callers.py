@@ -262,6 +262,7 @@ def caller_modules(monkeypatch):
         AI_CONSENT_WEBSOCKET_CLOSE_CODE=4403,
         AI_CONSENT_WEBSOCKET_RETRY_CLOSE_CODE=1013,
         assert_current_ai_consent=_noop,
+        is_typesafe_egress_authorized=lambda *_args: False,
         require_current_ai_consent=lambda: "uid-1",
         resolve_processor=lambda *_args: object(),
     )
