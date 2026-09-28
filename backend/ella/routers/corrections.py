@@ -1256,8 +1256,75 @@ class CorrectionIdentityGateError(Exception):
         super().__init__(reason)
 
 
-_PROPER_NAME_TOKEN_RE = re.compile(r"[A-Z][a-z]+")
+_PROPER_NAME_TOKEN_RE = re.compile(r"[^\W\d_]+(?:['’\-][^\W\d_]+)*", re.UNICODE)
+_POSSESSIVE_SUFFIX_RE = re.compile(r"['’][sS]$")
 _ELLA_OVERVIEW_PREFIX_RE = re.compile(r"^\[Ella\]\s*")
+
+# Small, deliberately narrow stoplist of common all-caps acronyms/initialisms
+# that should never be treated as a candidate identity even though every
+# letter is uppercase and the token is long enough to otherwise qualify.
+# Anything not on this list -- including a fictional all-caps name like
+# "FABLE" -- is a candidate that must be grounded.
+_ALL_CAPS_ACRONYM_STOPLIST = {
+    "CEO",
+    "CFO",
+    "CTO",
+    "FAQ",
+    "ASAP",
+    "TODO",
+    "URL",
+    "API",
+    "PDF",
+    "USA",
+    "DIY",
+    "RSVP",
+    "ETA",
+    "FYI",
+    "VIP",
+    "GPS",
+    "PIN",
+    "SSN",
+    "ATM",
+}
+
+
+def _strip_possessive_suffix(token: str) -> str:
+    """Drop a trailing possessive `'s`/`'s` so it isn't folded into the name.
+
+    The token regex above deliberately joins an interior apostrophe into the
+    name (e.g. "O'Fable") since that apostrophe is part of the name itself.
+    A trailing possessive marker is not: "Rowan's" must still ground/collide
+    with "Rowan", not a distinct token "Rowan's".
+    """
+
+    stripped = _POSSESSIVE_SUFFIX_RE.sub("", token)
+    return stripped or token
+
+
+def _is_name_shaped_token(token: str) -> bool:
+    """Whether `token` is plausibly a person's name, Unicode-aware.
+
+    A token is a candidate identity when its first letter is uppercase in
+    any script (covers accented/non-Latin names like "Élora" as well as
+    ordinary ASCII ones), including tokens that embed an apostrophe/curly
+    apostrophe or hyphen (e.g. "O’Fable", "Anne-Marie") since the token
+    regex above already keeps those joined into a single token. An
+    all-uppercase token of plausible name length (>= 3 letters) is also a
+    candidate -- e.g. a fictional "FABLE" -- unless it is on the small
+    acronym stoplist above.
+    """
+
+    letters = [c for c in token if c.isalpha()]
+    if not letters or not letters[0].isupper():
+        return False
+    if all(c.isupper() for c in letters):
+        if len(letters) < 3:
+            return False
+        if token.upper() in _ALL_CAPS_ACRONYM_STOPLIST:
+            return False
+    return True
+
+
 _VOCATIVE_GREETING_RE = re.compile(r"(?i)(?:^|[.!?]\s+)(?:hi|hey|hello|dear|greetings)\b,?\s*[A-Z][a-z]+")
 _VOCATIVE_LEADING_ADDRESS_RE = re.compile(r"(?:^|[.!?]\s+)[A-Z][a-z]+,\s")
 _VOCATIVE_TRAILING_ADDRESS_RE = re.compile(r",\s*[A-Z][a-z]+[.!?](?:\s|$)")
@@ -1356,7 +1423,8 @@ _CAPITALIZED_STOPWORDS = {
 
 
 def _extract_capitalized_tokens(text: str) -> set[str]:
-    return set(_PROPER_NAME_TOKEN_RE.findall(text or ""))
+    tokens = (_strip_possessive_suffix(token) for token in _PROPER_NAME_TOKEN_RE.findall(text or ""))
+    return {token for token in tokens if _is_name_shaped_token(token)}
 
 
 def _strip_word_punctuation(word: str) -> str:
@@ -1382,8 +1450,10 @@ def _candidate_identity_tokens(text: str) -> list[str]:
         match = _PROPER_NAME_TOKEN_RE.match(word)
         if not match:
             continue
-        token = match.group(0)
+        token = _strip_possessive_suffix(match.group(0))
         if token in _CAPITALIZED_STOPWORDS:
+            continue
+        if not _is_name_shaped_token(token):
             continue
         candidates.append(token)
     return candidates
