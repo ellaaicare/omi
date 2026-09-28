@@ -37,6 +37,7 @@ from database.ella_provisioning import EllaProvisioningRepository
 from database.honcho_attestation import authority_credential
 from ella.services.app_settings import TTS_PROVIDERS, build_effective_voice_settings
 from ella.services.ai_consent import assert_current_ai_consent
+from ella.services import guardian_playback_ledger as _playback_ledger
 from ella.services.hermes_cloud import HermesCloudClient
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import (
@@ -110,13 +111,6 @@ _GUARDIAN_CLOUD_TARGET_MODE = "hermes-cloud-guardian"
 # Database connection pool (lazy-initialized)
 _pool: Optional[asyncpg.Pool] = None
 
-# ---------------------------------------------------------------------------
-# In-memory playback event store (echo risk tracking)
-# ---------------------------------------------------------------------------
-
-# uid -> last playback event (resets on restart — used only for echo risk)
-_playback_events: dict[str, dict] = {}
-
 
 get_guardian_authenticated_uid = get_exact_firebase_uid
 
@@ -156,20 +150,6 @@ _ECHO_RISK = {
     "CarAudio": "high",
     "USBAudio": "low",
 }
-_ECHO_RISKY_OUTPUTS = {"medium", "high", "very_high"}
-_GUARDIAN_ECHO_SUPPRESSION_SECONDS = int(os.getenv("ELLA_GUARDIAN_ECHO_SUPPRESSION_SECONDS", "45"))
-_GUARDIAN_ECHO_MARKERS = (
-    "hi greg",
-    "heard my name",
-    "i heard my name",
-    "i'm here with you",
-    "im here with you",
-    "here with you",
-    "tell me what you need",
-    "just talking about names",
-    "just talking about me",
-    "i heard you. i am checking that now",
-)
 
 
 async def _get_pool() -> asyncpg.Pool:
@@ -889,60 +869,6 @@ def _is_wake_ack_row(row: dict[str, Any]) -> bool:
     return trigger == "wake_word_ack" or ack_only is True or str(ack_only or "").strip().lower() == "true"
 
 
-def _normalize_for_echo_match(text: str) -> str:
-    normalized = text.lower().replace("’", "'")
-    normalized = re.sub(r"[^a-z0-9' ]+", " ", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    return normalized
-
-
-def _looks_like_guardian_echo_text(text: str) -> bool:
-    normalized = _normalize_for_echo_match(text)
-    if not normalized:
-        return False
-
-    marker_hits = sum(1 for marker in _GUARDIAN_ECHO_MARKERS if marker in normalized)
-    if marker_hits >= 2:
-        return True
-    if "hi greg" in normalized and "heard my name" in normalized:
-        return True
-    if "tell me what you need" in normalized and ("just talking about" in normalized or "here with you" in normalized):
-        return True
-    return False
-
-
-def _recent_risky_playback_event(uid: str) -> dict | None:
-    event = get_playback_event(uid)
-    if not event:
-        return None
-    if event.get("echo_risk") not in _ECHO_RISKY_OUTPUTS:
-        return None
-    recorded_at = event.get("recorded_at")
-    if isinstance(recorded_at, (int, float)) and time.time() - recorded_at > _GUARDIAN_ECHO_SUPPRESSION_SECONDS:
-        return None
-    return event
-
-
-def _enqueue_rejects_guardian_echo(uid: str, req: "EnqueueRequest") -> tuple[bool, Optional[str]]:
-    """Reject scanner wake fallback audio that is the app hearing its own Guardian response."""
-    metadata = _coerce_metadata_dict(req.metadata)
-    trigger = str(
-        req.trigger or metadata.get("trigger_type") or metadata.get("event_type") or metadata.get("category") or ""
-    ).lower()
-    if "wake_word" not in trigger:
-        return False, None
-
-    message = str(req.message or metadata.get("message") or "")
-    if not _looks_like_guardian_echo_text(message):
-        return False, None
-
-    if trigger.endswith("_fallback") or trigger == "wake_word_fallback":
-        return True, "guardian_playback_echo"
-    if _recent_risky_playback_event(uid):
-        return True, "guardian_playback_echo"
-    return False, None
-
-
 def _is_wake_ack_request(req: "EnqueueRequest") -> bool:
     metadata = _coerce_metadata_dict(req.metadata)
     trigger = str(
@@ -1458,8 +1384,17 @@ async def next_audio(uid: Optional[str] = None, authenticated_uid: str = Depends
                 uid,
             )
 
-            playback = get_playback_event(uid)
-            echo_risk = playback["echo_risk"] if playback else "unknown"
+            try:
+                ledger_pool = await _playback_ledger.get_pool()
+                recent_played = await _playback_ledger.get_played_candidates(
+                    ledger_pool,
+                    uid,
+                    window_seconds=60,
+                    limit=1,
+                )
+            except Exception:
+                recent_played = []
+            echo_risk = recent_played[0].device_class if recent_played and recent_played[0].device_class else "unknown"
 
             chat_turns = await _get_recent_chat_turns(uid, limit=5)
 
@@ -1519,6 +1454,28 @@ async def next_audio(uid: Optional[str] = None, authenticated_uid: str = Depends
                     }
                 ),
             )
+            try:
+                ledger_pool = await _playback_ledger.get_pool()
+                await _playback_ledger.record_generated(
+                    ledger_pool,
+                    uid=uid,
+                    playback_id=new_id,
+                    queue_item_id=new_id,
+                    audio_id=new_id,
+                    trace_id=source_trace_id,
+                    purpose="consolidated",
+                    playback_text=consolidated_msg,
+                    text_provenance="consolidated",
+                )
+                await _playback_ledger.record_queued(
+                    ledger_pool,
+                    uid=uid,
+                    playback_id=new_id,
+                    queue_item_id=new_id,
+                    trace_id=source_trace_id,
+                )
+            except Exception as exc:
+                print(f"[FLOW:CONSOLIDATOR] uid={uid} ledger write failed (non-fatal): {exc}", flush=True)
             # Fall through to pop the newly-inserted consolidated item
 
     # --- Normal pop path ---
@@ -1568,6 +1525,17 @@ async def next_audio(uid: Optional[str] = None, authenticated_uid: str = Depends
 
     trace_id = _trace_id_from_metadata(meta, row["id"])
     meta.setdefault("trace_id", trace_id)
+    try:
+        ledger_pool = await _playback_ledger.get_pool()
+        await _playback_ledger.record_fetched(
+            ledger_pool,
+            uid=uid,
+            playback_id=row["id"],
+            queue_item_id=row["id"],
+            trace_id=trace_id,
+        )
+    except Exception as exc:
+        print(f"[FLOW:GUARDIAN-POLL] uid={uid} ledger write failed (non-fatal): {exc}", flush=True)
     await _log_pipeline_event(
         trace_id=trace_id,
         uid=uid,
@@ -1627,35 +1595,11 @@ async def enqueue(
     normalized_mode = _normalize_mode(guardian_mode)
 
     # --- guardian_mode gate: reject inserts when guardian is OFF / suppressed ---
+    # Echo/feedback de-dupe is no longer decided here: it is a semantic
+    # judgment made downstream (typed classifier / n8n Echo Guard) over the
+    # transcript plus this owner's playback ledger candidates, never a
+    # text/regex verdict against the outgoing message being enqueued.
     if req.priority != "debug":
-        echo_rejected, echo_reason = _enqueue_rejects_guardian_echo(uid, req)
-        if echo_rejected:
-            _elapsed = int((time.time() - _start) * 1000)
-            print(
-                f"[FLOW:GUARDIAN-ENQUEUE] uid={uid} REJECTED reason={echo_reason} "
-                f"trigger={req.trigger} trace={trace_id} latency={_elapsed}ms",
-                flush=True,
-            )
-            await _log_pipeline_event(
-                trace_id=trace_id,
-                uid=uid,
-                stage="queue_rejected",
-                status="rejected",
-                latency_ms=_elapsed,
-                metadata={
-                    "queue_item_id": item_id,
-                    "priority": req.priority,
-                    "trigger_type": req.trigger,
-                    "reason": echo_reason,
-                    "guardian_mode": normalized_mode,
-                },
-            )
-            return {
-                "ok": False,
-                "rejected": True,
-                "reason": echo_reason,
-            }
-
         allowed, reject_reason = _enqueue_allows_guardian_audio(guardian_mode, req)
         if not allowed:
             _elapsed = int((time.time() - _start) * 1000)
@@ -1741,6 +1685,29 @@ async def enqueue(
         req.trigger,
         metadata_str,
     )
+
+    try:
+        ledger_pool = await _playback_ledger.get_pool()
+        await _playback_ledger.record_generated(
+            ledger_pool,
+            uid=uid,
+            playback_id=item_id,
+            queue_item_id=item_id,
+            audio_id=item_id,
+            trace_id=trace_id,
+            purpose=req.trigger,
+            playback_text=req.message,
+            text_provenance="tts_generated",
+        )
+        await _playback_ledger.record_queued(
+            ledger_pool,
+            uid=uid,
+            playback_id=item_id,
+            queue_item_id=item_id,
+            trace_id=trace_id,
+        )
+    except Exception as exc:
+        print(f"[FLOW:GUARDIAN-ENQUEUE] uid={uid} ledger write failed (non-fatal): {exc}", flush=True)
 
     # Count pending items for this user
     count = await pool.fetchval(
@@ -2555,24 +2522,37 @@ async def record_playback_event(
     authenticated_uid: str = Depends(get_exact_firebase_uid),
 ):
     """iOS calls this when guardian audio starts playing.
-    Records output route so the consolidator knows echo risk."""
+
+    Records a transactional, owner-scoped playback receipt in the durable
+    ledger BEFORE acknowledging — this is the only kind of record that
+    counts as evidence the audio actually played (see
+    ella.services.guardian_playback_ledger)."""
     uid = require_matching_firebase_uid(authenticated_uid, req.uid, feature="Guardian playback")
     echo_risk = _ECHO_RISK.get(req.port_type, "unknown")
-    _playback_events[uid] = {
-        "queue_item_id": req.queue_item_id,
-        "trace_id": req.trace_id,
-        "event_type": req.event_type,
-        "port_type": req.port_type,
-        "port_name": req.port_name,
-        "device_uid": req.device_uid,
-        "echo_risk": echo_risk,
-        "duration_ms": req.duration_ms,
-        "recorded_at": time.time(),
-    }
+    event_type = (req.event_type or "started").strip().lower().replace(" ", "_")
+
+    if req.queue_item_id and event_type in ("started", "completed", "failed"):
+        try:
+            ledger_pool = await _playback_ledger.get_pool()
+            await _playback_ledger.record_playback_receipt(
+                ledger_pool,
+                uid=uid,
+                playback_id=req.queue_item_id,
+                event_type=event_type,
+                queue_item_id=req.queue_item_id,
+                trace_id=req.trace_id,
+                route=req.port_type,
+                device_class=echo_risk,
+                port_name=req.port_name,
+                device_uid=req.device_uid,
+                duration_ms=req.duration_ms,
+                error_message=None,
+            )
+        except _playback_ledger.PlaybackLedgerOwnershipError:
+            raise HTTPException(status_code=403, detail={"error": "playback_id_not_owned_by_caller"})
 
     trace_id = req.trace_id or req.queue_item_id
     if trace_id:
-        event_type = (req.event_type or "started").strip().lower().replace(" ", "_")
         status = "error" if event_type == "failed" else "success"
         await _log_pipeline_event(
             trace_id=trace_id,
@@ -2641,13 +2621,3 @@ async def record_playback_debug_event(
         flush=True,
     )
     return {"ok": True, "trace_id": trace_id, "stage": stage, "event_name": event_name}
-
-
-def get_playback_event(uid: str) -> dict | None:
-    """Return the most recent playback event for a UID, or None if >60s old."""
-    event = _playback_events.get(uid)
-    if not event:
-        return None
-    if time.time() - event["recorded_at"] > 60:
-        return None  # stale — more than 60s old
-    return event
