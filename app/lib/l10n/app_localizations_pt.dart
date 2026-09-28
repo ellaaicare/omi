@@ -10120,4 +10120,16 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get upstreamCaptureSearching => 'Looking for your necklace…';
+
+  @override
+  String get deviceDiagnostics => 'Device Diagnostics';
+
+  @override
+  String get deviceDiagnosticsDescription => 'Redacted BLE scan counters for troubleshooting missing devices';
+
+  @override
+  String get copyDiagnostics => 'Copy Diagnostics';
+
+  @override
+  String get noDiagnosticsYet => 'No diagnostics recorded yet. Run a device scan to populate this.';
 }

@@ -18704,6 +18704,30 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Looking for your necklace…'**
   String get upstreamCaptureSearching;
+
+  /// Title for the BLE scan diagnostics screen and its Settings row
+  ///
+  /// In en, this message translates to:
+  /// **'Device Diagnostics'**
+  String get deviceDiagnostics;
+
+  /// Subtitle for the Device Diagnostics settings row
+  ///
+  /// In en, this message translates to:
+  /// **'Redacted BLE scan counters for troubleshooting missing devices'**
+  String get deviceDiagnosticsDescription;
+
+  /// Button that copies the diagnostics buffer to the clipboard
+  ///
+  /// In en, this message translates to:
+  /// **'Copy Diagnostics'**
+  String get copyDiagnostics;
+
+  /// Empty state shown on the Device Diagnostics screen before any scan has run
+  ///
+  /// In en, this message translates to:
+  /// **'No diagnostics recorded yet. Run a device scan to populate this.'**
+  String get noDiagnosticsYet;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

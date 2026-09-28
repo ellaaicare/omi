@@ -11101,5 +11101,21 @@
   "upstreamCaptureConnectNecklace": "Connect necklace",
   "upstreamCaptureStop": "Stop recording",
   "upstreamCaptureRecordingPhone": "Recording with your phone",
-  "upstreamCaptureSearching": "Looking for your necklace…"
+  "upstreamCaptureSearching": "Looking for your necklace…",
+  "deviceDiagnostics": "Device Diagnostics",
+  "@deviceDiagnostics": {
+    "description": "Title for the BLE scan diagnostics screen and its Settings row"
+  },
+  "deviceDiagnosticsDescription": "Redacted BLE scan counters for troubleshooting missing devices",
+  "@deviceDiagnosticsDescription": {
+    "description": "Subtitle for the Device Diagnostics settings row"
+  },
+  "copyDiagnostics": "Copy Diagnostics",
+  "@copyDiagnostics": {
+    "description": "Button that copies the diagnostics buffer to the clipboard"
+  },
+  "noDiagnosticsYet": "No diagnostics recorded yet. Run a device scan to populate this.",
+  "@noDiagnosticsYet": {
+    "description": "Empty state shown on the Device Diagnostics screen before any scan has run"
+  }
 }
