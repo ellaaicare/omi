@@ -16064,6 +16064,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Summary enriched by Ella'**
   String get conversationEllaEnrichedLabel;
+
+  /// Example placeholder text shown in the conversation correction text field
+  ///
+  /// In en, this message translates to:
+  /// **'Example: This was Avery and Jordan discussing weekend plans, not a work meeting.'**
+  String get correctionSheetHintExample;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {
