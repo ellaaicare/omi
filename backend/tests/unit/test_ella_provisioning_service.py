@@ -13,6 +13,7 @@ import pytest
 
 import database
 from database.runtime_targets import (
+    RuntimeTargetLineage,
     SELF_HOSTED_RUNTIME_MODEL,
     SELF_HOSTED_RUNTIME_PROVIDER,
     SELF_HOSTED_RUNTIME_TARGET_MODES,
@@ -37,6 +38,8 @@ from ella.services.ai_consent import (
     CURRENT_PROCESSOR_SET_HASH,
     CURRENT_SCOPE_HASH,
     CURRENT_SCOPE_VERSION,
+    LEGACY_POLICY_VERSION_V10,
+    LEGACY_V10_PROCESSOR_SET_HASH,
 )
 from ella.services.provisioning import (
     ATTESTATION_VERIFICATION_GRACE_ENV,
@@ -253,6 +256,7 @@ class FakeRepository:
         self.activation_error = None
         self.last_stage_arguments = None
         self.last_activation_arguments = None
+        self.last_resolution_arguments = None
 
     async def assert_schema_ready(self):
         self.schema_checks += 1
@@ -295,7 +299,12 @@ class FakeRepository:
         self.omi_identity_calls.append(kwargs)
         return True
 
-    async def resolve_active_runtime(self, uid, template_version=None, **_kwargs):
+    async def resolve_active_runtime(self, uid, template_version=None, **kwargs):
+        self.last_resolution_arguments = {
+            "uid": uid,
+            "template_version": template_version,
+            **kwargs,
+        }
         if self.binding and template_version and self.binding.get("template_version") != template_version:
             return None
         return self.binding
@@ -3348,6 +3357,88 @@ def test_fresh_uid_relax_admits_uninvited_self_hosted_when_flag_set(monkeypatch)
 
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "false")
     monkeypatch.delenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", raising=False)
+
+
+def test_existing_v10_invitation_authority_remains_admitted(monkeypatch):
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_HERMES_GATEWAY_KEY_USER_A", "test-runtime-credential")
+    identity = VerifiedIdentity("user-a", "user@example.test", "User", "UTC")
+    admission = _self_hosted_admission(identity.uid)
+    admission.update(
+        consent_policy_version=LEGACY_POLICY_VERSION_V10,
+        consent_processor_set_hash=LEGACY_V10_PROCESSOR_SET_HASH,
+    )
+    expected_lineage = RuntimeTargetLineage(
+        policy_version=LEGACY_POLICY_VERSION_V10,
+        processor_set_hash=LEGACY_V10_PROCESSOR_SET_HASH,
+        scope_version=CURRENT_SCOPE_VERSION,
+        scope_hash=CURRENT_SCOPE_HASH,
+    )
+
+    assert self_hosted_provisioning_enabled(identity.uid, admission=admission) is True
+
+    binding = {
+        **_extract(_runtime_receipt(), uid=identity.uid),
+        "id": "44444444-4444-4444-4444-444444444444",
+        "omi_uid": identity.uid,
+        "active": True,
+        "status": "active",
+        "revision": 2,
+        "user_status": "ACTIVE",
+        "runtime_target_id": "target-a",
+        "attestation_runtime_target_id": "33333333-3333-3333-3333-333333333333",
+        "runtime_target_mode": "hermes-chat",
+        "target_policy_version": LEGACY_POLICY_VERSION_V10,
+        "target_processor_set_hash": LEGACY_V10_PROCESSOR_SET_HASH,
+        "target_scope_version": CURRENT_SCOPE_VERSION,
+        "target_scope_hash": CURRENT_SCOPE_HASH,
+        "consent_authority_epoch": "11111111-1111-1111-1111-111111111111",
+        "account_user_id": "22222222-2222-2222-2222-222222222222",
+        "profile_user_id": "22222222-2222-2222-2222-222222222222",
+    }
+    resolve_repository = FakeRepository(
+        binding=binding,
+        self_hosted_admission=admission,
+        self_hosted_owned=True,
+    )
+    _job_result, resolved_binding, claimed = asyncio.run(
+        ProvisioningCoordinator(resolve_repository, FakeProvisionClient(_runtime_receipt())).ensure_job(
+            identity=identity,
+            target_schema_version="hermes-user-v1",
+            client_request_id="request-v10-resolve",
+            request_payload={"client": "ios"},
+        )
+    )
+    assert resolved_binding is not None
+    assert claimed is False
+    assert resolve_repository.last_resolution_arguments["authority_lineage"] == expected_lineage
+
+    runtime = asyncio.run(
+        resolve_isolated_runtime(
+            identity.uid,
+            repository=resolve_repository,
+            target_mode="hermes-chat",
+        )
+    )
+    assert runtime.uid == identity.uid
+    assert runtime.runtime_target_id == "target-a"
+    assert resolve_repository.last_resolution_arguments["authority_lineage"] == expected_lineage
+
+    activation_repository = FakeRepository(
+        self_hosted_admission=admission,
+        self_hosted_owned=True,
+    )
+    asyncio.run(
+        ProvisioningCoordinator(
+            activation_repository,
+            FakeProvisionClient(_runtime_receipt()),
+        ).process_claimed_job(
+            job=_job(state="provisioning", stage="profile_ready"),
+            identity=identity,
+        )
+    )
+    assert activation_repository.job["state"] == "ready"
+    assert activation_repository.last_activation_arguments["authority_lineage"] == expected_lineage
 
 
 def test_fresh_uid_relax_preserves_exact_active_retained_runtime(monkeypatch):

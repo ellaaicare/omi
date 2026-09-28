@@ -1,7 +1,9 @@
 import asyncio
 import hashlib
+import json
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -44,6 +46,14 @@ def _submission(
     )
 
 
+def _v10_submission(*, request_id="request-v10"):
+    return _submission(
+        request_id=request_id,
+        policy_version=consent.LEGACY_POLICY_VERSION_V10,
+        processor_set_hash=consent.LEGACY_V10_PROCESSOR_SET_HASH,
+    )
+
+
 def _service(repository=None):
     return consent.AiConsentService(
         repository or consent.InMemoryConsentRepository(),
@@ -51,12 +61,77 @@ def _service(repository=None):
     )
 
 
-def test_policy_matches_exact_managed_cloud_v10_artwork_contract():
+def _build_871_policy_view(policy):
+    """Parse only fields used by AiConsentPolicy.fromJson in build 871.
+
+    This mirrors the shipped implementation at exact commit
+    9ab8782107aa47837b54cdc56734b9952b2749a0. Unknown response metadata such
+    as minimum_required_version and provider_aliases is deliberately ignored.
+    """
+    return {
+        "version": policy.get("version", ""),
+        "processor_set_hash": policy.get("processor_set_hash", ""),
+        "canonical_processor_set": policy.get("canonical_processor_set", ""),
+        "scope_version": policy.get("scope_version", ""),
+        "scope_hash": policy.get("scope_hash", ""),
+        "canonical_scope": policy.get("canonical_scope", ""),
+        "processors": [
+            {
+                "id": processor.get("id", ""),
+                "legal_recipient": processor.get("legal_recipient", ""),
+                "function": processor.get("function", ""),
+                "data": processor.get("data", ""),
+                "third_party": processor.get("third_party", True),
+            }
+            for processor in policy.get("processors", [])
+        ],
+    }
+
+
+def _build_871_bundled_v10_policy():
+    fixture_path = Path(__file__).resolve().parents[1] / "fixtures" / "ella_ai_consent_policy_v11.json"
+    policy = json.loads(fixture_path.read_text())
+    policy["version"] = consent.LEGACY_POLICY_VERSION_V10
+    policy["processor_set_hash"] = consent.LEGACY_V10_PROCESSOR_SET_HASH
+    policy["canonical_processor_set"] = consent.LEGACY_V10_CANONICAL_PROCESSOR_SET
+    policy["processors"] = [processor for processor in policy["processors"] if processor["id"] != "typesafe"]
+    return _build_871_policy_view(policy)
+
+
+def _build_871_refresh_accepts(policy, status, uid):
+    """Execute build 871's fetch-policy-first authority refresh predicates."""
+    parsed_policy = _build_871_policy_view(policy)
+    if parsed_policy != _build_871_bundled_v10_policy():
+        return False
+    parsed_status_policy = _build_871_policy_view(status.get("policy") or {})
+    if parsed_status_policy.get("processor_set_hash") != parsed_policy["processor_set_hash"]:
+        return False
+    consent_state = status.get("consent") or {}
+    return bool(
+        status.get("subject_uid") == uid
+        and status.get("authorized") is True
+        and consent_state.get("decision") == "granted"
+        and str(consent_state.get("receipt_id") or "").startswith("aicr_")
+        and consent_state.get("policy_version") == consent.LEGACY_POLICY_VERSION_V10
+        and consent_state.get("processor_set_hash") == consent.LEGACY_V10_PROCESSOR_SET_HASH
+        and consent_state.get("profile_binding_id")
+        and consent_state.get("scope_version") == consent.CURRENT_SCOPE_VERSION
+        and consent_state.get("scope_hash") == consent.CURRENT_SCOPE_HASH
+        and consent_state.get("server_decided_at")
+        and parsed_status_policy == _build_871_bundled_v10_policy()
+    )
+
+
+def test_policy_matches_exact_managed_cloud_v11_typesafe_contract():
     policy = consent.AiConsentService.policy()
 
-    assert policy["version"] == "ai-data-processors-v10"
+    assert consent.LEGACY_V10_PROCESSOR_SET_HASH == (
+        "sha256:84c1007429613ba0f5cdee2e64194e262c6fec8f296af2219f7ad6c8b2da1b2d"
+    )
+    assert policy["version"] == "ai-data-processors-v11"
     assert policy["minimum_required_version"] == "ai-data-processors-v10"
     assert policy["processor_set_hash"] == consent.CURRENT_PROCESSOR_SET_HASH
+    assert policy["processor_set_hash"] == "sha256:16a0ca2b738ce6b4f31e9619960ef5d611be51a43a1a43b83dbf8f391ef1a591"
     assert policy["scope_version"] == "managed-cloud-internal-pilot-v4"
     assert policy["scope_hash"] == consent.CURRENT_SCOPE_HASH
     assert (
@@ -80,6 +155,7 @@ def test_policy_matches_exact_managed_cloud_v10_artwork_contract():
                 "xai-grok:language-live-voice",
                 "inworld:tts",
                 "elevenlabs:tts-fallback",
+                "typesafe:guardian-whispers-safety-classification",
             ]
         )
         == policy["canonical_processor_set"]
@@ -116,6 +192,14 @@ def test_policy_matches_exact_managed_cloud_v10_artwork_contract():
             "hermes-profile-memory",
             "hermes_profile_scoped_memory",
         ],
+        "third_party": True,
+    }
+    assert processors["typesafe"] == {
+        "id": "typesafe",
+        "legal_recipient": "TypeSafe (Jev), via OpenRouter",
+        "function": "Conversation safety classification for Guardian and Whispers",
+        "data": "Conversation transcript text windows (no audio)",
+        "provider_aliases": ["typesafe", "typesafe-jev", "jev"],
         "third_party": True,
     }
     assert [
@@ -226,6 +310,13 @@ def test_policy_matches_exact_managed_cloud_v10_artwork_contract():
             "xAI Grok",
             "Language processing and live voice",
             "Text, selected context, or live microphone audio",
+            True,
+        ),
+        (
+            "typesafe",
+            "TypeSafe (Jev), via OpenRouter",
+            "Conversation safety classification for Guardian and Whispers",
+            "Conversation transcript text windows (no audio)",
             True,
         ),
         ("inworld", "Inworld AI", "Voice synthesis", "Response text", True),
@@ -598,7 +689,7 @@ def test_nonmaterial_policy_metadata_drift_keeps_explicit_grant_current(monkeypa
     }
     repository.states["user-a"].update(archived_metadata)
     repository.receipts[("user-a", receipt_id)].update(archived_metadata)
-    monkeypatch.setattr(consent, "CURRENT_POLICY_VERSION", "ai-data-processors-v11")
+    monkeypatch.setattr(consent, "CURRENT_POLICY_VERSION", "ai-data-processors-v12")
     monkeypatch.setattr(consent, "CURRENT_PROCESSOR_SET_HASH", "sha256:deployed-descriptor")
     monkeypatch.setattr(consent, "CURRENT_SCOPE_VERSION", "deployed-scope-descriptor")
     monkeypatch.setattr(consent, "CURRENT_SCOPE_HASH", "sha256:deployed-scope-descriptor")
@@ -618,8 +709,8 @@ def test_future_explicit_grant_remains_current_after_server_rollback():
     service = _service(repository)
     result = service.submit("user-a", _submission())
     receipt_id = result["receipt"]["receipt_id"]
-    repository.states["user-a"]["policy_version"] = "ai-data-processors-v11"
-    repository.receipts[("user-a", receipt_id)]["policy_version"] = "ai-data-processors-v11"
+    repository.states["user-a"]["policy_version"] = "ai-data-processors-v12"
+    repository.receipts[("user-a", receipt_id)]["policy_version"] = "ai-data-processors-v12"
 
     status = service.status("user-a")
 
@@ -634,9 +725,9 @@ def test_human_bumped_minimum_policy_requires_reconsent(monkeypatch):
     monkeypatch.setattr(
         consent,
         "CONSENT_POLICY_VERSION_ORDER",
-        (*consent.CONSENT_POLICY_VERSION_ORDER, "ai-data-processors-v11"),
+        (*consent.CONSENT_POLICY_VERSION_ORDER, "ai-data-processors-v12"),
     )
-    monkeypatch.setattr(consent, "MINIMUM_REQUIRED_POLICY_VERSION", "ai-data-processors-v11")
+    monkeypatch.setattr(consent, "MINIMUM_REQUIRED_POLICY_VERSION", "ai-data-processors-v12")
     monkeypatch.setattr(consent, "_repository", repository)
     monkeypatch.setenv("ELLA_AI_CONSENT_ENFORCEMENT_UIDS", "user-a")
 
@@ -1465,7 +1556,21 @@ def test_policy_is_public_but_status_and_receipts_require_firebase_auth(monkeypa
 
     policy_response = client.get("/v1/users/ai-consent/policy")
     assert policy_response.status_code == 200
-    assert policy_response.json()["version"] == consent.CURRENT_POLICY_VERSION
+    assert policy_response.json()["version"] == consent.LEGACY_POLICY_VERSION_V10
+
+    v11_policy_response = client.get(
+        "/v1/users/ai-consent/policy",
+        params={"policy_version": consent.CURRENT_POLICY_VERSION},
+    )
+    assert v11_policy_response.status_code == 200
+    assert v11_policy_response.json() == consent.AiConsentService.policy(consent.CURRENT_POLICY_VERSION)
+
+    unsupported_policy_response = client.get(
+        "/v1/users/ai-consent/policy",
+        params={"policy_version": "ai-data-processors-v12"},
+    )
+    assert unsupported_policy_response.status_code == 404
+    assert unsupported_policy_response.json() == {"detail": {"code": "ai_consent_policy_version_not_supported"}}
 
     assert client.get("/v1/users/ai-consent").status_code == 401
     assert client.get("/v1/users/ai-consent/receipts/aicr_unknown").status_code == 401
@@ -1619,3 +1724,154 @@ def test_authenticated_api_allows_terminal_decisions_without_verified_email(monk
         }
     ]
     assert erasures == ["user-a"]
+
+
+def test_v11_policy_matches_documented_cross_stack_fixture():
+    """The server's v11 manifest must be byte-for-byte equal to the fixture the
+    client's `AiConsentPolicy.bundled` (app/lib/ella/services/ai_consent_policy.dart)
+    is documented to match. See backend/tests/fixtures/ella_ai_consent_policy_v11.json.
+    """
+    fixture_path = Path(__file__).resolve().parents[1] / "fixtures" / "ella_ai_consent_policy_v11.json"
+    fixture = json.loads(fixture_path.read_text())
+
+    assert fixture == consent.AiConsentService.policy()
+    assert fixture["processor_set_hash"] == "sha256:16a0ca2b738ce6b4f31e9619960ef5d611be51a43a1a43b83dbf8f391ef1a591"
+    assert fixture["scope_hash"] == "sha256:9c23f344b752c91c6ae252c628e9c603a8c87072e31bc9e599f2cc5257c7d72c"
+
+
+def test_v11_grant_is_durable_and_authorizes_typesafe_egress(monkeypatch):
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    monkeypatch.setattr(consent, "_repository", repository)
+
+    granted = service.submit("user-a", _submission())
+    assert granted["authorized"] is True
+    assert granted["receipt"]["policy_version"] == "ai-data-processors-v11"
+    assert granted["receipt"]["processor_set_hash"] == consent.CURRENT_PROCESSOR_SET_HASH
+    assert "typesafe" in granted["receipt"]["processor_ids"]
+
+    # A durable re-fetch (new status() call, same stored receipt) stays authorized.
+    refetched = service.status("user-a")
+    assert refetched["authorized"] is True
+    assert refetched["authority_state"] == "authorized"
+    assert refetched["consent"]["receipt_id"] == granted["receipt"]["receipt_id"]
+    assert consent.assert_typesafe_egress_consent("user-a") == "user-a"
+
+
+def test_v10_receipt_keeps_capture_working_without_forced_reconsent(monkeypatch):
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    monkeypatch.setattr(consent, "_repository", repository)
+
+    granted = service.submit("user-v10", _v10_submission())
+
+    assert granted["authorized"] is True
+    assert granted["authority_state"] == "authorized"
+    assert granted["receipt"]["policy_version"] == consent.LEGACY_POLICY_VERSION_V10
+    assert granted["receipt"]["processor_set_hash"] == consent.LEGACY_V10_PROCESSOR_SET_HASH
+    assert granted["receipt"]["processor_ids"] == list(consent.LEGACY_V10_PROCESSOR_IDS)
+    assert "typesafe" not in granted["receipt"]["processor_ids"]
+    assert service.status("user-v10")["policy"]["version"] == consent.LEGACY_POLICY_VERSION_V10
+    assert service.status("user-v10")["policy"]["minimum_required_version"] == consent.LEGACY_POLICY_VERSION_V10
+    assert consent.assert_current_ai_consent("user-v10") == "user-v10"
+    _enable_managed_cloud(monkeypatch, uid="user-v10")
+    assert (
+        _assert_exact_managed_cloud_consent(uid="user-v10", profile_uid="user-v10") == granted["receipt"]["receipt_id"]
+    )
+
+    app = FastAPI()
+    app.add_exception_handler(consent.AiConsentHTTPException, consent.ai_consent_http_exception_handler)
+
+    @app.get("/capture")
+    def capture(uid: str):
+        consent.assert_current_ai_consent(uid)
+
+    client = TestClient(app)
+    assert client.get("/capture", params={"uid": "user-v10"}).status_code == 200
+
+
+def test_build_871_refresh_semantics_keep_exact_v10_receipt_verified(monkeypatch):
+    """Regression for the shipped build-871 refresh flow at exact commit
+    9ab8782107aa47837b54cdc56734b9952b2749a0.
+    """
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    service.submit("user-v10", _v10_submission())
+    monkeypatch.setattr(ai_consent, "get_ai_consent_service", lambda: service)
+
+    app = FastAPI()
+    app.include_router(ai_consent.router)
+    app.dependency_overrides[get_firebase_token_identity] = lambda: FirebaseTokenIdentity(uid="user-v10")
+    client = TestClient(app)
+
+    # Build 871 makes these exact unversioned requests in this exact order.
+    policy_response = client.get("/v1/users/ai-consent/policy")
+    status_response = client.get("/v1/users/ai-consent")
+
+    assert policy_response.status_code == 200
+    assert status_response.status_code == 200
+    assert _build_871_refresh_accepts(policy_response.json(), status_response.json(), "user-v10") is True
+
+
+def test_status_policy_matches_stored_receipt_while_v11_upgrade_is_explicitly_negotiated():
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    service.submit("user-v10", _v10_submission())
+    service.submit("user-v11", _submission(request_id="request-v11-status"))
+
+    assert service.status(
+        "user-v10",
+        requested_policy_version=consent.CURRENT_POLICY_VERSION,
+    )[
+        "policy"
+    ] == consent.AiConsentService.policy(consent.LEGACY_POLICY_VERSION_V10)
+    assert service.status("user-v11")["policy"] == consent.AiConsentService.policy(consent.CURRENT_POLICY_VERSION)
+    assert service.status(
+        "no-receipt-v11-client",
+        requested_policy_version=consent.CURRENT_POLICY_VERSION,
+    )[
+        "policy"
+    ] == consent.AiConsentService.policy(consent.CURRENT_POLICY_VERSION)
+
+
+def test_v10_receipt_cannot_authorize_typesafe_egress(monkeypatch):
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    monkeypatch.setattr(consent, "_repository", repository)
+    service.submit("user-v10", _v10_submission())
+
+    with pytest.raises(HTTPException) as error:
+        consent.assert_typesafe_egress_consent("user-v10")
+
+    assert error.value.status_code == 403
+    assert error.value.detail == {"code": "ai_consent_required"}
+    assert consent.assert_current_ai_consent("user-v10") == "user-v10"
+
+
+def test_v9_receipt_still_requires_reconsent(monkeypatch):
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    monkeypatch.setattr(consent, "_repository", repository)
+
+    result = service.submit("user-v9", _v10_submission(request_id="request-v9-seed"))
+    receipt_id = result["receipt"]["receipt_id"]
+    repository.states["user-v9"]["policy_version"] = consent.LEGACY_POLICY_VERSION_V9
+    repository.states["user-v9"]["processor_set_hash"] = "sha256:stale-v9-processor-set"
+    repository.receipts[("user-v9", receipt_id)]["policy_version"] = consent.LEGACY_POLICY_VERSION_V9
+    repository.receipts[("user-v9", receipt_id)]["processor_set_hash"] = "sha256:stale-v9-processor-set"
+
+    status = service.status("user-v9")
+    assert status["authorized"] is False
+    assert status["authority_state"] == "reconsent_required"
+    assert status["retryable"] is False
+
+    with pytest.raises(HTTPException) as error:
+        consent.assert_current_ai_consent("user-v9")
+    assert error.value.status_code == 403
+    assert error.value.detail == {"code": "ai_consent_required"}
+
+    # The listen (websocket) path maps this exact 403/ai_consent_required
+    # rejection to the fixed 4403 close code — see
+    # test_websocket_consent_rejection_and_authority_outage_have_distinct_close_contracts
+    # in test_ella_ai_consent_route_gates.py for the close-code mapping itself.
+    assert consent.AI_CONSENT_WEBSOCKET_CLOSE_CODE == 4403
