@@ -1079,7 +1079,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 21
-          # 643 (consent v10/v11 compatibility and scanner TypeSafe authority) + 18
+          # 642 (consent v10/v11 compatibility and scanner TypeSafe authority) + 18
           # (test_ella_sync_v2_contract.py, now wired into
           # this collection for the first time) + 10
           # (test_ella_sync_segments_state_machine.py -- new: exercises the real
@@ -1087,7 +1087,7 @@ jobs:
           # database/sync_segments.py directly, including the SYNC-V2-002
           # retry-after-commit/stale-lease regressions, rather than through this file's own
           # route-level fakes).
-          test "$collected" -eq 671
+          test "$collected" -eq 670
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
