@@ -82,6 +82,15 @@ the registrar performs list-before-create, persists the existing provider user
 and assigned destination, and does not create a duplicate. This bootstrap is
 reachability only; consent and proof remain backend authority.
 
+Photon's shared-line stream reports `space.phone=shared`; it does not echo the
+provider-assigned destination used in the enrollment instructions. Stream
+authority is therefore the dedicated project credential, and contact routing
+is the persisted project + provider-user + handset mapping. The assigned
+destination is still required for registration/proof correlation and owner UX,
+but destination equality is never used to select an owner. The bridge tests
+exercise two senders on the shared sentinel and prove that they resolve to
+distinct contacts without a caller-supplied UID or profile.
+
 The bridge delivers an inbound proof to:
 
 - `POST /v1/ella/internal/imessage/proof`
@@ -131,8 +140,9 @@ to uncertain/manual reconciliation. A live `claimed` or `running` receipt is
 polled for a bounded interval with the original inbound timestamp and receipt;
 the durable backend claim prevents a second inference.
 
-The backend writes canonical `imessage` user and assistant events under the
-owner's stable OMI session. It performs one bounded non-stream request against
+The backend writes canonical `imessage` user and assistant events under a
+stable channel-specific Hermes session while retaining the owner's canonical
+OMI memory key. It performs one bounded non-stream request against
 the already authorized self-hosted Hermes target or the configured owner's
 exact dedicated `role=imessage` retained binding. A retained binding is
 accepted only when it has no runtime-target row and exact user/account/profile
@@ -142,6 +152,15 @@ an empty or malformed response.
 Replies longer than the pinned Photon adapter's 8,000-character transport limit
 are rejected before the assistant event or delivery intent is committed; the
 bridge never relies on the adapter's silent truncation.
+
+The retained-owner session ID is
+`ella:omi:{uid}:canonical:channel:imessage`; the long-term memory key remains
+`ella:omi:{uid}:canonical`. This separation is required because Hermes does not
+provide a per-session lock and concurrent same-session calls are
+last-writer-wins. App chat uses its own `channel:ios-chat` session only when the
+separately reviewed default-off retained-owner channel flag is enabled. The
+canonical ledger, not private Hermes session history, is the shared history
+authority.
 
 ## Runnable bridge contract
 

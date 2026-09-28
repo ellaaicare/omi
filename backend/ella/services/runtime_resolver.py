@@ -56,6 +56,9 @@ from ella.services.provisioning import (
     validate_internal_gateway_url,
 )
 
+RETAINED_OWNER_PROFILE_NAME = "plato-eval"
+RETAINED_OWNER_AGENT_ID = "plato-eval"
+
 
 def runtime_bindings_enabled(uid: Optional[str] = None) -> bool:
     return rollout_enabled(
@@ -70,6 +73,13 @@ def retained_owner_uid_configured(uid: Optional[str]) -> bool:
     candidate = uid if isinstance(uid, str) else ""
     owner_uid = os.getenv("ELLA_PLATO_UID", "").strip()
     return bool(candidate and owner_uid and hmac.compare_digest(candidate, owner_uid))
+
+
+def retained_owner_channel_runtime_enabled(uid: Optional[str]) -> bool:
+    """Gate app-channel reuse of the exact retained-owner runtime."""
+
+    enabled = os.getenv("ELLA_RETAINED_OWNER_CHANNEL_RUNTIME_ENABLED", "false").strip().lower() == "true"
+    return enabled and retained_owner_uid_configured(uid)
 
 
 async def runtime_authority_enabled(
@@ -147,6 +157,7 @@ class CloudRuntimeAuthorityIdentity:
     uid: str
     target_mode: str
     digest: str
+    binding_role: str = "user"
 
 
 def runtime_authority_identity(runtime: IsolatedRuntime) -> CloudRuntimeAuthorityIdentity:
@@ -226,6 +237,7 @@ def runtime_authority_identity(runtime: IsolatedRuntime) -> CloudRuntimeAuthorit
         uid=runtime.uid,
         target_mode=runtime.runtime_target_mode or "retained",
         digest=digest,
+        binding_role=runtime.binding_role,
     )
 
 
@@ -528,7 +540,7 @@ async def resolve_imessage_retained_runtime(
         return None
     try:
         repository = repository or await EllaProvisioningRepository.create()
-        binding = await repository.resolve_self_hosted_active_direct(uid=uid, role="imessage")
+        binding = await repository.resolve_retained_owner_active_direct(uid=uid)
     except ProvisioningSchemaNotReadyError as exc:
         raise ProvisioningError("provisioning_schema_not_ready", retryable=True) from exc
     except ProvisioningError:
@@ -536,6 +548,33 @@ async def resolve_imessage_retained_runtime(
     except Exception as exc:
         raise ProvisioningError("imessage_retained_runtime_authority_unavailable", retryable=True) from exc
     return runtime_from_binding(binding, uid) if binding else None
+
+
+async def resolve_retained_owner_channel_runtime(
+    uid: str,
+    repository: Optional[EllaProvisioningRepository] = None,
+) -> Optional[IsolatedRuntime]:
+    """Resolve the retained owner runtime for built-in chat and voice.
+
+    The feature is an explicit, default-off exception for the configured owner.
+    Once enabled, absence or drift of the dedicated role is an error rather than
+    permission to fall through to the owner's ordinary role=user binding.
+    """
+
+    if not retained_owner_channel_runtime_enabled(uid):
+        return None
+    runtime = await resolve_imessage_retained_runtime(uid, repository=repository)
+    if runtime is None:
+        raise ProvisioningError("retained_owner_channel_runtime_required", retryable=True)
+    if (
+        runtime.provider != SELF_HOSTED_RUNTIME_PROVIDER
+        or runtime.binding_role != "imessage"
+        or runtime.runtime_target_id
+        or runtime.profile_name != RETAINED_OWNER_PROFILE_NAME
+        or runtime.agent_id != RETAINED_OWNER_AGENT_ID
+    ):
+        raise ProvisioningError("retained_owner_channel_runtime_invalid", retryable=False)
+    return runtime
 
 
 async def revalidate_imessage_runtime_authority(
@@ -652,11 +691,14 @@ async def revalidate_runtime_authority(
     repository: Optional[EllaProvisioningRepository] = None,
 ) -> IsolatedRuntime:
     """Re-resolve and compare the exact runtime target immediately before use."""
-    current = await resolve_isolated_runtime(
-        identity.uid,
-        repository=repository,
-        target_mode=identity.target_mode,
-    )
+    if identity.binding_role == "imessage":
+        current = await resolve_retained_owner_channel_runtime(identity.uid, repository=repository)
+    else:
+        current = await resolve_isolated_runtime(
+            identity.uid,
+            repository=repository,
+            target_mode=identity.target_mode,
+        )
     if current is None:
         raise ProvisioningError("hermes_runtime_required", retryable=False)
     current_identity = runtime_authority_identity(current)

@@ -409,14 +409,18 @@ def test_enrollment_runtime_accepts_only_exact_configured_retained_owner(monkeyp
 
 
 def test_retained_imessage_resolver_selects_only_the_dedicated_runtime_role(monkeypatch):
-    repository = SimpleNamespace(resolve_self_hosted_active_direct=AsyncMock(return_value={"id": "binding-a"}))
+    repository = SimpleNamespace(
+        resolve_retained_owner_active_direct=AsyncMock(return_value={"id": "binding-a"}),
+        resolve_self_hosted_active_direct=AsyncMock(side_effect=AssertionError("generic selector must not run")),
+    )
     selected = object()
     monkeypatch.setattr(runtime_resolver, "runtime_from_binding", lambda binding, uid: selected)
 
     result = asyncio.run(runtime_resolver.resolve_imessage_retained_runtime("owner-a", repository=repository))
 
     assert result is selected
-    repository.resolve_self_hosted_active_direct.assert_awaited_once_with(uid="owner-a", role="imessage")
+    repository.resolve_retained_owner_active_direct.assert_awaited_once_with(uid="owner-a")
+    repository.resolve_self_hosted_active_direct.assert_not_awaited()
 
 
 def test_start_persists_before_provider_and_revalidates_before_finalization(monkeypatch):
