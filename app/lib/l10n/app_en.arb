@@ -10495,7 +10495,7 @@
   "todayReadMore": "Read more",
   "voiceModalEndAction": "End",
   "ellaAuthDataDisclosure": "Google Firebase processes your account and basic service information for secure sign-in and app infrastructure. Apple or Google also processes the sign-in method you choose. Signing in does not turn on listening or AI sharing; Ella asks separately before sending audio, transcripts, messages, or memory context to AI processors.",
-  "aiConsentCompactSummary": "Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; OpenAI and Ella’s dedicated artwork designer to illustrate a saved memory; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.",
+  "aiConsentCompactSummary": "Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; TypeSafe, via OpenRouter, to help Ella recognize when extra support may be helpful for Guardian and Whispers; OpenAI and Ella’s dedicated artwork designer to illustrate a saved memory; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.",
   "aiConsentProcessorDetailsLink": "Full processor details in Privacy Policy",
   "aiConsentNoSharingBeforeAllow": "Ella will not send what you say or type, messages, details from your saved memories, or Photon messages to these companies until you choose Allow. Not now keeps these cloud AI, memory, voice, and messaging features off. You can review or remove this permission in Settings.",
   "aiConsentRevokeAction": "Revoke AI permission",
@@ -10552,6 +10552,14 @@
   "aiConsentOpenAiArtworkBody": "Creates an illustration for a saved memory using OpenAI’s Codex and image services. It receives only that memory’s title and summary, plus your chosen artwork style; it does not receive raw microphone audio, source photos, or your full memory history.",
   "@aiConsentOpenAiArtworkBody": {
     "description": "Plain-language data categories and purpose for OpenAI artwork generation"
+  },
+  "aiConsentTypesafeTitle": "TypeSafe (Jev), via OpenRouter",
+  "@aiConsentTypesafeTitle": {
+    "description": "Legal recipient and routing partner for the Guardian/Whispers conversation safety classifier"
+  },
+  "aiConsentTypesafeBody": "Reviews conversation text so Ella can recognize when extra support may be helpful, as part of Guardian and Whispers.",
+  "@aiConsentTypesafeBody": {
+    "description": "Plain-language data categories and purpose for the TypeSafe safety classifier"
   },
   "aiConsentManagedCloudScope": "This permission belongs only to the signed-in account and selected profile. Photon can message only one person you choose for testing. It cannot message everyone, contact family support, or accept files. If these company, profile, or messaging choices change, Ella will ask again.",
   "@aiConsentManagedCloudScope": {
