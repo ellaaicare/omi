@@ -471,13 +471,42 @@ def _classify_playback_source_for_dispatch(
         return None
 
 
+_SAFE_PARTIAL_SEGMENT_KEYS = ("speaker", "start", "end")
+
+
+def _extract_live_span_text(text: str, live_spans: list[str]) -> str:
+    """Return only the substrings of `text` that fall inside a validated
+    live span, in transcript order, with everything else (the playback
+    portion) dropped."""
+    matches = []
+    for span in live_spans:
+        start = text.find(span)
+        if start != -1:
+            matches.append((start, start + len(span)))
+    if not matches:
+        return ""
+    matches.sort()
+    merged = [matches[0]]
+    for start, end in matches[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return " ".join(text[start:end].strip() for start, end in merged).strip()
+
+
 def _segments_matching_live_spans(segments: List[dict], live_spans: list[str]) -> List[dict]:
-    """Restrict segments to only those overlapping a validated live span.
+    """Restrict segments to only the text overlapping a validated live span.
 
     `live_spans` are exact extractive substrings of the combined transcript
     (`_combined_segment_text`, which joins segment texts with a single
-    space) — a segment is kept when its own text is contained in, or
-    contains, at least one validated span.
+    space). A segment whose entire text is itself part of a validated span
+    is kept unchanged. A segment that mixes playback and live speech in the
+    same ASR chunk is rewritten to carry only the validated live
+    substring(s) — the playback portion is dropped from the outgoing text,
+    and only safe metadata (speaker, timing bounds where available)
+    carries over, never the untouched original text.
     """
     non_blank_spans = [span for span in live_spans if span.strip()]
     if not non_blank_spans:
@@ -487,8 +516,17 @@ def _segments_matching_live_spans(segments: List[dict], live_spans: list[str]) -
         text = (segment.get("text") or "").strip()
         if not text:
             continue
-        if any(text in span or span in text for span in non_blank_spans):
+        if any(text in span for span in non_blank_spans):
             kept.append(segment)
+            continue
+        live_text = _extract_live_span_text(text, non_blank_spans)
+        if not live_text:
+            continue
+        partial_segment = {"text": live_text}
+        for key in _SAFE_PARTIAL_SEGMENT_KEYS:
+            if key in segment:
+                partial_segment[key] = segment[key]
+        kept.append(partial_segment)
     return kept
 
 
@@ -1403,14 +1441,17 @@ def send_to_scanner(
         )
         return None
 
-    _enqueue_wake_ack(uid, str(conversation_id), trace_id, scanner_segments)
-
     # Owner-scoped SELECTION only (time/route proximity) of this owner's own
     # recently-PLAYED ledger entries. Time/route proximity never decides
     # whether the current transcript IS one of them — that regex/window
     # selection has hint authority only. The actual semantic echo-source
     # judgment is made right below, executed here in the backend (never by
-    # text/regex matching), before the window is ever dispatched.
+    # text/regex matching), before ANY queue-producing action for this
+    # window — including the wake acknowledgement below — is ever taken. A
+    # re-heard "Hey Ella" that is a confirmed echo of Ella's own playback
+    # must never create a `wake_word_ack` queue row, so that ack cannot be
+    # enqueued until this judgment (and any live-span filtering it implies)
+    # is settled.
     playback_candidates = select_playback_ledger_candidates(uid)
 
     echo_classification = None
@@ -1428,7 +1469,9 @@ def send_to_scanner(
             )
             if live_only_segments:
                 # Mixed: only the classifier-validated live speech continues
-                # downstream — the echoed portion is dropped, never dispatched.
+                # downstream (and can trigger the wake ack below) — the
+                # echoed portion is dropped, never dispatched and never
+                # acked on its own.
                 scanner_segments = live_only_segments
             # else: the invariant in `_validate_payload` guarantees a
             # confirmed "mixed" result always carries a non-blank span, so
@@ -1436,9 +1479,10 @@ def send_to_scanner(
             # rather than silently drop it if it is ever hit.
         else:
             # Confirmed Ella playback (no live component): tag this window
-            # as Ella's own output in the pipeline context and do not
-            # dispatch it as user speech at all — it can never create a
-            # Whisper/queue row if the scanner webhook is never called.
+            # as Ella's own output in the pipeline context. It must not be
+            # dispatched as user speech, and it must not be wake-acked
+            # either — neither can create a Whisper/queue row for a
+            # re-heard echo of Ella's own voice.
             _log_trace_event(
                 trace_id=trace_id,
                 uid=uid,
@@ -1459,6 +1503,8 @@ def send_to_scanner(
                 flush=True,
             )
             return None
+
+    _enqueue_wake_ack(uid, str(conversation_id), trace_id, scanner_segments)
 
     payload = {
         "uid": uid,
