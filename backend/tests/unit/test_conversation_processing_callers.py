@@ -261,8 +261,13 @@ def caller_modules(monkeypatch):
         AI_CONSENT_REQUIRED_CODE="ai_consent_required",
         AI_CONSENT_WEBSOCKET_CLOSE_CODE=4403,
         AI_CONSENT_WEBSOCKET_RETRY_CLOSE_CODE=1013,
+        AiConsentEgressDecision=SimpleNamespace,
         assert_current_ai_consent=_noop,
-        is_typesafe_egress_authorized=lambda *_args: False,
+        resolve_ai_consent_egress_decision=lambda uid: SimpleNamespace(
+            subject_uid=uid,
+            authorized=True,
+            typesafe_egress_authorized=False,
+        ),
         require_current_ai_consent=lambda: "uid-1",
         resolve_processor=lambda *_args: object(),
     )

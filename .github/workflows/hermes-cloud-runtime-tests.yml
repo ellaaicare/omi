@@ -963,7 +963,7 @@ jobs:
             "tests/unit/test_ella_ai_consent_route_gates.py::test_native_websocket_consent_check_precedes_runtime_and_stt_provider_work"
             "tests/unit/test_ella_ai_consent_route_gates.py::test_websocket_consent_rejection_and_authority_outage_have_distinct_close_contracts"
             "tests/unit/test_ella_ai_consent_route_gates.py::test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary"
-            "tests/unit/test_ella_ai_consent_route_gates.py::test_scanner_dispatch_passes_server_typesafe_authority_to_provider"
+            "tests/unit/test_ella_ai_consent_route_gates.py::test_scanner_dispatch_uses_one_snapshot_for_v10_v11_revoked_and_unavailable"
             "tests/unit/test_ella_ai_consent_route_gates.py::test_stt_session_authority_avoids_transaction_per_audio_fragment_and_caches_fail_closed_state"
             "tests/unit/test_ella_ai_consent_route_gates.py::test_memory_artwork_provider_routes_share_the_consent_gate"
             "tests/unit/test_ella_ai_consent_route_gates.py::test_background_ai_and_honcho_boundaries_recheck_consent_before_network_egress"

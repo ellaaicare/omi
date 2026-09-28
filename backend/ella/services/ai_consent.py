@@ -1170,6 +1170,13 @@ class AiConsentHTTPException(HTTPException):
     """Consent rejection rendered without FastAPI's nested detail envelope."""
 
 
+@dataclass(frozen=True)
+class AiConsentEgressDecision:
+    subject_uid: str
+    authorized: bool
+    typesafe_egress_authorized: bool
+
+
 async def ai_consent_http_exception_handler(_request: Any, exc: AiConsentHTTPException) -> JSONResponse:
     detail = exc.detail if isinstance(exc.detail, dict) else {"code": str(exc.detail)}
     return JSONResponse(status_code=exc.status_code, content=detail, headers=exc.headers)
@@ -1237,10 +1244,19 @@ def assert_managed_cloud_consent(
     return receipt_id
 
 
-def assert_current_ai_consent(uid: str) -> str:
-    status = get_ai_consent_service().status(uid)
-    if status["authorized"]:
-        return uid
+def resolve_ai_consent_egress_decision(uid: str) -> AiConsentEgressDecision:
+    """Resolve generic and TypeSafe egress authority from one status snapshot."""
+    try:
+        status = get_ai_consent_service().status(uid)
+    except Exception as exc:
+        raise AiConsentHTTPException(
+            status_code=503,
+            detail={
+                "code": AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE,
+                "retryable": True,
+            },
+        ) from exc
+
     authority_state = str(status.get("authority_state") or "unavailable")
     if authority_state == "unavailable":
         raise AiConsentHTTPException(
@@ -1250,27 +1266,16 @@ def assert_current_ai_consent(uid: str) -> str:
                 "retryable": True,
             },
         )
-    raise AiConsentHTTPException(
-        status_code=403,
-        detail={"code": AI_CONSENT_REQUIRED_CODE},
-    )
-
-
-def assert_typesafe_egress_consent(uid: str) -> str:
-    """Authorize TypeSafe/Jev transcript egress only under the exact v11 grant."""
-    status = get_ai_consent_service().status(uid)
-    if status.get("authority_state") == "unavailable":
+    if status.get("authorized") is not True:
         raise AiConsentHTTPException(
-            status_code=503,
-            detail={
-                "code": AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE,
-                "retryable": True,
-            },
+            status_code=403,
+            detail={"code": AI_CONSENT_REQUIRED_CODE},
         )
+
     consent = dict(status.get("consent") or {})
     processor_ids = consent.get("processor_ids")
-    if (
-        status.get("authorized") is True
+    typesafe_egress_authorized = (
+        consent.get("decision") == "granted"
         and consent_policy_contract(
             consent.get("policy_version"),
             consent.get("processor_set_hash"),
@@ -1282,21 +1287,27 @@ def assert_typesafe_egress_consent(uid: str) -> str:
         and consent.get("processor_set_hash") == TYPESAFE_PROCESSOR_SET_HASH
         and isinstance(processor_ids, list)
         and TYPESAFE_PROCESSOR_ID in processor_ids
-    ):
-        return uid
+    )
+    return AiConsentEgressDecision(
+        subject_uid=uid,
+        authorized=True,
+        typesafe_egress_authorized=typesafe_egress_authorized,
+    )
+
+
+def assert_current_ai_consent(uid: str) -> str:
+    return resolve_ai_consent_egress_decision(uid).subject_uid
+
+
+def assert_typesafe_egress_consent(uid: str) -> str:
+    """Authorize TypeSafe/Jev transcript egress only under the exact v11 grant."""
+    decision = resolve_ai_consent_egress_decision(uid)
+    if decision.typesafe_egress_authorized:
+        return decision.subject_uid
     raise AiConsentHTTPException(
         status_code=403,
         detail={"code": AI_CONSENT_REQUIRED_CODE},
     )
-
-
-def is_typesafe_egress_authorized(uid: str) -> bool:
-    """Return a fail-closed TypeSafe egress decision without raising."""
-    try:
-        assert_typesafe_egress_consent(uid)
-    except Exception:
-        return False
-    return True
 
 
 def require_current_ai_consent(
