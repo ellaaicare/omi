@@ -1756,6 +1756,9 @@ def test_v11_grant_is_durable_and_authorizes_typesafe_egress(monkeypatch):
     assert refetched["authority_state"] == "authorized"
     assert refetched["consent"]["receipt_id"] == granted["receipt"]["receipt_id"]
     assert consent.assert_typesafe_egress_consent("user-a") == "user-a"
+    decision = consent.resolve_ai_consent_egress_decision("user-a")
+    assert decision.authorized is True
+    assert decision.typesafe_egress_authorized is True
 
 
 def test_v10_receipt_keeps_capture_working_without_forced_reconsent(monkeypatch):
@@ -1846,6 +1849,45 @@ def test_v10_receipt_cannot_authorize_typesafe_egress(monkeypatch):
     assert error.value.status_code == 403
     assert error.value.detail == {"code": "ai_consent_required"}
     assert consent.assert_current_ai_consent("user-v10") == "user-v10"
+
+    v10_status = service.status("user-v10")
+    revoked_status = {
+        **v10_status,
+        "authorized": False,
+        "authority_state": "revoked",
+        "consent": {**v10_status["consent"], "decision": "revoked"},
+    }
+
+    class SequencedConsentService:
+        calls = 0
+
+        def status(self, _uid):
+            self.calls += 1
+            return v10_status if self.calls == 1 else revoked_status
+
+    sequenced_service = SequencedConsentService()
+    monkeypatch.setattr(consent, "get_ai_consent_service", lambda: sequenced_service)
+    decision = consent.resolve_ai_consent_egress_decision("user-v10")
+    assert sequenced_service.calls == 1
+    assert decision.authorized is True
+    assert decision.typesafe_egress_authorized is False
+
+
+def test_typesafe_egress_authorization_fails_closed_on_consent_service_error(monkeypatch):
+    class UnavailableConsentService:
+        def status(self, _uid):
+            raise RuntimeError("consent service unavailable")
+
+    monkeypatch.setattr(consent, "get_ai_consent_service", lambda: UnavailableConsentService())
+
+    with pytest.raises(consent.AiConsentHTTPException) as error:
+        consent.resolve_ai_consent_egress_decision("user-unavailable")
+
+    assert error.value.status_code == 503
+    assert error.value.detail == {
+        "code": "ai_consent_authority_unavailable",
+        "retryable": True,
+    }
 
 
 def test_v9_receipt_still_requires_reconsent(monkeypatch):

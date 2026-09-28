@@ -958,10 +958,12 @@ jobs:
             "tests/unit/test_ella_ai_consent.py::test_build_871_refresh_semantics_keep_exact_v10_receipt_verified"
             "tests/unit/test_ella_ai_consent.py::test_status_policy_matches_stored_receipt_while_v11_upgrade_is_explicitly_negotiated"
             "tests/unit/test_ella_ai_consent.py::test_v10_receipt_cannot_authorize_typesafe_egress"
+            "tests/unit/test_ella_ai_consent.py::test_typesafe_egress_authorization_fails_closed_on_consent_service_error"
             "tests/unit/test_ella_ai_consent.py::test_v9_receipt_still_requires_reconsent"
             "tests/unit/test_ella_ai_consent_route_gates.py::test_native_websocket_consent_check_precedes_runtime_and_stt_provider_work"
             "tests/unit/test_ella_ai_consent_route_gates.py::test_websocket_consent_rejection_and_authority_outage_have_distinct_close_contracts"
             "tests/unit/test_ella_ai_consent_route_gates.py::test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary"
+            "tests/unit/test_ella_ai_consent_route_gates.py::test_scanner_dispatch_uses_one_snapshot_for_v10_v11_revoked_and_unavailable"
             "tests/unit/test_ella_ai_consent_route_gates.py::test_stt_session_authority_avoids_transaction_per_audio_fragment_and_caches_fail_closed_state"
             "tests/unit/test_ella_ai_consent_route_gates.py::test_memory_artwork_provider_routes_share_the_consent_gate"
             "tests/unit/test_ella_ai_consent_route_gates.py::test_background_ai_and_honcho_boundaries_recheck_consent_before_network_egress"
@@ -1075,14 +1077,15 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 21
-          # 638 (consent v10/v11 compatibility) + 18 (test_ella_sync_v2_contract.py, now wired into
+          # 640 (consent v10/v11 compatibility and scanner TypeSafe authority) + 18
+          # (test_ella_sync_v2_contract.py, now wired into
           # this collection for the first time) + 10
           # (test_ella_sync_segments_state_machine.py -- new: exercises the real
           # claim/reserve/complete/release state machine and the append transaction in
           # database/sync_segments.py directly, including the SYNC-V2-002
           # retry-after-commit/stale-lease regressions, rather than through this file's own
           # route-level fakes).
-          test "$collected" -eq 666
+          test "$collected" -eq 668
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \

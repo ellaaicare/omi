@@ -1318,6 +1318,7 @@ def send_to_scanner(
     wake_prefix_recent: Optional[bool] = None,
     latency_metadata: Optional[dict] = None,
     guardian_mode: object = _GUARDIAN_MODE_UNSET,
+    typesafe_egress_authorized: bool = False,
 ) -> Optional[int]:
     """
     Send transcript segments to Ella scanner agent.
@@ -1523,6 +1524,7 @@ def send_to_scanner(
         "guardian_mode_source": "users.guardian_mode",
         "guardian_mode_enabled": guardian_mode_enabled,
         "emergency_only_dispatch": emergency_only_dispatch,
+        "typesafe_egress_authorized": typesafe_egress_authorized is True,
         "playback_candidates": playback_candidates,
     }
     if latency_metadata:
