@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import 'package:omi/ella/capture_host/ella_capture_host.dart';
 import 'package:omi/ella/upstream_capture/ella_capture_authority.dart';
 import 'package:omi/ella/upstream_capture/ella_gated_capture_seams.dart';
 import 'package:omi/ella/upstream_capture/ella_gated_device_connection.dart';
@@ -27,6 +28,7 @@ import 'package:omi/upstream_capture/services/devices/connectors/device_connecti
 import 'package:omi/upstream_capture/services/services.dart';
 import 'package:omi/upstream_capture/services/wals.dart';
 import 'package:omi/utils/audio/foreground.dart';
+import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
 
 /// Upstream [upstream_env.EnvFields] backed by the fork's already-initialized
@@ -160,6 +162,23 @@ class EllaUpstreamCaptureWiring {
   final Future<CreateConversationResponse?> Function()? processInProgressConversation;
 }
 
+/// Converts the native Pigeon discovery-diagnostics snapshot into the
+/// flag-OFF-safe DTO consumed by `DeviceDiagnosticsPage`. A function of
+/// [BleHostApi] (not a bound method) so tests can exercise the exact same
+/// mapping with a fake host, and production can register it with
+/// `EllaCaptureHost.installNativeDiscoveryDiagnosticsLoader`.
+Future<EllaNativeDiscoveryDiagnostics> loadNativeDiscoveryDiagnostics([BleHostApi? hostApi]) async {
+  final native = await (hostApi ?? BleHostApi()).getNativeDiscoveryDiagnostics();
+  return EllaNativeDiscoveryDiagnostics(
+    lastStartScanCbState: native.lastStartScanCbState,
+    scansStartedImmediately: native.scansStartedImmediately,
+    scansQueued: native.scansQueued,
+    queuedScansFired: native.queuedScansFired,
+    didDiscoverCount: native.didDiscoverCount,
+    flutterApiNilDropCount: native.flutterApiNilDropCount,
+  );
+}
+
 /// Composition root of the flag-ON graph: boots the vendored upstream capture
 /// stack exactly as upstream's own `main.dart` does (Env, SharedPreferences,
 /// ServiceManager, BleFlutterApi -> BleBridge) and builds upstream's
@@ -204,6 +223,7 @@ class EllaUpstreamCaptureRuntime {
     }
     // Upstream main.dart registers the native BLE bridge here.
     BleFlutterApi.setUp(BleBridge.instance);
+    DebugLogManager.recordBleFlutterApiSetUp();
     await ServiceManager.instance().start();
 
     final services = ServiceManager.instance();
