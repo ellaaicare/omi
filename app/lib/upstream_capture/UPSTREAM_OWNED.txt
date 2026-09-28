@@ -5,7 +5,8 @@
 # Verified by scripts/verify_upstream_capture_identity.py (app/test/upstream_capture/byte_identity_guard_test.dart).
 # Regenerate with scripts/vendor_upstream_capture.py --pin <pin> --list scripts/upstream_capture_files.txt
 # Kinds: dart-relocated (namespaced copy), verbatim (native/doc at upstream path),
-#        in-place (shared fork file replaced by the pin's exact bytes at its original path).
+#        in-place (shared fork file replaced by the pin's exact bytes at its original path),
+#        patched (namespaced copy, deliberately NOT byte-identical; see UPSTREAM_PATCHES.md).
 # Columns (tab separated): kind, upstream git blob id at pin, upstream path, local path
 pin f16699aea7fe9ba089baceb628922f2882c51153
 verbatim	1cf0db68110598db438e4eed38f4b82e2ac3bf96	app/ios/Runner/Batch/BaseBatchAudioWriter.swift	app/ios/Runner/Batch/BaseBatchAudioWriter.swift
@@ -148,7 +149,7 @@ dart-relocated	e1e75012b7e3267a245bf1dec9ea15d2cd4f92f4	app/lib/services/devices
 dart-relocated	9b5e9474f1342f60b68a36a5b181fd3cfb803f30	app/lib/services/devices/discovery/apple_watch_discoverer.dart	app/lib/upstream_capture/services/devices/discovery/apple_watch_discoverer.dart
 dart-relocated	804d9a8b7483f94a828f4aa2be5b8350c1771222	app/lib/services/devices/discovery/device_discoverer.dart	app/lib/upstream_capture/services/devices/discovery/device_discoverer.dart
 dart-relocated	01bc9a4d30e5b6c2aa72da89a5ef2e7bc5bfa7c2	app/lib/services/devices/discovery/device_locator.dart	app/lib/upstream_capture/services/devices/discovery/device_locator.dart
-dart-relocated	0a7aec27f031d61972599823158d8f77731dc2b4	app/lib/services/devices/discovery/native_bluetooth_discoverer.dart	app/lib/upstream_capture/services/devices/discovery/native_bluetooth_discoverer.dart
+patched	0a7aec27f031d61972599823158d8f77731dc2b4	app/lib/services/devices/discovery/native_bluetooth_discoverer.dart	app/lib/upstream_capture/services/devices/discovery/native_bluetooth_discoverer.dart
 dart-relocated	bb9187a358b52ad1ee17ffc4122b5a5232d4ecba	app/lib/services/devices/discovery/rayban_meta_discoverer.dart	app/lib/upstream_capture/services/devices/discovery/rayban_meta_discoverer.dart
 dart-relocated	3ed5ae3add699aefd5d7f29fdb914abfcfae194a	app/lib/services/devices/models.dart	app/lib/upstream_capture/services/devices/models.dart
 dart-relocated	04826a6fd9337588c80cb8c851d14edc2a94e4d5	app/lib/services/devices/ring_protocol.dart	app/lib/upstream_capture/services/devices/ring_protocol.dart
