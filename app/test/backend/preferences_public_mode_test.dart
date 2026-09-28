@@ -23,7 +23,7 @@ void main() {
     expect(preferences.publicMode, isFalse);
   });
 
-  test('existing v8 account requires v9 before any managed-cloud AI or illustration action', () async {
+  test('existing v8 account is neither current nor supported prior authority', () async {
     SharedPreferences.setMockInitialValues({
       'aiConsentAccepted': true,
       'aiConsentAcceptedAt': '2026-01-01T00:00:00Z',
@@ -40,7 +40,7 @@ void main() {
 
     final preferences = SharedPreferencesUtil();
     expect(preferences.aiConsentAccepted, isFalse);
-    expect(preferences.hasPriorAccountBoundAiConsent('uid-a'), isTrue);
+    expect(preferences.hasPriorAccountBoundAiConsent('uid-a'), isFalse);
     expect(preferences.hasPriorAccountBoundAiConsent('uid-b'), isFalse);
   });
 

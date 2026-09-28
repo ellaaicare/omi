@@ -92,8 +92,24 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
         return;
       }
     } catch (_) {
-      // Keep the consent surface open and capture disabled on acknowledgement failure.
+      // First consent stays open and fail closed. Upgrade mode below can keep
+      // the already-verified v10 authority and dismiss this optional upgrade.
       outcome = _genericFailure;
+    }
+
+    if (mounted && widget.preserveExistingAuthorityOnDecline) {
+      final preferences = SharedPreferencesUtil();
+      final uid = preferences.uid;
+      if (preferences.hasPriorAccountBoundAiConsent(uid) &&
+          preferences.hasCurrentAiConsentAuthority(enforceEnglishPilotLocale: false)) {
+        final messenger = ScaffoldMessenger.maybeOf(context);
+        final notice = context.l10n.aiConsentUpgradeRetryNotice;
+        Navigator.of(context).pop(false);
+        messenger
+          ?..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(content: Text(notice)));
+        return;
+      }
     }
 
     if (mounted) {
@@ -198,6 +214,14 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                   children: [
                     Text(context.l10n.aiConsentTitle, style: EllaTextStyles.display),
                     const SizedBox(height: 16),
+                    if (widget.preserveExistingAuthorityOnDecline) ...[
+                      Text(
+                        context.l10n.aiConsentUpgradeExistingAuthority,
+                        key: const Key('ai-consent-upgrade-existing-authority'),
+                        style: bodyStyle,
+                      ),
+                      const SizedBox(height: 16),
+                    ],
                     Text(context.l10n.aiConsentManagedCloudIntro, style: bodyStyle),
                     const SizedBox(height: 12),
                     _processorDisclosure(
@@ -248,13 +272,10 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                     const SizedBox(height: 16),
                     Text(context.l10n.aiConsentCompactSummary, style: bodyStyle),
                     const SizedBox(height: 12),
-                    Text(
-                      widget.preserveExistingAuthorityOnDecline
-                          ? context.l10n.aiConsentUpgradeExistingAuthority
-                          : context.l10n.aiConsentNoSharingBeforeAllow,
-                      style: bodyStyle,
-                    ),
-                    const SizedBox(height: 14),
+                    if (!widget.preserveExistingAuthorityOnDecline) ...[
+                      Text(context.l10n.aiConsentNoSharingBeforeAllow, style: bodyStyle),
+                      const SizedBox(height: 14),
+                    ],
                     Text.rich(
                       TextSpan(
                         text: context.l10n.aiConsentProcessorDetailsLink,

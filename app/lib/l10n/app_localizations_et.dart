@@ -10121,6 +10121,10 @@ class AppLocalizationsEt extends AppLocalizations {
   String get upstreamCaptureSearching => 'Looking for your necklace…';
 
   @override
+  String get aiConsentUpgradeRetryNotice =>
+      'We couldn’t update your AI permission. Your existing permission is still active, and we’ll retry later.';
+
+  @override
   String get deviceDiagnostics => 'Device Diagnostics';
 
   @override

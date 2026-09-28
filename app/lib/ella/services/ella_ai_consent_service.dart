@@ -609,8 +609,8 @@ class EllaAiConsentService {
       (await grantCurrentConsentWithOutcome(uid: uid)).receiptId;
 
   /// Grant with a typed outcome so the consent surface can say why an attempt
-  /// failed. Semantics are identical to [grantCurrentConsent]: fail closed,
-  /// never persist authority on any failure path.
+  /// failed. First consent remains fail closed. An additive v10-to-v11 upgrade
+  /// preserves the already-verified v10 authority until v11 succeeds.
   Future<AiConsentGrantOutcome> grantCurrentConsentWithOutcome({required String uid}) async {
     const authorityChanged = AiConsentGrantOutcome.failed(AiConsentGrantFailureKind.authorityChanged);
     final authority = _captureAuthority(uid);
@@ -618,7 +618,15 @@ class EllaAiConsentService {
       SharedPreferencesUtil.clearAiConsentServerVerification();
       return authorityChanged;
     }
-    SharedPreferencesUtil.clearAiConsentServerVerification();
+    // A v11 upgrade is additive: a failed attempt must not revoke the exact
+    // v10 authority that was already verified for this account. The successful
+    // response below atomically replaces it with v11; first consent still has
+    // no authority to preserve and remains fail closed.
+    final preservesLegacyAuthority = _preferences.hasPriorAccountBoundAiConsent(uid) &&
+        _preferences.hasCurrentAiConsentAuthority(enforceEnglishPilotLocale: false);
+    if (!preservesLegacyAuthority) {
+      SharedPreferencesUtil.clearAiConsentServerVerification();
+    }
     if (!_requireCurrentAuthority(authority)) return authorityChanged;
 
     final policy = await _fetchAcceptedPolicy();

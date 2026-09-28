@@ -11102,6 +11102,7 @@
   "upstreamCaptureStop": "Stop recording",
   "upstreamCaptureRecordingPhone": "Recording with your phone",
   "upstreamCaptureSearching": "Looking for your necklace…",
+  "aiConsentUpgradeRetryNotice": "We couldn’t update your AI permission. Your existing permission is still active, and we’ll retry later.",
   "deviceDiagnostics": "Device Diagnostics",
   "@deviceDiagnostics": {
     "description": "Title for the BLE scan diagnostics screen and its Settings row"

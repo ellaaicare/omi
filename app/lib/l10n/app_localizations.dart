@@ -18705,6 +18705,12 @@ abstract class AppLocalizations {
   /// **'Looking for your necklace…'**
   String get upstreamCaptureSearching;
 
+  /// No description provided for @aiConsentUpgradeRetryNotice.
+  ///
+  /// In en, this message translates to:
+  /// **'We couldn’t update your AI permission. Your existing permission is still active, and we’ll retry later.'**
+  String get aiConsentUpgradeRetryNotice;
+
   /// Title for the BLE scan diagnostics screen and its Settings row
   ///
   /// In en, this message translates to:
