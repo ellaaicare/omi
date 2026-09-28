@@ -51,6 +51,7 @@ from ella.services.provisioning import (
     resolve_gateway_credential,
     rollout_enabled,
     self_hosted_invitation_admission,
+    self_hosted_invitation_lineage,
     self_hosted_provisioning_configured,
     self_hosted_provisioning_enabled,
     self_hosted_runtime_authority_required,
@@ -231,7 +232,13 @@ def cloud_runtime_authority_identity(runtime: IsolatedRuntime) -> CloudRuntimeAu
     return runtime_authority_identity(runtime)
 
 
-def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False) -> IsolatedRuntime:
+def runtime_from_binding(
+    binding: dict,
+    uid: str,
+    *,
+    allow_shadow: bool = False,
+    self_hosted_authority_lineage: Optional[RuntimeTargetLineage] = None,
+) -> IsolatedRuntime:
     if binding.get("omi_uid") != uid:
         raise ProvisioningError("runtime_ownership_mismatch", retryable=False)
     provider = str(binding.get("provider") or "").lower()
@@ -364,14 +371,14 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
                 raise ProvisioningError("invitation_runtime_profile_forbidden", retryable=False)
             if str(binding.get("runtime_target_mode") or "") not in SELF_HOSTED_RUNTIME_TARGET_MODES:
                 raise ProvisioningError("self_hosted_runtime_target_mode_missing", retryable=False)
-            current_lineage = _current_self_hosted_lineage()
+            authority_lineage = self_hosted_authority_lineage or _current_self_hosted_lineage()
             stored_lineage = RuntimeTargetLineage(
                 policy_version=str(binding.get("target_policy_version") or ""),
                 processor_set_hash=str(binding.get("target_processor_set_hash") or ""),
                 scope_version=str(binding.get("target_scope_version") or ""),
                 scope_hash=str(binding.get("target_scope_hash") or ""),
             ).validate()
-            if stored_lineage != current_lineage:
+            if stored_lineage != authority_lineage:
                 raise ProvisioningError("self_hosted_runtime_target_lineage_stale", retryable=False)
             try:
                 consent_authority_epoch = str(UUID(str(binding.get("consent_authority_epoch") or "").strip()))
@@ -519,6 +526,7 @@ async def resolve_isolated_runtime(
     cloud_required = cloud_provisioning_enabled(uid)
     retained_required = runtime_bindings_enabled(uid)
     self_hosted_configured = self_hosted_provisioning_configured() and not cloud_required
+    materialization_lineage = None
     try:
         repository = repository or await EllaProvisioningRepository.create()
     except Exception as exc:
@@ -585,11 +593,17 @@ async def resolve_isolated_runtime(
             )
         elif self_hosted_required:
             self_hosted_mode = _self_hosted_target_mode(target_mode)
+            authority_lineage = (
+                self_hosted_invitation_lineage(invitation_admission)
+                if invitation_admission is not None
+                else _current_self_hosted_lineage()
+            )
+            materialization_lineage = authority_lineage
             binding = await repository.resolve_active_runtime(
                 uid,
                 target_mode=self_hosted_mode,
                 required_provider=SELF_HOSTED_RUNTIME_PROVIDER,
-                authority_lineage=_current_self_hosted_lineage(),
+                authority_lineage=authority_lineage,
                 model=SELF_HOSTED_RUNTIME_MODEL,
             )
         else:
@@ -601,7 +615,11 @@ async def resolve_isolated_runtime(
     except RuntimePoolClaimError as exc:
         raise ProvisioningError(exc.code, retryable=False) from exc
     if binding:
-        return runtime_from_binding(binding, uid)
+        return runtime_from_binding(
+            binding,
+            uid,
+            self_hosted_authority_lineage=materialization_lineage,
+        )
     if not binding:
         try:
             cloud_state = await repository.resolve_cloud_binding_state(uid)

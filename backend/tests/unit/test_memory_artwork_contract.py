@@ -103,7 +103,8 @@ def _load_service_module():
     ella_services_stub = types.ModuleType("ella.services")
     ella_services_stub.__path__ = []
     ai_consent_stub = types.ModuleType("ella.services.ai_consent")
-    ai_consent_stub.CURRENT_POLICY_VERSION = "ai-data-processors-v10"
+    ai_consent_stub.CURRENT_POLICY_VERSION = "ai-data-processors-v11"
+    ai_consent_stub.LEGACY_POLICY_VERSION_V10 = "ai-data-processors-v10"
     ai_consent_stub.get_ai_consent_service = lambda: None
     runtime_stub = types.ModuleType("ella.services.runtime_resolver")
     runtime_stub.resolve_isolated_runtime = lambda *args, **kwargs: None

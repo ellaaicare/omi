@@ -48,6 +48,7 @@ from ella.services.ai_consent import (
     CURRENT_SCOPE_VERSION,
     MANAGED_CLOUD_MEMORY_PROVIDER,
     MANAGED_CLOUD_PHOTON_SCOPE,
+    consent_policy_contract,
 )
 from ella.services.hermes_cloud import (
     HermesCloudClient,
@@ -184,6 +185,24 @@ def current_self_hosted_runtime_lineage() -> RuntimeTargetLineage:
         processor_set_hash=CURRENT_PROCESSOR_SET_HASH,
         scope_version=CURRENT_SCOPE_VERSION,
         scope_hash=CURRENT_SCOPE_HASH,
+    ).validate()
+
+
+def self_hosted_invitation_lineage(admission: dict[str, Any]) -> RuntimeTargetLineage:
+    """Return the exact supported consent lineage carried by an invitation."""
+    contract = consent_policy_contract(
+        admission.get("consent_policy_version"),
+        admission.get("consent_processor_set_hash"),
+        admission.get("consent_scope_version"),
+        admission.get("consent_scope_hash"),
+    )
+    if contract is None:
+        raise ProvisioningError("invitation_authority_required", retryable=False)
+    return RuntimeTargetLineage(
+        policy_version=contract.version,
+        processor_set_hash=contract.processor_set_hash,
+        scope_version=contract.scope_version,
+        scope_hash=contract.scope_hash,
     ).validate()
 
 
@@ -351,10 +370,13 @@ def _self_hosted_invitation_matches(admission: Optional[dict[str, Any]]) -> bool
         except json.JSONDecodeError:
             return False
     return bool(
-        str(admission.get("consent_policy_version") or "") == CURRENT_POLICY_VERSION
-        and str(admission.get("consent_processor_set_hash") or "") == CURRENT_PROCESSOR_SET_HASH
-        and str(admission.get("consent_scope_version") or "") == CURRENT_SCOPE_VERSION
-        and str(admission.get("consent_scope_hash") or "") == CURRENT_SCOPE_HASH
+        consent_policy_contract(
+            admission.get("consent_policy_version"),
+            admission.get("consent_processor_set_hash"),
+            admission.get("consent_scope_version"),
+            admission.get("consent_scope_hash"),
+        )
+        is not None
         and list(admission.get("provider_allowlist") or []) == [SELF_HOSTED_RUNTIME_PROVIDER]
         and list(admission.get("model_allowlist") or []) == [SELF_HOSTED_RUNTIME_MODEL]
         and list(admission.get("mode_allowlist") or []) == list(SELF_HOSTED_RUNTIME_TARGET_MODES)
@@ -1091,6 +1113,14 @@ class ProvisioningCoordinator:
             # chain were resolved before identity, job, or provider side effects.
             assert invitation_admission is not None
 
+        self_hosted_authority_lineage = None
+        if self_hosted_required:
+            self_hosted_authority_lineage = (
+                self_hosted_invitation_lineage(invitation_admission)
+                if invitation_admission is not None
+                else current_self_hosted_runtime_lineage()
+            )
+
         await self._repository_call(
             authority_snapshot,
             self.repository.ensure_user_identity,
@@ -1158,7 +1188,7 @@ class ProvisioningCoordinator:
                 template_version=target_schema_version,
                 target_mode="hermes-chat" if self_hosted_required else None,
                 required_provider="hermes",
-                authority_lineage=(current_self_hosted_runtime_lineage() if self_hosted_required else None),
+                authority_lineage=self_hosted_authority_lineage,
                 model=SELF_HOSTED_RUNTIME_MODEL if self_hosted_required else CLOUD_RUNTIME_MODEL,
             )
         if binding:
@@ -1343,6 +1373,9 @@ class ProvisioningCoordinator:
                 raise ProvisioningError("invitation_authority_required", retryable=False)
             if not self_hosted_required and not legacy_required:
                 raise ProvisioningError("provisioning_disabled", retryable=False)
+            invitation_authority_lineage = (
+                self_hosted_invitation_lineage(invitation_admission) if invitation_admission is not None else None
+            )
             account_owner_id = str((invitation_admission or {}).get("user_id") or job.get("user_id") or "").strip()
             runtime_target_id = str(
                 (invitation_admission or {}).get("attestation_runtime_target_id") or f"job:{job['id']}"
@@ -1457,7 +1490,7 @@ class ProvisioningCoordinator:
                 "uid": identity.uid,
                 "provider": "hermes",
                 "require_invitation_target": invitation_target_required,
-                "authority_lineage": (current_self_hosted_runtime_lineage() if invitation_target_required else None),
+                "authority_lineage": invitation_authority_lineage,
                 "model": SELF_HOSTED_RUNTIME_MODEL,
             }
             if retained_authority_revision is not None:

@@ -15,10 +15,14 @@ paths:
     get:
       tags: [AI Consent]
       security: []
-      summary: Return the current AI/data processor disclosure contract.
+      summary: Return a negotiated AI/data processor disclosure contract.
+      parameters:
+        - $ref: "#/components/parameters/AiConsentPolicyVersion"
       responses:
         "200":
-          description: Current immutable policy metadata.
+          description: >
+            Exact immutable policy metadata. An omitted policy_version returns
+            v10 for compatibility with installed clients; v11 must be explicit.
           content:
             application/json:
               schema:
@@ -41,9 +45,14 @@ paths:
     get:
       tags: [AI Consent]
       summary: Return the authenticated user's current consent status.
+      parameters:
+        - $ref: "#/components/parameters/AiConsentPolicyVersion"
       responses:
         "200":
-          description: Current consent status.
+          description: >
+            Current consent status. The embedded policy matches a supported
+            stored receipt; accounts without a receipt receive the explicitly
+            negotiated policy, defaulting to v10.
   /v1/ella/resolve:
     get:
       tags: [Runtime Resolution]
@@ -143,7 +152,7 @@ paths:
       x-ella-runtime-target:
         mode: hermes-cloud-chat
         fallback: none
-      x-ella-ai-data-processors-v10:
+      x-ella-ai-data-processors-v11:
         - nous-hermes-cloud
         - hermes-profile-memory
         - openai-codex
@@ -176,7 +185,7 @@ paths:
       x-ella-runtime-target:
         mode: hermes-cloud-voice
         fallback: none
-      x-ella-ai-data-processors-v10:
+      x-ella-ai-data-processors-v11:
         always:
           - nous-hermes-cloud
           - hermes-profile-memory
@@ -266,7 +275,7 @@ paths:
       x-ella-runtime-target:
         mode: hermes-cloud-transcript
         fallback: none
-      x-ella-ai-data-processors-v10:
+      x-ella-ai-data-processors-v11:
         always:
           - nous-hermes-cloud
           - hermes-profile-memory
@@ -290,7 +299,7 @@ paths:
       x-ella-runtime-target:
         mode: hermes-cloud-transcript
         fallback: none
-      x-ella-ai-data-processors-v10:
+      x-ella-ai-data-processors-v11:
         always:
           - nous-hermes-cloud
           - hermes-profile-memory
@@ -381,7 +390,7 @@ paths:
       x-ella-runtime-target:
         mode: hermes-cloud-transcript
         fallback: none
-      x-ella-ai-data-processors-v10:
+      x-ella-ai-data-processors-v11:
         when-extractor-mode-is-hermes:
           - nous-hermes-cloud
           - hermes-profile-memory
@@ -405,10 +414,11 @@ paths:
       x-ella-runtime-target:
         mode: hermes-cloud-guardian
         fallback: none
-      x-ella-ai-data-processors-v10:
+      x-ella-ai-data-processors-v11:
         - nous-hermes-cloud
         - hermes-profile-memory
         - openai-codex
+        - typesafe
       responses:
         "200":
           description: Proposal-only Observer run receipt.
@@ -449,6 +459,17 @@ components:
       in: header
       name: X-Ella-Subject-Uid
   parameters:
+    AiConsentPolicyVersion:
+      name: policy_version
+      in: query
+      required: false
+      description: >
+        Explicit policy negotiation. Omit for installed v10 clients; v11
+        clients must request ai-data-processors-v11 deliberately.
+      schema:
+        type: string
+        enum: [ai-data-processors-v10, ai-data-processors-v11]
+        default: ai-data-processors-v10
     ConversationId:
       name: conversation_id
       in: path
@@ -616,12 +637,15 @@ components:
       type: object
       required:
         - version
+        - minimum_required_version
         - processor_set_hash
         - scope_version
         - scope_hash
         - processors
       properties:
         version:
+          enum: [ai-data-processors-v10, ai-data-processors-v11]
+        minimum_required_version:
           const: ai-data-processors-v10
         processor_set_hash:
           type: string
@@ -636,10 +660,14 @@ components:
           items:
             type: object
       description: >
-        v10 names Hermes Cloud, OpenAI Codex, Photon, built-in Hermes
-        profile-scoped memory, and the xAI memory-artwork image purpose.
-        Honcho Cloud is not part of the Cloud route processor set; retained
-        Plato/Honcho remains separate.
+        The unversioned compatibility response is v10; v11 is available only
+        through explicit policy_version negotiation. V10 is the minimum accepted grant.
+        V10 continues to authorize its original processor set but never
+        TypeSafe egress. V11 names Hermes Cloud, OpenAI Codex, Photon, built-in Hermes
+        profile-scoped memory, and TypeSafe (Jev), via OpenRouter, for
+        Guardian/Whispers safety classification of conversation transcript
+        text windows (no audio). Honcho Cloud is not part of the Cloud route
+        processor set; retained Plato/Honcho remains separate.
     AiConsentSubmission:
       type: object
       required:
@@ -656,7 +684,7 @@ components:
         decision:
           enum: [granted, declined, revoked]
         policy_version:
-          const: ai-data-processors-v10
+          enum: [ai-data-processors-v10, ai-data-processors-v11]
         processor_set_hash:
           type: string
         scope_version:
