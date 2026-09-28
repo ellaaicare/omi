@@ -17,6 +17,11 @@ def _disable_trace(monkeypatch):
     monkeypatch.setattr(scanner, "_enqueue_wake_ack", lambda *args, **kwargs: None)
 
 
+@pytest.fixture(autouse=True)
+def _scanner_webhook_authority(monkeypatch):
+    monkeypatch.setattr(scanner, "SCANNER_WEBHOOK_KEY", "configured-scanner-webhook-key")
+
+
 def setup_function():
     scanner.reset_scanner_batch_state()
 
@@ -59,8 +64,9 @@ def test_guardian_trace_service_caller_fails_closed_without_configured_key(monke
 def test_wake_word_bypasses_ambient_batching(monkeypatch):
     posts = []
 
-    def fake_post(_url, json, timeout):
+    def fake_post(_url, json, headers, timeout):
         posts.append(json)
+        assert headers == {scanner.SCANNER_WEBHOOK_KEY_HEADER: "configured-scanner-webhook-key"}
         return _FakeResponse(200)
 
     _disable_trace(monkeypatch)
@@ -84,8 +90,9 @@ def test_wake_word_bypasses_ambient_batching(monkeypatch):
 def test_emergency_bypasses_ambient_batching(monkeypatch):
     posts = []
 
-    def fake_post(_url, json, timeout):
+    def fake_post(_url, json, headers, timeout):
         posts.append(json)
+        assert headers == {scanner.SCANNER_WEBHOOK_KEY_HEADER: "configured-scanner-webhook-key"}
         return _FakeResponse(200)
 
     _disable_trace(monkeypatch)
@@ -144,7 +151,8 @@ def test_emergency_bypasses_ambient_batching(monkeypatch):
 def test_guardian_off_contextual_emergency_sends_only_authorized_suffix(monkeypatch):
     posts = []
 
-    def fake_post(_url, json, timeout):
+    def fake_post(_url, json, headers, timeout):
+        assert headers == {scanner.SCANNER_WEBHOOK_KEY_HEADER: scanner.SCANNER_WEBHOOK_KEY}
         posts.append(json)
         return _FakeResponse(200)
 
@@ -172,7 +180,8 @@ def test_guardian_off_contextual_emergency_sends_only_authorized_suffix(monkeypa
 def test_guardian_off_direct_emergency_omits_unmatched_retained_history(monkeypatch):
     posts = []
 
-    def fake_post(_url, json, timeout):
+    def fake_post(_url, json, headers, timeout):
+        assert headers == {scanner.SCANNER_WEBHOOK_KEY_HEADER: scanner.SCANNER_WEBHOOK_KEY}
         posts.append(json)
         return _FakeResponse(200)
 
@@ -197,7 +206,8 @@ def test_guardian_off_direct_emergency_omits_unmatched_retained_history(monkeypa
 def test_guardian_off_direct_emergency_sends_only_matching_current_speaker_group(monkeypatch):
     posts = []
 
-    def fake_post(_url, json, timeout):
+    def fake_post(_url, json, headers, timeout):
+        assert headers == {scanner.SCANNER_WEBHOOK_KEY_HEADER: scanner.SCANNER_WEBHOOK_KEY}
         posts.append(json)
         return _FakeResponse(200)
 
@@ -223,7 +233,8 @@ def test_guardian_off_direct_emergency_sends_only_matching_current_speaker_group
 def test_guardian_enabled_context_does_not_rewrite_active_segments(monkeypatch):
     posts = []
 
-    def fake_post(_url, json, timeout):
+    def fake_post(_url, json, headers, timeout):
+        assert headers == {scanner.SCANNER_WEBHOOK_KEY_HEADER: scanner.SCANNER_WEBHOOK_KEY}
         posts.append(json)
         return _FakeResponse(200)
 
@@ -248,8 +259,9 @@ def test_guardian_enabled_context_does_not_rewrite_active_segments(monkeypatch):
 def test_ambient_chunks_batch_until_word_threshold(monkeypatch):
     posts = []
 
-    def fake_post(_url, json, timeout):
+    def fake_post(_url, json, headers, timeout):
         posts.append(json)
+        assert headers == {scanner.SCANNER_WEBHOOK_KEY_HEADER: "configured-scanner-webhook-key"}
         return _FakeResponse(200)
 
     _disable_trace(monkeypatch)
@@ -282,8 +294,9 @@ def test_ambient_chunks_batch_until_word_threshold(monkeypatch):
 def test_rate_limit_defers_ambient_but_not_wake(monkeypatch):
     posts = []
 
-    def fake_post(_url, json, timeout):
+    def fake_post(_url, json, headers, timeout):
         posts.append(json)
+        assert headers == {scanner.SCANNER_WEBHOOK_KEY_HEADER: "configured-scanner-webhook-key"}
         if len(posts) == 1:
             return _FakeResponse(429, {"Retry-After": "30", "x-ratelimit-remaining-requests": "0"})
         return _FakeResponse(200)
@@ -343,8 +356,9 @@ def test_rate_limit_status_parses_groq_duration_headers():
 def test_scanner_payload_preserves_stt_identity_and_latency_metadata(monkeypatch):
     posts = []
 
-    def fake_post(_url, json, timeout):
+    def fake_post(_url, json, headers, timeout):
         posts.append(json)
+        assert headers == {scanner.SCANNER_WEBHOOK_KEY_HEADER: "configured-scanner-webhook-key"}
         return _FakeResponse(200)
 
     _disable_trace(monkeypatch)
@@ -402,7 +416,8 @@ def test_scanner_suppresses_all_off_equivalent_modes(monkeypatch, mode):
 def test_scanner_preserves_emergency_only_dispatch_when_guardian_is_off(monkeypatch):
     posts = []
 
-    def fake_post(_url, json, timeout):
+    def fake_post(_url, json, headers, timeout):
+        assert headers == {scanner.SCANNER_WEBHOOK_KEY_HEADER: scanner.SCANNER_WEBHOOK_KEY}
         posts.append(json)
         return _FakeResponse(200)
 
@@ -450,6 +465,40 @@ def test_scanner_fails_closed_when_mode_authority_is_unavailable(monkeypatch):
     assert trace_events[-1]["stage"] == "scanner_mode_authority"
     assert trace_events[-1]["status"] == "error"
     assert trace_events[-1]["metadata"] == {"reason": "guardian_mode_required"}
+
+
+def test_scanner_fails_before_webhook_egress_without_authority(monkeypatch):
+    posts = []
+    wake_acks = []
+    echo_inspections = []
+    monkeypatch.setattr(scanner, "_enqueue_wake_ack", lambda *args, **kwargs: wake_acks.append((args, kwargs)))
+    monkeypatch.setattr(
+        scanner,
+        "should_suppress_guardian_echo",
+        lambda *args, **kwargs: echo_inspections.append((args, kwargs)) or True,
+    )
+    monkeypatch.setattr(
+        scanner,
+        "_apply_ambient_batching",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("missing scanner authority must fail before batching")
+        ),
+    )
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner, "SCANNER_WEBHOOK_KEY", "")
+    monkeypatch.setattr(scanner, "GUARDIAN_WEBHOOK_KEY", "configured-guardian-trace-key")
+    monkeypatch.setattr(scanner.requests, "post", lambda *args, **kwargs: posts.append((args, kwargs)))
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-authority",
+        [{"text": "Hey Ella, are you there?", "speaker": "SPEAKER_1"}],
+    )
+
+    assert status is None
+    assert wake_acks == []
+    assert echo_inspections == []
+    assert posts == []
 
 
 @pytest.mark.parametrize(
@@ -661,7 +710,8 @@ def test_credible_emergency_match_with_context_scans_all_current_speaker_groups(
 def test_scanner_off_mode_dispatches_independent_speaker_after_reported_speech_group(monkeypatch):
     posts = []
 
-    def fake_post(_url, json, timeout):
+    def fake_post(_url, json, headers, timeout):
+        assert headers == {scanner.SCANNER_WEBHOOK_KEY_HEADER: scanner.SCANNER_WEBHOOK_KEY}
         posts.append(json)
         return _FakeResponse(200)
 
