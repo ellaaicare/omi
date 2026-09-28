@@ -15,6 +15,7 @@ on:
       - "backend/contracts/README.md"
       - "backend/database/authority_advisory_lock.py"
       - "backend/database/conversations.py"
+      - "backend/database/sync_segments.py"
       - "backend/database/redis_db.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/ella_postgres.py"
@@ -28,6 +29,9 @@ on:
       - "backend/models/conversation_integrity.py"
       - "backend/models/hermes_cloud_enrichment_contract.py"
       - "backend/routers/transcribe.py"
+      - "backend/routers/sync.py"
+      - "backend/utils/sync_capture_manifest.py"
+      - "backend/tests/unit/test_ella_sync_v2_contract.py"
       - "backend/utils/stt/session_delivery.py"
       - "backend/utils/stt/streaming.py"
       - "backend/tests/unit/test_stt_session_delivery.py"
@@ -185,6 +189,7 @@ on:
       - "backend/contracts/README.md"
       - "backend/database/authority_advisory_lock.py"
       - "backend/database/conversations.py"
+      - "backend/database/sync_segments.py"
       - "backend/database/redis_db.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/ella_postgres.py"
@@ -198,6 +203,9 @@ on:
       - "backend/models/conversation_integrity.py"
       - "backend/models/hermes_cloud_enrichment_contract.py"
       - "backend/routers/transcribe.py"
+      - "backend/routers/sync.py"
+      - "backend/utils/sync_capture_manifest.py"
+      - "backend/tests/unit/test_ella_sync_v2_contract.py"
       - "backend/utils/stt/session_delivery.py"
       - "backend/utils/stt/streaming.py"
       - "backend/tests/unit/test_stt_session_delivery.py"
@@ -1027,8 +1035,11 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 21
-          # 630 + 15 (test_ella_sync_v2_contract.py, now wired into this collection).
-          test "$collected" -eq 645
+          # 630 + 18 (test_ella_sync_v2_contract.py, now wired into this collection; 15 original +
+          # 3 new regressions from PR #594 round 2: an atomic-append-transaction-outage-then-retry
+          # test, a stale-claim-release test, and a mutation-check companion for the parallel
+          # -segments test).
+          test "$collected" -eq 648
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
