@@ -218,8 +218,28 @@ def _identity_phone(identities: object, canonical_phone: Optional[str]) -> Optio
     return canonical_phone
 
 
+_DELIVERY_RECIPIENT_SEPARATOR = "::recipient:"
+
+
 def _delivery_key(step: dict) -> tuple[str, str]:
-    return str(step.get("channel") or "unknown"), str(step.get("target") or "unknown")
+    channel = str(step.get("channel") or "unknown")
+    target = str(step.get("target") or "unknown")
+    explicit_claim_target = str(step.get("claim_target") or "").strip()
+    if explicit_claim_target == target or explicit_claim_target.startswith(f"{target}{_DELIVERY_RECIPIENT_SEPARATOR}"):
+        return channel, explicit_claim_target
+
+    for identity_key in ("caregiver_id", "recipient_id", "recipient_email", "recipient_phone"):
+        identity = str(step.get(identity_key) or "").strip()
+        if identity:
+            if identity_key == "recipient_email":
+                identity = identity.casefold()
+            digest = hashlib.sha256(f"{identity_key}:{identity}".encode()).hexdigest()[:24]
+            return channel, f"{target}{_DELIVERY_RECIPIENT_SEPARATOR}{digest}"
+    return channel, target
+
+
+def _public_delivery_target(target: object) -> str:
+    return str(target or "unknown").split(_DELIVERY_RECIPIENT_SEPARATOR, 1)[0]
 
 
 _DELIVERY_BLOCKING_STATUSES = frozenset({"pending", "sending", "sent", "success", "delivered"})
@@ -413,17 +433,19 @@ async def _reserve_delivery_steps(
     pending_steps: list[dict] = []
     skipped_steps: list[dict] = []
     for step in steps:
+        _channel, claim_target = _delivery_key(step)
+        claimed_step = {**step, "claim_target": claim_target}
         claimed, skip_reason = await _claim_delivery_step(
             pool,
             trace_id=trace_id,
             uid=uid,
-            step=step,
+            step=claimed_step,
             claimed_status="pending",
         )
         if claimed:
-            pending_steps.append(step)
+            pending_steps.append(claimed_step)
         else:
-            skipped_steps.append({**step, "skip_reason": skip_reason or "claim_not_acquired"})
+            skipped_steps.append({**claimed_step, "skip_reason": skip_reason or "claim_not_acquired"})
 
     return pending_steps, skipped_steps
 
@@ -661,7 +683,7 @@ def _guardian_alert_tags(priority: Any, trigger_type: Any, metadata: dict[str, A
 
 
 def _delivery_target_from_logs(deliveries: list[dict[str, Any]], metadata: dict[str, Any]) -> str:
-    targets = {str(item.get("target") or "").lower() for item in deliveries}
+    targets = {_public_delivery_target(item.get("target")).lower() for item in deliveries}
     channels = {str(item.get("channel") or "").lower() for item in deliveries}
     if "caregiver" in targets:
         return "caregiver"
@@ -688,7 +710,10 @@ def _delivery_escalation_status(deliveries: list[dict[str, Any]], metadata: dict
 def _caregiver_escalation(deliveries: list[dict[str, Any]], metadata: dict[str, Any]) -> bool:
     if _bool_from_metadata(metadata, "caregiver_escalation", "caregiverEscalation"):
         return True
-    return any(str(item.get("target") or "").lower() == "caregiver" or item.get("caregiver_id") for item in deliveries)
+    return any(
+        _public_delivery_target(item.get("target")).lower() == "caregiver" or item.get("caregiver_id")
+        for item in deliveries
+    )
 
 
 def _playback_status(
@@ -854,7 +879,7 @@ async def _guardian_alert_history(uid: str, limit: int) -> dict[str, Any]:
                         'created_at', created_at,
                         'updated_at', updated_at,
                         'channel', channel,
-                        'target', target,
+                        'target', split_part(target, '::recipient:', 1),
                         'caregiver_id', caregiver_id,
                         'status', status,
                         'error_message', error_message
@@ -2432,11 +2457,14 @@ async def email_send(
     trace_id = req.trace_id or "unknown"
     uid = req.uid or "unknown"
     pool = await _get_pool()
+    email_step = {"channel": "email", "target": req.target, "recipient_email": req.to}
+    _channel, claim_target = _delivery_key(email_step)
+    email_step["claim_target"] = claim_target
     claimed, skip_reason = await _claim_delivery_step(
         pool,
         trace_id=trace_id,
         uid=uid,
-        step={"channel": "email", "target": req.target, "recipient_email": req.to},
+        step=email_step,
         claimed_status="sending",
     )
     if not claimed:
@@ -2481,7 +2509,7 @@ async def email_send(
         "sent" if sent else "error",
         error,
         trace_id,
-        req.target,
+        claim_target,
         uid,
     )
     await _log_pipeline_event(
@@ -2529,21 +2557,32 @@ async def log_pipeline_event(
     channel = metadata.get("channel")
     if channel:
         pool = await _get_pool()
+        _channel, claim_target = _delivery_key(
+            {
+                "channel": channel,
+                "target": metadata.get("target", "unknown"),
+                "claim_target": metadata.get("claim_target"),
+                "caregiver_id": metadata.get("caregiver_id"),
+                "recipient_id": metadata.get("recipient_id"),
+                "recipient_email": metadata.get("recipient_email"),
+                "recipient_phone": metadata.get("recipient_phone"),
+            }
+        )
         await pool.execute(
             """
             INSERT INTO guardian_delivery_log (trace_id, uid, channel, target, caregiver_id, status, error_message)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (trace_id, channel, target) DO UPDATE SET
-                uid = EXCLUDED.uid,
                 caregiver_id = EXCLUDED.caregiver_id,
                 status = EXCLUDED.status,
                 error_message = EXCLUDED.error_message,
                 updated_at = NOW()
+            WHERE guardian_delivery_log.uid = EXCLUDED.uid
             """,
             req.trace_id,
             req.uid or "",
             channel,
-            metadata.get("target", "unknown"),
+            claim_target,
             metadata.get("caregiver_id"),
             req.status,
             req.error_detail,

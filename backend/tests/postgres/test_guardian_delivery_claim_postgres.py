@@ -70,13 +70,16 @@ async def _run_with_database(scenario):
         await admin.close()
 
 
-def _step(channel="imessage", target="user"):
-    return {
+def _step(channel="imessage", target="user", caregiver_id=None):
+    step = {
         "channel": channel,
         "target": target,
         "recipient_phone": "+15550000001",
         "recipient_email": "synthetic@example.test",
     }
+    if caregiver_id:
+        step["caregiver_id"] = caregiver_id
+    return step
 
 
 def test_two_connections_produce_exactly_one_delivery_claim():
@@ -109,6 +112,30 @@ def test_two_connections_produce_exactly_one_delivery_claim():
         assert (
             await pool.fetchval("SELECT count(*) FROM guardian_delivery_log WHERE trace_id = 'trace-concurrent'") == 1
         )
+
+        caregiver_results = await asyncio.gather(
+            guardian._claim_delivery_step(
+                pool,
+                trace_id="trace-multiple-caregivers",
+                uid="uid-1",
+                step=_step(channel="email", target="emergency_caregiver", caregiver_id="caregiver-1"),
+                claimed_status="pending",
+            ),
+            guardian._claim_delivery_step(
+                pool,
+                trace_id="trace-multiple-caregivers",
+                uid="uid-1",
+                step=_step(channel="email", target="emergency_caregiver", caregiver_id="caregiver-2"),
+                claimed_status="pending",
+            ),
+        )
+        assert caregiver_results == [(True, None), (True, None)]
+        targets = await pool.fetch(
+            "SELECT target FROM guardian_delivery_log WHERE trace_id = 'trace-multiple-caregivers' ORDER BY target"
+        )
+        assert len(targets) == 2
+        assert all(row["target"].startswith("emergency_caregiver::recipient:") for row in targets)
+        assert all("caregiver-" not in row["target"] for row in targets)
 
     asyncio.run(_run_with_database(scenario))
 

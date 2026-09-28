@@ -358,6 +358,35 @@ def test_delivery_claim_rejects_cross_owner_existing_row(monkeypatch):
     assert skipped[0]["skip_reason"] == "owner_mismatch"
 
 
+def test_delivery_claim_distinguishes_multiple_caregivers_without_exposing_identity(monkeypatch):
+    pool = _ClaimPool(
+        claim_rows=[
+            {"uid": "uid-1", "status": "pending"},
+            {"uid": "uid-1", "status": "pending"},
+        ]
+    )
+    monkeypatch.setattr(guardian, "_pool", pool)
+
+    pending, skipped = asyncio.run(
+        guardian._reserve_delivery_steps(
+            "trace-caregivers",
+            "uid-1",
+            [
+                {"channel": "email", "target": "emergency_caregiver", "caregiver_id": "caregiver-1"},
+                {"channel": "email", "target": "emergency_caregiver", "caregiver_id": "caregiver-2"},
+            ],
+        )
+    )
+
+    assert skipped == []
+    assert len(pending) == 2
+    claim_targets = [step["claim_target"] for step in pending]
+    assert len(set(claim_targets)) == 2
+    assert all(target.startswith("emergency_caregiver::recipient:") for target in claim_targets)
+    assert all("caregiver-" not in target for target in claim_targets)
+    assert [call[1][3] for call in pool.fetchrow_calls] == claim_targets
+
+
 def test_mark_dispatch_failed_is_bound_to_owner_and_pending_claim(monkeypatch):
     pool = _ClaimPool()
     monkeypatch.setattr(guardian, "_pool", pool)
@@ -687,6 +716,37 @@ def test_trace_log_requires_configured_key_and_rejects_bad_key(monkeypatch):
             )
         )
     assert exc.value.status_code == 403
+
+
+def test_trace_log_uses_same_recipient_specific_claim_target(monkeypatch):
+    pool = _ClaimPool()
+    monkeypatch.setattr(guardian, "_pool", pool)
+
+    result = asyncio.run(
+        guardian.log_pipeline_event(
+            guardian.TraceLogRequest(
+                trace_id="trace-caregiver",
+                uid="uid-1",
+                stage="delivery_sent",
+                metadata={
+                    "channel": "email",
+                    "target": "emergency_caregiver",
+                    "caregiver_id": "caregiver-1",
+                },
+            ),
+            x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+            subject_uid="uid-1",
+        )
+    )
+
+    assert result["logged"] is True
+    delivery_query, delivery_args = pool.executed[1]
+    expected_target = guardian._delivery_key(
+        {"channel": "email", "target": "emergency_caregiver", "caregiver_id": "caregiver-1"}
+    )[1]
+    assert "INSERT INTO guardian_delivery_log" in delivery_query
+    assert "guardian_delivery_log.uid = EXCLUDED.uid" in delivery_query
+    assert delivery_args[3] == expected_target
 
 
 def test_guardian_alert_history_normalizes_queue_event_delivery_rows(monkeypatch):

@@ -1317,7 +1317,7 @@ jobs:
           pytest tests/unit/test_conversation_summary_cas.py -k "$baseline_summary_cas_selector" -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 85
           pytest tests/unit/test_ella_conversation_corrections.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 49
+          test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 51
           pytest tests/unit/test_ella_guardian_delivery.py -v
           guardian_delivery_claim_ids="$(
             pytest --collect-only -q tests/postgres/test_guardian_delivery_claim_postgres.py |
