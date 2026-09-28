@@ -18,7 +18,6 @@ import 'package:omi/upstream_capture/env/env.dart' as upstream_env;
 import 'package:omi/upstream_capture/gen/pigeon_communicator.g.dart';
 import 'package:omi/upstream_capture/providers/capture_provider.dart';
 import 'package:omi/upstream_capture/services/bridges/ble_bridge.dart';
-import 'package:omi/upstream_capture/services/capture/capture_composition.dart';
 import 'package:omi/upstream_capture/services/capture/capture_seams.dart';
 import 'package:omi/upstream_capture/services/capture/capture_session_owner.dart';
 import 'package:omi/upstream_capture/services/capture/conversation_location_capture.dart';
@@ -135,6 +134,7 @@ class EllaUpstreamCaptureWiring {
     this.microphonePermission,
     this.refreshConversation,
     this.telemetry,
+    this.processInProgressConversation,
   });
 
   final IWalService wal;
@@ -155,6 +155,9 @@ class EllaUpstreamCaptureWiring {
   final Future<bool> Function()? microphonePermission;
   final Future<void> Function(CaptureProvider provider)? refreshConversation;
   final RecordingLifecycleTelemetry? telemetry;
+
+  /// Null in production (upstream's REST call). Deterministic tests inject it.
+  final Future<CreateConversationResponse?> Function()? processInProgressConversation;
 }
 
 /// Composition root of the flag-ON graph: boots the vendored upstream capture
@@ -205,7 +208,12 @@ class EllaUpstreamCaptureRuntime {
 
     final services = ServiceManager.instance();
     final wal = services.wal;
-    _configureTransferCoordinator(wal);
+    configureTransferCoordinator(
+      RecordingTransferCoordinator.instance,
+      wal,
+      connectivityChanges: ConnectivityService().onConnectionChange,
+      initiallyConnected: ConnectivityService().isConnected,
+    );
     final provider = compose(
       EllaUpstreamCaptureWiring(
         wal: wal,
@@ -246,65 +254,51 @@ class EllaUpstreamCaptureRuntime {
     return provider;
   }
 
-  /// Builds upstream's CaptureProvider through upstream's
-  /// [composeCaptureProvider] with every audio seam decorated by the Ella gate.
-  /// Production and tests use this same path.
+  /// Builds upstream's CaptureProvider through its own constructor seams with
+  /// every audio seam decorated by the Ella gate. Production and tests use this
+  /// same path.
+  ///
+  /// This forwards exactly the seams upstream's `composeCaptureProvider(
+  /// CaptureDependencies)` forwards (that helper is a pure forwarder into this
+  /// same constructor), plus `processInProgressConversation`, which
+  /// CaptureDependencies does not expose; production leaves it null so
+  /// upstream's own REST call is used, deterministic tests inject it.
   CaptureProvider compose(EllaUpstreamCaptureWiring wiring) {
     final gatedDeviceConnection = ellaGatedDeviceConnectionLoader(wiring.ensureDeviceConnection, authority);
     final gatedSocket = ellaGatedConversationSocketOpen(wiring.openConversationSocket, authority);
     late final CaptureProvider provider;
-    provider = composeCaptureProvider(
-      CaptureDependencies(
-        wal: wiring.wal,
-        phoneMic: EllaGatedMicRecorderService(wiring.phoneMic, authority),
-        batchSupported: wiring.batchSupported ?? (Platform.isIOS || Platform.isAndroid),
-        auth: wiring.auth ?? CaptureAuthBoundary.production,
-        connectivity: wiring.connectivity ?? CaptureConnectivityBoundary.production(),
-        now: wiring.now ?? DateTime.now,
-        scheduling: wiring.scheduling ?? const WallClockCaptureScheduling(),
-        preferences: wiring.preferences ?? upstream.SharedPreferencesUtil(),
-        ble: wiring.ble ?? const BleBridgeCaptureListeners(),
-        openSocket: ({
-          required BleAudioCodec codec,
-          required int sampleRate,
-          required String language,
-          required bool force,
-          String? source,
-          String? clientConversationId,
-          customSttConfig,
-        }) =>
-            gatedSocket(
-          codec: codec,
-          sampleRate: sampleRate,
-          language: language,
-          force: force,
-          source: source,
-          clientConversationId: clientConversationId,
-          customSttConfig: customSttConfig,
-        ),
-        openConversationSocket: gatedSocket,
-        owner: wiring.owner,
-        location: wiring.location ?? ConversationLocationCapture(),
-        localSegments: wiring.localSegments ?? LocalSegmentStore.disabled(),
-        codec: wiring.codec ??
-            (deviceId) async {
-              final connection = await gatedDeviceConnection(deviceId);
-              if (connection == null) return BleAudioCodec.pcm8;
-              return connection.getAudioCodec();
-            },
-        microphonePermission:
-            wiring.microphonePermission ?? () async => (await Permission.microphone.request()).isGranted,
-        refreshConversation: () async {
-          final refresh = wiring.refreshConversation;
-          if (refresh != null) return refresh(provider);
-          // Same as upstream CaptureController's default in-progress loader.
-          final conversations =
-              await upstream_api.getConversations(statuses: [ConversationStatus.in_progress], limit: 1);
-          provider.applyInProgressConversation(conversations.isNotEmpty ? conversations.first : null);
-        },
-        telemetry: wiring.telemetry ?? RecordingLifecycleTelemetry(),
-        ensureDeviceConnection: gatedDeviceConnection,
-      ),
+    provider = CaptureProvider(
+      walService: wiring.wal,
+      phoneMicRecorder: EllaGatedMicRecorderService(wiring.phoneMic, authority),
+      phoneMicBatchSupported: wiring.batchSupported ?? (Platform.isIOS || Platform.isAndroid),
+      authBoundary: wiring.auth ?? CaptureAuthBoundary.production,
+      connectivity: wiring.connectivity ?? CaptureConnectivityBoundary.production(),
+      now: wiring.now ?? DateTime.now,
+      scheduling: wiring.scheduling ?? const WallClockCaptureScheduling(),
+      preferences: wiring.preferences ?? upstream.SharedPreferencesUtil(),
+      bleListeners: wiring.ble ?? const BleBridgeCaptureListeners(),
+      openSocket: gatedSocket,
+      sessionOwner: wiring.owner,
+      conversationLocationCapture: wiring.location ?? ConversationLocationCapture(),
+      inProgressConversationLoader: () async {
+        final refresh = wiring.refreshConversation;
+        if (refresh != null) return refresh(provider);
+        // Same as upstream CaptureController's default in-progress loader.
+        final conversations = await upstream_api.getConversations(statuses: [ConversationStatus.in_progress], limit: 1);
+        provider.applyInProgressConversation(conversations.isNotEmpty ? conversations.first : null);
+      },
+      audioCodecLoader: wiring.codec ??
+          (deviceId) async {
+            final connection = await gatedDeviceConnection(deviceId);
+            if (connection == null) return BleAudioCodec.pcm8;
+            return connection.getAudioCodec();
+          },
+      microphonePermissionRequester:
+          wiring.microphonePermission ?? () async => (await Permission.microphone.request()).isGranted,
+      recordingTelemetry: wiring.telemetry ?? RecordingLifecycleTelemetry(),
+      localSegmentStore: wiring.localSegments ?? LocalSegmentStore.disabled(),
+      deviceConnectionLoader: gatedDeviceConnection,
+      processInProgressConversation: wiring.processInProgressConversation,
     );
     _provider = provider;
     unawaited(_revocationSubscription?.cancel());
@@ -372,10 +366,22 @@ class EllaUpstreamCaptureRuntime {
     }
   }
 
-  void _configureTransferCoordinator(IWalService wal) {
-    final phone = wal.getSyncs().phone as LocalWalSync;
-    RecordingTransferCoordinator.instance.configure(
-      reconcile: () async => (wal.getSyncs() as WalSyncs).phone.reconcileUploadedWals(),
+  /// Configures upstream's recording-transfer owner for the phone WAL the way
+  /// upstream's SyncProvider does for local WALs (reconcile, drain via
+  /// `syncAll`), with auto-upload admitted only while the bound account still
+  /// holds current consent authority: uploading recorded audio is an emission.
+  /// Production passes `RecordingTransferCoordinator.instance`; tests pass an
+  /// isolated coordinator with a virtual clock.
+  void configureTransferCoordinator(
+    RecordingTransferCoordinator coordinator,
+    IWalService wal, {
+    required Stream<bool> connectivityChanges,
+    required bool initiallyConnected,
+  }) {
+    final syncs = wal.getSyncs() as WalSyncs;
+    final phone = syncs.phone;
+    coordinator.configure(
+      reconcile: () async => phone.reconcileUploadedWals(),
       discover: () async {},
       refreshPending: () async {},
       drain: () async {
@@ -388,11 +394,9 @@ class EllaUpstreamCaptureRuntime {
           needsReconciliation: needsReconciliation,
         );
       },
-      // Uploading recorded audio is an emission too: only while the bound
-      // account still holds current consent authority.
       autoUploadEnabled: () => authority.hasCurrentAuthority,
-      connectivityChanges: ConnectivityService().onConnectionChange,
-      initiallyConnected: ConnectivityService().isConnected,
+      connectivityChanges: connectivityChanges,
+      initiallyConnected: initiallyConnected,
     );
   }
 
