@@ -18,6 +18,7 @@ import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/ella/services/ella_account_isolation_service.dart';
+import 'package:omi/services/auth/auth_token_result.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 
@@ -90,6 +91,65 @@ class AuthService {
       }, preserveOwnerScopedArtworkCache: true);
 
   bool isSignedIn() => FirebaseAuth.instance.currentUser != null && !FirebaseAuth.instance.currentUser!.isAnonymous;
+
+  // --- Upstream capture compatibility (ellaaicare/ella-ai#1280) ---
+  // The vendored upstream HTTP/capture stack (lib/upstream_capture/**, BasedHardware/omi@f16699a)
+  // calls THIS AuthService (upstream's auth_service.dart is deliberately not vendored, so every
+  // Firebase identity mutation stays behind Ella's quiesced transitions). The result/event types
+  // come from upstream's own lib/services/auth/auth_token_result.dart (synced in place).
+  static const Set<String> _terminalTokenErrorCodes = {
+    'invalid-user-token',
+    'user-disabled',
+    'user-not-found',
+    'user-token-expired',
+  };
+
+  Future<AuthTokenResult>? _typedRefreshInFlight;
+  Future<void>? _expireSessionInFlight;
+
+  /// Upstream capture compatibility: typed forced token refresh (same result
+  /// classes and terminal codes as upstream). Never signs in or out; identity
+  /// changes stay behind [runIdentityTransition] / [signOutForReauthentication].
+  Future<AuthTokenResult> refreshIdToken() => _typedRefreshInFlight ??= _refreshIdTokenTyped().whenComplete(() {
+        _typedRefreshInFlight = null;
+      });
+
+  Future<AuthTokenResult> _refreshIdTokenTyped() async {
+    final User? user;
+    try {
+      user = FirebaseAuth.instance.currentUser;
+    } catch (_) {
+      return const AuthTokenTransientFailure(failureClass: 'transient');
+    }
+    if (user == null) return const AuthTokenMissingUser();
+    try {
+      final refreshed = await user.getIdTokenResult(true);
+      if (FirebaseAuth.instance.currentUser?.uid != user.uid) return const AuthTokenMissingUser();
+      final token = refreshed.token;
+      if (token == null || token.isEmpty) return const AuthTokenMissingToken();
+      SharedPreferencesUtil().tokenExpirationTime = refreshed.expirationTime?.millisecondsSinceEpoch ?? 0;
+      SharedPreferencesUtil().authToken = token;
+      return AuthTokenSuccess(token: token, expirationTime: refreshed.expirationTime);
+    } on FirebaseAuthException catch (e) {
+      if (_terminalTokenErrorCodes.contains(e.code)) return AuthTokenTerminalFailure(code: e.code);
+      return AuthTokenTransientFailure(failureClass: 'firebase_transient', code: e.code);
+    } catch (_) {
+      return const AuthTokenTransientFailure(failureClass: 'transient');
+    }
+  }
+
+  /// Upstream capture compatibility: upstream's 401 telemetry hook. Ella keeps
+  /// upstream product telemetry inert.
+  void recordAuthenticatedRequest401({required bool recovered, required String outcome}) {}
+
+  /// Upstream capture compatibility: a terminal session failure reported by the
+  /// vendored upstream HTTP stack ends the session through Ella's quiesced
+  /// re-authentication sign-out (account isolation runs first), never through a
+  /// direct Firebase sign-out. Concurrent reports join one sign-out.
+  Future<void> expireSession(AuthSessionExpiredEvent event) =>
+      _expireSessionInFlight ??= signOutForReauthentication().whenComplete(() {
+        _expireSessionInFlight = null;
+      });
 
   getFirebaseUser() {
     return FirebaseAuth.instance.currentUser;
