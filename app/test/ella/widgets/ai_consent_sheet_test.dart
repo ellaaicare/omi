@@ -180,6 +180,9 @@ void main() {
     expect(disclosure, contains('OpenAI and Ella’s artwork designer'));
     expect(disclosure, contains('OpenAI’s Codex and image services'));
     expect(disclosure, contains('saved memory'));
+    expect(disclosure, contains('TypeSafe (Jev), via OpenRouter'));
+    expect(disclosure, contains('extra support may be helpful'));
+    expect(disclosure, contains('Guardian and Whispers'));
     expect(disclosure, isNot(contains('Daily Note')));
     expect(disclosure, contains('does not receive raw microphone audio, source photos, or your full memory history'));
     expect(disclosure, contains('ElevenLabs'));
