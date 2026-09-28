@@ -223,6 +223,12 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                       title: context.l10n.aiConsentOpenAiArtworkTitle,
                       body: context.l10n.aiConsentOpenAiArtworkBody,
                     ),
+                    const SizedBox(height: 10),
+                    _processorDisclosure(
+                      icon: Icons.shield_outlined,
+                      title: context.l10n.aiConsentTypesafeTitle,
+                      body: context.l10n.aiConsentTypesafeBody,
+                    ),
                     const SizedBox(height: 12),
                     Container(
                       width: double.infinity,
