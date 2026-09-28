@@ -330,11 +330,12 @@ def _get_conversation_obj(
         conversation_dict = conversation.dict()
         # Store calendar context in external_data if available
         calendar_context = conversation_dict.pop('calendar_meeting_context', None)
+        explicit_id = conversation_dict.pop('explicit_id', None)
 
         # Use started_at as created_at for imported conversations to preserve original timestamp
         created_at = conversation.started_at if conversation.started_at else datetime.now(timezone.utc)
         conversation = Conversation(
-            id=str(uuid.uuid4()),
+            id=explicit_id or str(uuid.uuid4()),
             uid=uid,
             structured=structured,
             created_at=created_at,
@@ -928,6 +929,19 @@ def process_conversation_with_outcome(
         else None
     )
     allow_create = not isinstance(conversation, Conversation)
+    if isinstance(conversation, CreateConversation) and conversation.explicit_id:
+        # Idempotent upsert for an explicit id (SYNC-V2-002): a conversation already durably
+        # sitting at this id means an earlier attempt already ran this exact pipeline and
+        # committed it. Replay that result instead of creating a second document or re-running
+        # STT/LLM/side effects -- the same "already_completed" contract `process_conversation()`
+        # already honors for a resumed `Conversation` capture below.
+        existing = conversations_db.get_conversation(uid, conversation.explicit_id)
+        if existing:
+            return ConversationProcessingOutcome(
+                conversation=Conversation(**existing),
+                dispatched=False,
+                status='already_completed',
+            )
     resuming_completed_capture = False
     initial_processing_claim_held = bool(_claim_already_held)
     initial_processing_claim_token = _initial_processing_claim_token

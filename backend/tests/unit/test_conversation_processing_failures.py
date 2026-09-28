@@ -17,6 +17,7 @@ from models.conversation import (
     ConversationDiscardClassifierProvenance,
     ConversationDiscardReason,
     ConversationStatus,
+    CreateConversation,
     Structured,
 )
 from models.transcript_segment import TranscriptSegment
@@ -668,6 +669,50 @@ def test_completed_duplicate_initial_processing_returns_explicit_no_dispatch(mon
     assert outcome.conversation.status == ConversationStatus.completed
     assert outcome.status == "already_completed"
     assert outcome.dispatched is False
+    assert calls == []
+
+
+def test_create_conversation_with_explicit_id_already_durable_is_idempotent_upsert(monkeypatch):
+    """SYNC-V2-002 (PR #594): `routers/sync.py` reserves a deterministic conversation id for a
+    sync segment before running the pipeline, and re-passes it on every retry via
+    `CreateConversation.explicit_id`. If an earlier attempt already durably created that exact
+    conversation (its `process_conversation` commit succeeded, even if something after it later
+    failed), a second call with the same `explicit_id` must replay that existing conversation --
+    never create a second document, and never re-run STT/LLM (`_get_structured`) or the summary
+    commit for it."""
+    existing = _long_conversation()
+    existing.id = "reserved-conversation-id"
+    existing.status = ConversationStatus.completed
+    calls = []
+    monkeypatch.setattr(conversation_processor, "assert_current_ai_consent", lambda _uid: None)
+    monkeypatch.setattr(
+        conversation_processor.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: existing.dict() if conversation_id == existing.id else None,
+    )
+    monkeypatch.setattr(
+        conversation_processor,
+        "_get_structured",
+        lambda *args, **kwargs: calls.append("summary") or (Structured(), False, None, None),
+    )
+    monkeypatch.setattr(
+        conversation_processor.conversations_db,
+        "commit_stock_summary_processing_result",
+        lambda *args, **kwargs: calls.append("commit") or {"status": "committed", "dispatched": True},
+    )
+
+    create_memory = CreateConversation(
+        started_at=existing.started_at,
+        finished_at=existing.finished_at,
+        transcript_segments=existing.transcript_segments,
+        explicit_id=existing.id,
+    )
+    outcome = conversation_processor.process_conversation_with_outcome("uid-1", "en", create_memory)
+
+    assert outcome.conversation.id == existing.id
+    assert outcome.status == "already_completed"
+    assert outcome.dispatched is False
+    # Neither STT/LLM structuring nor a second summary commit ever ran for the already-durable id.
     assert calls == []
 
 

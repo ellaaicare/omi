@@ -15,6 +15,7 @@ on:
       - "backend/contracts/README.md"
       - "backend/database/authority_advisory_lock.py"
       - "backend/database/conversations.py"
+      - "backend/database/sync_segments.py"
       - "backend/database/redis_db.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/ella_postgres.py"
@@ -28,6 +29,10 @@ on:
       - "backend/models/conversation_integrity.py"
       - "backend/models/hermes_cloud_enrichment_contract.py"
       - "backend/routers/transcribe.py"
+      - "backend/routers/sync.py"
+      - "backend/utils/sync_capture_manifest.py"
+      - "backend/tests/unit/test_ella_sync_v2_contract.py"
+      - "backend/tests/unit/test_ella_sync_segments_state_machine.py"
       - "backend/utils/stt/session_delivery.py"
       - "backend/utils/stt/streaming.py"
       - "backend/tests/unit/test_stt_session_delivery.py"
@@ -193,6 +198,7 @@ on:
       - "backend/contracts/README.md"
       - "backend/database/authority_advisory_lock.py"
       - "backend/database/conversations.py"
+      - "backend/database/sync_segments.py"
       - "backend/database/redis_db.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/ella_postgres.py"
@@ -206,6 +212,10 @@ on:
       - "backend/models/conversation_integrity.py"
       - "backend/models/hermes_cloud_enrichment_contract.py"
       - "backend/routers/transcribe.py"
+      - "backend/routers/sync.py"
+      - "backend/utils/sync_capture_manifest.py"
+      - "backend/tests/unit/test_ella_sync_v2_contract.py"
+      - "backend/tests/unit/test_ella_sync_segments_state_machine.py"
       - "backend/utils/stt/session_delivery.py"
       - "backend/utils/stt/streaming.py"
       - "backend/tests/unit/test_stt_session_delivery.py"
@@ -907,6 +917,8 @@ jobs:
             pytest --collect-only -q \
               tests/unit/test_ella_ai_consent.py \
               tests/unit/test_ella_ai_consent_route_gates.py \
+              tests/unit/test_ella_sync_v2_contract.py \
+              tests/unit/test_ella_sync_segments_state_machine.py \
               tests/unit/test_ella_chat_stream_resilience.py \
               tests/unit/test_voice_honcho.py \
               tests/unit/test_hermes_cloud_migration.py \
@@ -1054,10 +1066,19 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 21
-          test "$collected" -eq 630
+          # 630 (base) + 18 (test_ella_sync_v2_contract.py, now wired into
+          # this collection for the first time) + 10
+          # (test_ella_sync_segments_state_machine.py -- new: exercises the real
+          # claim/reserve/complete/release state machine and the append transaction in
+          # database/sync_segments.py directly, including the SYNC-V2-002
+          # retry-after-commit/stale-lease regressions, rather than through this file's own
+          # route-level fakes).
+          test "$collected" -eq 658
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
+            tests/unit/test_ella_sync_v2_contract.py \
+            tests/unit/test_ella_sync_segments_state_machine.py \
             tests/unit/test_ella_chat_stream_resilience.py \
             tests/unit/test_voice_honcho.py \
             tests/unit/test_hermes_cloud_migration.py \
@@ -1168,7 +1189,10 @@ jobs:
               exit 1
             fi
           done
-          test "$(grep -c '::' <<<"$today_card_ids")" -eq 236
+          # 236 + 1 (test_create_conversation_with_explicit_id_already_durable_is_idempotent_upsert,
+          # the SYNC-V2-002 idempotent-upsert regression added to
+          # test_conversation_processing_failures.py).
+          test "$(grep -c '::' <<<"$today_card_ids")" -eq 237
           pytest \
             tests/unit/test_today_card.py \
             tests/unit/test_today_card_api.py \

@@ -897,7 +897,10 @@ def test_stored_sync_gates_target_uid_before_deepgram_and_processing():
     assert process_segment_source.index("assert_current_ai_consent(uid)") < process_segment_source.index(
         "deepgram_prerecorded("
     )
-    assert "/v1/sync-local-files" in _gated_route_paths(source_path, "require_current_ai_consent")
+    gated_sync_paths = _gated_route_paths(source_path, "require_current_ai_consent")
+    assert "/v1/sync-local-files" in gated_sync_paths
+    assert "/v2/sync-local-files" in gated_sync_paths
+    assert "/v2/sync-capture-manifest" in gated_sync_paths
 
 
 def test_legacy_initial_message_helper_gates_every_model_call_path():

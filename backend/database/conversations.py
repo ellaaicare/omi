@@ -3116,6 +3116,88 @@ def update_conversation_segments(uid: str, conversation_id: str, segments: List[
     doc_ref.update(prepared_payload)
 
 
+def merge_transcript_segments_into_conversation_transaction(
+    transaction, conversation_ref, uid: str, new_transcript_segments: List[dict], segment_timestamp: float
+) -> Dict[str, Any]:
+    """Transactional read-modify-write: merge [new_transcript_segments] (raw VAD-segment-relative
+    start/end, not yet placed on the conversation's timeline) into conversation_ref's existing
+    transcript, sorted by absolute timestamp.
+
+    Must be called from inside a caller's own `@transactional`-decorated function so Firestore
+    retries the whole read-modify-write together under contention -- this is what makes two
+    concurrent segment appends to the *same* conversation safe: each retry re-reads the latest
+    segment list instead of both writers computing a merge against the same stale snapshot and one
+    silently overwriting the other's write (the plain get+merge+set this replaces could do exactly
+    that).
+
+    Returns {'status': 'missing'} if the conversation doc doesn't exist, else
+    {'status': 'merged', 'discarded': bool} (the conversation's `discarded` flag *before* this
+    merge, so callers can decide whether to trigger reprocessing).
+    """
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return {'status': 'missing'}
+    raw = snapshot.to_dict() or {}
+    doc_level = raw.get('data_protection_level', 'standard')
+    data = _prepare_conversation_for_read(raw, uid)
+    if not data:
+        return {'status': 'missing'}
+
+    started_at_ts = data['started_at'].timestamp()
+    existing_segments = [dict(segment) for segment in (data.get('transcript_segments') or [])]
+    for segment in existing_segments:
+        segment['timestamp'] = started_at_ts + segment['start']
+
+    incoming_segments = [dict(segment) for segment in new_transcript_segments]
+    for segment in incoming_segments:
+        segment['timestamp'] = segment_timestamp + segment['start']
+
+    segments = existing_segments + incoming_segments
+    segments.sort(key=lambda x: x['timestamp'])
+    for segment in segments:
+        duration = segment['end'] - segment['start']
+        segment['start'] = segment['timestamp'] - started_at_ts
+        segment['end'] = segment['start'] + duration
+        segment.pop('timestamp', None)
+
+    last_segment_end = segments[-1]['end'] if segments else 0
+    new_finished_at = datetime.fromtimestamp(started_at_ts + last_segment_end, tz=timezone.utc)
+    if new_finished_at < data['finished_at']:
+        new_finished_at = data['finished_at']
+
+    update_payload = _prepare_conversation_for_write(
+        {'transcript_segments': segments, 'finished_at': new_finished_at}, uid, doc_level
+    )
+    transaction.update(conversation_ref, update_payload)
+    return {'status': 'merged', 'discarded': bool(data.get('discarded', False))}
+
+
+@transactional
+def _append_conversation_transcript_segments(
+    transaction, conversation_ref, uid: str, new_transcript_segments: List[dict], segment_timestamp: float
+) -> Dict[str, Any]:
+    return merge_transcript_segments_into_conversation_transaction(
+        transaction, conversation_ref, uid, new_transcript_segments, segment_timestamp
+    )
+
+
+def append_conversation_transcript_segments(
+    uid: str, conversation_id: str, new_transcript_segments: List[dict], segment_timestamp: float
+) -> Dict[str, Any]:
+    """Public, non-idempotency-aware entry point for the transactional merge above -- used by
+    callers (e.g. `/v1/sync-local-files`) that have no durable idempotency record of their own.
+    Concurrency-safe on its own (see `merge_transcript_segments_into_conversation_transaction`);
+    callers that also need exactly-once replay semantics should use
+    `database.sync_segments.append_segment_to_conversation_and_complete` instead, which performs
+    the same merge plus a durable idempotency write in one transaction."""
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _append_conversation_transcript_segments(
+        db.transaction(), conversation_ref, uid, new_transcript_segments, segment_timestamp
+    )
+
+
 def _capture_batch_id(conversation_id: str, segment_ids: list[str], photo_ids: list[str]) -> str:
     framed = json.dumps(
         {
