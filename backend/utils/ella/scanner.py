@@ -64,6 +64,27 @@ _GUARDIAN_ECHO_MARKERS = (
     "just talking about me",
     "i heard you i am checking that now",
 )
+
+
+def _post_scanner_webhook(url: str, *, json: dict, headers: dict, timeout: float):
+    """Send scanner data without ambient proxy or redirect authority."""
+    with requests.Session() as session:
+        session.trust_env = False
+        response = session.post(
+            url,
+            json=json,
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=False,
+        )
+    if 300 <= response.status_code < 400:
+        raise requests.RequestException(
+            f"scanner webhook redirect rejected: status={response.status_code}",
+            response=response,
+        )
+    return response
+
+
 WAKE_WORD_ALIASES = (
     "hey ella",
     "ella",
@@ -1325,7 +1346,7 @@ def send_to_scanner(
 
     try:
         start = time.time()
-        resp = requests.post(
+        resp = _post_scanner_webhook(
             ELLA_CONFIG.scanner_url,
             json=payload,
             headers={SCANNER_WEBHOOK_KEY_HEADER: SCANNER_WEBHOOK_KEY},

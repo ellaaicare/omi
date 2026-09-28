@@ -1,5 +1,8 @@
+import json
 import sys
+import threading
 import types
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
@@ -61,6 +64,74 @@ def test_guardian_trace_service_caller_fails_closed_without_configured_key(monke
     assert posts == []
 
 
+def test_scanner_webhook_ignores_proxy_environment_and_rejects_redirect(monkeypatch):
+    target_requests = []
+    proxy_requests = []
+
+    class TargetHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            target_requests.append(
+                {
+                    "path": self.path,
+                    "authority": self.headers.get(scanner.SCANNER_WEBHOOK_KEY_HEADER),
+                    "body": body,
+                }
+            )
+            self.send_response(307)
+            self.send_header("Location", self.server.redirect_url)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            return None
+
+    class ProxyHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            proxy_requests.append(self.path)
+            self.send_response(502)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            return None
+
+    target = ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), ProxyHandler)
+    target.redirect_url = f"http://127.0.0.1:{target.server_port}/redirect-target"
+    target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+    proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+    target_thread.start()
+    proxy_thread.start()
+
+    proxy_url = f"http://127.0.0.1:{proxy.server_port}"
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        monkeypatch.setenv(name, proxy_url)
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+
+    payload = {"segments": [{"text": "private scanner payload"}]}
+    try:
+        with pytest.raises(scanner.requests.RequestException, match="redirect rejected"):
+            scanner._post_scanner_webhook(
+                f"http://127.0.0.1:{target.server_port}/scanner",
+                json=payload,
+                headers={scanner.SCANNER_WEBHOOK_KEY_HEADER: "scoped-test-key"},
+                timeout=2.0,
+            )
+    finally:
+        target.shutdown()
+        proxy.shutdown()
+        target.server_close()
+        proxy.server_close()
+        target_thread.join(timeout=2.0)
+        proxy_thread.join(timeout=2.0)
+
+    assert proxy_requests == []
+    assert len(target_requests) == 1
+    assert target_requests[0]["path"] == "/scanner"
+    assert target_requests[0]["authority"] == "scoped-test-key"
+    assert json.loads(target_requests[0]["body"]) == payload
+
+
 def test_wake_word_bypasses_ambient_batching(monkeypatch):
     posts = []
 
@@ -71,7 +142,7 @@ def test_wake_word_bypasses_ambient_batching(monkeypatch):
 
     _disable_trace(monkeypatch)
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
-    monkeypatch.setattr(scanner.requests, "post", fake_post)
+    monkeypatch.setattr(scanner, "_post_scanner_webhook", fake_post)
     monkeypatch.setattr(scanner, "SCANNER_AMBIENT_BATCH_WORDS", 100)
 
     status = scanner.send_to_scanner(
@@ -97,7 +168,7 @@ def test_emergency_bypasses_ambient_batching(monkeypatch):
 
     _disable_trace(monkeypatch)
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
-    monkeypatch.setattr(scanner.requests, "post", fake_post)
+    monkeypatch.setattr(scanner, "_post_scanner_webhook", fake_post)
     monkeypatch.setattr(scanner, "SCANNER_AMBIENT_BATCH_WORDS", 100)
 
     status = scanner.send_to_scanner(
@@ -158,7 +229,7 @@ def test_guardian_off_contextual_emergency_sends_only_authorized_suffix(monkeypa
 
     _disable_trace(monkeypatch)
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
-    monkeypatch.setattr(scanner.requests, "post", fake_post)
+    monkeypatch.setattr(scanner, "_post_scanner_webhook", fake_post)
 
     status = scanner.send_to_scanner(
         "uid-1",
@@ -187,7 +258,7 @@ def test_guardian_off_direct_emergency_omits_unmatched_retained_history(monkeypa
 
     _disable_trace(monkeypatch)
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
-    monkeypatch.setattr(scanner.requests, "post", fake_post)
+    monkeypatch.setattr(scanner, "_post_scanner_webhook", fake_post)
 
     status = scanner.send_to_scanner(
         "uid-1",
@@ -213,7 +284,7 @@ def test_guardian_off_direct_emergency_sends_only_matching_current_speaker_group
 
     _disable_trace(monkeypatch)
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
-    monkeypatch.setattr(scanner.requests, "post", fake_post)
+    monkeypatch.setattr(scanner, "_post_scanner_webhook", fake_post)
 
     status = scanner.send_to_scanner(
         "uid-1",
@@ -240,7 +311,7 @@ def test_guardian_enabled_context_does_not_rewrite_active_segments(monkeypatch):
 
     _disable_trace(monkeypatch)
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
-    monkeypatch.setattr(scanner.requests, "post", fake_post)
+    monkeypatch.setattr(scanner, "_post_scanner_webhook", fake_post)
 
     status = scanner.send_to_scanner(
         "uid-1",
@@ -266,7 +337,7 @@ def test_ambient_chunks_batch_until_word_threshold(monkeypatch):
 
     _disable_trace(monkeypatch)
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
-    monkeypatch.setattr(scanner.requests, "post", fake_post)
+    monkeypatch.setattr(scanner, "_post_scanner_webhook", fake_post)
     monkeypatch.setattr(scanner, "SCANNER_AMBIENT_BATCH_SECONDS", 999)
     monkeypatch.setattr(scanner, "SCANNER_AMBIENT_BATCH_WORDS", 5)
 
@@ -303,7 +374,7 @@ def test_rate_limit_defers_ambient_but_not_wake(monkeypatch):
 
     _disable_trace(monkeypatch)
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
-    monkeypatch.setattr(scanner.requests, "post", fake_post)
+    monkeypatch.setattr(scanner, "_post_scanner_webhook", fake_post)
     monkeypatch.setattr(scanner, "SCANNER_AMBIENT_BATCH_SECONDS", 999)
     monkeypatch.setattr(scanner, "SCANNER_AMBIENT_BATCH_WORDS", 1)
 
@@ -363,7 +434,7 @@ def test_scanner_payload_preserves_stt_identity_and_latency_metadata(monkeypatch
 
     _disable_trace(monkeypatch)
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
-    monkeypatch.setattr(scanner.requests, "post", fake_post)
+    monkeypatch.setattr(scanner, "_post_scanner_webhook", fake_post)
 
     status = scanner.send_to_scanner(
         "uid-1",
@@ -400,7 +471,7 @@ def test_scanner_suppresses_all_off_equivalent_modes(monkeypatch, mode):
     posts = []
     _disable_trace(monkeypatch)
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
-    monkeypatch.setattr(scanner.requests, "post", lambda *args, **kwargs: posts.append((args, kwargs)))
+    monkeypatch.setattr(scanner, "_post_scanner_webhook", lambda *args, **kwargs: posts.append((args, kwargs)))
 
     status = scanner.send_to_scanner(
         "uid-1",
@@ -423,7 +494,7 @@ def test_scanner_preserves_emergency_only_dispatch_when_guardian_is_off(monkeypa
 
     _disable_trace(monkeypatch)
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
-    monkeypatch.setattr(scanner.requests, "post", fake_post)
+    monkeypatch.setattr(scanner, "_post_scanner_webhook", fake_post)
 
     for index, text in enumerate(
         (
@@ -450,7 +521,7 @@ def test_scanner_fails_closed_when_mode_authority_is_unavailable(monkeypatch):
     posts = []
     trace_events = []
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
-    monkeypatch.setattr(scanner.requests, "post", lambda *args, **kwargs: posts.append((args, kwargs)))
+    monkeypatch.setattr(scanner, "_post_scanner_webhook", lambda *args, **kwargs: posts.append((args, kwargs)))
     monkeypatch.setattr(scanner, "_enqueue_wake_ack", lambda *args, **kwargs: None)
     monkeypatch.setattr(scanner, "_log_trace_event", lambda **kwargs: trace_events.append(kwargs))
 
@@ -487,7 +558,7 @@ def test_scanner_fails_before_webhook_egress_without_authority(monkeypatch):
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
     monkeypatch.setattr(scanner, "SCANNER_WEBHOOK_KEY", "")
     monkeypatch.setattr(scanner, "GUARDIAN_WEBHOOK_KEY", "configured-guardian-trace-key")
-    monkeypatch.setattr(scanner.requests, "post", lambda *args, **kwargs: posts.append((args, kwargs)))
+    monkeypatch.setattr(scanner, "_post_scanner_webhook", lambda *args, **kwargs: posts.append((args, kwargs)))
 
     status = scanner.send_to_scanner(
         "uid-1",
@@ -519,7 +590,7 @@ def test_scanner_off_mode_does_not_leak_ambiguous_routine_speech(monkeypatch, te
     posts = []
     _disable_trace(monkeypatch)
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
-    monkeypatch.setattr(scanner.requests, "post", lambda *args, **kwargs: posts.append((args, kwargs)))
+    monkeypatch.setattr(scanner, "_post_scanner_webhook", lambda *args, **kwargs: posts.append((args, kwargs)))
 
     status = scanner.send_to_scanner(
         "uid-1",
@@ -717,7 +788,7 @@ def test_scanner_off_mode_dispatches_independent_speaker_after_reported_speech_g
 
     _disable_trace(monkeypatch)
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
-    monkeypatch.setattr(scanner.requests, "post", fake_post)
+    monkeypatch.setattr(scanner, "_post_scanner_webhook", fake_post)
 
     status = scanner.send_to_scanner(
         "uid-1",
@@ -740,7 +811,7 @@ def test_scanner_off_mode_does_not_join_emergency_phrase_across_segments(monkeyp
     posts = []
     _disable_trace(monkeypatch)
     monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
-    monkeypatch.setattr(scanner.requests, "post", lambda *args, **kwargs: posts.append((args, kwargs)))
+    monkeypatch.setattr(scanner, "_post_scanner_webhook", lambda *args, **kwargs: posts.append((args, kwargs)))
 
     status = scanner.send_to_scanner(
         "uid-1",

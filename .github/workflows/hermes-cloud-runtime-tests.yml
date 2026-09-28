@@ -806,9 +806,10 @@ jobs:
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_delivery_uses_owner_scoped_onboarding_contact_store"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_contact_crud_rejects_unauthenticated_and_cross_owner_before_storage"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_contact_exact_owner_positive_control"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_onboarding_contact_dispatch_is_owner_bound_and_ignores_proxy_environment"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_webhook_fails_closed_without_authority"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_status_requires_confirmed_caregiver_delivery[delivery_statuses0-partial-emergency_delivery_unconfirmed]"
-            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_status_requires_confirmed_caregiver_delivery[delivery_statuses1-partial-emergency_delivery_unconfirmed]"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_status_requires_confirmed_caregiver_delivery[delivery_statuses1-pending-emergency_delivery_pending]"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_status_requires_confirmed_caregiver_delivery[delivery_statuses2-success-None]"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_delivery_uses_selected_active_owner_caregiver"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_first_party_caregiver_routes_derive_owner_and_reject_caller_uid"
@@ -854,7 +855,7 @@ jobs:
           for required_id in "${required_incident_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$incident_ids"
           done
-          test "$(grep -c '::' <<<"$incident_ids")" -eq 74
+          test "$(grep -c '::' <<<"$incident_ids")" -eq 75
           pytest \
             tests/unit/test_ella_incident_1182_route_isolation.py \
             tests/unit/test_ella_incident_1182_callback_auth.py \
@@ -1392,7 +1393,10 @@ jobs:
           grep -Fqx \
             "tests/unit/test_ella_scanner_batching.py::test_scanner_fails_before_webhook_egress_without_authority" \
             <<<"$scanner_batching_ids"
-          test "$(grep -c '::' <<<"$scanner_batching_ids")" -eq 51
+          grep -Fqx \
+            "tests/unit/test_ella_scanner_batching.py::test_scanner_webhook_ignores_proxy_environment_and_rejects_redirect" \
+            <<<"$scanner_batching_ids"
+          test "$(grep -c '::' <<<"$scanner_batching_ids")" -eq 52
           pytest tests/unit/test_ella_scanner_batching.py -v
 
       - name: Run real Firestore summary CAS contention gate

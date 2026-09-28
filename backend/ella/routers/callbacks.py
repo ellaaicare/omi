@@ -871,6 +871,7 @@ class EmergencyResponse(BaseModel):
 
 
 _CONFIRMED_EMERGENCY_DELIVERY_STATUSES = {"delivered"}
+_PENDING_EMERGENCY_DELIVERY_STATUSES = {"queued"}
 
 
 def _append_unique_emergency_contact(contacts: List[dict], seen: set[str], contact: dict) -> None:
@@ -900,6 +901,8 @@ def _append_unique_emergency_contact(contacts: List[dict], seen: set[str], conta
 
 
 async def _server_owned_emergency_contacts(uid: str) -> List[dict]:
+    # The authenticated onboarding store is canonical. PostgreSQL caregivers
+    # remain a compatibility source while existing records are reconciled.
     stored_contacts = await asyncio.to_thread(get_contacts, uid)
     if not isinstance(stored_contacts, list):
         raise RuntimeError("invalid emergency contact store response")
@@ -1015,6 +1018,7 @@ async def ella_emergency(
     sms_available = False
     delivery_error: Optional[str] = None
     confirmed_delivery_count = 0
+    pending_delivery_count = 0
 
     # Step 1: Send immediate push notification to elder's device
     try:
@@ -1061,7 +1065,7 @@ async def ella_emergency(
         logger.warning("[Ella] Emergency delivery skipped: no eligible server-owned contacts")
     else:
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
                 response = await client.post(
                     ELLA_CONFIG.emergency_url,
                     json=n8n_payload,
@@ -1083,8 +1087,11 @@ async def ella_emergency(
                             error=contact.get("error"),
                         )
                         contacts_notified.append(contact_result)
-                        if contact_result.status.strip().lower() in _CONFIRMED_EMERGENCY_DELIVERY_STATUSES:
+                        normalized_status = contact_result.status.strip().lower()
+                        if normalized_status in _CONFIRMED_EMERGENCY_DELIVERY_STATUSES:
                             confirmed_delivery_count += 1
+                        elif normalized_status in _PENDING_EMERGENCY_DELIVERY_STATUSES:
+                            pending_delivery_count += 1
 
                     logger.info(
                         f"[Ella] Emergency n8n dispatch success: "
@@ -1092,7 +1099,11 @@ async def ella_emergency(
                         f"sms={sms_available}"
                     )
                     if confirmed_delivery_count == 0:
-                        delivery_error = "emergency_delivery_unconfirmed"
+                        delivery_error = (
+                            "emergency_delivery_pending"
+                            if pending_delivery_count > 0
+                            else "emergency_delivery_unconfirmed"
+                        )
                 else:
                     delivery_error = "emergency_delivery_unavailable"
                     logger.warning("[Ella] Emergency n8n dispatch returned status=%s", response.status_code)
@@ -1104,7 +1115,12 @@ async def ella_emergency(
             delivery_error = "emergency_delivery_unavailable"
             logger.exception("[Ella] Emergency n8n dispatch failed")
 
-    status = "success" if confirmed_delivery_count > 0 else "partial"
+    if confirmed_delivery_count > 0:
+        status = "success"
+    elif pending_delivery_count > 0:
+        status = "pending"
+    else:
+        status = "partial"
 
     logger.info(
         f"[Ella] Emergency alert complete: alert_id={alert_id}, "
