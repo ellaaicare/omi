@@ -419,6 +419,7 @@ jobs:
           "PyJWT==2.9.0"
           "pytest==8.3.2"
           "openapi-spec-validator==0.7.1"
+          "psycopg2-binary==2.9.9"
           "PyYAML==6.0.2"
           "python-multipart==0.0.9"
           "websockets==12.0"
@@ -1358,7 +1359,7 @@ jobs:
           pytest tests/unit/test_guardian_echo_classifier.py -v
           test "$(pytest --collect-only -q tests/postgres/test_guardian_playback_ledger_postgres.py | grep -c '::')" -eq 13
           pytest tests/postgres/test_guardian_playback_ledger_postgres.py -v
-          test "$(pytest --collect-only -q tests/postgres/test_guardian_echo_classifier_scanner_e2e_postgres.py | grep -c '::')" -eq 3
+          test "$(pytest --collect-only -q tests/postgres/test_guardian_echo_classifier_scanner_e2e_postgres.py | grep -c '::')" -eq 5
           pytest tests/postgres/test_guardian_echo_classifier_scanner_e2e_postgres.py -v
           escalation_auth_ids="$(pytest --collect-only -q tests/unit/test_ella_escalations_router_auth.py | sed '/^$/d')"
           required_escalation_auth_ids=(
@@ -1439,7 +1440,7 @@ jobs:
             <<<"$scanner_batching_ids"
           test "$(grep -c '::' <<<"$scanner_batching_ids")" -eq 56
           pytest tests/unit/test_ella_scanner_batching.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_scanner_echo_suppression.py | grep -c '::')" -eq 11
+          test "$(pytest --collect-only -q tests/unit/test_ella_scanner_echo_suppression.py | grep -c '::')" -eq 17
           pytest tests/unit/test_ella_scanner_echo_suppression.py -v
 
       - name: Run real Firestore summary CAS contention gate
