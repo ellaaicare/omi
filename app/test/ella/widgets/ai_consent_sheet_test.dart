@@ -193,6 +193,18 @@ void main() {
     expect(disclosure, contains('Full processor details in Privacy Policy'));
     expect(find.text('Not now'), findsOneWidget);
 
+    // First-time consent (no prior authority) must be unchanged by the v10-to-v11
+    // upgrade-copy fix: still says nothing is shared and Not now keeps everything off.
+    expect(
+      disclosure,
+      contains(
+        'Ella will not send what you say or type, messages, details from your saved memories, or Photon '
+        'messages to these companies until you choose Allow. Not now keeps these cloud AI, memory, voice, '
+        'and messaging features off. You can review or remove this permission in Settings.',
+      ),
+    );
+    expect(disclosure, isNot(contains('Your previously approved v10 processing continues')));
+
     final normalizedDisclosure = disclosure.toLowerCase();
     for (final bannedWord in const [
       'monitor',
