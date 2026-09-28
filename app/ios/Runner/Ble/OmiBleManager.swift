@@ -2,6 +2,71 @@ import CoreBluetooth
 import Flutter
 import UIKit
 
+/// Thread-safe recorder for native BLE discovery diagnostics surfaced to the
+/// Dart "Device diagnostics" view. Counts and CoreBluetooth state labels
+/// only — never device names or UUIDs — so a single copy/paste from the
+/// in-app view can diagnose a one-run discovery failure across the native,
+/// bridge, and Dart layers. See ellaaicare/ella-ai#1280 RUN-010.
+final class OmiBleDiagnostics {
+    static let shared = OmiBleDiagnostics()
+
+    private let lock = NSLock()
+
+    private var lastStartScanCbState = "unknown"
+    private var scansStartedImmediately: Int64 = 0
+    private var scansQueued: Int64 = 0
+    private var queuedScansFired: Int64 = 0
+    private var didDiscoverCount: Int64 = 0
+    private var flutterApiNilDropCount: Int64 = 0
+
+    private init() {}
+
+    /// Records the CoreBluetooth state observed at a `startScan` call and
+    /// whether it started immediately or was queued for later.
+    func recordStartScan(cbState: String, queued: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        lastStartScanCbState = cbState
+        if queued {
+            scansQueued += 1
+        } else {
+            scansStartedImmediately += 1
+        }
+    }
+
+    /// Records that a previously queued scan fired once CoreBluetooth reached `poweredOn`.
+    func recordQueuedScanFired() {
+        lock.lock()
+        defer { lock.unlock() }
+        queuedScansFired += 1
+    }
+
+    /// Records a native `didDiscover` callback. Call this BEFORE the Pigeon
+    /// call to Dart — a nil `flutterApi` silently swallows the discovery, and
+    /// this is the only place that drop is counted.
+    func recordDidDiscover(flutterApiWasNil: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        didDiscoverCount += 1
+        if flutterApiWasNil {
+            flutterApiNilDropCount += 1
+        }
+    }
+
+    func snapshot() -> BleNativeDiscoveryDiagnostics {
+        lock.lock()
+        defer { lock.unlock() }
+        return BleNativeDiscoveryDiagnostics(
+            lastStartScanCbState: lastStartScanCbState,
+            scansStartedImmediately: scansStartedImmediately,
+            scansQueued: scansQueued,
+            queuedScansFired: queuedScansFired,
+            didDiscoverCount: didDiscoverCount,
+            flutterApiNilDropCount: flutterApiNilDropCount
+        )
+    }
+}
+
 /// Native CoreBluetooth manager that handles BLE lifecycle, state restoration,
 /// reconnection, service discovery, and audio batching.
 ///
@@ -134,15 +199,18 @@ final class OmiBleManager: NSObject {
     // MARK: - Scanning
 
     func startScan(timeout: Int, serviceUuids: [String]) {
-        NSLog("[OmiBle] startScan called, state=\(getBluetoothState()), timeout=\(timeout), serviceUuids=\(serviceUuids)")
+        let cbState = getBluetoothState()
+        NSLog("[OmiBle] startScan called, state=\(cbState), timeout=\(timeout), serviceUuids=\(serviceUuids)")
 
         // Queue the scan if Bluetooth isn't ready yet — it will fire once poweredOn
         guard centralManager.state == .poweredOn else {
             NSLog("[OmiBle] BT not ready, queuing scan")
+            OmiBleDiagnostics.shared.recordStartScan(cbState: cbState, queued: true)
             pendingScan = (timeout: timeout, serviceUuids: serviceUuids)
             return
         }
 
+        OmiBleDiagnostics.shared.recordStartScan(cbState: cbState, queued: false)
         pendingScan = nil
         let cbuuids: [CBUUID]? = serviceUuids.isEmpty ? nil : serviceUuids.map { CBUUID(string: $0) }
         isScanning = true
@@ -543,6 +611,13 @@ final class OmiBleManager: NSObject {
         defaults.set(count + 1, forKey: key)
     }
 
+    /// Snapshot of native BLE discovery diagnostics (CoreBluetooth state at
+    /// scan time, started-vs-queued, native `didDiscover` count, and
+    /// `flutterApi`-nil drop count). See `OmiBleDiagnostics`.
+    func getNativeDiscoveryDiagnostics() -> BleNativeDiscoveryDiagnostics {
+        return OmiBleDiagnostics.shared.snapshot()
+    }
+
     func getDeviceDiagnostics(uuid: String) -> BleDeviceDiagnostics {
         let defaults = UserDefaults.standard
         let history = defaults.array(forKey: OmiBleManager.historyKey(uuid)) as? [[String: Any]] ?? []
@@ -676,6 +751,7 @@ extension OmiBleManager: CBCentralManagerDelegate {
         // Execute queued scan if Bluetooth just became ready
         if central.state == .poweredOn, let pending = pendingScan {
             NSLog("[OmiBle] Executing queued scan (timeout=\(pending.timeout))")
+            OmiBleDiagnostics.shared.recordQueuedScanFired()
             startScan(timeout: pending.timeout, serviceUuids: pending.serviceUuids)
         }
     }
@@ -713,6 +789,10 @@ extension OmiBleManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
+        // Recorded before the Pigeon call below: a nil flutterApi silently
+        // swallows the discovery, and this is the only place that drop is counted.
+        OmiBleDiagnostics.shared.recordDidDiscover(flutterApiWasNil: flutterApi == nil)
+
         let uuid = peripheralUuidString(peripheral)
         peripheral.delegate = self
         peripherals[uuid] = peripheral
