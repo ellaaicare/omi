@@ -34,11 +34,15 @@ logger = logging.getLogger(__name__)
 
 # Prior consent versions are immutable history. V10 replaces the xAI artwork
 # recipient with the owner-only OpenAI Codex artwork designer, so stale v9
-# receipts cannot authorize selected-memory artwork egress.
+# receipts cannot authorize selected-memory artwork egress. V11 adds the
+# TypeSafe (Jev), via OpenRouter processor for Guardian/Whispers conversation
+# safety classification, so stale v10 (and earlier) receipts cannot authorize
+# TypeSafe egress.
 LEGACY_POLICY_VERSION_V7 = "ai-data-processors-v7"
 LEGACY_POLICY_VERSION_V8 = "ai-data-processors-v8"
 LEGACY_POLICY_VERSION_V9 = "ai-data-processors-v9"
-CURRENT_POLICY_VERSION = "ai-data-processors-v10"
+LEGACY_POLICY_VERSION_V10 = "ai-data-processors-v10"
+CURRENT_POLICY_VERSION = "ai-data-processors-v11"
 # This is the only policy constant that invalidates a prior explicit grant.
 # Adding processors, changing descriptive scope metadata, or deploying code
 # must not silently revoke consent. A human-reviewed material policy change
@@ -47,9 +51,10 @@ CONSENT_POLICY_VERSION_ORDER = (
     LEGACY_POLICY_VERSION_V7,
     LEGACY_POLICY_VERSION_V8,
     LEGACY_POLICY_VERSION_V9,
+    LEGACY_POLICY_VERSION_V10,
     CURRENT_POLICY_VERSION,
 )
-MINIMUM_REQUIRED_POLICY_VERSION = "ai-data-processors-v10"
+MINIMUM_REQUIRED_POLICY_VERSION = "ai-data-processors-v11"
 CANONICAL_PROCESSOR_SET = (
     "deepgram:stt|soniox:stt|speechmatics:stt|firebase:auth-infrastructure|"
     "hermes-self-hosted:agent-runtime|honcho-self-hosted:memory-context|ella-self-hosted-tts:tts|"
@@ -57,7 +62,7 @@ CANONICAL_PROCESSOR_SET = (
     "openai-codex:managed-agent-model-memory-illustration|photon:messaging-delivery|"
     "openrouter:model-routing|google-gemini:language-live-voice|openai:language-live-voice|"
     "groq:language|xai-grok:language-live-voice|"
-    "inworld:tts|elevenlabs:tts-fallback"
+    "inworld:tts|elevenlabs:tts-fallback|typesafe:guardian-whispers-safety-classification"
 )
 CURRENT_PROCESSOR_SET_HASH = f"sha256:{hashlib.sha256(CANONICAL_PROCESSOR_SET.encode()).hexdigest()}"
 CURRENT_SCOPE_VERSION = "managed-cloud-internal-pilot-v4"
@@ -212,6 +217,14 @@ PROCESSORS: tuple[dict[str, Any], ...] = (
         "function": "Language processing and live voice",
         "data": "Text, selected context, or live microphone audio",
         "provider_aliases": ["grok", "grok-voice", "xai", "xai-grok", "xai-tts"],
+        "third_party": True,
+    },
+    {
+        "id": "typesafe",
+        "legal_recipient": "TypeSafe (Jev), via OpenRouter",
+        "function": "Conversation safety classification for Guardian and Whispers",
+        "data": "Conversation transcript text windows (no audio)",
+        "provider_aliases": ["typesafe", "typesafe-jev", "jev"],
         "third_party": True,
     },
     {
