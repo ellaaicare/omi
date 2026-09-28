@@ -62,7 +62,7 @@ String _read(String rel) => File('$_app/$rel').readAsStringSync();
 
 List<String> _vendoredNativeSources() => _read('lib/upstream_capture/UPSTREAM_OWNED.txt')
     .split('\n')
-    .where((l) => l.startsWith('verbatim\t'))
+    .where((l) => l.startsWith('verbatim\t') || l.startsWith('patched\t'))
     .map((l) => l.split('\t')[3])
     .where((p) => p.startsWith('app/ios/Runner/'))
     .toList();
