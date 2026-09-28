@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/upstream_capture/backend/schema/geolocation.dart';
 import 'package:omi/upstream_capture/models/custom_stt_config.dart';
-import 'package:omi/upstream_capture/services/auth_service.dart';
+import 'package:omi/services/auth_service.dart';
 import 'package:omi/upstream_capture/services/bridges/ble_bridge.dart';
 import 'package:omi/services/connectivity_service.dart';
 import 'package:omi/upstream_capture/services/sockets/transcription_service.dart';

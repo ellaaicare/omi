@@ -4,8 +4,8 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:omi/upstream_capture/backend/http/shared.dart';
-import 'package:omi/upstream_capture/services/auth/auth_token_result.dart';
-import 'package:omi/upstream_capture/services/auth_service.dart';
+import 'package:omi/services/auth/auth_token_result.dart';
+import 'package:omi/services/auth_service.dart';
 
 import 'api_fallback.dart';
 

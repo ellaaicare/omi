@@ -99,8 +99,7 @@ dart-relocated	77b093e1a481efdcb55031b48046144a363eee3d	app/lib/services/account
 dart-relocated	a9d43c00f70bf841cd94441685df1efdde1d2f20	app/lib/services/audio_sources/audio_source.dart	app/lib/upstream_capture/services/audio_sources/audio_source.dart
 dart-relocated	bcfceaaab35f84c6b1c696cc2d566116f675adec	app/lib/services/audio_sources/ble_device_source.dart	app/lib/upstream_capture/services/audio_sources/ble_device_source.dart
 dart-relocated	dfbf8ee58da892327d216e8ae343d32312a79b30	app/lib/services/audio_sources/phone_mic_source.dart	app/lib/upstream_capture/services/audio_sources/phone_mic_source.dart
-dart-relocated	8509ef06c4fbf271a500b9ea253f561c4edb9fc6	app/lib/services/auth/auth_token_result.dart	app/lib/upstream_capture/services/auth/auth_token_result.dart
-dart-relocated	4809553f92ee496462145cac779ae11daa893061	app/lib/services/auth_service.dart	app/lib/upstream_capture/services/auth_service.dart
+in-place	8509ef06c4fbf271a500b9ea253f561c4edb9fc6	app/lib/services/auth/auth_token_result.dart	app/lib/services/auth/auth_token_result.dart
 dart-relocated	98a8e9e97256b4001f36cf5f2de2140d4ab89138	app/lib/services/battery_widget_service.dart	app/lib/upstream_capture/services/battery_widget_service.dart
 dart-relocated	fedf85cc92927604f84733d9ee73ac65f91ad6f4	app/lib/services/bridges/apple_watch_bridge.dart	app/lib/upstream_capture/services/bridges/apple_watch_bridge.dart
 dart-relocated	027c6199e4e51f278774537d8cfa40d28e4b89c8	app/lib/services/bridges/ble_bridge.dart	app/lib/upstream_capture/services/bridges/ble_bridge.dart

@@ -63,8 +63,7 @@ app/lib/services/account_cutover/account_cutover_runtime.dart
 app/lib/services/audio_sources/audio_source.dart
 app/lib/services/audio_sources/ble_device_source.dart
 app/lib/services/audio_sources/phone_mic_source.dart
-app/lib/services/auth/auth_token_result.dart
-app/lib/services/auth_service.dart
+inplace app/lib/services/auth/auth_token_result.dart
 app/lib/services/battery_widget_service.dart
 app/lib/services/bridges/apple_watch_bridge.dart
 app/lib/services/bridges/ble_bridge.dart

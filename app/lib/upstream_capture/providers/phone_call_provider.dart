@@ -15,7 +15,7 @@ import 'package:omi/upstream_capture/backend/preferences.dart';
 import 'package:omi/upstream_capture/backend/schema/phone_call.dart';
 import 'package:omi/upstream_capture/backend/schema/transcript_segment.dart';
 import 'package:omi/upstream_capture/models/audio_route.dart';
-import 'package:omi/upstream_capture/services/auth/auth_token_result.dart';
+import 'package:omi/services/auth/auth_token_result.dart';
 import 'package:omi/upstream_capture/services/phone_call_service.dart';
 import 'package:omi/utils/logger.dart';
 

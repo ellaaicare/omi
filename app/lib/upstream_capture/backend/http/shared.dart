@@ -13,8 +13,8 @@ import 'package:omi/upstream_capture/backend/preferences.dart';
 import 'package:omi/upstream_capture/env/env.dart';
 import 'package:omi/upstream_capture/utils/jwt_expiry.dart';
 import 'package:omi/upstream_capture/services/account_cutover/account_cutover_runtime.dart';
-import 'package:omi/upstream_capture/services/auth/auth_token_result.dart';
-import 'package:omi/upstream_capture/services/auth_service.dart';
+import 'package:omi/services/auth/auth_token_result.dart';
+import 'package:omi/services/auth_service.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
