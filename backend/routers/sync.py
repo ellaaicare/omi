@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import re
 import struct
@@ -7,17 +8,18 @@ import time
 import wave
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query, Header, Request, Response
 from fastapi.responses import StreamingResponse
 from opuslib import Decoder
+from pydantic import BaseModel, Field
 from pydub import AudioSegment
 
 from database import conversations as conversations_db
 from database import users as users_db
 from database.conversations import get_closest_conversation_to_timestamps, update_conversation_segments
-from models.conversation import CreateConversation, ConversationSource, Conversation
+from models.conversation import CreateConversation, ConversationSource, Conversation, Geolocation
 from models.transcript_segment import TranscriptSegment
 from utils.conversations.process_conversation import process_conversation
 from ella.services.ai_consent import assert_current_ai_consent, require_current_ai_consent
@@ -29,6 +31,15 @@ from utils.other.storage import (
     get_or_create_merged_audio,
     get_merged_audio_signed_url,
 )
+from utils.sync_capture_manifest import (
+    cache_sync_segment_result,
+    claim_conversation_manifest,
+    compute_sync_segment_id,
+    get_cached_sync_segment_result,
+    issue_capture_manifest,
+    manifest_claims_match_paths,
+    verify_capture_manifest,
+)
 
 # Audio constants
 AUDIO_SAMPLE_RATE = 16000
@@ -37,6 +48,40 @@ from utils.stt.pre_recorded import deepgram_prerecorded, postprocess_words
 from utils.stt.vad import vad_is_empty
 
 router = APIRouter()
+
+
+# **********************************************
+# ************ SYNC V2 WIRE MODELS *************
+# **********************************************
+#
+# Field names/shape mirror BasedHardware/omi's `SyncLocalFilesResultResponse` /
+# `SyncCaptureManifestRequest` / `SyncCaptureManifestResponse`
+# (backend/routers/sync.py at commit f16699aea7fe9ba089baceb628922f2882c51153), which is what the
+# vendored client's `GeneratedSyncLocalFilesResultResponse` / `GeneratedSyncCaptureManifestRequest`
+# / `GeneratedSyncCaptureManifestResponse` wire models (app/lib/upstream_capture/backend/schema/gen/
+# conversation_wire.g.dart on origin/release/testflight-850-necklace-recovery) encode/decode.
+
+
+class SyncLocalFilesResultResponse(BaseModel):
+    new_memories: List[str] = Field(default_factory=list)
+    updated_memories: List[str] = Field(default_factory=list)
+    failed_segments: int = 0
+    total_segments: int = 0
+    errors: List[str] = Field(default_factory=list)
+
+
+class SyncCaptureManifestFile(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    sha256: str = Field(pattern=r'^[0-9a-fA-F]{64}$')
+
+
+class SyncCaptureManifestRequest(BaseModel):
+    conversation_id: str = Field(min_length=1, max_length=128)
+    files: List[SyncCaptureManifestFile] = Field(min_length=1, max_length=20)
+
+
+class SyncCaptureManifestResponse(BaseModel):
+    manifest: str
 
 
 # **********************************************
@@ -615,7 +660,28 @@ def _reprocess_conversation_after_update(uid: str, conversation_id: str, languag
     print(f'Successfully reprocessed conversation {conversation_id}')
 
 
-def process_segment(path: str, uid: str, response: dict, source: ConversationSource = ConversationSource.omi):
+def process_segment(
+    path: str,
+    uid: str,
+    response: dict,
+    source: ConversationSource = ConversationSource.omi,
+    target_conversation_id: Optional[str] = None,
+    geolocation: Optional[Geolocation] = None,
+):
+    """Transcribe one VAD-segmented audio file and attach it to a conversation.
+
+    [target_conversation_id], when given, is looked up with `conversations_db.get_conversation(uid,
+    target_conversation_id)` — a uid-scoped Firestore read, so it can never resolve a conversation
+    owned by a different uid — and used instead of nearest-by-timestamp matching. It falls back to
+    the timestamp heuristic (and ultimately to creating a new conversation) whenever it does not
+    resolve, so an unknown/foreign/already-deleted id never fails the sync and never touches another
+    account's data. [geolocation], when given, is only stamped on a newly created conversation.
+
+    Returns `(kind, conversation_id)` — `kind` is `'new_memories'` or `'updated_memories'` — for the
+    conversation this segment ended up in, or `None` when nothing was transcribed. `/v2/sync-local-files`
+    uses this to cache the outcome per segment content id for idempotent replay; `/v1/sync-local-files`
+    (and any other existing caller) ignores the return value, so this is backward compatible.
+    """
     assert_current_ai_consent(uid)
     url = get_syncing_file_temporal_signed_url(path)
 
@@ -629,11 +695,15 @@ def process_segment(path: str, uid: str, response: dict, source: ConversationSou
     transcript_segments: List[TranscriptSegment] = postprocess_words(words, 0)
     if not transcript_segments:
         print('failed to get deepgram segments')
-        return
+        return None
 
     timestamp = get_timestamp_from_path(path)
     segment_end_timestamp = timestamp + transcript_segments[-1].end
-    closest_memory = get_closest_conversation_to_timestamps(uid, timestamp, segment_end_timestamp)
+    closest_memory = None
+    if target_conversation_id:
+        closest_memory = conversations_db.get_conversation(uid, target_conversation_id)
+    if not closest_memory:
+        closest_memory = get_closest_conversation_to_timestamps(uid, timestamp, segment_end_timestamp)
 
     if not closest_memory:
         started_at = datetime.fromtimestamp(timestamp, tz=timezone.utc)
@@ -643,9 +713,11 @@ def process_segment(path: str, uid: str, response: dict, source: ConversationSou
             finished_at=finished_at,
             transcript_segments=transcript_segments,
             source=source,
+            geolocation=geolocation,
         )
         created = process_conversation(uid, language, create_memory)
         response['new_memories'].add(created.id)
+        return ('new_memories', created.id)
     else:
 
         transcript_segments = [s.dict() for s in transcript_segments]
@@ -688,6 +760,8 @@ def process_segment(path: str, uid: str, response: dict, source: ConversationSou
         if closest_memory.get('discarded', False):
             print(f'Conversation {closest_memory["id"]} was discarded, checking if it should be reprocessed')
             _reprocess_conversation_after_update(uid, closest_memory['id'], language)
+
+        return ('updated_memories', closest_memory['id'])
 
 
 def _cleanup_files(file_paths):
@@ -766,3 +840,211 @@ async def sync_local_files(files: List[UploadFile] = File(...), uid: str = Depen
         _cleanup_files(paths)  # .bin files (in case decode_files_to_wav didn't finish)
         _cleanup_files(wav_paths)  # Original wav files (if VAD didn't complete)
         _cleanup_files(segmented_paths)  # Segmented wav files after processing
+
+
+# **********************************************
+# ************ SYNC LOCAL FILES V2 *************
+# **********************************************
+#
+# Wire contract ported from BasedHardware/omi (upstream commit
+# f16699aea7fe9ba089baceb628922f2882c51153), `backend/routers/sync.py`'s `/v2/sync-capture-manifest`
+# and `/v2/sync-local-files` routes, cross-checked against the vendored client's request/response
+# handling in `app/lib/upstream_capture/backend/http/api/conversations.dart` (`uploadLocalFilesV2`,
+# `_createSyncCaptureManifest`) on `origin/release/testflight-850-necklace-recovery`.
+#
+# Deliberate deviations from upstream's implementation (the *wire contract* — request/response
+# shape and status codes the client actually sends/parses — is kept intact; upstream's *internal*
+# architecture is not, since this fork has no Cloud Tasks / fair-use / backfill-lane / Firestore
+# sync-ledger subsystem, and its v1 sibling already processes uploads synchronously):
+#   * /v2/sync-local-files always processes synchronously and returns 200 with a
+#     SyncLocalFilesResultResponse body (upstream's async 202 job_id + GET
+#     /v2/sync-local-files/{job_id} polling contract is not implemented). The vendored client
+#     explicitly supports this as its "fast path" (see `UploadFilesResult.done` /
+#     `uploadLocalFilesV2`'s 200 branch), so this is a spec-compliant subset, not a break.
+#   * The capture-manifest token is not bound to a verified client_device_id (this fork doesn't
+#     resolve one for sync requests yet) — see utils/sync_capture_manifest.py's module docstring.
+#   * Idempotent replay is enforced per VAD-segment (content-hash keyed), not per upload batch via
+#     a Firestore job ledger — see utils/sync_capture_manifest.py's module docstring.
+#   * No fair-use / daily-audio-ceiling / backfill-lane / rate-limit gating: none of that subsystem
+#     exists in this fork, and the client treats any non-recognized status as a generic retryable
+#     failure, so omitting it does not desync the client.
+#   * X-Omi-Conversation-Geolocation is parsed best-effort into this fork's narrower `Geolocation`
+#     model (latitude/longitude/google_place_id/address/location_type only — upstream's richer
+#     altitude/accuracy/capture_source/captured_at fields have no equivalent field here) and is
+#     only ever attached to a newly created conversation; a malformed header is ignored rather than
+#     failing the upload.
+
+
+def _run_threads_in_chunks(threads: List[threading.Thread], chunk_size: int = 5):
+    for i in range(0, len(threads), chunk_size):
+        [t.start() for t in threads[i : i + chunk_size]]
+        [t.join() for t in threads[i : i + chunk_size]]
+
+
+def _parse_conversation_geolocation_header(raw: Optional[str]) -> Optional[Geolocation]:
+    """Best-effort parse of X-Omi-Conversation-Geolocation. Never raises: a malformed/partial
+    header just means the new conversation is created without a geolocation stamp."""
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return None
+        latitude = data.get('latitude')
+        longitude = data.get('longitude')
+        if latitude is None or longitude is None:
+            return None
+        return Geolocation(
+            latitude=float(latitude),
+            longitude=float(longitude),
+            google_place_id=data.get('google_place_id'),
+            address=data.get('address'),
+            location_type=data.get('location_type'),
+        )
+    except Exception as e:
+        print(f'Failed to parse X-Omi-Conversation-Geolocation header: {e}')
+        return None
+
+
+@router.post('/v2/sync-capture-manifest', response_model=SyncCaptureManifestResponse)
+async def create_sync_capture_manifest(
+    payload: SyncCaptureManifestRequest,
+    uid: str = Depends(require_current_ai_consent),
+):
+    """Issue a short-lived, HMAC-signed proof binding [payload.files] (name + sha256) to
+    [payload.conversation_id] for this uid. The vendored client only requests this before a fresh
+    (live-capture) upload and treats any non-200 response as "no manifest available" — it still
+    uploads the audio without one — so failures here are conservative (409/503) rather than fatal.
+    """
+    claims = [item.model_dump() for item in payload.files]
+    try:
+        claimed = claim_conversation_manifest(uid, payload.conversation_id, claims)
+    except Exception as e:
+        print(f'sync capture manifest claim unavailable uid={uid} error={e}')
+        raise HTTPException(status_code=503, detail={'code': 'sync_capture_manifest_unavailable', 'retryable': True})
+    if not claimed:
+        raise HTTPException(status_code=409, detail={'code': 'sync_capture_manifest_conflict'})
+    manifest = issue_capture_manifest(uid, payload.conversation_id, claims)
+    return SyncCaptureManifestResponse(manifest=manifest)
+
+
+@router.post('/v2/sync-local-files', response_model=SyncLocalFilesResultResponse)
+async def sync_local_files_v2(
+    files: List[UploadFile] = File(...),
+    uid: str = Depends(require_current_ai_consent),
+    conversation_id: Optional[str] = Query(
+        None, description="Target conversation ID to attach audio to (auto-sync from live capture)"
+    ),
+    x_omi_sync_capture_manifest: Optional[str] = Header(None, alias='X-Omi-Sync-Capture-Manifest'),
+    x_omi_conversation_geolocation: Optional[str] = Header(None, alias='X-Omi-Conversation-Geolocation'),
+):
+    """Synchronous v2 upload. Same VAD -> STT -> conversation-assignment pipeline as
+    `/v1/sync-local-files`, plus: optional fresh-capture manifest verification, optional explicit
+    `conversation_id` targeting (uid-scoped; never resolves another account's conversation), and
+    per-segment idempotent replay so re-uploading the same audio (e.g. after a dropped response)
+    never creates or updates a conversation twice.
+    """
+    source = ConversationSource.omi
+    for f in files:
+        if f.filename and 'limitless' in f.filename.lower():
+            source = ConversationSource.limitless
+            break
+
+    filenames = [f.filename or '' for f in files]
+    manifest_claims = None
+    if x_omi_sync_capture_manifest:
+        manifest_claims = verify_capture_manifest(x_omi_sync_capture_manifest, uid, conversation_id, filenames)
+
+    geolocation = _parse_conversation_geolocation_header(x_omi_conversation_geolocation)
+
+    paths = []
+    wav_paths = []
+    segmented_paths = set()
+
+    try:
+        paths = retrieve_file_paths(files, uid)
+
+        if manifest_claims is not None and not manifest_claims_match_paths(manifest_claims, paths):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    'code': 'capture_manifest_mismatch',
+                    'detail': 'Fresh capture manifest did not match the uploaded audio',
+                },
+            )
+
+        wav_paths = decode_files_to_wav(paths)
+
+        vad_errors = []
+        threads = [
+            threading.Thread(target=retrieve_vad_segments, args=(path, segmented_paths, vad_errors))
+            for path in wav_paths
+        ]
+        _run_threads_in_chunks(threads)
+
+        # Clean up original wav files after VAD segmentation (segments are now in segmented_paths)
+        _cleanup_files(wav_paths)
+        wav_paths = []  # Clear to avoid double cleanup in finally
+
+        if vad_errors:
+            error_detail = f"VAD processing failed for {len(vad_errors)} file(s): {'; '.join(vad_errors[:3])}"
+            if len(vad_errors) > 3:
+                error_detail += f" (and {len(vad_errors) - 3} more)"
+            raise HTTPException(status_code=500, detail=error_detail)
+
+        print('sync_local_files_v2 len(segmented_paths)', len(segmented_paths))
+
+        response = {'updated_memories': set(), 'new_memories': set()}
+        errors: List[str] = []
+        result_lock = threading.Lock()
+        total_segments = len(segmented_paths)
+
+        def _run_segment(path: str):
+            segment_id = compute_sync_segment_id(uid, path)
+            cached = get_cached_sync_segment_result(segment_id)
+            if cached is not None:
+                # Replay of already-durably-processed audio: no STT/LLM re-run, no duplicate
+                # conversation write. Just report the same outcome as the first successful call.
+                with result_lock:
+                    response[cached['kind']].add(cached['conversation_id'])
+                return
+            try:
+                outcome = process_segment(
+                    path,
+                    uid,
+                    response,
+                    source,
+                    target_conversation_id=conversation_id,
+                    geolocation=geolocation,
+                )
+            except Exception as e:
+                with result_lock:
+                    errors.append(f'{os.path.basename(path)}: {e}')
+                return
+            if outcome is not None:
+                kind, result_conversation_id = outcome
+                cache_sync_segment_result(segment_id, kind, result_conversation_id)
+
+        threads = [threading.Thread(target=_run_segment, args=(path,)) for path in segmented_paths]
+        _run_threads_in_chunks(threads)
+
+        failed_segments = len(errors)
+        successful_segments = total_segments - failed_segments
+
+        if total_segments > 0 and successful_segments == 0:
+            raise HTTPException(
+                status_code=500,
+                detail=f"All {total_segments} segment(s) failed processing: {'; '.join(errors[:3])}",
+            )
+
+        return SyncLocalFilesResultResponse(
+            new_memories=sorted(response['new_memories']),
+            updated_memories=sorted(response['updated_memories']),
+            failed_segments=failed_segments,
+            total_segments=total_segments,
+            errors=errors[:10],
+        )
+    finally:
+        _cleanup_files(paths)
+        _cleanup_files(wav_paths)
+        _cleanup_files(segmented_paths)
