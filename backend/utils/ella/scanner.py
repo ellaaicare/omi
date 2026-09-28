@@ -3,6 +3,7 @@
 # Sends real-time transcript segments to n8n scanner for urgency detection.
 # Fire-and-forget with short timeout - doesn't block transcription flow.
 
+import asyncio
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ from typing import Iterator, List, Optional
 import requests
 
 from database.honcho_attestation import authority_credential
+from ella.services import guardian_playback_ledger
 
 from .config import ELLA_CONFIG
 
@@ -45,25 +47,18 @@ GUARDIAN_TRACE_LOG_TIMEOUT_S = min(
 WAKE_WORD_PREFIX_MAX_WORDS = 4
 WAKE_WORD_PENDING_WINDOW_S = float(os.getenv("ELLA_WAKE_WORD_PENDING_WINDOW_S", "12.0"))
 SCANNER_CONTEXT_WINDOW_S = float(os.getenv("ELLA_SCANNER_CONTEXT_WINDOW_S", "12.0"))
-GUARDIAN_ECHO_SUPPRESSION_SECONDS = int(os.getenv("ELLA_GUARDIAN_ECHO_SUPPRESSION_SECONDS", "45"))
+# Lookback window for selecting the owner's own recently-PLAYED ledger
+# candidates to attach to the scanner context. This is a time/route
+# proximity SELECTION only — it never suppresses anything itself. Whether
+# any selected candidate is actually being re-heard is a semantic judgment
+# made downstream (the typed echo classifier / n8n Echo Guard node).
+GUARDIAN_PLAYBACK_CANDIDATE_WINDOW_SECONDS = int(os.getenv("ELLA_GUARDIAN_ECHO_SUPPRESSION_SECONDS", "45"))
+GUARDIAN_PLAYBACK_CANDIDATE_LIMIT = int(os.getenv("ELLA_GUARDIAN_PLAYBACK_CANDIDATE_LIMIT", "5"))
 SCANNER_AMBIENT_BATCHING_ENABLED = os.getenv("ELLA_SCANNER_AMBIENT_BATCHING_ENABLED", "true").lower() == "true"
 SCANNER_AMBIENT_BATCH_SECONDS = float(os.getenv("ELLA_SCANNER_AMBIENT_BATCH_SECONDS", "10.0"))
 SCANNER_AMBIENT_BATCH_WORDS = int(os.getenv("ELLA_SCANNER_AMBIENT_BATCH_WORDS", "70"))
 SCANNER_AMBIENT_BATCH_MAX_WORDS = int(os.getenv("ELLA_SCANNER_AMBIENT_BATCH_MAX_WORDS", "180"))
 SCANNER_RATE_LIMIT_DEFAULT_BACKOFF_S = float(os.getenv("ELLA_SCANNER_RATE_LIMIT_DEFAULT_BACKOFF_S", "15.0"))
-_ECHO_RISKY_OUTPUTS = {"medium", "high", "very_high"}
-_GUARDIAN_ECHO_MARKERS = (
-    "hi greg",
-    "heard my name",
-    "i heard my name",
-    "i'm here with you",
-    "im here with you",
-    "here with you",
-    "tell me what you need",
-    "just talking about names",
-    "just talking about me",
-    "i heard you i am checking that now",
-)
 
 
 def _post_scanner_webhook(url: str, *, json: dict, headers: dict, timeout: float):
@@ -330,57 +325,40 @@ def _word_count(text: str) -> int:
     return len(_normalize_text(text).split())
 
 
-def _normalize_for_echo_match(text: str) -> str:
-    normalized = text.lower().replace("’", "'")
-    normalized = re.sub(r"[^a-z0-9' ]+", " ", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    return normalized
+async def _fetch_playback_ledger_candidates(uid: str, *, window_seconds: int, limit: int) -> list[dict]:
+    pool = await guardian_playback_ledger.get_pool()
+    candidates = await guardian_playback_ledger.get_played_candidates(
+        pool,
+        uid,
+        window_seconds=window_seconds,
+        limit=limit,
+    )
+    return [candidate.to_classifier_candidate() for candidate in candidates]
 
 
-def _looks_like_guardian_echo_text(text: str) -> bool:
-    normalized = _normalize_for_echo_match(text)
-    if not normalized:
-        return False
+def select_playback_ledger_candidates(
+    uid: str,
+    *,
+    window_seconds: int = GUARDIAN_PLAYBACK_CANDIDATE_WINDOW_SECONDS,
+    limit: int = GUARDIAN_PLAYBACK_CANDIDATE_LIMIT,
+) -> list[dict]:
+    """Owner-scoped SELECTION of recently-PLAYED ledger candidates.
 
-    marker_hits = sum(1 for marker in _GUARDIAN_ECHO_MARKERS if marker in normalized)
-    if marker_hits >= 2:
-        return True
-    if "hi greg" in normalized and "heard my name" in normalized:
-        return True
-    if "tell me what you need" in normalized and ("just talking about" in normalized or "here with you" in normalized):
-        return True
-    return False
+    Time/route proximity only decides which of the owner's own played
+    Whispers are worth attaching to the scanner context — it never decides
+    whether the current transcript IS one of them. That is a semantic
+    judgment made downstream by the typed echo classifier (or the n8n Echo
+    Guard node), never here and never by text/regex matching.
 
-
-def _recent_risky_playback_event(uid: str) -> dict | None:
+    Best-effort: any lookup failure (ledger unavailable, DB error) returns
+    an empty candidate list rather than raising, so a ledger outage can
+    never block scanner dispatch.
+    """
     try:
-        from ella.routers.guardian import get_playback_event
-    except Exception:
-        return None
-
-    event = get_playback_event(uid)
-    if not event:
-        return None
-    if event.get("echo_risk") not in _ECHO_RISKY_OUTPUTS:
-        return None
-    recorded_at = event.get("recorded_at")
-    if isinstance(recorded_at, (int, float)) and time.time() - recorded_at > GUARDIAN_ECHO_SUPPRESSION_SECONDS:
-        return None
-    return event
-
-
-def should_suppress_guardian_echo(
-    uid: str, scanner_segments: List[dict], playback_event: Optional[dict] = None
-) -> bool:
-    """Return True when the scanner input is likely Guardian audio re-captured by the mic."""
-    text = _combined_segment_text(scanner_segments)
-    if not _looks_like_guardian_echo_text(text):
-        return False
-
-    event = playback_event if playback_event is not None else _recent_risky_playback_event(uid)
-    if not event:
-        return False
-    return event.get("echo_risk") in _ECHO_RISKY_OUTPUTS
+        return asyncio.run(_fetch_playback_ledger_candidates(uid, window_seconds=window_seconds, limit=limit))
+    except Exception as exc:
+        print(f"📡 Scanner playback ledger candidate lookup failed uid={uid}: {exc}", flush=True)
+        return []
 
 
 def _combined_segment_text(segments: List[dict]) -> str:
@@ -1264,27 +1242,6 @@ def send_to_scanner(
         )
         return None
 
-    if should_suppress_guardian_echo(uid, scanner_segments):
-        _log_trace_event(
-            trace_id=trace_id,
-            uid=uid,
-            stage="scanner_dispatch_suppressed",
-            status="skipped",
-            metadata={
-                "conversation_id": str(conversation_id),
-                "device_type": device_type,
-                "segment_count": len(scanner_segments),
-                "reason": "guardian_playback_echo",
-                "segments_preview": scanner_payload_preview(scanner_segments),
-            },
-        )
-        print(
-            f"📡 Scanner suppressed guardian playback echo trace={trace_id} "
-            f"preview={scanner_payload_preview(scanner_segments)}",
-            flush=True,
-        )
-        return None
-
     scanner_segments, batch_metadata = _apply_ambient_batching(
         uid,
         str(conversation_id),
@@ -1317,6 +1274,13 @@ def send_to_scanner(
 
     _enqueue_wake_ack(uid, str(conversation_id), trace_id, scanner_segments)
 
+    # Owner-scoped SELECTION only (time/route proximity) of this owner's own
+    # recently-PLAYED ledger entries. Attached to the scanner context so the
+    # typed echo classifier / n8n Echo Guard node can make the actual
+    # semantic playback-source judgment downstream. Never suppresses dispatch
+    # here — that would be exactly the text/regex verdict this replaces.
+    playback_candidates = select_playback_ledger_candidates(uid)
+
     payload = {
         "uid": uid,
         "conversation_id": str(conversation_id),
@@ -1334,6 +1298,7 @@ def send_to_scanner(
         "guardian_mode_source": "users.guardian_mode",
         "guardian_mode_enabled": guardian_mode_enabled,
         "emergency_only_dispatch": emergency_only_dispatch,
+        "playback_candidates": playback_candidates,
     }
     if latency_metadata:
         payload["latency"] = latency_metadata
