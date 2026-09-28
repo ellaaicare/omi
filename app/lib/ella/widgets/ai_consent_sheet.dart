@@ -214,6 +214,14 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                   children: [
                     Text(context.l10n.aiConsentTitle, style: EllaTextStyles.display),
                     const SizedBox(height: 16),
+                    if (widget.preserveExistingAuthorityOnDecline) ...[
+                      Text(
+                        context.l10n.aiConsentUpgradeExistingAuthority,
+                        key: const Key('ai-consent-upgrade-existing-authority'),
+                        style: bodyStyle,
+                      ),
+                      const SizedBox(height: 16),
+                    ],
                     Text(context.l10n.aiConsentManagedCloudIntro, style: bodyStyle),
                     const SizedBox(height: 12),
                     _processorDisclosure(
@@ -264,13 +272,10 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                     const SizedBox(height: 16),
                     Text(context.l10n.aiConsentCompactSummary, style: bodyStyle),
                     const SizedBox(height: 12),
-                    Text(
-                      widget.preserveExistingAuthorityOnDecline
-                          ? context.l10n.aiConsentUpgradeExistingAuthority
-                          : context.l10n.aiConsentNoSharingBeforeAllow,
-                      style: bodyStyle,
-                    ),
-                    const SizedBox(height: 14),
+                    if (!widget.preserveExistingAuthorityOnDecline) ...[
+                      Text(context.l10n.aiConsentNoSharingBeforeAllow, style: bodyStyle),
+                      const SizedBox(height: 14),
+                    ],
                     Text.rich(
                       TextSpan(
                         text: context.l10n.aiConsentProcessorDetailsLink,

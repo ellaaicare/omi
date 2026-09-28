@@ -378,6 +378,10 @@ void main() {
     );
     expect(disclosure, isNot(contains('until you choose Allow')));
     expect(disclosure, isNot(contains('Not now keeps these cloud AI, memory, voice, and messaging features off.')));
+    final upgradeCopy = find.byKey(const Key('ai-consent-upgrade-existing-authority'));
+    final firstProcessor = find.text('Nous Research / Hermes Cloud');
+    expect(upgradeCopy.hitTestable(), findsOneWidget);
+    expect(tester.getTopLeft(upgradeCopy).dy, lessThan(tester.getTopLeft(firstProcessor).dy));
 
     await tester.ensureVisible(find.text('Not now'));
     await tester.tap(find.text('Not now'));
