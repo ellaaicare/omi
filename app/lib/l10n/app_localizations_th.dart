@@ -8572,4 +8572,8 @@ class AppLocalizationsTh extends AppLocalizations {
 
   @override
   String get conversationEllaEnrichedLabel => 'Summary enriched by Ella';
+
+  @override
+  String get correctionSheetHintExample =>
+      'Example: This was Avery and Jordan discussing weekend plans, not a work meeting.';
 }
