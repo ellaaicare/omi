@@ -51,6 +51,7 @@ def _set_caregiver_pool(monkeypatch, rows):
         return pool
 
     monkeypatch.setattr(callbacks, "get_ella_postgres_pool", get_pool)
+    monkeypatch.setattr(callbacks, "get_contacts", lambda _uid: [])
     return pool
 
 
@@ -90,6 +91,45 @@ def test_emergency_contacts_use_configured_shared_ella_postgres_pool(monkeypatch
 
     assert len(contacts) == 1
     assert pool.fetches[0][1] == ("uid-a",)
+
+
+def test_emergency_delivery_uses_owner_scoped_onboarding_contact_store(monkeypatch):
+    _set_caregiver_pool(monkeypatch, [])
+    monkeypatch.setattr(
+        callbacks,
+        "get_contacts",
+        lambda uid: [
+            {
+                "uid": uid,
+                "name": "Onboarding contact",
+                "phone": "+15555550106",
+                "email": "onboarding@example.test",
+                "relationship": "family",
+                "permissions": {"emergency_contact": True},
+            },
+            {
+                "uid": "uid-b",
+                "name": "Other owner",
+                "phone": "+15555550107",
+                "permissions": {"emergency_contact": True},
+            },
+            {
+                "uid": uid,
+                "name": "Not an emergency contact",
+                "phone": "+15555550108",
+                "permissions": {"emergency_contact": False},
+            },
+        ],
+    )
+
+    assert asyncio.run(callbacks._server_owned_emergency_contacts("uid-a")) == [
+        {
+            "name": "Onboarding contact",
+            "phone": "+15555550106",
+            "email": "onboarding@example.test",
+            "relationship": "family",
+        }
+    ]
 
 
 def test_emergency_contact_crud_rejects_unauthenticated_and_cross_owner_before_storage(monkeypatch):
@@ -233,7 +273,8 @@ def test_emergency_webhook_fails_closed_without_authority(monkeypatch):
     ("delivery_statuses", "expected_status", "expected_error"),
     [
         (["failed", "error"], "partial", "emergency_delivery_unconfirmed"),
-        (["failed", "queued"], "success", None),
+        (["failed", "queued"], "partial", "emergency_delivery_unconfirmed"),
+        (["failed", "delivered"], "success", None),
     ],
 )
 def test_emergency_status_requires_confirmed_caregiver_delivery(

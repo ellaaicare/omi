@@ -870,10 +870,52 @@ class EmergencyResponse(BaseModel):
     error: Optional[str] = None
 
 
-_CONFIRMED_EMERGENCY_DELIVERY_STATUSES = {"sent", "queued", "delivered"}
+_CONFIRMED_EMERGENCY_DELIVERY_STATUSES = {"delivered"}
+
+
+def _append_unique_emergency_contact(contacts: List[dict], seen: set[str], contact: dict) -> None:
+    phone = str(contact.get("phone") or "").strip()[:20]
+    email = str(contact.get("email") or "").strip()[:254]
+    if not phone and not email:
+        return
+
+    dedupe_keys = set()
+    phone_digits = re.sub(r"\D", "", phone)
+    if phone_digits:
+        dedupe_keys.add(f"phone:{phone_digits}")
+    if email:
+        dedupe_keys.add(f"email:{email.casefold()}")
+    if dedupe_keys & seen:
+        return
+
+    seen.update(dedupe_keys)
+    contacts.append(
+        {
+            "name": str(contact.get("name") or "Emergency contact")[:200],
+            "phone": phone or None,
+            "email": email or None,
+            "relationship": str(contact.get("relationship") or "other")[:100],
+        }
+    )
 
 
 async def _server_owned_emergency_contacts(uid: str) -> List[dict]:
+    stored_contacts = await asyncio.to_thread(get_contacts, uid)
+    if not isinstance(stored_contacts, list):
+        raise RuntimeError("invalid emergency contact store response")
+
+    contacts: List[dict] = []
+    seen: set[str] = set()
+    for stored_contact in stored_contacts:
+        if not isinstance(stored_contact, dict):
+            continue
+        if str(stored_contact.get("uid") or "").strip() != uid:
+            continue
+        permissions = stored_contact.get("permissions") or {}
+        if not isinstance(permissions, dict) or permissions.get("emergency_contact") is not True:
+            continue
+        _append_unique_emergency_contact(contacts, seen, stored_contact)
+
     pool = await get_ella_postgres_pool()
     caregiver_rows = await pool.fetch(
         """
@@ -895,7 +937,6 @@ async def _server_owned_emergency_contacts(uid: str) -> List[dict]:
         """,
         uid,
     )
-    contacts = []
     for row in caregiver_rows:
         caregiver = dict(row)
         if str(caregiver.get("owner_uid") or "").strip() != uid:
@@ -925,17 +966,15 @@ async def _server_owned_emergency_contacts(uid: str) -> List[dict]:
         )
         if not allowed:
             continue
-        phone = str(context.phone or "").strip()
-        email = str(context.email or "").strip()
-        if not phone and not email:
-            continue
-        contacts.append(
+        _append_unique_emergency_contact(
+            contacts,
+            seen,
             {
-                "name": str(context.name or "Emergency contact")[:200],
-                "phone": phone[:20] or None,
-                "email": email[:254] or None,
-                "relationship": str(context.relationship or "other")[:100],
-            }
+                "name": context.name,
+                "phone": context.phone,
+                "email": context.email,
+                "relationship": context.relationship,
+            },
         )
     return contacts
 

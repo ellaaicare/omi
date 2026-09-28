@@ -803,11 +803,13 @@ jobs:
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_real_mounted_route_manifest_has_exact_paths_authorities_and_no_duplicates"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_affected_background_boundaries_are_exact_and_trace_has_no_detached_task"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_contacts_use_configured_shared_ella_postgres_pool"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_delivery_uses_owner_scoped_onboarding_contact_store"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_contact_crud_rejects_unauthenticated_and_cross_owner_before_storage"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_contact_exact_owner_positive_control"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_webhook_fails_closed_without_authority"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_status_requires_confirmed_caregiver_delivery[delivery_statuses0-partial-emergency_delivery_unconfirmed]"
-            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_status_requires_confirmed_caregiver_delivery[delivery_statuses1-success-None]"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_status_requires_confirmed_caregiver_delivery[delivery_statuses1-partial-emergency_delivery_unconfirmed]"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_status_requires_confirmed_caregiver_delivery[delivery_statuses2-success-None]"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_delivery_uses_selected_active_owner_caregiver"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_first_party_caregiver_routes_derive_owner_and_reject_caller_uid"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_caregiver_routes_reject_unauth_admin_and_service_before_storage"
@@ -852,7 +854,7 @@ jobs:
           for required_id in "${required_incident_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$incident_ids"
           done
-          test "$(grep -c '::' <<<"$incident_ids")" -eq 72
+          test "$(grep -c '::' <<<"$incident_ids")" -eq 74
           pytest \
             tests/unit/test_ella_incident_1182_route_isolation.py \
             tests/unit/test_ella_incident_1182_callback_auth.py \
@@ -1031,7 +1033,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 21
-          test "$collected" -eq 630
+          test "$collected" -eq 632
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
