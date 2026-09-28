@@ -199,3 +199,13 @@ app/ios/Runner/Batch/LimitlessBatchAudioWriter.swift
 app/ios/Runner/Limitless/LimitlessFlashDrainEngine.swift
 app/ios/Runner/Limitless/LimitlessProtocol.swift
 app/ios/Runner/SyncTransferBackgroundLease.swift
+# --- upstream capture tests + test support, run against the vendored stack
+app/test/support/capture/capture_replay_world.dart
+app/test/support/capture/scripted_device_connection.dart
+app/test/support/capture/virtual_capture_time.dart
+app/test/services/capture/capture_one_source_test.dart
+app/test/unit/capture_recovery_replay_scenarios_test.dart
+app/test/unit/capture_mute_admission_test.dart
+app/test/unit/phone_mic_wal_test.dart
+app/test/unit/native_mic_recorder_service_test.dart
+app/test/services/wals/recording_transfer_coordinator_test.dart

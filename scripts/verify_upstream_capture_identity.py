@@ -43,11 +43,15 @@ from dataclasses import dataclass
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MANIFEST = os.path.join('app', 'lib', 'upstream_capture', 'UPSTREAM_OWNED.txt')
 VENDOR_ROOT = os.path.join('app', 'lib', 'upstream_capture')
+# Upstream's own capture tests/fixtures, vendored to run against the vendored stack.
+VENDOR_TEST_ROOT = os.path.join('app', 'test', 'upstream_capture')
 ALLOWED_UNLISTED = {'UPSTREAM_OWNED.txt', 'UPSTREAM_PATCHES.md', 'README.md'}
 PACKAGE_PREFIX = 'package:omi/'
 RELOCATED_PREFIX = 'package:omi/upstream_capture/'
 UPSTREAM_DART_ROOT = 'app/lib/'
 LOCAL_DART_ROOT = 'app/lib/upstream_capture/'
+UPSTREAM_TEST_ROOT = 'app/test/'
+LOCAL_TEST_ROOT = 'app/test/upstream_capture/'
 # dart-relocated: Dart file under app/lib/upstream_capture/ with the import relocation applied.
 # verbatim:       non-Dart file (Swift/ObjC/Markdown) at its upstream path, byte-identical.
 # in-place:       shared fork Dart file replaced by the pin's bytes at its ORIGINAL path (a strict,
@@ -75,6 +79,8 @@ def local_path_for(upstream_path: str, kind: str | None = None) -> str:
         return upstream_path
     if upstream_path.startswith(UPSTREAM_DART_ROOT):
         return LOCAL_DART_ROOT + upstream_path[len(UPSTREAM_DART_ROOT) :]
+    if upstream_path.startswith(UPSTREAM_TEST_ROOT):
+        return LOCAL_TEST_ROOT + upstream_path[len(UPSTREAM_TEST_ROOT) :]
     return upstream_path
 
 
@@ -191,16 +197,16 @@ def verify(require_pin: bool, verbose: bool) -> int:
         if git_blob_id(original) != e.blob:
             failures.append(f'{e.local_path}: differs from upstream {e.upstream_path}@{pin[:12]} (blob {e.blob})')
 
-    # No stray files inside the vendored Dart tree.
-    vendor_root = os.path.join(REPO_ROOT, VENDOR_ROOT)
-    for dirpath, _, files in os.walk(vendor_root):
-        for name in files:
-            rel = os.path.relpath(os.path.join(dirpath, name), REPO_ROOT).replace(os.sep, '/')
-            if rel in seen_local:
-                continue
-            if os.path.dirname(rel) == VENDOR_ROOT.replace(os.sep, '/') and name in ALLOWED_UNLISTED:
-                continue
-            failures.append(f'{rel}: unlisted file inside the upstream-owned tree')
+    # No stray files inside the vendored Dart trees (Ella code must live outside them).
+    for root in (VENDOR_ROOT, VENDOR_TEST_ROOT):
+        for dirpath, _, files in os.walk(os.path.join(REPO_ROOT, root)):
+            for name in files:
+                rel = os.path.relpath(os.path.join(dirpath, name), REPO_ROOT).replace(os.sep, '/')
+                if rel in seen_local:
+                    continue
+                if os.path.dirname(rel) == VENDOR_ROOT.replace(os.sep, '/') and name in ALLOWED_UNLISTED:
+                    continue
+                failures.append(f'{rel}: unlisted file inside the upstream-owned tree')
 
     online = pin_available(pin)
     if not online and require_pin:
