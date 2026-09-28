@@ -376,6 +376,77 @@ class BleDeviceDiagnostics {
   int get hashCode => Object.hashAll(_toList());
 }
 
+/// Redacted cross-layer BLE discovery diagnostics recorded natively — counts
+/// and state labels only, never device names or UUIDs.
+class BleNativeDiscoveryDiagnostics {
+  BleNativeDiscoveryDiagnostics({
+    required this.lastStartScanCbState,
+    required this.scansStartedImmediately,
+    required this.scansQueued,
+    required this.queuedScansFired,
+    required this.didDiscoverCount,
+    required this.flutterApiNilDropCount,
+  });
+
+  /// CoreBluetooth state observed at the most recent startScan call.
+  String lastStartScanCbState;
+
+  int scansStartedImmediately;
+
+  int scansQueued;
+
+  int queuedScansFired;
+
+  /// Incremented before the didDiscover Pigeon call reaches Dart.
+  int didDiscoverCount;
+
+  /// Count of didDiscover callbacks dropped because flutterApi was nil.
+  int flutterApiNilDropCount;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      lastStartScanCbState,
+      scansStartedImmediately,
+      scansQueued,
+      queuedScansFired,
+      didDiscoverCount,
+      flutterApiNilDropCount,
+    ];
+  }
+
+  Object encode() {
+    return _toList();
+  }
+
+  static BleNativeDiscoveryDiagnostics decode(Object result) {
+    result as List<Object?>;
+    return BleNativeDiscoveryDiagnostics(
+      lastStartScanCbState: result[0]! as String,
+      scansStartedImmediately: result[1]! as int,
+      scansQueued: result[2]! as int,
+      queuedScansFired: result[3]! as int,
+      didDiscoverCount: result[4]! as int,
+      flutterApiNilDropCount: result[5]! as int,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! BleNativeDiscoveryDiagnostics || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(encode(), other.encode());
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => Object.hashAll(_toList());
+}
+
 /// A pair of Ray-Ban Meta glasses reported by the Meta Wearables toolkit.
 class RayBanMetaGlasses {
   RayBanMetaGlasses({
@@ -498,6 +569,9 @@ class _PigeonCodec extends StandardMessageCodec {
     } else if (value is BluetoothHfpInput) {
       buffer.putUint8(135);
       writeValue(buffer, value.encode());
+    } else if (value is BleNativeDiscoveryDiagnostics) {
+      buffer.putUint8(136);
+      writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
     }
@@ -520,6 +594,8 @@ class _PigeonCodec extends StandardMessageCodec {
         return RayBanMetaGlasses.decode(readValue(buffer)!);
       case 135:
         return BluetoothHfpInput.decode(readValue(buffer)!);
+      case 136:
+        return BleNativeDiscoveryDiagnostics.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
     }
@@ -1553,6 +1629,36 @@ class BleHostApi {
       );
     } else {
       return (pigeonVar_replyList[0] as BleDeviceDiagnostics?)!;
+    }
+  }
+
+  /// Cross-layer discovery diagnostics recorded natively (CoreBluetooth state,
+  /// started-vs-queued, didDiscover count, flutterApi-nil drop count).
+  Future<BleNativeDiscoveryDiagnostics> getNativeDiscoveryDiagnostics() async {
+    final String pigeonVar_channelName =
+        'dev.flutter.pigeon.omi_pigeon.BleHostApi.getNativeDiscoveryDiagnostics$pigeonVar_messageChannelSuffix';
+    final BasicMessageChannel<Object?> pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final List<Object?>? pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    if (pigeonVar_replyList == null) {
+      throw _createConnectionError(pigeonVar_channelName);
+    } else if (pigeonVar_replyList.length > 1) {
+      throw PlatformException(
+        code: pigeonVar_replyList[0]! as String,
+        message: pigeonVar_replyList[1] as String?,
+        details: pigeonVar_replyList[2],
+      );
+    } else if (pigeonVar_replyList[0] == null) {
+      throw PlatformException(
+        code: 'null-error',
+        message: 'Host platform returned null value for non-null return value.',
+      );
+    } else {
+      return (pigeonVar_replyList[0] as BleNativeDiscoveryDiagnostics?)!;
     }
   }
 
