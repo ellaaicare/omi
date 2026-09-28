@@ -108,7 +108,7 @@ class AiConsentPolicy {
         'openai-codex:managed-agent-model-memory-illustration|photon:messaging-delivery|'
         'openrouter:model-routing|google-gemini:language-live-voice|openai:language-live-voice|'
         'groq:language|xai-grok:language-live-voice|'
-        'inworld:tts|elevenlabs:tts-fallback',
+        'inworld:tts|elevenlabs:tts-fallback|typesafe:guardian-whispers-safety-classification',
     scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
     scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
     canonicalScope: 'profile_binding=server-profile-v1|runtime_provider=hermes_cloud|'
@@ -212,6 +212,12 @@ class AiConsentPolicy {
         name: 'xAI Grok',
         function: 'Language processing and live voice',
         data: 'Text, selected context, or live microphone audio',
+      ),
+      AiConsentProcessor(
+        id: 'typesafe',
+        name: 'TypeSafe (Jev), via OpenRouter',
+        function: 'Conversation safety classification for Guardian and Whispers',
+        data: 'Conversation transcript text windows (no audio)',
       ),
       AiConsentProcessor(id: 'inworld', name: 'Inworld AI', function: 'Voice synthesis', data: 'Response text'),
       AiConsentProcessor(
