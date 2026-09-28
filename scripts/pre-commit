@@ -1,7 +1,16 @@
 #!/bin/sh
 
 # Dart formatting for app/
-STAGED_DART_FILES=$(git diff --cached --name-only --diff-filter=ACM "app/**.dart" | grep -v -e '\.gen\.dart$' -e '\.g\.dart$')
+# Upstream-owned files (BasedHardware/omi pin, see app/lib/upstream_capture/UPSTREAM_OWNED.txt) must stay
+# byte-identical to the pin, so they are never reformatted; scripts/verify_upstream_capture_identity.py guards them.
+UPSTREAM_OWNED_MANIFEST="app/lib/upstream_capture/UPSTREAM_OWNED.txt"
+STAGED_DART_FILES=$(git diff --cached --name-only --diff-filter=ACM "app/**.dart" | grep -v -e '\.gen\.dart$' -e '\.g\.dart$' -e '^app/lib/upstream_capture/')
+if [ -n "$STAGED_DART_FILES" ] && [ -f "$UPSTREAM_OWNED_MANIFEST" ]; then
+  UPSTREAM_OWNED_PATHS=$(awk -F '\t' 'NF == 4 { print $4 }' "$UPSTREAM_OWNED_MANIFEST")
+  if [ -n "$UPSTREAM_OWNED_PATHS" ]; then
+    STAGED_DART_FILES=$(echo "$STAGED_DART_FILES" | grep -v -x -F "$UPSTREAM_OWNED_PATHS" || true)
+  fi
+fi
 
 if [ -n "$STAGED_DART_FILES" ]; then
   echo "Formatting staged Dart files in app/..."

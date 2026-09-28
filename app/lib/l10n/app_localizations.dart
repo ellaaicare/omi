@@ -18608,6 +18608,84 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Ella will wait until you review AI permission.'**
   String get aiConsentNeededReviewBody;
+
+  /// No description provided for @transcriptionPausedReconnecting.
+  ///
+  /// In en, this message translates to:
+  /// **'Still recording — reconnecting to transcription…'**
+  String get transcriptionPausedReconnecting;
+
+  /// No description provided for @upstreamCaptureRecordingNecklace.
+  ///
+  /// In en, this message translates to:
+  /// **'Recording with your necklace'**
+  String get upstreamCaptureRecordingNecklace;
+
+  /// No description provided for @upstreamCaptureRecordPhone.
+  ///
+  /// In en, this message translates to:
+  /// **'Record with phone'**
+  String get upstreamCaptureRecordPhone;
+
+  /// No description provided for @upstreamCaptureStarting.
+  ///
+  /// In en, this message translates to:
+  /// **'Starting…'**
+  String get upstreamCaptureStarting;
+
+  /// No description provided for @upstreamCaptureFinish.
+  ///
+  /// In en, this message translates to:
+  /// **'Finish conversation'**
+  String get upstreamCaptureFinish;
+
+  /// No description provided for @upstreamCaptureDisconnectNecklace.
+  ///
+  /// In en, this message translates to:
+  /// **'Disconnect necklace'**
+  String get upstreamCaptureDisconnectNecklace;
+
+  /// No description provided for @upstreamCaptureConsentRequired.
+  ///
+  /// In en, this message translates to:
+  /// **'Review AI permission before recording.'**
+  String get upstreamCaptureConsentRequired;
+
+  /// No description provided for @upstreamCaptureUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Recording is unavailable right now.'**
+  String get upstreamCaptureUnavailable;
+
+  /// No description provided for @upstreamCaptureNoNecklaceFound.
+  ///
+  /// In en, this message translates to:
+  /// **'No necklace found. Make sure it is on and nearby.'**
+  String get upstreamCaptureNoNecklaceFound;
+
+  /// No description provided for @upstreamCaptureConnectNecklace.
+  ///
+  /// In en, this message translates to:
+  /// **'Connect necklace'**
+  String get upstreamCaptureConnectNecklace;
+
+  /// No description provided for @upstreamCaptureStop.
+  ///
+  /// In en, this message translates to:
+  /// **'Stop recording'**
+  String get upstreamCaptureStop;
+
+  /// No description provided for @upstreamCaptureRecordingPhone.
+  ///
+  /// In en, this message translates to:
+  /// **'Recording with your phone'**
+  String get upstreamCaptureRecordingPhone;
+
+  /// No description provided for @upstreamCaptureSearching.
+  ///
+  /// In en, this message translates to:
+  /// **'Looking for your necklace…'**
+  String get upstreamCaptureSearching;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

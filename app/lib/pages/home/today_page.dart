@@ -40,6 +40,7 @@ import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/capture_host/ella_capture_host.dart';
 
 typedef TodayCardTalkRouteOpener = Future<void> Function(BuildContext context, TodayCard card);
 typedef TodayCardAuthoritySnapshot = ({String uid, String authorityKey, bool isProvisioningReady});
@@ -2137,39 +2138,40 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
             left: 14,
             right: 14,
             bottom: EllaSizes.navBarHeight + MediaQuery.paddingOf(context).bottom + 16,
-            child: TodayRecordMomentControl(
-              selectedSource: selectedCaptureSource,
-              activeSource: activeCaptureSource,
-              externalCaptureFinalizationPending: captureFinalizationPending,
-              starting: _homeCaptureStarting,
-              hasNecklace: hasNecklace,
-              legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
-              necklaceConnected: deviceConnected,
-              necklaceConnecting: device.isConnecting,
-              necklaceConnectionFailed: device.connectionAttemptFailed,
-              recordingState: capture.recordingState,
-              diagnostics: capture.captureDiagnostics,
-              transcriptionReady: capture.transcriptServiceReady,
-              showWhispers: showGuardianSurfaces,
-              whispersEnabled: _whispersOn,
-              whispersVerified: _whispersVerified,
-              onOpenControls: openControls,
-              onOpenWhispers: () =>
-                  Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage())),
-              onViewTranscript: () => _openLiveTranscript(capture),
-              onSourceSelected: _selectCaptureSource,
-              onReviewConsent: () => unawaited(AiConsentCoordinator.ensure(context)),
-              onUnavailable: () => ScaffoldMessenger.of(
-                context,
-              ).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable))),
-              onTap: () => _handleCapturePrimaryAction(
-                selectedSource: selectedCaptureSource,
-                capture: capture,
-                device: device,
-                homeCaptureOwned: homeCaptureOwned,
-                legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
-              ),
-            ),
+            child: EllaCaptureHost.homeCaptureDockBuilder?.call(context) ??
+                TodayRecordMomentControl(
+                  selectedSource: selectedCaptureSource,
+                  activeSource: activeCaptureSource,
+                  externalCaptureFinalizationPending: captureFinalizationPending,
+                  starting: _homeCaptureStarting,
+                  hasNecklace: hasNecklace,
+                  legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
+                  necklaceConnected: deviceConnected,
+                  necklaceConnecting: device.isConnecting,
+                  necklaceConnectionFailed: device.connectionAttemptFailed,
+                  recordingState: capture.recordingState,
+                  diagnostics: capture.captureDiagnostics,
+                  transcriptionReady: capture.transcriptServiceReady,
+                  showWhispers: showGuardianSurfaces,
+                  whispersEnabled: _whispersOn,
+                  whispersVerified: _whispersVerified,
+                  onOpenControls: openControls,
+                  onOpenWhispers: () =>
+                      Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage())),
+                  onViewTranscript: () => _openLiveTranscript(capture),
+                  onSourceSelected: _selectCaptureSource,
+                  onReviewConsent: () => unawaited(AiConsentCoordinator.ensure(context)),
+                  onUnavailable: () => ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable))),
+                  onTap: () => _handleCapturePrimaryAction(
+                    selectedSource: selectedCaptureSource,
+                    capture: capture,
+                    device: device,
+                    homeCaptureOwned: homeCaptureOwned,
+                    legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
+                  ),
+                ),
           ),
         ],
       ),

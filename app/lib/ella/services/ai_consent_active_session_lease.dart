@@ -171,8 +171,19 @@ class AiConsentActiveSessionLease {
   bool _refreshing = false;
   bool _authorityLossReported = false;
 
+  /// Process-wide monotonic source for [generation]; never reused, never reset.
+  static int _generationCounter = 0;
+  int _generation = 0;
+
   bool get isActive => _active;
   bool get hasCurrentAuthority => _active && _authority?.isCurrent(preferences: _preferences) == true;
+
+  /// Session generation of this lease: minted from a process-wide monotonic
+  /// counter on every [start] and re-minted on every [stop] (including authority
+  /// loss). A consumer captures the value right after [start] and must compare it
+  /// on every use, so a stopped, superseded, or lost session can never be
+  /// mistaken for the current one. 0 means the lease was never started.
+  int get generation => _generation;
 
   @visibleForTesting
   Duration? get scheduledRefreshDelay => _scheduledRefreshDelay;
@@ -192,6 +203,7 @@ class AiConsentActiveSessionLease {
     if (_active) return;
     _authority ??= AiConsentAuthoritySnapshot.capture(preferences: _preferences, expectedUid: uid);
     _active = true;
+    _generation = ++_generationCounter;
     if (_preferences.uid != uid || !_preferences.getBool('aiConsentAccepted', defaultValue: false)) {
       unawaited(_loseAuthority('explicit_not_accepted'));
       return;
@@ -210,6 +222,7 @@ class AiConsentActiveSessionLease {
   }
 
   void stop() {
+    if (_active) _generation = ++_generationCounter;
     _active = false;
     _refreshTimer?.cancel();
     _refreshTimer = null;

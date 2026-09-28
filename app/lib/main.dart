@@ -79,6 +79,7 @@ import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:omi/utils/platform/platform_service.dart';
+import 'package:omi/ella/capture_host/ella_capture_host.dart';
 
 /// Background message handler for FCM data messages
 @pragma('vm:entry-point')
@@ -198,7 +199,11 @@ Future _init() async {
     await DesktopUpdateService().initialize();
   }
 
-  await ServiceManager.instance().start();
+  // Flag-ON graph: the upstream capture stack owns device + WAL services
+  // (see lib/main_upstream_capture.dart); the legacy ones stay unstarted.
+  if (!EllaCaptureHost.legacyCaptureSuppressed) {
+    await ServiceManager.instance().start();
+  }
   return;
 }
 

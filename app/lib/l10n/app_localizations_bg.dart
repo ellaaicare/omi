@@ -10102,4 +10102,43 @@ class AppLocalizationsBg extends AppLocalizations {
 
   @override
   String get aiConsentNeededReviewBody => 'Ella will wait until you review AI permission.';
+
+  @override
+  String get transcriptionPausedReconnecting => 'Все още се записва — свързване с транскрипцията…';
+
+  @override
+  String get upstreamCaptureRecordingNecklace => 'Recording with your necklace';
+
+  @override
+  String get upstreamCaptureRecordPhone => 'Record with phone';
+
+  @override
+  String get upstreamCaptureStarting => 'Starting…';
+
+  @override
+  String get upstreamCaptureFinish => 'Finish conversation';
+
+  @override
+  String get upstreamCaptureDisconnectNecklace => 'Disconnect necklace';
+
+  @override
+  String get upstreamCaptureConsentRequired => 'Review AI permission before recording.';
+
+  @override
+  String get upstreamCaptureUnavailable => 'Recording is unavailable right now.';
+
+  @override
+  String get upstreamCaptureNoNecklaceFound => 'No necklace found. Make sure it is on and nearby.';
+
+  @override
+  String get upstreamCaptureConnectNecklace => 'Connect necklace';
+
+  @override
+  String get upstreamCaptureStop => 'Stop recording';
+
+  @override
+  String get upstreamCaptureRecordingPhone => 'Recording with your phone';
+
+  @override
+  String get upstreamCaptureSearching => 'Looking for your necklace…';
 }

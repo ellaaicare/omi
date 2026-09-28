@@ -9,6 +9,7 @@ import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/services/notifications/ella_notification_handler.dart';
 import 'package:omi/utils/wal_file_manager.dart';
+import 'package:omi/ella/capture_host/ella_capture_host.dart';
 
 class EllaAccountIsolationService {
   const EllaAccountIsolationService({
@@ -142,6 +143,7 @@ class EllaAccountIsolationService {
   }
 
   Future<void> resumeAfterVerifiedProvisioning() async {
+    if (EllaCaptureHost.legacyCaptureSuppressed) return;
     if (ServiceManager.isInitialized) await ServiceManager.instance().start();
   }
 }

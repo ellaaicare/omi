@@ -1,0 +1,11 @@
+# Upstream-owned files vendored byte-for-byte from BasedHardware/omi (ellaaicare/ella-ai#1280).
+# They must stay identical to the pin (scripts/verify_upstream_capture_identity.py), including
+# upstream's own whitespace, so whitespace-error checks (git diff --check) do not apply to them.
+app/lib/upstream_capture/** -whitespace
+app/test/upstream_capture/** -whitespace
+app/ios/Runner/Ble/** -whitespace
+app/ios/Runner/PhoneMic/** -whitespace
+app/ios/Runner/Batch/** -whitespace
+app/ios/Runner/Limitless/** -whitespace
+app/ios/Runner/PigeonCommunicator.g.swift -whitespace
+app/ios/Runner/SyncTransferBackgroundLease.swift -whitespace

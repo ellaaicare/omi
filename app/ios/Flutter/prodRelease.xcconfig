@@ -2,6 +2,7 @@
 #include "Generated.xcconfig"
 #include "Base.xcconfig"
 #include "Custom.xcconfig"
+#include "EllaUpstreamCapture.xcconfig"
 
 ASSET_PREFIX=prod
 BUNDLE_NAME=Omi
