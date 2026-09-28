@@ -118,6 +118,51 @@ void main() {
     expect(find.byKey(const Key('ready-child')), findsOneWidget);
   });
 
+  testWidgets('v10 authority provisions capture before offering a deferrable v11 upgrade', (tester) async {
+    final preferences = SharedPreferencesUtil();
+    preferences.acceptAiConsent(
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}v10-receipt',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-09-28T00:00:00Z',
+      policyVersion: SharedPreferencesUtil.legacyAiConsentContractVersionV10,
+      processorSetHash: SharedPreferencesUtil.legacyAiConsentProcessorSetHashV10,
+    );
+    final transport = _CountingReadyTransport();
+    final provider = EllaProvisioningProvider(transport: transport);
+    addTearDown(provider.dispose);
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider.value(
+        value: provider,
+        child: MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: EllaProvisioningGatePage(
+            readyChild: const SizedBox(key: Key('ready-child')),
+            authenticatedUidProvider: () => 'uid-a',
+            appVersionProvider: () => '1.0.572+872',
+            consentAuthorityRefresher: (_) async => true,
+            timezoneProvider: () async => 'America/Los_Angeles',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(transport.ensureCalls, 1);
+    expect(find.byKey(const Key('ready-child')), findsOneWidget);
+    expect(find.text('Not now'), findsOneWidget);
+
+    await tester.tap(find.text('Not now'));
+    await tester.pumpAndSettle();
+
+    expect(preferences.aiConsentAccepted, isTrue);
+    expect(preferences.aiConsentContractVersion, SharedPreferencesUtil.legacyAiConsentContractVersionV10);
+    expect(preferences.isCurrentAiConsentDeferred, isTrue);
+    expect(find.byKey(const Key('ready-child')), findsOneWidget);
+  });
+
   testWidgets('foreground revalidation preserves Home while an operational receipt is checked', (tester) async {
     final transport = _DelayedResumeTransport();
     final provider = EllaProvisioningProvider(transport: transport);
@@ -169,10 +214,7 @@ void main() {
 
   testWidgets('transient foreground revalidation failure does not replace an operational Home', (tester) async {
     final transport = _DelayedResumeTransport();
-    final provider = EllaProvisioningProvider(
-      transport: transport,
-      scheduler: (delay, callback) => _InertPollHandle(),
-    );
+    final provider = EllaProvisioningProvider(transport: transport, scheduler: (delay, callback) => _InertPollHandle());
     addTearDown(provider.dispose);
     await provider.start(
       uid: 'uid-a',
@@ -236,10 +278,7 @@ void main() {
         child: const MaterialApp(
           localizationsDelegates: AppLocalizations.localizationsDelegates,
           supportedLocales: AppLocalizations.supportedLocales,
-          home: EllaProvisioningGatePage(
-            readyChild: SizedBox(key: Key('ready-child')),
-            startOnMount: false,
-          ),
+          home: EllaProvisioningGatePage(readyChild: SizedBox(key: Key('ready-child')), startOnMount: false),
         ),
       ),
     );

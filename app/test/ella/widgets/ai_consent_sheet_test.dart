@@ -325,6 +325,43 @@ void main() {
     expect(preferences.isCurrentAiConsentDeferred, isTrue);
   });
 
+  testWidgets('Not now on the v11 upgrade preserves exact v10 capture authority', (tester) async {
+    final preferences = SharedPreferencesUtil()..uid = 'uid-a';
+    preferences.acceptAiConsent(
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}v10-receipt',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
+      policyVersion: SharedPreferencesUtil.legacyAiConsentContractVersionV10,
+      processorSetHash: SharedPreferencesUtil.legacyAiConsentProcessorSetHashV10,
+    );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}v10-receipt',
+      policyVersion: SharedPreferencesUtil.legacyAiConsentContractVersionV10,
+      processorSetHash: SharedPreferencesUtil.legacyAiConsentProcessorSetHashV10,
+      profileBindingId: 'profile-binding-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+
+    await tester.pumpWidget(
+      const MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(body: AiConsentSheet(preserveExistingAuthorityOnDecline: true)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Not now'));
+    await tester.tap(find.text('Not now'));
+    await tester.pumpAndSettle();
+
+    expect(preferences.aiConsentAccepted, isTrue);
+    expect(preferences.aiConsentContractVersion, SharedPreferencesUtil.legacyAiConsentContractVersionV10);
+    expect(preferences.isCurrentAiConsentDeferred, isTrue);
+  });
+
   testWidgets('review mode exposes revoke and deletion actions', (tester) async {
     final preferences = SharedPreferencesUtil();
     preferences.uid = 'uid-a';

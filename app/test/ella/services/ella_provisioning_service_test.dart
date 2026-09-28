@@ -266,9 +266,7 @@ void main() {
   });
 
   test('HTTP 426 is a hard update gate and never enters Home authority', () async {
-    final transport = _FakeTransport(
-      ensureResponses: const [EllaProvisioningResponse(statusCode: 426)],
-    );
+    final transport = _FakeTransport(ensureResponses: const [EllaProvisioningResponse(statusCode: 426)]);
     final provider = EllaProvisioningProvider(transport: transport);
 
     await provider.start(uid: 'uid-a', requestContext: _requestContext);
@@ -402,10 +400,7 @@ void main() {
           name: 'HTTP $statusCode',
           response: EllaProvisioningResponse(
             statusCode: statusCode,
-            receipt: const EllaProvisioningReceipt(
-              state: EllaProvisioningState.provisioning,
-              retryable: true,
-            ),
+            receipt: const EllaProvisioningReceipt(state: EllaProvisioningState.provisioning, retryable: true),
           ),
         ),
       (
@@ -423,10 +418,7 @@ void main() {
         name: 'unknown blocked receipt',
         response: const EllaProvisioningResponse(
           statusCode: 200,
-          receipt: EllaProvisioningReceipt(
-            state: EllaProvisioningState.blocked,
-            errorCode: 'blocked',
-          ),
+          receipt: EllaProvisioningReceipt(state: EllaProvisioningState.blocked, errorCode: 'blocked'),
         ),
       ),
       (
@@ -490,10 +482,7 @@ void main() {
       transport: _ReadyThenRevalidationTransport(
         response: const EllaProvisioningResponse(
           statusCode: 202,
-          receipt: EllaProvisioningReceipt(
-            state: EllaProvisioningState.provisioning,
-            retryable: true,
-          ),
+          receipt: EllaProvisioningReceipt(state: EllaProvisioningState.provisioning, retryable: true),
         ),
       ),
       preferences: preferences,
@@ -566,9 +555,7 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       await SharedPreferencesUtil.init();
       final preferences = await _prepareOperationalConsent();
-      final transport = _ReadyThenRevalidationTransport(
-        response: EllaProvisioningResponse(statusCode: statusCode),
-      );
+      final transport = _ReadyThenRevalidationTransport(response: EllaProvisioningResponse(statusCode: statusCode));
       final provider = EllaProvisioningProvider(transport: transport, preferences: preferences);
 
       await provider.start(uid: 'uid-a', requestContext: _requestContext);
@@ -604,10 +591,7 @@ void main() {
     final transport = _ReadyThenRevalidationTransport(
       response: const EllaProvisioningResponse(
         statusCode: 202,
-        receipt: EllaProvisioningReceipt(
-          state: EllaProvisioningState.provisioning,
-          retryable: true,
-        ),
+        receipt: EllaProvisioningReceipt(state: EllaProvisioningState.provisioning, retryable: true),
       ),
     );
     final provider = EllaProvisioningProvider(
@@ -631,10 +615,7 @@ void main() {
 
   test('disposing the provisioning owner closes protected authority', () async {
     final preferences = await _prepareOperationalConsent();
-    final provider = EllaProvisioningProvider(
-      transport: _ReadyThenRevalidationTransport(),
-      preferences: preferences,
-    );
+    final provider = EllaProvisioningProvider(transport: _ReadyThenRevalidationTransport(), preferences: preferences);
 
     await provider.start(uid: 'uid-a', requestContext: _requestContext);
     expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
@@ -798,15 +779,9 @@ void main() {
       scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
     );
     final provisioningTransport = _FakeTransport(
-      ensureResponses: [
-        _readyProvisioningResponse(bindingRevision: 1),
-        _readyProvisioningResponse(bindingRevision: 2),
-      ],
+      ensureResponses: [_readyProvisioningResponse(bindingRevision: 1), _readyProvisioningResponse(bindingRevision: 2)],
     );
-    final provider = EllaProvisioningProvider(
-      transport: provisioningTransport,
-      preferences: preferences,
-    );
+    final provider = EllaProvisioningProvider(transport: provisioningTransport, preferences: preferences);
     await provider.start(
       uid: 'uid-a',
       requestContext: EllaProvisioningRequestContext(
@@ -884,10 +859,7 @@ void main() {
     lease.stop();
     provider.dispose();
     expect(
-      await EllaProvisioningAuthorityCoordinator.revalidate(
-        uid: 'uid-a',
-        consentReceiptId: 'aicr_receipt-b',
-      ),
+      await EllaProvisioningAuthorityCoordinator.revalidate(uid: 'uid-a', consentReceiptId: 'aicr_receipt-b'),
       isFalse,
     );
   });
@@ -903,10 +875,7 @@ void main() {
     );
 
     expect(
-      await EllaProvisioningAuthorityCoordinator.revalidate(
-        uid: 'uid-a',
-        consentReceiptId: 'aicr_receipt-a',
-      ),
+      await EllaProvisioningAuthorityCoordinator.revalidate(uid: 'uid-a', consentReceiptId: 'aicr_receipt-a'),
       isFalse,
     );
     expect(calls, isEmpty);
@@ -973,9 +942,7 @@ void main() {
     final readyNotifications = <bool>[];
     provider.addListener(() {
       if (provider.isOperational) {
-        readyNotifications.add(
-          preferences.hasCurrentEllaProvisioningAuthority(uid: 'uid-a', bindingRevision: 1),
-        );
+        readyNotifications.add(preferences.hasCurrentEllaProvisioningAuthority(uid: 'uid-a', bindingRevision: 1));
       }
     });
 
@@ -1014,94 +981,94 @@ void main() {
     provider.dispose();
   });
 
-  test('receipt replacement quarantines an overlapping obsolete ensure before retrying with current authority',
-      () async {
-    final preferences = SharedPreferencesUtil()..uid = 'uid-a';
-    final transport = _ReceiptReplacementEnsureTransport();
-    final provider = EllaProvisioningProvider(transport: transport);
-    await provider.start(
-      uid: 'uid-a',
-      requestContext: EllaProvisioningRequestContext(
-        appVersion: '1.0.524+800',
-        locale: 'en-US',
-        timezone: 'America/Los_Angeles',
-        clientRequestId: 'request-receipt-a',
-        consentReceiptId: 'aicr_receipt-a',
-      ),
-    );
-    preferences.acceptAiConsent(
-      receiptId: 'aicr_receipt-a',
-      uid: 'uid-a',
-      profileBindingId: 'profile-binding-a',
-      serverDecidedAt: '2026-07-27T00:00:00Z',
-    );
-    preferences.markAiConsentServerVerified(
-      uid: 'uid-a',
-      receiptId: 'aicr_receipt-a',
-      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
-      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
-      profileBindingId: 'profile-binding-a',
-      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
-      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
-    );
-    await preferences.markEllaProvisioningVerified('uid-a');
+  test(
+    'receipt replacement quarantines an overlapping obsolete ensure before retrying with current authority',
+    () async {
+      final preferences = SharedPreferencesUtil()..uid = 'uid-a';
+      final transport = _ReceiptReplacementEnsureTransport();
+      final provider = EllaProvisioningProvider(transport: transport);
+      await provider.start(
+        uid: 'uid-a',
+        requestContext: EllaProvisioningRequestContext(
+          appVersion: '1.0.524+800',
+          locale: 'en-US',
+          timezone: 'America/Los_Angeles',
+          clientRequestId: 'request-receipt-a',
+          consentReceiptId: 'aicr_receipt-a',
+        ),
+      );
+      preferences.acceptAiConsent(
+        receiptId: 'aicr_receipt-a',
+        uid: 'uid-a',
+        profileBindingId: 'profile-binding-a',
+        serverDecidedAt: '2026-07-27T00:00:00Z',
+      );
+      preferences.markAiConsentServerVerified(
+        uid: 'uid-a',
+        receiptId: 'aicr_receipt-a',
+        policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+        processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+        profileBindingId: 'profile-binding-a',
+        scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+        scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+      );
+      await preferences.markEllaProvisioningVerified('uid-a');
 
-    final readyNotifications = <({int ensureCalls, int bindingRevision, bool authorityCurrent})>[];
-    provider.addListener(() {
-      if (provider.isOperational) {
-        final bindingRevision = provider.receipt?.bindingRevision ?? 0;
-        readyNotifications.add((
-          ensureCalls: transport.ensureCalls,
-          bindingRevision: bindingRevision,
-          authorityCurrent: preferences.hasCurrentEllaProvisioningAuthority(
-            uid: 'uid-a',
+      final readyNotifications = <({int ensureCalls, int bindingRevision, bool authorityCurrent})>[];
+      provider.addListener(() {
+        if (provider.isOperational) {
+          final bindingRevision = provider.receipt?.bindingRevision ?? 0;
+          readyNotifications.add((
+            ensureCalls: transport.ensureCalls,
             bindingRevision: bindingRevision,
-          ),
-        ));
-      }
-    });
+            authorityCurrent: preferences.hasCurrentEllaProvisioningAuthority(
+              uid: 'uid-a',
+              bindingRevision: bindingRevision,
+            ),
+          ));
+        }
+      });
 
-    final staleEnsure = provider.retry();
-    await transport.staleEnsureStarted.future;
-    expect(provider.state, EllaProvisioningState.checking);
-    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
-    expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
-    preferences.acceptAiConsent(
-      receiptId: 'aicr_receipt-b',
-      uid: 'uid-a',
-      profileBindingId: 'profile-binding-a',
-      serverDecidedAt: '2026-07-27T00:01:00Z',
-    );
-    preferences.markAiConsentServerVerified(
-      uid: 'uid-a',
-      receiptId: 'aicr_receipt-b',
-      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
-      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
-      profileBindingId: 'profile-binding-a',
-      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
-      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
-    );
-    provider.setConsentReceiptId('aicr_receipt-b');
-    transport.completeStaleEnsure();
-    await staleEnsure;
-    await transport.replacementEnsureStarted.future;
-    await Future<void>.delayed(Duration.zero);
-    await Future<void>.delayed(Duration.zero);
+      final staleEnsure = provider.retry();
+      await transport.staleEnsureStarted.future;
+      expect(provider.state, EllaProvisioningState.checking);
+      expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
+      expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNull);
+      preferences.acceptAiConsent(
+        receiptId: 'aicr_receipt-b',
+        uid: 'uid-a',
+        profileBindingId: 'profile-binding-a',
+        serverDecidedAt: '2026-07-27T00:01:00Z',
+      );
+      preferences.markAiConsentServerVerified(
+        uid: 'uid-a',
+        receiptId: 'aicr_receipt-b',
+        policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+        processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+        profileBindingId: 'profile-binding-a',
+        scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+        scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+      );
+      provider.setConsentReceiptId('aicr_receipt-b');
+      transport.completeStaleEnsure();
+      await staleEnsure;
+      await transport.replacementEnsureStarted.future;
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
 
-    expect(transport.ensureContexts.map((context) => context.consentReceiptId), [
-      'aicr_receipt-a',
-      'aicr_receipt-a',
-      'aicr_receipt-b',
-    ]);
-    expect(readyNotifications, [
-      (ensureCalls: 3, bindingRevision: 2, authorityCurrent: true),
-    ]);
-    expect(provider.receipt?.bindingRevision, 2);
-    expect(preferences.getEllaProvisioningReceipt('uid-a')?['binding_revision'], 2);
-    expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
-    expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
-    provider.dispose();
-  });
+      expect(transport.ensureContexts.map((context) => context.consentReceiptId), [
+        'aicr_receipt-a',
+        'aicr_receipt-a',
+        'aicr_receipt-b',
+      ]);
+      expect(readyNotifications, [(ensureCalls: 3, bindingRevision: 2, authorityCurrent: true)]);
+      expect(provider.receipt?.bindingRevision, 2);
+      expect(preferences.getEllaProvisioningReceipt('uid-a')?['binding_revision'], 2);
+      expect(WalOwnerAuthority.active(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+      expect(WalOwnerAuthority.operationEntry(preferences: preferences, authenticatedUid: 'uid-a'), isNotNull);
+      provider.dispose();
+    },
+  );
 
   test('AI consent becomes authority only after an exact server v8 managed-cloud grant', () async {
     SharedPreferencesUtil().uid = 'uid-a';
@@ -1178,11 +1145,7 @@ void main() {
   test('post-deletion grant fails closed when no fresh server account epoch is available', () async {
     SharedPreferencesUtil().uid = 'uid-a';
     final transport = _DeletedAccountEpochConsentTransport(
-      epochStatus: _consentStatus(
-        authorized: false,
-        decision: 'deleted',
-        authorityState: 'deleted',
-      ),
+      epochStatus: _consentStatus(authorized: false, decision: 'deleted', authorityState: 'deleted'),
       acceptedStatus: _consentStatus(),
     );
     final service = EllaAiConsentService(
@@ -1267,6 +1230,33 @@ void main() {
     expect(preferences.aiConsentReceiptId, 'aicr_server-receipt');
     expect(transport.policyCalls, 1);
     expect(transport.statusCalls, 1);
+  });
+
+  test('v11 client explicitly negotiates the deployed policy version', () {
+    expect(
+      EllaAiConsentHttpTransport.negotiatedEndpoint('https://api.example.test/v1/users/ai-consent'),
+      'https://api.example.test/v1/users/ai-consent?policy_version=ai-data-processors-v11',
+    );
+  });
+
+  test('exact v10 server authority remains operational while v11 consent is pending', () async {
+    final preferences = SharedPreferencesUtil()..uid = 'uid-a';
+    final transport = _FakeConsentTransport(
+      policy: AiConsentPolicy.bundled,
+      statusResponse: _consentStatus(
+        policy: AiConsentPolicy.legacyV10,
+        policyVersion: SharedPreferencesUtil.legacyAiConsentContractVersionV10,
+        processorSetHash: SharedPreferencesUtil.legacyAiConsentProcessorSetHashV10,
+      ),
+    );
+
+    final authorized = await EllaAiConsentService(transport: transport).refreshServerAuthority(uid: 'uid-a');
+
+    expect(authorized, isTrue);
+    expect(preferences.aiConsentAccepted, isTrue);
+    expect(preferences.hasPriorAccountBoundAiConsent('uid-a'), isTrue);
+    expect(preferences.hasCurrentVersionAccountBoundAiConsent('uid-a'), isFalse);
+    expect(preferences.aiConsentServerVerificationRemaining, isNotNull);
   });
 
   test('active authority remains valid while an early refresh is in flight', () async {
@@ -1713,10 +1703,7 @@ class _FakeConsentTransport extends EllaAiConsentTransport {
   @override
   Future<AiConsentFetchResult> fetchStatusWithDetails() async {
     statusCalls++;
-    return AiConsentFetchResult(
-      status: statusResponse,
-      httpStatus: statusResponse == null ? 503 : 200,
-    );
+    return AiConsentFetchResult(status: statusResponse, httpStatus: statusResponse == null ? 503 : 200);
   }
 
   @override
@@ -1849,14 +1836,16 @@ AiConsentStatus _consentStatus({
   bool includeServerDecidedAt = true,
   String authorityState = '',
   String accountEpochToken = '',
+  String policyVersion = SharedPreferencesUtil.currentAiConsentContractVersion,
+  AiConsentPolicy policy = AiConsentPolicy.bundled,
 }) {
   return AiConsentStatus(
     subjectUid: 'uid-a',
     authorized: authorized,
-    policy: AiConsentPolicy.bundled,
+    policy: policy,
     decision: decision,
     receiptId: 'aicr_server-receipt',
-    policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+    policyVersion: policyVersion,
     processorSetHash: processorSetHash,
     appVersion: '1.0.528',
     buildNumber: '804',

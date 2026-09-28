@@ -19,6 +19,7 @@ class AiConsentSheet extends StatefulWidget {
     this.onRequestDeletion,
     this.canPersistDecision,
     this.reviewMode = false,
+    this.preserveExistingAuthorityOnDecline = false,
   });
 
   final Future<AiConsentGrantOutcome> Function()? onAccept;
@@ -26,6 +27,7 @@ class AiConsentSheet extends StatefulWidget {
   final Future<void> Function()? onRequestDeletion;
   final bool Function()? canPersistDecision;
   final bool reviewMode;
+  final bool preserveExistingAuthorityOnDecline;
 
   static Future<bool?> show(
     BuildContext context, {
@@ -34,6 +36,7 @@ class AiConsentSheet extends StatefulWidget {
     Future<void> Function()? onRequestDeletion,
     bool Function()? canPersistDecision,
     bool reviewMode = false,
+    bool preserveExistingAuthorityOnDecline = false,
     bool pilotLocaleRestricted = isEllaInternalPilotEnabled,
   }) {
     if (pilotLocaleRestricted && !isEllaInternalPilotLocaleSupported(Localizations.localeOf(context).languageCode)) {
@@ -55,6 +58,7 @@ class AiConsentSheet extends StatefulWidget {
           onRequestDeletion: onRequestDeletion,
           canPersistDecision: canPersistDecision,
           reviewMode: reviewMode,
+          preserveExistingAuthorityOnDecline: preserveExistingAuthorityOnDecline,
         ),
       ),
     );
@@ -120,6 +124,8 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
     final preferences = SharedPreferencesUtil();
     if (widget.reviewMode) {
       preferences.declineAiConsent();
+    } else if (widget.preserveExistingAuthorityOnDecline) {
+      preferences.deferAiConsentUpgrade();
     } else {
       preferences.deferAiConsent();
     }

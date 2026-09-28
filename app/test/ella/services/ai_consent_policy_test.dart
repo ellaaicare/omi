@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -7,6 +8,16 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ai_consent_policy.dart';
 
 void main() {
+  test('bundled v11 manifest is byte-equivalent to the deployed server fixture', () {
+    final fixtureBytes = File('../backend/tests/fixtures/ella_ai_consent_policy_v11.json').readAsBytesSync();
+    expect(sha256.convert(fixtureBytes).toString(), '03fce6f4d0c9ab660489f2ee833300f6951ddc25daf460eb01f5753488a0b5d3');
+
+    final serverJson = jsonDecode(utf8.decode(fixtureBytes)) as Map<String, dynamic>;
+    final serverPolicy = AiConsentPolicy.fromJson(serverJson);
+    expect(serverPolicy.isBundledCurrent, isTrue);
+    expect(jsonEncode(AiConsentPolicy.bundled.toJson()), jsonEncode(serverJson));
+  });
+
   test('v11 fallback manifest matches the managed-cloud and illustration contract', () {
     const policy = AiConsentPolicy.bundled;
     expect(policy.version, SharedPreferencesUtil.currentAiConsentContractVersion);

@@ -56,7 +56,7 @@ class EllaOnboarding extends StatefulWidget {
     required bool hasPriorAccountConsent,
     required bool deferredCurrentConsent,
   }) =>
-      !hasCurrentConsent && !deferredCurrentConsent;
+      (!hasCurrentConsent || hasPriorAccountConsent) && !deferredCurrentConsent;
 
   @visibleForTesting
   static bool shouldStartProvisioning({required bool hasCurrentConsent}) => hasCurrentConsent;
@@ -185,11 +185,12 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
     }
     if (!mounted || !_isPilotLocaleAllowed || _authenticatedUid != uid) return;
     final shouldPresentVoiceConsent = EllaOnboarding.shouldPresentVoiceConsent(
-      hasCurrentConsent: preferences.hasAccountBoundAiConsent(uid),
+      hasCurrentConsent: preferences.hasCurrentVersionAccountBoundAiConsent(uid),
       hasPriorAccountConsent: uid.isNotEmpty && preferences.hasPriorAccountBoundAiConsent(uid),
       deferredCurrentConsent: preferences.isCurrentAiConsentDeferred,
     );
     if (shouldPresentVoiceConsent && mounted) {
+      final isConsentUpgrade = preferences.hasPriorAccountBoundAiConsent(uid);
       await AiConsentSheet.show(
         context,
         onAccept: () async {
@@ -200,7 +201,8 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
           }
           return outcome;
         },
-        onDecline: () => consentService.declineCurrentConsent(uid: uid),
+        onDecline: isConsentUpgrade ? null : () => consentService.declineCurrentConsent(uid: uid),
+        preserveExistingAuthorityOnDecline: isConsentUpgrade,
       );
     }
     if (!mounted || !_isPilotLocaleAllowed || _authenticatedUid != uid) return;

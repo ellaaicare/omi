@@ -45,10 +45,24 @@ class SharedPreferencesUtil {
   static const String currentAiConsentContractVersion = 'ai-data-processors-v11';
   static const String currentAiConsentProcessorSetHash =
       'sha256:16a0ca2b738ce6b4f31e9619960ef5d611be51a43a1a43b83dbf8f391ef1a591';
+  static const String legacyAiConsentContractVersionV10 = 'ai-data-processors-v10';
+  static const String legacyAiConsentProcessorSetHashV10 =
+      'sha256:84c1007429613ba0f5cdee2e64194e262c6fec8f296af2219f7ad6c8b2da1b2d';
   static const String currentAiConsentScopeVersion = 'managed-cloud-internal-pilot-v4';
   static const String currentAiConsentScopeHash =
       'sha256:9c23f344b752c91c6ae252c628e9c603a8c87072e31bc9e599f2cc5257c7d72c';
   static const String currentAiConsentReceiptPrefix = 'aicr_';
+
+  static bool isSupportedAiConsentContract({
+    required String policyVersion,
+    required String processorSetHash,
+    required String scopeVersion,
+    required String scopeHash,
+  }) {
+    if (scopeVersion != currentAiConsentScopeVersion || scopeHash != currentAiConsentScopeHash) return false;
+    return (policyVersion == currentAiConsentContractVersion && processorSetHash == currentAiConsentProcessorSetHash) ||
+        (policyVersion == legacyAiConsentContractVersionV10 && processorSetHash == legacyAiConsentProcessorSetHashV10);
+  }
 
   factory SharedPreferencesUtil() {
     return _instance;
@@ -261,7 +275,7 @@ class SharedPreferencesUtil {
 
   bool get aiConsentAccepted => hasCurrentAiConsentAuthority();
 
-  /// Returns the durable receipt for the current account and bundled contract
+  /// Returns the durable receipt for the current account and a supported contract
   /// without treating it as live data authority. Callers must still perform a
   /// fresh server verification or enforce the bounded last-confirmed grace
   /// window before any protected capture or egress.
@@ -271,14 +285,16 @@ class SharedPreferencesUtil {
     }
     final receiptId = aiConsentReceiptId;
     final persistedGrant = getBool('aiConsentAccepted', defaultValue: false) &&
-        aiConsentContractVersion == currentAiConsentContractVersion &&
-        aiConsentProcessorSetHash == currentAiConsentProcessorSetHash &&
+        isSupportedAiConsentContract(
+          policyVersion: aiConsentContractVersion,
+          processorSetHash: aiConsentProcessorSetHash,
+          scopeVersion: aiConsentScopeVersion,
+          scopeHash: aiConsentScopeHash,
+        ) &&
         uid.isNotEmpty &&
         receiptId.startsWith(currentAiConsentReceiptPrefix) &&
         aiConsentReceiptUid == uid &&
         aiConsentProfileBindingId.isNotEmpty &&
-        aiConsentScopeVersion == currentAiConsentScopeVersion &&
-        aiConsentScopeHash == currentAiConsentScopeHash &&
         DateTime.tryParse(aiConsentServerDecidedAt) != null;
     return persistedGrant ? receiptId : '';
   }
@@ -290,7 +306,19 @@ class SharedPreferencesUtil {
     // The server is the consent authority. This flag is only the cached
     // last confirmation for the current uid. A missed refresh, a 5xx, or an
     // expired in-memory TTL must not look like a revocation.
-    if (uid.isEmpty || !getBool('aiConsentAccepted', defaultValue: false)) return false;
+    if (uid.isEmpty ||
+        !getBool('aiConsentAccepted', defaultValue: false) ||
+        !isSupportedAiConsentContract(
+          policyVersion: aiConsentContractVersion,
+          processorSetHash: aiConsentProcessorSetHash,
+          scopeVersion: aiConsentScopeVersion,
+          scopeHash: aiConsentScopeHash,
+        ) ||
+        !aiConsentReceiptId.startsWith(currentAiConsentReceiptPrefix) ||
+        aiConsentProfileBindingId.isEmpty ||
+        DateTime.tryParse(aiConsentServerDecidedAt) == null) {
+      return false;
+    }
     final confirmedUid = getString(_aiConsentLastServerConfirmedUidKey);
     if (confirmedUid.isNotEmpty && confirmedUid != uid) return false;
     final receiptUid = aiConsentReceiptUid;
@@ -303,11 +331,17 @@ class SharedPreferencesUtil {
     if (verifiedAt == null ||
         _verifiedAiConsentUid != uid ||
         _verifiedAiConsentReceiptId != aiConsentReceiptId ||
-        _verifiedAiConsentPolicyVersion != currentAiConsentContractVersion ||
-        _verifiedAiConsentProcessorSetHash != currentAiConsentProcessorSetHash ||
+        _verifiedAiConsentPolicyVersion != aiConsentContractVersion ||
+        _verifiedAiConsentProcessorSetHash != aiConsentProcessorSetHash ||
         _verifiedAiConsentProfileBindingId != aiConsentProfileBindingId ||
-        _verifiedAiConsentScopeVersion != currentAiConsentScopeVersion ||
-        _verifiedAiConsentScopeHash != currentAiConsentScopeHash) {
+        _verifiedAiConsentScopeVersion != aiConsentScopeVersion ||
+        _verifiedAiConsentScopeHash != aiConsentScopeHash ||
+        !isSupportedAiConsentContract(
+          policyVersion: aiConsentContractVersion,
+          processorSetHash: aiConsentProcessorSetHash,
+          scopeVersion: aiConsentScopeVersion,
+          scopeHash: aiConsentScopeHash,
+        )) {
       return null;
     }
     final remaining = aiConsentServerVerificationTtl - DateTime.now().difference(verifiedAt);
@@ -363,11 +397,20 @@ class SharedPreferencesUtil {
       aiConsentReceiptUid == uid &&
       aiConsentProfileBindingId.isNotEmpty;
 
+  bool hasCurrentVersionAccountBoundAiConsent(String uid) =>
+      hasAccountBoundAiConsent(uid) &&
+      aiConsentContractVersion == currentAiConsentContractVersion &&
+      aiConsentProcessorSetHash == currentAiConsentProcessorSetHash &&
+      aiConsentScopeVersion == currentAiConsentScopeVersion &&
+      aiConsentScopeHash == currentAiConsentScopeHash;
+
   bool hasPriorAccountBoundAiConsent(String uid) =>
       uid.isNotEmpty &&
       getBool('aiConsentAccepted', defaultValue: false) &&
-      aiConsentContractVersion.isNotEmpty &&
-      aiConsentContractVersion != currentAiConsentContractVersion &&
+      aiConsentContractVersion == legacyAiConsentContractVersionV10 &&
+      aiConsentProcessorSetHash == legacyAiConsentProcessorSetHashV10 &&
+      aiConsentScopeVersion == currentAiConsentScopeVersion &&
+      aiConsentScopeHash == currentAiConsentScopeHash &&
       aiConsentReceiptId.isNotEmpty &&
       aiConsentReceiptUid == uid;
 
@@ -383,11 +426,13 @@ class SharedPreferencesUtil {
   }) {
     if (uid.isEmpty ||
         !receiptId.startsWith(currentAiConsentReceiptPrefix) ||
-        policyVersion != currentAiConsentContractVersion ||
-        processorSetHash != currentAiConsentProcessorSetHash ||
         profileBindingId.isEmpty ||
-        scopeVersion != currentAiConsentScopeVersion ||
-        scopeHash != currentAiConsentScopeHash) {
+        !isSupportedAiConsentContract(
+          policyVersion: policyVersion,
+          processorSetHash: processorSetHash,
+          scopeVersion: scopeVersion,
+          scopeHash: scopeHash,
+        )) {
       clearAiConsentServerVerification();
       return;
     }
@@ -443,6 +488,10 @@ class SharedPreferencesUtil {
     String locale = '',
     String profileBindingId = '',
     String serverDecidedAt = '',
+    String policyVersion = currentAiConsentContractVersion,
+    String processorSetHash = currentAiConsentProcessorSetHash,
+    String scopeVersion = currentAiConsentScopeVersion,
+    String scopeHash = currentAiConsentScopeHash,
   }) {
     final hasAccountBoundReceipt = receiptId.startsWith(currentAiConsentReceiptPrefix) && uid.isNotEmpty;
     final nextReceiptId = hasAccountBoundReceipt ? receiptId : '';
@@ -451,15 +500,15 @@ class SharedPreferencesUtil {
     // switch still wipes through invalidateAccountAuthorityForTransition.
     aiConsentAccepted = true;
     aiConsentAcceptedAt = DateTime.now().toUtc().toIso8601String();
-    saveString('aiConsentContractVersion', currentAiConsentContractVersion);
-    saveString('aiConsentProcessorSetHash', currentAiConsentProcessorSetHash);
+    saveString('aiConsentContractVersion', policyVersion);
+    saveString('aiConsentProcessorSetHash', processorSetHash);
     saveString('aiConsentClientVersion', clientVersion);
     saveString('aiConsentLocale', locale);
     saveString('aiConsentProfileBindingId', profileBindingId);
-    saveString('aiConsentScopeVersion', currentAiConsentScopeVersion);
-    saveString('aiConsentScopeHash', currentAiConsentScopeHash);
+    saveString('aiConsentScopeVersion', scopeVersion);
+    saveString('aiConsentScopeHash', scopeHash);
     saveString('aiConsentServerDecidedAt', serverDecidedAt);
-    remove('aiConsentDeferredVersion');
+    if (policyVersion == currentAiConsentContractVersion) remove('aiConsentDeferredVersion');
     if (hasAccountBoundReceipt) {
       saveString('aiConsentReceiptId', nextReceiptId);
       saveString('aiConsentReceiptUid', nextReceiptUid);
@@ -471,6 +520,10 @@ class SharedPreferencesUtil {
 
   void deferAiConsent() {
     declineAiConsent();
+    saveString('aiConsentDeferredVersion', currentAiConsentContractVersion);
+  }
+
+  void deferAiConsentUpgrade() {
     saveString('aiConsentDeferredVersion', currentAiConsentContractVersion);
   }
 
