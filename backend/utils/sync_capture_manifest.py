@@ -184,3 +184,67 @@ def cache_sync_segment_result(segment_id: str, kind: str, conversation_id: str) 
         json.dumps({'kind': kind, 'conversation_id': conversation_id}),
         ex=SEGMENT_RESULT_TTL_SECONDS,
     )
+
+
+# How long one execution may hold exclusive processing rights over a single VAD segment. Bounds
+# how long a crashed/hung claimant can block a legitimate retry of the same segment (SYNC-V2-002):
+# generous relative to one segment's STT + LLM + persistence latency, short relative to a human
+# noticing a stuck upload.
+SEGMENT_CLAIM_TTL_SECONDS = 15 * 60
+
+
+def claim_sync_segment(segment_id: str, claimant: str) -> bool:
+    """Atomically claim exclusive processing rights for one VAD segment via Redis `SET NX EX`.
+
+    Returns True if [claimant] now holds the claim (safe to run STT/LLM/persistence for this
+    segment id); False if another claimant currently holds an unexpired lease. Combined with
+    `get_cached_sync_segment_result`, this makes concurrent retries of the same segment content
+    (e.g. two in-flight uploads racing after a dropped response) run STT/LLM/persistence exactly
+    once instead of both proceeding past a non-atomic get/process/set check.
+    """
+    return bool(
+        redis_client.set(f'sync_v2_segment_claim:{segment_id}', claimant, nx=True, ex=SEGMENT_CLAIM_TTL_SECONDS)
+    )
+
+
+def release_sync_segment_claim(segment_id: str, claimant: str) -> None:
+    """Release a claim early (e.g. after a failed attempt) so a retry doesn't have to wait out the
+    full lease TTL. No-ops if [claimant] no longer holds it — already expired and possibly
+    reclaimed by someone else — so this never deletes a lease it doesn't own."""
+    key = f'sync_v2_segment_claim:{segment_id}'
+    current = redis_client.get(key)
+    if isinstance(current, bytes):
+        current = current.decode()
+    if current == claimant:
+        redis_client.delete(key)
+
+
+# How long a per-conversation update lock may be held (SYNC-V2-003) and how long a segment will
+# wait to acquire one. One segment update (merge + Firestore write) is fast; this only needs to
+# outlast realistic contention between a handful of segments targeting the same conversation.
+CONVERSATION_UPDATE_LOCK_TTL_SECONDS = 60
+CONVERSATION_UPDATE_LOCK_WAIT_SECONDS = 30
+CONVERSATION_UPDATE_LOCK_POLL_INTERVAL_SECONDS = 0.1
+
+
+def acquire_conversation_update_lock(uid: str, conversation_id: str, claimant: str) -> bool:
+    """Blocking-with-timeout Redis mutex serializing read-modify-write updates to one
+    conversation's segments, so parallel VAD segments explicitly targeting the same conversation
+    can't both read a stale snapshot and drop each other's write. Returns False on timeout."""
+    key = f'sync_v2_conversation_lock:{uid}:{conversation_id}'
+    deadline = time.monotonic() + CONVERSATION_UPDATE_LOCK_WAIT_SECONDS
+    while True:
+        if redis_client.set(key, claimant, nx=True, ex=CONVERSATION_UPDATE_LOCK_TTL_SECONDS):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(CONVERSATION_UPDATE_LOCK_POLL_INTERVAL_SECONDS)
+
+
+def release_conversation_update_lock(uid: str, conversation_id: str, claimant: str) -> None:
+    key = f'sync_v2_conversation_lock:{uid}:{conversation_id}'
+    current = redis_client.get(key)
+    if isinstance(current, bytes):
+        current = current.decode()
+    if current == claimant:
+        redis_client.delete(key)
