@@ -2094,6 +2094,71 @@ def test_v10_to_v11_grant_preserves_null_guardian_mode_under_production_constrai
     asyncio.run(_run_with_database(scenario))
 
 
+def test_v11_denial_uses_null_guardian_mode_under_production_constraint():
+    async def scenario(pool):
+        uid = "synthetic-consent-v11-denial"
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                ALTER TABLE users
+                ADD CONSTRAINT guardian_mode_check
+                CHECK (
+                    guardian_mode IS NULL OR guardian_mode IN (
+                        'EMERGENCY_ONLY', 'ACTIVE_SUPPORT', 'MAXIMUM_AWARENESS',
+                        'CUSTOM', 'CYBORG', 'CHATBOT', 'MEMORY_SUPPORT', 'DEMO'
+                    )
+                )
+                """
+            )
+            user_id = await conn.fetchval(
+                """
+                INSERT INTO users (omi_uid, email, status, guardian_mode, profile_class)
+                VALUES ($1, $2, 'ACTIVE', 'ACTIVE_SUPPORT', 'real')
+                RETURNING id
+                """,
+                uid,
+                "synthetic-consent-v11-denial@example.invalid",
+            )
+            await conn.execute(
+                """
+                INSERT INTO ella_managed_cloud_consent_authority (
+                    user_id, decision, consent_receipt_ref, profile_binding_id,
+                    policy_version, processor_set_hash, scope_version, scope_hash
+                ) VALUES (
+                    $1, 'granted', $2, 'synthetic-profile',
+                    'ai-data-processors-v11', $3,
+                    'managed-cloud-internal-pilot-v4', $4
+                )
+                """,
+                user_id,
+                managed_cloud_consent.consent_receipt_ref(uid, "synthetic-v11-receipt"),
+                "sha256:" + ("1" * 64),
+                "sha256:" + ("2" * 64),
+            )
+
+        result = await managed_cloud_consent.synchronize_denial(
+            uid=uid,
+            decision="revoked",
+        )
+
+        assert result["decision"] == "revoked"
+        async with pool.acquire() as observer:
+            row = await observer.fetchrow(
+                """
+                SELECT account.guardian_mode, authority.decision,
+                       authority.policy_version, authority.consent_receipt_ref
+                FROM users account
+                JOIN ella_managed_cloud_consent_authority authority
+                  ON authority.user_id = account.id
+                WHERE account.omi_uid = $1
+                """,
+                uid,
+            )
+        assert tuple(row.values()) == (None, "revoked", None, None)
+
+    asyncio.run(_run_with_database(scenario))
+
+
 def test_consented_pending_user_can_enable_guardian_and_activates_atomically():
     async def scenario(pool):
         uid = "synthetic-consented-pending-guardian"
@@ -2170,7 +2235,7 @@ def test_guardian_reenable_fails_closed_after_consent_revocation():
             """,
             uid,
         )
-        assert tuple(row.values()) == ("ACTIVE", "OFF", "revoked", None)
+        assert tuple(row.values()) == ("ACTIVE", None, "revoked", None)
 
         with pytest.raises(LookupError, match="active_or_currently_consented_user_not_found"):
             await repository.update_guardian_mode(uid, "ACTIVE_SUPPORT")
@@ -2180,7 +2245,7 @@ def test_guardian_reenable_fails_closed_after_consent_revocation():
                 "SELECT guardian_mode FROM users WHERE omi_uid = $1",
                 uid,
             )
-            == "OFF"
+            is None
         )
 
     asyncio.run(_run_with_database(scenario))
