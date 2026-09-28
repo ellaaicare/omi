@@ -37,6 +37,7 @@ from database.ella_provisioning import EllaProvisioningRepository
 from database.honcho_attestation import authority_credential
 from ella.services.app_settings import TTS_PROVIDERS, build_effective_voice_settings
 from ella.services.ai_consent import assert_current_ai_consent
+from ella.services import guardian_playback_ledger as _playback_ledger
 from ella.services.hermes_cloud import HermesCloudClient
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import (
@@ -110,13 +111,6 @@ _GUARDIAN_CLOUD_TARGET_MODE = "hermes-cloud-guardian"
 # Database connection pool (lazy-initialized)
 _pool: Optional[asyncpg.Pool] = None
 
-# ---------------------------------------------------------------------------
-# In-memory playback event store (echo risk tracking)
-# ---------------------------------------------------------------------------
-
-# uid -> last playback event (resets on restart — used only for echo risk)
-_playback_events: dict[str, dict] = {}
-
 
 get_guardian_authenticated_uid = get_exact_firebase_uid
 
@@ -156,20 +150,6 @@ _ECHO_RISK = {
     "CarAudio": "high",
     "USBAudio": "low",
 }
-_ECHO_RISKY_OUTPUTS = {"medium", "high", "very_high"}
-_GUARDIAN_ECHO_SUPPRESSION_SECONDS = int(os.getenv("ELLA_GUARDIAN_ECHO_SUPPRESSION_SECONDS", "45"))
-_GUARDIAN_ECHO_MARKERS = (
-    "hi greg",
-    "heard my name",
-    "i heard my name",
-    "i'm here with you",
-    "im here with you",
-    "here with you",
-    "tell me what you need",
-    "just talking about names",
-    "just talking about me",
-    "i heard you. i am checking that now",
-)
 
 
 async def _get_pool() -> asyncpg.Pool:
@@ -218,12 +198,102 @@ def _identity_phone(identities: object, canonical_phone: Optional[str]) -> Optio
     return canonical_phone
 
 
+_DELIVERY_RECIPIENT_SEPARATOR = "::recipient:"
+
+
 def _delivery_key(step: dict) -> tuple[str, str]:
-    return str(step.get("channel") or "unknown"), str(step.get("target") or "unknown")
+    channel = str(step.get("channel") or "unknown")
+    target = str(step.get("target") or "unknown")
+    explicit_claim_target = str(step.get("claim_target") or "").strip()
+    if explicit_claim_target == target or explicit_claim_target.startswith(f"{target}{_DELIVERY_RECIPIENT_SEPARATOR}"):
+        return channel, explicit_claim_target
+
+    for identity_key in ("caregiver_id", "recipient_id", "recipient_email", "recipient_phone"):
+        identity = str(step.get(identity_key) or "").strip()
+        if identity:
+            if identity_key == "recipient_email":
+                identity = identity.casefold()
+            digest = hashlib.sha256(f"{identity_key}:{identity}".encode()).hexdigest()[:24]
+            return channel, f"{target}{_DELIVERY_RECIPIENT_SEPARATOR}{digest}"
+    return channel, target
+
+
+def _public_delivery_target(target: object) -> str:
+    return str(target or "unknown").split(_DELIVERY_RECIPIENT_SEPARATOR, 1)[0]
+
+
+_DELIVERY_BLOCKING_STATUSES = frozenset({"pending", "sending", "sent", "success", "delivered"})
+_DELIVERY_RETRYABLE_STATUSES = frozenset({"dispatch_failed", "error"})
 
 
 def _delivery_status_blocks_dispatch(status: Optional[str]) -> bool:
-    return str(status or "").lower() in {"pending", "sending", "sent", "success", "delivered"}
+    normalized = str(status or "").lower()
+    if normalized in _DELIVERY_RETRYABLE_STATUSES:
+        return False
+    return normalized in _DELIVERY_BLOCKING_STATUSES or bool(normalized)
+
+
+async def _claim_delivery_step(
+    pool,
+    *,
+    trace_id: str,
+    uid: str,
+    step: dict,
+    claimed_status: str,
+) -> tuple[bool, Optional[str]]:
+    channel, target = _delivery_key(step)
+    claimed = await pool.fetchrow(
+        """
+        INSERT INTO guardian_delivery_log (
+            trace_id, uid, channel, target, caregiver_id, recipient_phone,
+            recipient_email, status, provider_response
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+        ON CONFLICT (trace_id, channel, target) DO UPDATE SET
+            caregiver_id = EXCLUDED.caregiver_id,
+            recipient_phone = EXCLUDED.recipient_phone,
+            recipient_email = EXCLUDED.recipient_email,
+            status = EXCLUDED.status,
+            error_message = NULL,
+            provider_response = EXCLUDED.provider_response,
+            updated_at = NOW()
+        WHERE guardian_delivery_log.uid = EXCLUDED.uid
+          AND guardian_delivery_log.status = ANY($10::text[])
+        RETURNING guardian_delivery_log.uid, guardian_delivery_log.status
+        """,
+        trace_id,
+        uid,
+        channel,
+        target,
+        step.get("caregiver_id"),
+        step.get("recipient_phone"),
+        step.get("recipient_email"),
+        claimed_status,
+        json.dumps({"reserved_by": "omi_backend", "step": step}),
+        sorted(_DELIVERY_RETRYABLE_STATUSES),
+    )
+    if claimed:
+        return True, None
+
+    existing = await pool.fetchrow(
+        """
+        SELECT uid, status
+        FROM guardian_delivery_log
+        WHERE trace_id = $1 AND channel = $2 AND target = $3
+        """,
+        trace_id,
+        channel,
+        target,
+    )
+    if not existing:
+        return False, "claim_not_acquired"
+    if str(existing["uid"]) != uid:
+        return False, "owner_mismatch"
+
+    status = str(existing["status"] or "unknown").lower()
+    if _delivery_status_blocks_dispatch(status):
+        return False, f"already_{status}"
+    return False, f"claim_not_acquired_{status}"
 
 
 def _caregiver_payload(caregiver: CaregiverPolicyContext) -> dict:
@@ -340,64 +410,27 @@ async def _reserve_delivery_steps(
         return [], []
 
     pool = await _get_pool()
-    channels = [channel for channel, _target in [_delivery_key(step) for step in steps]]
-    targets = [target for _channel, target in [_delivery_key(step) for step in steps]]
-    existing_rows = await pool.fetch(
-        """
-        SELECT channel, target, status
-        FROM guardian_delivery_log
-        WHERE trace_id = $1
-          AND channel = ANY($2::text[])
-          AND target = ANY($3::text[])
-        """,
-        trace_id,
-        channels,
-        targets,
-    )
-    existing_status = {(str(row["channel"]), str(row["target"])): row["status"] for row in existing_rows}
-
     pending_steps: list[dict] = []
     skipped_steps: list[dict] = []
     for step in steps:
-        channel, target = _delivery_key(step)
-        status = existing_status.get((channel, target))
-        if _delivery_status_blocks_dispatch(status):
-            skipped_steps.append({**step, "skip_reason": f"already_{status}"})
-            continue
-
-        await pool.execute(
-            """
-            INSERT INTO guardian_delivery_log (
-                trace_id, uid, channel, target, caregiver_id, recipient_phone,
-                recipient_email, status, provider_response
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8::jsonb)
-            ON CONFLICT (trace_id, channel, target) DO UPDATE SET
-                uid = EXCLUDED.uid,
-                caregiver_id = EXCLUDED.caregiver_id,
-                recipient_phone = EXCLUDED.recipient_phone,
-                recipient_email = EXCLUDED.recipient_email,
-                status = 'pending',
-                error_message = NULL,
-                provider_response = EXCLUDED.provider_response,
-                updated_at = NOW()
-            WHERE guardian_delivery_log.status NOT IN ('pending', 'sending', 'sent', 'success', 'delivered')
-            """,
-            trace_id,
-            uid,
-            channel,
-            target,
-            step.get("caregiver_id"),
-            step.get("recipient_phone"),
-            step.get("recipient_email"),
-            json.dumps({"reserved_by": "omi_backend", "step": step}),
+        _channel, claim_target = _delivery_key(step)
+        claimed_step = {**step, "claim_target": claim_target}
+        claimed, skip_reason = await _claim_delivery_step(
+            pool,
+            trace_id=trace_id,
+            uid=uid,
+            step=claimed_step,
+            claimed_status="pending",
         )
-        pending_steps.append(step)
+        if claimed:
+            pending_steps.append(claimed_step)
+        else:
+            skipped_steps.append({**claimed_step, "skip_reason": skip_reason or "claim_not_acquired"})
 
     return pending_steps, skipped_steps
 
 
-async def _mark_reserved_steps_dispatch_failed(trace_id: str, steps: list[dict], error_message: str) -> None:
+async def _mark_reserved_steps_dispatch_failed(trace_id: str, uid: str, steps: list[dict], error_message: str) -> None:
     if not steps:
         return
     pool = await _get_pool()
@@ -407,10 +440,11 @@ async def _mark_reserved_steps_dispatch_failed(trace_id: str, steps: list[dict],
             """
             UPDATE guardian_delivery_log
             SET status = 'dispatch_failed', error_message = $1, updated_at = NOW()
-            WHERE trace_id = $2 AND channel = $3 AND target = $4 AND status = 'pending'
+            WHERE trace_id = $2 AND uid = $3 AND channel = $4 AND target = $5 AND status = 'pending'
             """,
             error_message[:500],
             trace_id,
+            uid,
             channel,
             target,
         )
@@ -629,7 +663,7 @@ def _guardian_alert_tags(priority: Any, trigger_type: Any, metadata: dict[str, A
 
 
 def _delivery_target_from_logs(deliveries: list[dict[str, Any]], metadata: dict[str, Any]) -> str:
-    targets = {str(item.get("target") or "").lower() for item in deliveries}
+    targets = {_public_delivery_target(item.get("target")).lower() for item in deliveries}
     channels = {str(item.get("channel") or "").lower() for item in deliveries}
     if "caregiver" in targets:
         return "caregiver"
@@ -656,7 +690,10 @@ def _delivery_escalation_status(deliveries: list[dict[str, Any]], metadata: dict
 def _caregiver_escalation(deliveries: list[dict[str, Any]], metadata: dict[str, Any]) -> bool:
     if _bool_from_metadata(metadata, "caregiver_escalation", "caregiverEscalation"):
         return True
-    return any(str(item.get("target") or "").lower() == "caregiver" or item.get("caregiver_id") for item in deliveries)
+    return any(
+        _public_delivery_target(item.get("target")).lower() == "caregiver" or item.get("caregiver_id")
+        for item in deliveries
+    )
 
 
 def _playback_status(
@@ -822,7 +859,7 @@ async def _guardian_alert_history(uid: str, limit: int) -> dict[str, Any]:
                         'created_at', created_at,
                         'updated_at', updated_at,
                         'channel', channel,
-                        'target', target,
+                        'target', split_part(target, '::recipient:', 1),
                         'caregiver_id', caregiver_id,
                         'status', status,
                         'error_message', error_message
@@ -887,60 +924,6 @@ def _is_wake_ack_row(row: dict[str, Any]) -> bool:
     trigger = str(row.get("trigger_type") or metadata.get("trigger_type") or "").strip().lower()
     ack_only = metadata.get("ack_only")
     return trigger == "wake_word_ack" or ack_only is True or str(ack_only or "").strip().lower() == "true"
-
-
-def _normalize_for_echo_match(text: str) -> str:
-    normalized = text.lower().replace("’", "'")
-    normalized = re.sub(r"[^a-z0-9' ]+", " ", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    return normalized
-
-
-def _looks_like_guardian_echo_text(text: str) -> bool:
-    normalized = _normalize_for_echo_match(text)
-    if not normalized:
-        return False
-
-    marker_hits = sum(1 for marker in _GUARDIAN_ECHO_MARKERS if marker in normalized)
-    if marker_hits >= 2:
-        return True
-    if "hi greg" in normalized and "heard my name" in normalized:
-        return True
-    if "tell me what you need" in normalized and ("just talking about" in normalized or "here with you" in normalized):
-        return True
-    return False
-
-
-def _recent_risky_playback_event(uid: str) -> dict | None:
-    event = get_playback_event(uid)
-    if not event:
-        return None
-    if event.get("echo_risk") not in _ECHO_RISKY_OUTPUTS:
-        return None
-    recorded_at = event.get("recorded_at")
-    if isinstance(recorded_at, (int, float)) and time.time() - recorded_at > _GUARDIAN_ECHO_SUPPRESSION_SECONDS:
-        return None
-    return event
-
-
-def _enqueue_rejects_guardian_echo(uid: str, req: "EnqueueRequest") -> tuple[bool, Optional[str]]:
-    """Reject scanner wake fallback audio that is the app hearing its own Guardian response."""
-    metadata = _coerce_metadata_dict(req.metadata)
-    trigger = str(
-        req.trigger or metadata.get("trigger_type") or metadata.get("event_type") or metadata.get("category") or ""
-    ).lower()
-    if "wake_word" not in trigger:
-        return False, None
-
-    message = str(req.message or metadata.get("message") or "")
-    if not _looks_like_guardian_echo_text(message):
-        return False, None
-
-    if trigger.endswith("_fallback") or trigger == "wake_word_fallback":
-        return True, "guardian_playback_echo"
-    if _recent_risky_playback_event(uid):
-        return True, "guardian_playback_echo"
-    return False, None
 
 
 def _is_wake_ack_request(req: "EnqueueRequest") -> bool:
@@ -1458,8 +1441,17 @@ async def next_audio(uid: Optional[str] = None, authenticated_uid: str = Depends
                 uid,
             )
 
-            playback = get_playback_event(uid)
-            echo_risk = playback["echo_risk"] if playback else "unknown"
+            try:
+                ledger_pool = await _playback_ledger.get_pool()
+                recent_played = await _playback_ledger.get_played_candidates(
+                    ledger_pool,
+                    uid,
+                    window_seconds=60,
+                    limit=1,
+                )
+            except Exception:
+                recent_played = []
+            echo_risk = recent_played[0].device_class if recent_played and recent_played[0].device_class else "unknown"
 
             chat_turns = await _get_recent_chat_turns(uid, limit=5)
 
@@ -1519,6 +1511,28 @@ async def next_audio(uid: Optional[str] = None, authenticated_uid: str = Depends
                     }
                 ),
             )
+            try:
+                ledger_pool = await _playback_ledger.get_pool()
+                await _playback_ledger.record_generated(
+                    ledger_pool,
+                    uid=uid,
+                    playback_id=new_id,
+                    queue_item_id=new_id,
+                    audio_id=new_id,
+                    trace_id=source_trace_id,
+                    purpose="consolidated",
+                    playback_text=consolidated_msg,
+                    text_provenance="consolidated",
+                )
+                await _playback_ledger.record_queued(
+                    ledger_pool,
+                    uid=uid,
+                    playback_id=new_id,
+                    queue_item_id=new_id,
+                    trace_id=source_trace_id,
+                )
+            except Exception as exc:
+                print(f"[FLOW:CONSOLIDATOR] uid={uid} ledger write failed (non-fatal): {exc}", flush=True)
             # Fall through to pop the newly-inserted consolidated item
 
     # --- Normal pop path ---
@@ -1568,6 +1582,17 @@ async def next_audio(uid: Optional[str] = None, authenticated_uid: str = Depends
 
     trace_id = _trace_id_from_metadata(meta, row["id"])
     meta.setdefault("trace_id", trace_id)
+    try:
+        ledger_pool = await _playback_ledger.get_pool()
+        await _playback_ledger.record_fetched(
+            ledger_pool,
+            uid=uid,
+            playback_id=row["id"],
+            queue_item_id=row["id"],
+            trace_id=trace_id,
+        )
+    except Exception as exc:
+        print(f"[FLOW:GUARDIAN-POLL] uid={uid} ledger write failed (non-fatal): {exc}", flush=True)
     await _log_pipeline_event(
         trace_id=trace_id,
         uid=uid,
@@ -1627,35 +1652,11 @@ async def enqueue(
     normalized_mode = _normalize_mode(guardian_mode)
 
     # --- guardian_mode gate: reject inserts when guardian is OFF / suppressed ---
+    # Echo/feedback de-dupe is no longer decided here: it is a semantic
+    # judgment made downstream (typed classifier / n8n Echo Guard) over the
+    # transcript plus this owner's playback ledger candidates, never a
+    # text/regex verdict against the outgoing message being enqueued.
     if req.priority != "debug":
-        echo_rejected, echo_reason = _enqueue_rejects_guardian_echo(uid, req)
-        if echo_rejected:
-            _elapsed = int((time.time() - _start) * 1000)
-            print(
-                f"[FLOW:GUARDIAN-ENQUEUE] uid={uid} REJECTED reason={echo_reason} "
-                f"trigger={req.trigger} trace={trace_id} latency={_elapsed}ms",
-                flush=True,
-            )
-            await _log_pipeline_event(
-                trace_id=trace_id,
-                uid=uid,
-                stage="queue_rejected",
-                status="rejected",
-                latency_ms=_elapsed,
-                metadata={
-                    "queue_item_id": item_id,
-                    "priority": req.priority,
-                    "trigger_type": req.trigger,
-                    "reason": echo_reason,
-                    "guardian_mode": normalized_mode,
-                },
-            )
-            return {
-                "ok": False,
-                "rejected": True,
-                "reason": echo_reason,
-            }
-
         allowed, reject_reason = _enqueue_allows_guardian_audio(guardian_mode, req)
         if not allowed:
             _elapsed = int((time.time() - _start) * 1000)
@@ -1741,6 +1742,29 @@ async def enqueue(
         req.trigger,
         metadata_str,
     )
+
+    try:
+        ledger_pool = await _playback_ledger.get_pool()
+        await _playback_ledger.record_generated(
+            ledger_pool,
+            uid=uid,
+            playback_id=item_id,
+            queue_item_id=item_id,
+            audio_id=item_id,
+            trace_id=trace_id,
+            purpose=req.trigger,
+            playback_text=req.message,
+            text_provenance="tts_generated",
+        )
+        await _playback_ledger.record_queued(
+            ledger_pool,
+            uid=uid,
+            playback_id=item_id,
+            queue_item_id=item_id,
+            trace_id=trace_id,
+        )
+    except Exception as exc:
+        print(f"[FLOW:GUARDIAN-ENQUEUE] uid={uid} ledger write failed (non-fatal): {exc}", flush=True)
 
     # Count pending items for this user
     count = await pool.fetchval(
@@ -2344,7 +2368,7 @@ async def deliver(
 
     elapsed_ms = int((time.time() - started_at) * 1000)
     if not dispatch_ok:
-        await _mark_reserved_steps_dispatch_failed(trace_id, pending_steps, dispatch_error)
+        await _mark_reserved_steps_dispatch_failed(trace_id, uid, pending_steps, dispatch_error)
 
     await _log_pipeline_event(
         trace_id=trace_id,
@@ -2400,37 +2424,23 @@ async def email_send(
     trace_id = req.trace_id or "unknown"
     uid = req.uid or "unknown"
     pool = await _get_pool()
-    existing = await pool.fetchval(
-        """
-        SELECT status
-        FROM guardian_delivery_log
-        WHERE trace_id = $1 AND channel = 'email' AND target = $2
-        """,
-        trace_id,
-        req.target,
+    email_step = {"channel": "email", "target": req.target, "recipient_email": req.to}
+    _channel, claim_target = _delivery_key(email_step)
+    email_step["claim_target"] = claim_target
+    claimed, skip_reason = await _claim_delivery_step(
+        pool,
+        trace_id=trace_id,
+        uid=uid,
+        step=email_step,
+        claimed_status="sending",
     )
-    if _delivery_status_blocks_dispatch(existing):
-        return {"ok": True, "sent": False, "reason": f"already_{existing}", "trace_id": trace_id}
-
-    await pool.execute(
-        """
-        INSERT INTO guardian_delivery_log (trace_id, uid, channel, target, recipient_email, status, provider_response)
-        VALUES ($1, $2, 'email', $3, $4, 'sending', $5::jsonb)
-        ON CONFLICT (trace_id, channel, target) DO UPDATE SET
-            uid = EXCLUDED.uid,
-            recipient_email = EXCLUDED.recipient_email,
-            status = 'sending',
-            error_message = NULL,
-            provider_response = EXCLUDED.provider_response,
-            updated_at = NOW()
-        WHERE guardian_delivery_log.status NOT IN ('pending', 'sending', 'sent', 'success', 'delivered')
-        """,
-        trace_id,
-        uid,
-        req.target,
-        req.to,
-        json.dumps({"to": req.to, "subject": req.subject}),
-    )
+    if not claimed:
+        return {
+            "ok": True,
+            "sent": False,
+            "reason": skip_reason or "claim_not_acquired",
+            "trace_id": trace_id,
+        }
 
     message = MIMEText(req.body)
     message["Subject"] = req.subject
@@ -2461,12 +2471,13 @@ async def email_send(
         """
         UPDATE guardian_delivery_log
         SET status = $1, error_message = $2, updated_at = NOW()
-        WHERE trace_id = $3 AND channel = 'email' AND target = $4
+        WHERE trace_id = $3 AND channel = 'email' AND target = $4 AND uid = $5 AND status = 'sending'
         """,
         "sent" if sent else "error",
         error,
         trace_id,
-        req.target,
+        claim_target,
+        uid,
     )
     await _log_pipeline_event(
         trace_id=trace_id,
@@ -2513,21 +2524,32 @@ async def log_pipeline_event(
     channel = metadata.get("channel")
     if channel:
         pool = await _get_pool()
+        _channel, claim_target = _delivery_key(
+            {
+                "channel": channel,
+                "target": metadata.get("target", "unknown"),
+                "claim_target": metadata.get("claim_target"),
+                "caregiver_id": metadata.get("caregiver_id"),
+                "recipient_id": metadata.get("recipient_id"),
+                "recipient_email": metadata.get("recipient_email"),
+                "recipient_phone": metadata.get("recipient_phone"),
+            }
+        )
         await pool.execute(
             """
             INSERT INTO guardian_delivery_log (trace_id, uid, channel, target, caregiver_id, status, error_message)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (trace_id, channel, target) DO UPDATE SET
-                uid = EXCLUDED.uid,
                 caregiver_id = EXCLUDED.caregiver_id,
                 status = EXCLUDED.status,
                 error_message = EXCLUDED.error_message,
                 updated_at = NOW()
+            WHERE guardian_delivery_log.uid = EXCLUDED.uid
             """,
             req.trace_id,
             req.uid or "",
             channel,
-            metadata.get("target", "unknown"),
+            claim_target,
             metadata.get("caregiver_id"),
             req.status,
             req.error_detail,
@@ -2555,24 +2577,39 @@ async def record_playback_event(
     authenticated_uid: str = Depends(get_exact_firebase_uid),
 ):
     """iOS calls this when guardian audio starts playing.
-    Records output route so the consolidator knows echo risk."""
+
+    Records a transactional, owner-scoped playback receipt in the durable
+    ledger BEFORE acknowledging — this is the only kind of record that
+    counts as evidence the audio actually played (see
+    ella.services.guardian_playback_ledger)."""
     uid = require_matching_firebase_uid(authenticated_uid, req.uid, feature="Guardian playback")
     echo_risk = _ECHO_RISK.get(req.port_type, "unknown")
-    _playback_events[uid] = {
-        "queue_item_id": req.queue_item_id,
-        "trace_id": req.trace_id,
-        "event_type": req.event_type,
-        "port_type": req.port_type,
-        "port_name": req.port_name,
-        "device_uid": req.device_uid,
-        "echo_risk": echo_risk,
-        "duration_ms": req.duration_ms,
-        "recorded_at": time.time(),
-    }
+    event_type = (req.event_type or "started").strip().lower().replace(" ", "_")
+
+    if req.queue_item_id and event_type in ("started", "completed", "failed"):
+        try:
+            ledger_pool = await _playback_ledger.get_pool()
+            await _playback_ledger.record_playback_receipt(
+                ledger_pool,
+                uid=uid,
+                playback_id=req.queue_item_id,
+                event_type=event_type,
+                queue_item_id=req.queue_item_id,
+                trace_id=req.trace_id,
+                route=req.port_type,
+                device_class=echo_risk,
+                port_name=req.port_name,
+                device_uid=req.device_uid,
+                duration_ms=req.duration_ms,
+                error_message=None,
+            )
+        except _playback_ledger.PlaybackLedgerOwnershipError:
+            raise HTTPException(status_code=403, detail={"error": "playback_id_not_owned_by_caller"})
+        except _playback_ledger.PlaybackLedgerUnknownItemError:
+            raise HTTPException(status_code=404, detail={"error": "playback_id_not_found"})
 
     trace_id = req.trace_id or req.queue_item_id
     if trace_id:
-        event_type = (req.event_type or "started").strip().lower().replace(" ", "_")
         status = "error" if event_type == "failed" else "success"
         await _log_pipeline_event(
             trace_id=trace_id,
@@ -2641,13 +2678,3 @@ async def record_playback_debug_event(
         flush=True,
     )
     return {"ok": True, "trace_id": trace_id, "stage": stage, "event_name": event_name}
-
-
-def get_playback_event(uid: str) -> dict | None:
-    """Return the most recent playback event for a UID, or None if >60s old."""
-    event = _playback_events.get(uid)
-    if not event:
-        return None
-    if time.time() - event["recorded_at"] > 60:
-        return None  # stale — more than 60s old
-    return event

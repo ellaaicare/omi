@@ -56,6 +56,10 @@ on:
       - "backend/ella/routers/chat.py"
       - "backend/ella/routers/escalations.py"
       - "backend/ella/routers/guardian.py"
+      - "backend/ella/services/guardian_playback_ledger.py"
+      - "backend/ella/services/guardian_echo_classifier.py"
+      - "backend/migrations/018_create_guardian_playback_ledger.sql"
+      - "backend/ella/docs/GUARDIAN_ECHO_CLASSIFIER_N8N_CONTRACT.md"
       - "backend/ella/routers/hermes_cloud_enrichment.py"
       - "backend/ella/routers/onboarding.py"
       - "backend/ella/routers/observer.py"
@@ -169,6 +173,10 @@ on:
       - "backend/tests/postgres/test_today_card_lifecycle_postgres.py"
       - "backend/tests/unit/test_scanner_keyterms.py"
       - "backend/tests/unit/test_ella_scanner_batching.py"
+      - "backend/tests/unit/test_ella_scanner_echo_suppression.py"
+      - "backend/tests/unit/test_guardian_echo_classifier.py"
+      - "backend/tests/postgres/test_guardian_playback_ledger_postgres.py"
+      - "backend/tests/postgres/test_guardian_echo_classifier_scanner_e2e_postgres.py"
       - "backend/tests/unit/test_capture_buffer_retention.py"
       - "backend/tests/unit/test_capture_incident_1210_regressions.py"
       - "backend/tests/unit/test_capture_protocol_v2_live.py"
@@ -231,6 +239,10 @@ on:
       - "backend/ella/routers/chat.py"
       - "backend/ella/routers/escalations.py"
       - "backend/ella/routers/guardian.py"
+      - "backend/ella/services/guardian_playback_ledger.py"
+      - "backend/ella/services/guardian_echo_classifier.py"
+      - "backend/migrations/018_create_guardian_playback_ledger.sql"
+      - "backend/ella/docs/GUARDIAN_ECHO_CLASSIFIER_N8N_CONTRACT.md"
       - "backend/ella/routers/hermes_cloud_enrichment.py"
       - "backend/ella/routers/onboarding.py"
       - "backend/ella/routers/observer.py"
@@ -344,6 +356,10 @@ on:
       - "backend/tests/postgres/test_today_card_lifecycle_postgres.py"
       - "backend/tests/unit/test_scanner_keyterms.py"
       - "backend/tests/unit/test_ella_scanner_batching.py"
+      - "backend/tests/unit/test_ella_scanner_echo_suppression.py"
+      - "backend/tests/unit/test_guardian_echo_classifier.py"
+      - "backend/tests/postgres/test_guardian_playback_ledger_postgres.py"
+      - "backend/tests/postgres/test_guardian_echo_classifier_scanner_e2e_postgres.py"
       - "backend/tests/unit/test_capture_buffer_retention.py"
       - "backend/tests/unit/test_capture_incident_1210_regressions.py"
       - "backend/tests/unit/test_capture_protocol_v2_live.py"
@@ -413,6 +429,7 @@ jobs:
           "PyJWT==2.9.0"
           "pytest==8.3.2"
           "openapi-spec-validator==0.7.1"
+          "psycopg2-binary==2.9.9"
           "PyYAML==6.0.2"
           "python-multipart==0.0.9"
           "websockets==12.0"
@@ -467,6 +484,8 @@ jobs:
           ella/routers/escalations.py
           ella/routers/hermes_cloud_enrichment.py
           ella/routers/guardian.py
+          ella/services/guardian_playback_ledger.py
+          ella/services/guardian_echo_classifier.py
           ella/routers/invites.py
           ella/routers/memory_reinterpretation.py
           ella/routers/onboarding.py
@@ -556,6 +575,7 @@ jobs:
           ella/routers/corrections.py
           ella/routers/debug_metadata.py ella/routers/escalations.py
           ella/routers/guardian.py ella/routers/hermes_cloud_enrichment.py ella/routers/invites.py
+          ella/services/guardian_playback_ledger.py ella/services/guardian_echo_classifier.py
           ella/routers/memory_reinterpretation.py ella/routers/observer.py ella/routers/photon.py
           ella/routers/onboarding.py ella/routers/plato_mcp.py ella/routers/resolve.py
           ella/routers/settings.py ella/routers/trace.py
@@ -812,8 +832,16 @@ jobs:
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_real_smoke_multichannel_identity_mismatch_has_zero_writes"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_real_mounted_route_manifest_has_exact_paths_authorities_and_no_duplicates"
             "tests/unit/test_ella_incident_1182_route_isolation.py::test_affected_background_boundaries_are_exact_and_trace_has_no_detached_task"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_contacts_use_configured_shared_ella_postgres_pool"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_delivery_uses_owner_scoped_onboarding_contact_store"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_contact_crud_rejects_unauthenticated_and_cross_owner_before_storage"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_contact_exact_owner_positive_control"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_onboarding_contact_dispatch_is_owner_bound_and_ignores_proxy_environment"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_webhook_fails_closed_without_authority"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_status_requires_confirmed_caregiver_delivery[delivery_statuses0-partial-emergency_delivery_unconfirmed]"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_status_requires_confirmed_caregiver_delivery[delivery_statuses1-pending-emergency_delivery_pending]"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_status_requires_confirmed_caregiver_delivery[delivery_statuses2-success-None]"
+            "tests/unit/test_ella_incident_1182_callback_auth.py::test_emergency_delivery_uses_selected_active_owner_caregiver"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_first_party_caregiver_routes_derive_owner_and_reject_caller_uid"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_caregiver_routes_reject_unauth_admin_and_service_before_storage"
             "tests/unit/test_ella_incident_1182_callback_auth.py::test_internal_callback_service_fails_closed_and_positive_control_is_scoped"
@@ -857,7 +885,7 @@ jobs:
           for required_id in "${required_incident_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$incident_ids"
           done
-          test "$(grep -c '::' <<<"$incident_ids")" -eq 62
+          test "$(grep -c '::' <<<"$incident_ids")" -eq 75
           pytest \
             tests/unit/test_ella_incident_1182_route_isolation.py \
             tests/unit/test_ella_incident_1182_callback_auth.py \
@@ -1342,8 +1370,30 @@ jobs:
           pytest tests/unit/test_conversation_summary_cas.py -k "$baseline_summary_cas_selector" -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 113
           pytest tests/unit/test_ella_conversation_corrections.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 44
+          test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 49
           pytest tests/unit/test_ella_guardian_delivery.py -v
+          guardian_delivery_claim_ids="$(
+            pytest --collect-only -q tests/postgres/test_guardian_delivery_claim_postgres.py |
+              sed '/^$/d'
+          )"
+          required_guardian_delivery_claim_ids=(
+            "tests/postgres/test_guardian_delivery_claim_postgres.py::test_two_connections_produce_exactly_one_delivery_claim"
+            "tests/postgres/test_guardian_delivery_claim_postgres.py::test_claim_retries_only_explicit_failures_and_survives_rollback_and_new_pool"
+            "tests/postgres/test_guardian_delivery_claim_postgres.py::test_concurrent_direct_email_uses_one_database_winner"
+          )
+          for required_id in "${required_guardian_delivery_claim_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$guardian_delivery_claim_ids"
+          done
+          test "$(grep -c '::' <<<"$guardian_delivery_claim_ids")" -eq 3
+          pytest tests/postgres/test_guardian_delivery_claim_postgres.py -v |
+            tee /tmp/guardian-delivery-claim-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/guardian-delivery-claim-pytest.log
+          test "$(pytest --collect-only -q tests/unit/test_guardian_echo_classifier.py | grep -c '::')" -eq 19
+          pytest tests/unit/test_guardian_echo_classifier.py -v
+          test "$(pytest --collect-only -q tests/postgres/test_guardian_playback_ledger_postgres.py | grep -c '::')" -eq 13
+          pytest tests/postgres/test_guardian_playback_ledger_postgres.py -v
+          test "$(pytest --collect-only -q tests/postgres/test_guardian_echo_classifier_scanner_e2e_postgres.py | grep -c '::')" -eq 5
+          pytest tests/postgres/test_guardian_echo_classifier_scanner_e2e_postgres.py -v
           escalation_auth_ids="$(pytest --collect-only -q tests/unit/test_ella_escalations_router_auth.py | sed '/^$/d')"
           required_escalation_auth_ids=(
             "tests/unit/test_ella_escalations_router_auth.py::test_policy_view_internal_key_reaches_load_context_for_explicit_uid"
@@ -1400,7 +1450,7 @@ jobs:
             <<<"$memory_reinterpretation_ids"
           test "$(grep -c '::' <<<"$memory_reinterpretation_ids")" -eq 30
           pytest tests/unit/test_memory_reinterpretation_outbox.py -v
-          test "$(pytest --collect-only -q tests/unit/test_scanner_keyterms.py | grep -c '::')" -eq 10
+          test "$(pytest --collect-only -q tests/unit/test_scanner_keyterms.py | grep -c '::')" -eq 19
           pytest tests/unit/test_scanner_keyterms.py -v
           scanner_batching_ids="$(pytest --collect-only -q tests/unit/test_ella_scanner_batching.py | sed '/^$/d')"
           grep -Fqx \
@@ -1415,8 +1465,16 @@ jobs:
           grep -Fqx \
             "tests/unit/test_ella_scanner_batching.py::test_guardian_enabled_context_does_not_rewrite_active_segments" \
             <<<"$scanner_batching_ids"
-          test "$(grep -c '::' <<<"$scanner_batching_ids")" -eq 50
+          grep -Fqx \
+            "tests/unit/test_ella_scanner_batching.py::test_scanner_fails_before_webhook_egress_without_authority" \
+            <<<"$scanner_batching_ids"
+          grep -Fqx \
+            "tests/unit/test_ella_scanner_batching.py::test_scanner_webhook_ignores_proxy_environment_and_rejects_redirect" \
+            <<<"$scanner_batching_ids"
+          test "$(grep -c '::' <<<"$scanner_batching_ids")" -eq 56
           pytest tests/unit/test_ella_scanner_batching.py -v
+          test "$(pytest --collect-only -q tests/unit/test_ella_scanner_echo_suppression.py | grep -c '::')" -eq 17
+          pytest tests/unit/test_ella_scanner_echo_suppression.py -v
 
       - name: Run real Firestore summary CAS contention gate
         run: |

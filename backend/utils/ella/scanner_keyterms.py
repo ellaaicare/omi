@@ -18,6 +18,11 @@ from ella.services.runtime_resolver import (
     resolve_isolated_runtime,
     runtime_authority_enabled,
 )
+from ella.utils.provision_authority import (
+    ProvisionAuthorityError,
+    ProvisionAuthoritySnapshot,
+    hermes_provision_authority,
+)
 
 logger = logging.getLogger("ella.scanner_keyterms")
 
@@ -396,12 +401,38 @@ async def _fetch_scanner_tuning(agent_id: str, uid: str = "") -> str:
             retryable=False,
         )
     isolated = await runtime_authority_enabled(uid) if uid else False
-    token = _provision_token(uid, isolated=isolated)
+    isolated_snapshot: ProvisionAuthoritySnapshot | None = None
+    if isolated:
+        try:
+            payload_authority = hermes_provision_authority()
+            authority = hermes_provision_authority(payload_authority.snapshot())
+            isolated_snapshot = authority.snapshot()
+        except ProvisionAuthorityError as exc:
+            raise ProvisioningError(exc.code, retryable=True) from exc
+        token = authority.token
+        provision_url = authority.base_url
+    else:
+        token = _provision_token(uid, isolated=False)
+        provision_url = _provision_url(uid, isolated=False)
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    provision_url = _provision_url(uid, isolated=isolated)
+    if isolated:
+        headers["X-Ella-Owner-Uid"] = uid
     url = f"{provision_url}/workspace/{agent_id}/files/scanner-tuning.md"
-    async with httpx.AsyncClient(timeout=_timeout_seconds()) as client:
+    client_options = {"timeout": _timeout_seconds()}
+    if isolated_snapshot is not None:
+        client_options["trust_env"] = False
+    async with httpx.AsyncClient(**client_options) as client:
+        if isolated_snapshot is not None:
+            try:
+                hermes_provision_authority(isolated_snapshot)
+            except ProvisionAuthorityError as exc:
+                raise ProvisioningError(exc.code, retryable=True) from exc
         response = await client.get(url, headers=headers)
+        if isolated_snapshot is not None:
+            try:
+                hermes_provision_authority(isolated_snapshot)
+            except ProvisionAuthorityError as exc:
+                raise ProvisioningError(exc.code, retryable=True) from exc
         if response.status_code == 404 and _allow_shared_fallback(uid, isolated=isolated):
             shared = f"{provision_url}/workspace/shared/files/scanner-tuning.md"
             response = await client.get(shared, headers=headers)

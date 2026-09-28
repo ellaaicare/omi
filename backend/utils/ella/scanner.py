@@ -3,6 +3,7 @@
 # Sends real-time transcript segments to n8n scanner for urgency detection.
 # Fire-and-forget with short timeout - doesn't block transcription flow.
 
+import asyncio
 import hashlib
 import json
 import os
@@ -15,7 +16,9 @@ from typing import Iterator, List, Optional
 
 import requests
 
+from database.ella_postgres import create_dedicated_ella_postgres_pool
 from database.honcho_attestation import authority_credential
+from ella.services import guardian_echo_classifier, guardian_playback_ledger
 
 from .config import ELLA_CONFIG
 
@@ -30,6 +33,8 @@ ELLA_POSTGRES_PASSWORD = authority_credential("ELLA_POSTGRES_PASSWORD", default=
 ELLA_POSTGRES_DATABASE = os.getenv("ELLA_POSTGRES_DATABASE", "ella_ai")
 GUARDIAN_ENQUEUE_URL = os.getenv("ELLA_GUARDIAN_ENQUEUE_URL", "http://127.0.0.1:8000/v1/ella/guardian/enqueue")
 GUARDIAN_WEBHOOK_KEY = authority_credential("GUARDIAN_WEBHOOK_KEY", strip=False)
+SCANNER_WEBHOOK_KEY = authority_credential("ELLA_SCANNER_WEBHOOK_KEY", strip=False)
+SCANNER_WEBHOOK_KEY_HEADER = "X-Ella-Scanner-Webhook-Key"
 GUARDIAN_WAKE_ACK_AUDIO_URL = os.getenv(
     "ELLA_GUARDIAN_WAKE_ACK_AUDIO_URL",
     "https://ella-ai-care.com/audio/system/wake_ack_pulse.mp3",
@@ -43,25 +48,49 @@ GUARDIAN_TRACE_LOG_TIMEOUT_S = min(
 WAKE_WORD_PREFIX_MAX_WORDS = 4
 WAKE_WORD_PENDING_WINDOW_S = float(os.getenv("ELLA_WAKE_WORD_PENDING_WINDOW_S", "12.0"))
 SCANNER_CONTEXT_WINDOW_S = float(os.getenv("ELLA_SCANNER_CONTEXT_WINDOW_S", "12.0"))
-GUARDIAN_ECHO_SUPPRESSION_SECONDS = int(os.getenv("ELLA_GUARDIAN_ECHO_SUPPRESSION_SECONDS", "45"))
+# Lookback window for selecting the owner's own recently-PLAYED ledger
+# candidates to attach to the scanner context. This is a time/route
+# proximity SELECTION only — it never suppresses anything itself. Whether
+# any selected candidate is actually being re-heard is a semantic judgment
+# made downstream (the typed echo classifier / n8n Echo Guard node).
+GUARDIAN_PLAYBACK_CANDIDATE_WINDOW_SECONDS = int(os.getenv("ELLA_GUARDIAN_ECHO_SUPPRESSION_SECONDS", "45"))
+GUARDIAN_PLAYBACK_CANDIDATE_LIMIT = int(os.getenv("ELLA_GUARDIAN_PLAYBACK_CANDIDATE_LIMIT", "5"))
+GUARDIAN_PLAYBACK_CANDIDATE_LOOKUP_TIMEOUT_SECONDS = float(
+    os.getenv("ELLA_GUARDIAN_PLAYBACK_CANDIDATE_LOOKUP_TIMEOUT_SECONDS", "2.0")
+)
+# Overall wall-clock budget for the backend's own echo-source judgment call,
+# bounding the classifier's internal per-provider timeout/fallback chain so a
+# slow or hung provider can never hold up scanner dispatch — a timeout here
+# fails open exactly like every other classifier failure mode.
+GUARDIAN_ECHO_CLASSIFICATION_TIMEOUT_SECONDS = float(
+    os.getenv("ELLA_GUARDIAN_ECHO_CLASSIFICATION_TIMEOUT_SECONDS", "4.5")
+)
 SCANNER_AMBIENT_BATCHING_ENABLED = os.getenv("ELLA_SCANNER_AMBIENT_BATCHING_ENABLED", "true").lower() == "true"
 SCANNER_AMBIENT_BATCH_SECONDS = float(os.getenv("ELLA_SCANNER_AMBIENT_BATCH_SECONDS", "10.0"))
 SCANNER_AMBIENT_BATCH_WORDS = int(os.getenv("ELLA_SCANNER_AMBIENT_BATCH_WORDS", "70"))
 SCANNER_AMBIENT_BATCH_MAX_WORDS = int(os.getenv("ELLA_SCANNER_AMBIENT_BATCH_MAX_WORDS", "180"))
 SCANNER_RATE_LIMIT_DEFAULT_BACKOFF_S = float(os.getenv("ELLA_SCANNER_RATE_LIMIT_DEFAULT_BACKOFF_S", "15.0"))
-_ECHO_RISKY_OUTPUTS = {"medium", "high", "very_high"}
-_GUARDIAN_ECHO_MARKERS = (
-    "hi greg",
-    "heard my name",
-    "i heard my name",
-    "i'm here with you",
-    "im here with you",
-    "here with you",
-    "tell me what you need",
-    "just talking about names",
-    "just talking about me",
-    "i heard you i am checking that now",
-)
+
+
+def _post_scanner_webhook(url: str, *, json: dict, headers: dict, timeout: float):
+    """Send scanner data without ambient proxy or redirect authority."""
+    with requests.Session() as session:
+        session.trust_env = False
+        response = session.post(
+            url,
+            json=json,
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=False,
+        )
+    if 300 <= response.status_code < 400:
+        raise requests.RequestException(
+            f"scanner webhook redirect rejected: status={response.status_code}",
+            response=response,
+        )
+    return response
+
+
 WAKE_WORD_ALIASES = (
     "hey ella",
     "ella",
@@ -307,61 +336,198 @@ def _word_count(text: str) -> int:
     return len(_normalize_text(text).split())
 
 
-def _normalize_for_echo_match(text: str) -> str:
-    normalized = text.lower().replace("’", "'")
-    normalized = re.sub(r"[^a-z0-9' ]+", " ", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    return normalized
+async def _fetch_playback_ledger_candidates(uid: str, *, window_seconds: int, limit: int) -> list[dict]:
+    pool = await _get_candidate_lookup_pool()
+    candidates = await guardian_playback_ledger.get_played_candidates(
+        pool,
+        uid,
+        window_seconds=window_seconds,
+        limit=limit,
+    )
+    return [candidate.to_classifier_candidate() for candidate in candidates]
 
 
-def _looks_like_guardian_echo_text(text: str) -> bool:
-    normalized = _normalize_for_echo_match(text)
-    if not normalized:
-        return False
+# `select_playback_ledger_candidates` is called synchronously from the sync
+# scanner send path, which itself runs inside a FastAPI worker thread
+# (`run_in_threadpool`) — never the app's own main event loop. An
+# `asyncio.run(...)` per call would spin up (and tear down) a brand-new
+# event loop every time, but asyncpg pools are bound to the loop that
+# created them: the second call would either reuse a pool whose connections
+# belong to an already-closed loop ("Event loop is closed" /
+# "another operation is in progress"), raise immediately if called from a
+# thread that already has a running loop, or race other callers doing the
+# same thing concurrently. Route every lookup through one dedicated,
+# long-lived background loop/thread instead, with its own pool independent
+# of the shared `database.ella_postgres` singleton (which stays reserved
+# for the app's main event loop) — that pool is then only ever touched from
+# the one loop that owns it, however many threads or loops call in.
+_candidate_loop: Optional[asyncio.AbstractEventLoop] = None
+_candidate_loop_lock = threading.Lock()
+_candidate_pool: Optional["asyncpg.Pool"] = None
+_candidate_pool_lock: Optional[asyncio.Lock] = None
 
-    marker_hits = sum(1 for marker in _GUARDIAN_ECHO_MARKERS if marker in normalized)
-    if marker_hits >= 2:
-        return True
-    if "hi greg" in normalized and "heard my name" in normalized:
-        return True
-    if "tell me what you need" in normalized and ("just talking about" in normalized or "here with you" in normalized):
-        return True
-    return False
+
+def _ensure_candidate_loop() -> asyncio.AbstractEventLoop:
+    global _candidate_loop
+    with _candidate_loop_lock:
+        if _candidate_loop is None or _candidate_loop.is_closed():
+            loop = asyncio.new_event_loop()
+            threading.Thread(
+                target=loop.run_forever,
+                name="guardian-playback-candidate-loop",
+                daemon=True,
+            ).start()
+            _candidate_loop = loop
+        return _candidate_loop
 
 
-def _recent_risky_playback_event(uid: str) -> dict | None:
+async def _get_candidate_lookup_pool():
+    # Only ever awaited on `_candidate_loop`, so this lock and the pool it
+    # guards are both local to that single loop/thread.
+    global _candidate_pool, _candidate_pool_lock
+    if _candidate_pool_lock is None:
+        _candidate_pool_lock = asyncio.Lock()
+    async with _candidate_pool_lock:
+        if _candidate_pool is None:
+            _candidate_pool = await create_dedicated_ella_postgres_pool(min_size=1, max_size=5)
+        return _candidate_pool
+
+
+def select_playback_ledger_candidates(
+    uid: str,
+    *,
+    window_seconds: int = GUARDIAN_PLAYBACK_CANDIDATE_WINDOW_SECONDS,
+    limit: int = GUARDIAN_PLAYBACK_CANDIDATE_LIMIT,
+) -> list[dict]:
+    """Owner-scoped SELECTION of recently-PLAYED ledger candidates.
+
+    Time/route proximity only decides which of the owner's own played
+    Whispers are worth attaching to the scanner context — it never decides
+    whether the current transcript IS one of them. That is a semantic
+    judgment made downstream by the typed echo classifier (or the n8n Echo
+    Guard node), never here and never by text/regex matching.
+
+    Best-effort: any lookup failure (ledger unavailable, DB error, timeout)
+    returns an empty candidate list rather than raising, so a ledger outage
+    can never block scanner dispatch. Safe to call repeatedly from the sync
+    scanner path, from any worker thread, and from inside a caller's own
+    running event loop.
+    """
     try:
-        from ella.routers.guardian import get_playback_event
-    except Exception:
-        return None
-
-    event = get_playback_event(uid)
-    if not event:
-        return None
-    if event.get("echo_risk") not in _ECHO_RISKY_OUTPUTS:
-        return None
-    recorded_at = event.get("recorded_at")
-    if isinstance(recorded_at, (int, float)) and time.time() - recorded_at > GUARDIAN_ECHO_SUPPRESSION_SECONDS:
-        return None
-    return event
-
-
-def should_suppress_guardian_echo(
-    uid: str, scanner_segments: List[dict], playback_event: Optional[dict] = None
-) -> bool:
-    """Return True when the scanner input is likely Guardian audio re-captured by the mic."""
-    text = _combined_segment_text(scanner_segments)
-    if not _looks_like_guardian_echo_text(text):
-        return False
-
-    event = playback_event if playback_event is not None else _recent_risky_playback_event(uid)
-    if not event:
-        return False
-    return event.get("echo_risk") in _ECHO_RISKY_OUTPUTS
+        loop = _ensure_candidate_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            _fetch_playback_ledger_candidates(uid, window_seconds=window_seconds, limit=limit),
+            loop,
+        )
+        return future.result(timeout=GUARDIAN_PLAYBACK_CANDIDATE_LOOKUP_TIMEOUT_SECONDS)
+    except Exception as exc:
+        # Content-free: never log the exception's own text, which for a
+        # query/driver error can echo back parameters or connection details.
+        print(
+            f"📡 Scanner playback ledger candidate lookup failed uid={uid} reason={type(exc).__name__}",
+            flush=True,
+        )
+        return []
 
 
 def _combined_segment_text(segments: List[dict]) -> str:
     return " ".join((segment.get("text") or "").strip() for segment in segments if segment.get("text")).strip()
+
+
+async def _classify_playback_source_with_timeout(
+    transcript: str, candidates: list[dict], *, uid: str
+) -> Optional[guardian_echo_classifier.EchoClassification]:
+    try:
+        return await asyncio.wait_for(
+            guardian_echo_classifier.classify_playback_source(transcript, candidates, uid=uid),
+            timeout=GUARDIAN_ECHO_CLASSIFICATION_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return None
+
+
+def _classify_playback_source_for_dispatch(
+    transcript: str, candidates: list[dict], *, uid: str
+) -> Optional[guardian_echo_classifier.EchoClassification]:
+    """Backend-executable echo-source judgment, run before scanner dispatch.
+
+    Shares the same dedicated background loop/thread as
+    `select_playback_ledger_candidates` rather than a fresh `asyncio.run()`
+    per call, so this is safe to call from the sync scanner path, a worker
+    thread, or a caller whose own thread already has a running event loop.
+
+    Returns None on any failure (timeout, unexpected error) — callers must
+    treat None exactly like a fail-open classification and dispatch the
+    original transcript window unchanged.
+    """
+    try:
+        loop = _ensure_candidate_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            _classify_playback_source_with_timeout(transcript, candidates, uid=uid),
+            loop,
+        )
+        return future.result(timeout=GUARDIAN_ECHO_CLASSIFICATION_TIMEOUT_SECONDS + 1.0)
+    except Exception:
+        return None
+
+
+_SAFE_PARTIAL_SEGMENT_KEYS = ("speaker", "start", "end")
+
+
+def _extract_live_span_text(text: str, live_spans: list[str]) -> str:
+    """Return only the substrings of `text` that fall inside a validated
+    live span, in transcript order, with everything else (the playback
+    portion) dropped."""
+    matches = []
+    for span in live_spans:
+        start = text.find(span)
+        if start != -1:
+            matches.append((start, start + len(span)))
+    if not matches:
+        return ""
+    matches.sort()
+    merged = [matches[0]]
+    for start, end in matches[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return " ".join(text[start:end].strip() for start, end in merged).strip()
+
+
+def _segments_matching_live_spans(segments: List[dict], live_spans: list[str]) -> List[dict]:
+    """Restrict segments to only the text overlapping a validated live span.
+
+    `live_spans` are exact extractive substrings of the combined transcript
+    (`_combined_segment_text`, which joins segment texts with a single
+    space). A segment whose entire text is itself part of a validated span
+    is kept unchanged. A segment that mixes playback and live speech in the
+    same ASR chunk is rewritten to carry only the validated live
+    substring(s) — the playback portion is dropped from the outgoing text,
+    and only safe metadata (speaker, timing bounds where available)
+    carries over, never the untouched original text.
+    """
+    non_blank_spans = [span for span in live_spans if span.strip()]
+    if not non_blank_spans:
+        return []
+    kept = []
+    for segment in segments:
+        text = (segment.get("text") or "").strip()
+        if not text:
+            continue
+        if any(text in span for span in non_blank_spans):
+            kept.append(segment)
+            continue
+        live_text = _extract_live_span_text(text, non_blank_spans)
+        if not live_text:
+            continue
+        partial_segment = {"text": live_text}
+        for key in _SAFE_PARTIAL_SEGMENT_KEYS:
+            if key in segment:
+                partial_segment[key] = segment[key]
+        kept.append(partial_segment)
+    return kept
 
 
 def contains_wake_phrase(text: str) -> bool:
@@ -635,16 +801,20 @@ def prepare_scanner_segments_for_dispatch(
     )
 
 
-def scanner_payload_preview(segments: List[dict], *, limit: int = 4) -> List[dict]:
-    preview = []
-    for segment in segments[:limit]:
-        preview.append(
-            {
-                "speaker": segment.get("speaker") or f"SPEAKER_{segment.get('speaker_id', 0)}",
-                "text": (segment.get("text") or "")[:120],
-            }
-        )
-    return preview
+def scanner_payload_metadata_summary(segments: List[dict], *, limit: int = 4) -> dict:
+    """Content-free summary of a segment list for trace metadata and logs.
+
+    Never includes transcript text or any derived quote from it — only
+    ids/counts/statuses (speaker labels and per-segment character counts),
+    so this is safe to persist (e.g. into `guardian_queue.metadata`) or
+    print without ever leaking what anyone said.
+    """
+    limited = segments[:limit]
+    return {
+        "segment_count": len(segments),
+        "speakers": [segment.get("speaker") or f"SPEAKER_{segment.get('speaker_id', 0)}" for segment in limited],
+        "text_lengths": [len(segment.get("text") or "") for segment in limited],
+    }
 
 
 def scanner_model_name() -> str:
@@ -971,7 +1141,7 @@ def _build_wake_ack_payload(uid: str, conversation_id: str, trace_id: str, scann
             "ack_only": True,
             "source": "omi_backend_fast_wake_ack",
             "detected_at": time.time(),
-            "segments_preview": scanner_payload_preview(scanner_segments, limit=2),
+            "segments_summary": scanner_payload_metadata_summary(scanner_segments, limit=2),
         },
     }
 
@@ -992,7 +1162,7 @@ def _enqueue_wake_ack(uid: str, conversation_id: str, trace_id: str, scanner_seg
         metadata={
             "conversation_id": str(conversation_id),
             "wake_turn_id": wake_turn_id,
-            "segments_preview": scanner_payload_preview(scanner_segments, limit=2),
+            "segments_summary": scanner_payload_metadata_summary(scanner_segments, limit=2),
         },
     )
 
@@ -1172,6 +1342,10 @@ def send_to_scanner(
     if not segments:
         return None
 
+    if not SCANNER_WEBHOOK_KEY:
+        print("Scanner authority unavailable", flush=True)
+        return None
+
     timeout = timeout or ELLA_CONFIG.scanner_timeout
     trace_id = _trace_id_for(str(conversation_id))
 
@@ -1237,27 +1411,6 @@ def send_to_scanner(
         )
         return None
 
-    if should_suppress_guardian_echo(uid, scanner_segments):
-        _log_trace_event(
-            trace_id=trace_id,
-            uid=uid,
-            stage="scanner_dispatch_suppressed",
-            status="skipped",
-            metadata={
-                "conversation_id": str(conversation_id),
-                "device_type": device_type,
-                "segment_count": len(scanner_segments),
-                "reason": "guardian_playback_echo",
-                "segments_preview": scanner_payload_preview(scanner_segments),
-            },
-        )
-        print(
-            f"📡 Scanner suppressed guardian playback echo trace={trace_id} "
-            f"preview={scanner_payload_preview(scanner_segments)}",
-            flush=True,
-        )
-        return None
-
     scanner_segments, batch_metadata = _apply_ambient_batching(
         uid,
         str(conversation_id),
@@ -1288,6 +1441,69 @@ def send_to_scanner(
         )
         return None
 
+    # Owner-scoped SELECTION only (time/route proximity) of this owner's own
+    # recently-PLAYED ledger entries. Time/route proximity never decides
+    # whether the current transcript IS one of them — that regex/window
+    # selection has hint authority only. The actual semantic echo-source
+    # judgment is made right below, executed here in the backend (never by
+    # text/regex matching), before ANY queue-producing action for this
+    # window — including the wake acknowledgement below — is ever taken. A
+    # re-heard "Hey Ella" that is a confirmed echo of Ella's own playback
+    # must never create a `wake_word_ack` queue row, so that ack cannot be
+    # enqueued until this judgment (and any live-span filtering it implies)
+    # is settled.
+    playback_candidates = select_playback_ledger_candidates(uid)
+
+    echo_classification = None
+    if playback_candidates:
+        combined_transcript = _combined_segment_text(scanner_segments)
+        if combined_transcript:
+            echo_classification = _classify_playback_source_for_dispatch(
+                combined_transcript, playback_candidates, uid=uid
+            )
+
+    if echo_classification is not None and not echo_classification.fail_open and echo_classification.is_confirmed_echo:
+        if echo_classification.source == "mixed":
+            live_only_segments = _segments_matching_live_spans(
+                scanner_segments, echo_classification.validated_live_spans
+            )
+            if live_only_segments:
+                # Mixed: only the classifier-validated live speech continues
+                # downstream (and can trigger the wake ack below) — the
+                # echoed portion is dropped, never dispatched and never
+                # acked on its own.
+                scanner_segments = live_only_segments
+            # else: the invariant in `_validate_payload` guarantees a
+            # confirmed "mixed" result always carries a non-blank span, so
+            # this should be unreachable; fail open on the untouched window
+            # rather than silently drop it if it is ever hit.
+        else:
+            # Confirmed Ella playback (no live component): tag this window
+            # as Ella's own output in the pipeline context. It must not be
+            # dispatched as user speech, and it must not be wake-acked
+            # either — neither can create a Whisper/queue row for a
+            # re-heard echo of Ella's own voice.
+            _log_trace_event(
+                trace_id=trace_id,
+                uid=uid,
+                stage="scanner_echo_classification",
+                status="suppressed_ella_output",
+                metadata={
+                    "conversation_id": str(conversation_id),
+                    "device_type": device_type,
+                    "candidate_count": len(playback_candidates),
+                    "matched_candidate_count": len(echo_classification.matched_playback_ids),
+                    "reason_code": echo_classification.reason_code,
+                    "confidence": echo_classification.confidence,
+                },
+            )
+            print(
+                f"📡 Scanner: trace={trace_id} confirmed Ella playback echo "
+                f"(matched={len(echo_classification.matched_playback_ids)}) — not dispatched",
+                flush=True,
+            )
+            return None
+
     _enqueue_wake_ack(uid, str(conversation_id), trace_id, scanner_segments)
 
     payload = {
@@ -1307,6 +1523,7 @@ def send_to_scanner(
         "guardian_mode_source": "users.guardian_mode",
         "guardian_mode_enabled": guardian_mode_enabled,
         "emergency_only_dispatch": emergency_only_dispatch,
+        "playback_candidates": playback_candidates,
     }
     if latency_metadata:
         payload["latency"] = latency_metadata
@@ -1319,7 +1536,12 @@ def send_to_scanner(
 
     try:
         start = time.time()
-        resp = requests.post(ELLA_CONFIG.scanner_url, json=payload, timeout=timeout)
+        resp = _post_scanner_webhook(
+            ELLA_CONFIG.scanner_url,
+            json=payload,
+            headers={SCANNER_WEBHOOK_KEY_HEADER: SCANNER_WEBHOOK_KEY},
+            timeout=timeout,
+        )
         latency_ms = int((time.time() - start) * 1000)
         rate_limit_status = rate_limit_status_from_response(resp)
         _record_scanner_backpressure(uid, rate_limit_status, time.time())
@@ -1337,8 +1559,8 @@ def send_to_scanner(
                 "scanner_batch": batch_metadata,
                 "latency": latency_metadata or {},
                 "rate_limit": rate_limit_status,
-                "segments_preview": scanner_payload_preview(scanner_segments),
-                "recent_segments_preview": scanner_payload_preview(payload.get("recent_segments", [])),
+                "segments_summary": scanner_payload_metadata_summary(scanner_segments),
+                "recent_segments_summary": scanner_payload_metadata_summary(payload.get("recent_segments", [])),
                 "wake_prefix_recent": payload.get("wake_prefix_recent"),
             },
         )
@@ -1346,8 +1568,8 @@ def send_to_scanner(
             f"📡 Scanner: trace={trace_id} {len(scanner_segments)} segments → {resp.status_code} "
             f"batch={batch_metadata.get('flush_reason')} words={batch_metadata.get('batch_word_count')} "
             f"rate_limited={rate_limit_status.get('limited')} "
-            f"payload={scanner_payload_preview(scanner_segments)} "
-            f"recent={scanner_payload_preview(payload.get('recent_segments', []))} "
+            f"payload={scanner_payload_metadata_summary(scanner_segments)} "
+            f"recent={scanner_payload_metadata_summary(payload.get('recent_segments', []))} "
             f"wake_prefix_recent={payload.get('wake_prefix_recent')}",
             flush=True,
         )
@@ -1366,8 +1588,8 @@ def send_to_scanner(
                 "timeout_s": timeout,
                 "scanner_batch": batch_metadata,
                 "latency": latency_metadata or {},
-                "segments_preview": scanner_payload_preview(scanner_segments),
-                "recent_segments_preview": scanner_payload_preview(payload.get("recent_segments", [])),
+                "segments_summary": scanner_payload_metadata_summary(scanner_segments),
+                "recent_segments_summary": scanner_payload_metadata_summary(payload.get("recent_segments", [])),
                 "wake_prefix_recent": payload.get("wake_prefix_recent"),
             },
         )
@@ -1387,8 +1609,8 @@ def send_to_scanner(
                 "error": str(e)[:200],
                 "scanner_batch": batch_metadata,
                 "latency": latency_metadata or {},
-                "segments_preview": scanner_payload_preview(scanner_segments),
-                "recent_segments_preview": scanner_payload_preview(payload.get("recent_segments", [])),
+                "segments_summary": scanner_payload_metadata_summary(scanner_segments),
+                "recent_segments_summary": scanner_payload_metadata_summary(payload.get("recent_segments", [])),
                 "wake_prefix_recent": payload.get("wake_prefix_recent"),
             },
         )
