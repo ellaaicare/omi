@@ -16,8 +16,9 @@ from typing import Iterator, List, Optional
 
 import requests
 
+from database.ella_postgres import create_dedicated_ella_postgres_pool
 from database.honcho_attestation import authority_credential
-from ella.services import guardian_playback_ledger
+from ella.services import guardian_echo_classifier, guardian_playback_ledger
 
 from .config import ELLA_CONFIG
 
@@ -54,6 +55,16 @@ SCANNER_CONTEXT_WINDOW_S = float(os.getenv("ELLA_SCANNER_CONTEXT_WINDOW_S", "12.
 # made downstream (the typed echo classifier / n8n Echo Guard node).
 GUARDIAN_PLAYBACK_CANDIDATE_WINDOW_SECONDS = int(os.getenv("ELLA_GUARDIAN_ECHO_SUPPRESSION_SECONDS", "45"))
 GUARDIAN_PLAYBACK_CANDIDATE_LIMIT = int(os.getenv("ELLA_GUARDIAN_PLAYBACK_CANDIDATE_LIMIT", "5"))
+GUARDIAN_PLAYBACK_CANDIDATE_LOOKUP_TIMEOUT_SECONDS = float(
+    os.getenv("ELLA_GUARDIAN_PLAYBACK_CANDIDATE_LOOKUP_TIMEOUT_SECONDS", "2.0")
+)
+# Overall wall-clock budget for the backend's own echo-source judgment call,
+# bounding the classifier's internal per-provider timeout/fallback chain so a
+# slow or hung provider can never hold up scanner dispatch — a timeout here
+# fails open exactly like every other classifier failure mode.
+GUARDIAN_ECHO_CLASSIFICATION_TIMEOUT_SECONDS = float(
+    os.getenv("ELLA_GUARDIAN_ECHO_CLASSIFICATION_TIMEOUT_SECONDS", "4.5")
+)
 SCANNER_AMBIENT_BATCHING_ENABLED = os.getenv("ELLA_SCANNER_AMBIENT_BATCHING_ENABLED", "true").lower() == "true"
 SCANNER_AMBIENT_BATCH_SECONDS = float(os.getenv("ELLA_SCANNER_AMBIENT_BATCH_SECONDS", "10.0"))
 SCANNER_AMBIENT_BATCH_WORDS = int(os.getenv("ELLA_SCANNER_AMBIENT_BATCH_WORDS", "70"))
@@ -326,7 +337,7 @@ def _word_count(text: str) -> int:
 
 
 async def _fetch_playback_ledger_candidates(uid: str, *, window_seconds: int, limit: int) -> list[dict]:
-    pool = await guardian_playback_ledger.get_pool()
+    pool = await _get_candidate_lookup_pool()
     candidates = await guardian_playback_ledger.get_played_candidates(
         pool,
         uid,
@@ -334,6 +345,52 @@ async def _fetch_playback_ledger_candidates(uid: str, *, window_seconds: int, li
         limit=limit,
     )
     return [candidate.to_classifier_candidate() for candidate in candidates]
+
+
+# `select_playback_ledger_candidates` is called synchronously from the sync
+# scanner send path, which itself runs inside a FastAPI worker thread
+# (`run_in_threadpool`) — never the app's own main event loop. An
+# `asyncio.run(...)` per call would spin up (and tear down) a brand-new
+# event loop every time, but asyncpg pools are bound to the loop that
+# created them: the second call would either reuse a pool whose connections
+# belong to an already-closed loop ("Event loop is closed" /
+# "another operation is in progress"), raise immediately if called from a
+# thread that already has a running loop, or race other callers doing the
+# same thing concurrently. Route every lookup through one dedicated,
+# long-lived background loop/thread instead, with its own pool independent
+# of the shared `database.ella_postgres` singleton (which stays reserved
+# for the app's main event loop) — that pool is then only ever touched from
+# the one loop that owns it, however many threads or loops call in.
+_candidate_loop: Optional[asyncio.AbstractEventLoop] = None
+_candidate_loop_lock = threading.Lock()
+_candidate_pool: Optional["asyncpg.Pool"] = None
+_candidate_pool_lock: Optional[asyncio.Lock] = None
+
+
+def _ensure_candidate_loop() -> asyncio.AbstractEventLoop:
+    global _candidate_loop
+    with _candidate_loop_lock:
+        if _candidate_loop is None or _candidate_loop.is_closed():
+            loop = asyncio.new_event_loop()
+            threading.Thread(
+                target=loop.run_forever,
+                name="guardian-playback-candidate-loop",
+                daemon=True,
+            ).start()
+            _candidate_loop = loop
+        return _candidate_loop
+
+
+async def _get_candidate_lookup_pool():
+    # Only ever awaited on `_candidate_loop`, so this lock and the pool it
+    # guards are both local to that single loop/thread.
+    global _candidate_pool, _candidate_pool_lock
+    if _candidate_pool_lock is None:
+        _candidate_pool_lock = asyncio.Lock()
+    async with _candidate_pool_lock:
+        if _candidate_pool is None:
+            _candidate_pool = await create_dedicated_ella_postgres_pool(min_size=1, max_size=5)
+        return _candidate_pool
 
 
 def select_playback_ledger_candidates(
@@ -350,19 +407,89 @@ def select_playback_ledger_candidates(
     judgment made downstream by the typed echo classifier (or the n8n Echo
     Guard node), never here and never by text/regex matching.
 
-    Best-effort: any lookup failure (ledger unavailable, DB error) returns
-    an empty candidate list rather than raising, so a ledger outage can
-    never block scanner dispatch.
+    Best-effort: any lookup failure (ledger unavailable, DB error, timeout)
+    returns an empty candidate list rather than raising, so a ledger outage
+    can never block scanner dispatch. Safe to call repeatedly from the sync
+    scanner path, from any worker thread, and from inside a caller's own
+    running event loop.
     """
     try:
-        return asyncio.run(_fetch_playback_ledger_candidates(uid, window_seconds=window_seconds, limit=limit))
+        loop = _ensure_candidate_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            _fetch_playback_ledger_candidates(uid, window_seconds=window_seconds, limit=limit),
+            loop,
+        )
+        return future.result(timeout=GUARDIAN_PLAYBACK_CANDIDATE_LOOKUP_TIMEOUT_SECONDS)
     except Exception as exc:
-        print(f"📡 Scanner playback ledger candidate lookup failed uid={uid}: {exc}", flush=True)
+        # Content-free: never log the exception's own text, which for a
+        # query/driver error can echo back parameters or connection details.
+        print(
+            f"📡 Scanner playback ledger candidate lookup failed uid={uid} reason={type(exc).__name__}",
+            flush=True,
+        )
         return []
 
 
 def _combined_segment_text(segments: List[dict]) -> str:
     return " ".join((segment.get("text") or "").strip() for segment in segments if segment.get("text")).strip()
+
+
+async def _classify_playback_source_with_timeout(
+    transcript: str, candidates: list[dict], *, uid: str
+) -> Optional[guardian_echo_classifier.EchoClassification]:
+    try:
+        return await asyncio.wait_for(
+            guardian_echo_classifier.classify_playback_source(transcript, candidates, uid=uid),
+            timeout=GUARDIAN_ECHO_CLASSIFICATION_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return None
+
+
+def _classify_playback_source_for_dispatch(
+    transcript: str, candidates: list[dict], *, uid: str
+) -> Optional[guardian_echo_classifier.EchoClassification]:
+    """Backend-executable echo-source judgment, run before scanner dispatch.
+
+    Shares the same dedicated background loop/thread as
+    `select_playback_ledger_candidates` rather than a fresh `asyncio.run()`
+    per call, so this is safe to call from the sync scanner path, a worker
+    thread, or a caller whose own thread already has a running event loop.
+
+    Returns None on any failure (timeout, unexpected error) — callers must
+    treat None exactly like a fail-open classification and dispatch the
+    original transcript window unchanged.
+    """
+    try:
+        loop = _ensure_candidate_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            _classify_playback_source_with_timeout(transcript, candidates, uid=uid),
+            loop,
+        )
+        return future.result(timeout=GUARDIAN_ECHO_CLASSIFICATION_TIMEOUT_SECONDS + 1.0)
+    except Exception:
+        return None
+
+
+def _segments_matching_live_spans(segments: List[dict], live_spans: list[str]) -> List[dict]:
+    """Restrict segments to only those overlapping a validated live span.
+
+    `live_spans` are exact extractive substrings of the combined transcript
+    (`_combined_segment_text`, which joins segment texts with a single
+    space) — a segment is kept when its own text is contained in, or
+    contains, at least one validated span.
+    """
+    non_blank_spans = [span for span in live_spans if span.strip()]
+    if not non_blank_spans:
+        return []
+    kept = []
+    for segment in segments:
+        text = (segment.get("text") or "").strip()
+        if not text:
+            continue
+        if any(text in span or span in text for span in non_blank_spans):
+            kept.append(segment)
+    return kept
 
 
 def contains_wake_phrase(text: str) -> bool:
@@ -1275,11 +1402,59 @@ def send_to_scanner(
     _enqueue_wake_ack(uid, str(conversation_id), trace_id, scanner_segments)
 
     # Owner-scoped SELECTION only (time/route proximity) of this owner's own
-    # recently-PLAYED ledger entries. Attached to the scanner context so the
-    # typed echo classifier / n8n Echo Guard node can make the actual
-    # semantic playback-source judgment downstream. Never suppresses dispatch
-    # here — that would be exactly the text/regex verdict this replaces.
+    # recently-PLAYED ledger entries. Time/route proximity never decides
+    # whether the current transcript IS one of them — that regex/window
+    # selection has hint authority only. The actual semantic echo-source
+    # judgment is made right below, executed here in the backend (never by
+    # text/regex matching), before the window is ever dispatched.
     playback_candidates = select_playback_ledger_candidates(uid)
+
+    echo_classification = None
+    if playback_candidates:
+        combined_transcript = _combined_segment_text(scanner_segments)
+        if combined_transcript:
+            echo_classification = _classify_playback_source_for_dispatch(
+                combined_transcript, playback_candidates, uid=uid
+            )
+
+    if echo_classification is not None and not echo_classification.fail_open and echo_classification.is_confirmed_echo:
+        if echo_classification.source == "mixed":
+            live_only_segments = _segments_matching_live_spans(
+                scanner_segments, echo_classification.validated_live_spans
+            )
+            if live_only_segments:
+                # Mixed: only the classifier-validated live speech continues
+                # downstream — the echoed portion is dropped, never dispatched.
+                scanner_segments = live_only_segments
+            # else: the invariant in `_validate_payload` guarantees a
+            # confirmed "mixed" result always carries a non-blank span, so
+            # this should be unreachable; fail open on the untouched window
+            # rather than silently drop it if it is ever hit.
+        else:
+            # Confirmed Ella playback (no live component): tag this window
+            # as Ella's own output in the pipeline context and do not
+            # dispatch it as user speech at all — it can never create a
+            # Whisper/queue row if the scanner webhook is never called.
+            _log_trace_event(
+                trace_id=trace_id,
+                uid=uid,
+                stage="scanner_echo_classification",
+                status="suppressed_ella_output",
+                metadata={
+                    "conversation_id": str(conversation_id),
+                    "device_type": device_type,
+                    "candidate_count": len(playback_candidates),
+                    "matched_candidate_count": len(echo_classification.matched_playback_ids),
+                    "reason_code": echo_classification.reason_code,
+                    "confidence": echo_classification.confidence,
+                },
+            )
+            print(
+                f"📡 Scanner: trace={trace_id} confirmed Ella playback echo "
+                f"(matched={len(echo_classification.matched_playback_ids)}) — not dispatched",
+                flush=True,
+            )
+            return None
 
     payload = {
         "uid": uid,

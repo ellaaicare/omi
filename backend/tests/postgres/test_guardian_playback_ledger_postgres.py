@@ -1,13 +1,16 @@
 import asyncio
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Awaitable, Callable
+from unittest import mock
 
 import asyncpg
 import pytest
 
 from ella.services import guardian_playback_ledger as ledger
+from utils.ella import scanner as scanner_module
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
 MIGRATION_PATH = Path(__file__).resolve().parents[2] / "migrations" / "018_create_guardian_playback_ledger.sql"
@@ -219,3 +222,76 @@ def test_played_candidate_outside_window_is_excluded():
         assert len(candidates_wide) == 1
 
     asyncio.run(_run_with_database(scenario))
+
+
+def test_select_playback_ledger_candidates_survives_repeated_calls_thread_and_running_loop():
+    """Regression for the `asyncio.run()`-per-call bug in
+    `utils.ella.scanner.select_playback_ledger_candidates`.
+
+    That selector wraps its async ledger fetch in a fresh `asyncio.run(...)`
+    on every call, sharing the module-level asyncpg pool from
+    `database.ella_postgres.get_ella_postgres_pool`. Reproduced against a
+    real ledger row: the first call in a process works, but asyncpg pools
+    are bound to the loop that created them, so a second `asyncio.run()`
+    call either reuses a pool whose connections belong to an
+    already-closed loop, or raises outright when called from a thread that
+    already has a running loop — silently degrading every later lookup (or
+    any lookup from a worker thread or a running loop) to `[]`, which
+    detaches candidates from the classifier without ever surfacing an
+    error.
+
+    Exercises the real, unmocked sync entry point end-to-end: three calls
+    in a row, one from a worker thread (matching how `send_to_scanner` is
+    actually invoked via `run_in_threadpool`), and one from inside the
+    caller's own running event loop — each must still return the played
+    candidate.
+    """
+
+    async def _setup(pool: asyncpg.Pool) -> None:
+        await ledger.record_generated(pool, uid="uid-thread", playback_id="pb-thread", playback_text="Hi Greg.")
+        await ledger.record_playback_receipt(
+            pool,
+            uid="uid-thread",
+            playback_id="pb-thread",
+            event_type="started",
+            route="Speaker",
+            device_class="high",
+        )
+
+    asyncio.run(_run_with_database(_setup))
+
+    async def _test_dedicated_pool(**_kwargs):
+        return await asyncpg.create_pool(TEST_DSN, min_size=1, max_size=5)
+
+    def _select():
+        return scanner_module.select_playback_ledger_candidates("uid-thread", window_seconds=3600, limit=5)
+
+    original_pool = scanner_module._candidate_pool
+    with mock.patch.object(scanner_module, "create_dedicated_ella_postgres_pool", _test_dedicated_pool):
+        scanner_module._candidate_pool = None
+        try:
+            for _ in range(3):
+                result = _select()
+                assert [c["playback_id"] for c in result] == ["pb-thread"]
+
+            thread_result: dict = {}
+            worker = threading.Thread(target=lambda: thread_result.__setitem__("value", _select()))
+            worker.start()
+            worker.join(timeout=10)
+            assert not worker.is_alive()
+            assert [c["playback_id"] for c in thread_result["value"]] == ["pb-thread"]
+
+            async def _call_from_running_loop():
+                # Calls the sync selector directly from inside a running
+                # loop on this thread — previously this raised
+                # "asyncio.run() cannot be called from a running event loop".
+                return _select()
+
+            result_from_loop = asyncio.run(_call_from_running_loop())
+            assert [c["playback_id"] for c in result_from_loop] == ["pb-thread"]
+        finally:
+            pool_to_close = scanner_module._candidate_pool
+            scanner_module._candidate_pool = original_pool
+            if pool_to_close is not None and scanner_module._candidate_loop is not None:
+                close_future = asyncio.run_coroutine_threadsafe(pool_to_close.close(), scanner_module._candidate_loop)
+                close_future.result(timeout=10)

@@ -2,28 +2,52 @@
 
 Issue: ellaaicare/ella-ai#600 (Whispers playback ledger + semantic echo)
 
-`services/n8n-workflows/` does not exist in this (public) repo — the n8n
-workflow JSON lives in the private Ella workflow repository. This document
-is the node contract the Echo Guard node in that private repo must
-implement, so the two repos stay in sync without either one needing to see
-the other's source.
+**Design update: the echo-source judgment is executed in the OMI backend,
+not in n8n.** `send_to_scanner` (`utils/ella/scanner.py`) now calls
+`classify_playback_source` itself, before a transcript window is ever
+dispatched to the scanner webhook, whenever owner-bound PLAYED ledger
+candidates exist. A confirmed echo is tagged as Ella's own output and is
+**never dispatched** to n8n at all (so it can never create a Whisper/queue
+row); a `mixed` result dispatches only the classifier-validated live
+speech spans; `unclear`, a provider error, or a timeout fails open and
+dispatches the original window unchanged. This is the same fail-open
+contract the node contract below originally specified — it is now
+enforced by an executable, tested backend code path
+(`utils/ella/scanner.py::send_to_scanner`,
+`ella/services/guardian_echo_classifier.py::classify_playback_source`)
+instead of being documentation for the private n8n workflow to implement.
+
+**No n8n change is required.** The Echo Guard node in the private workflow
+repo receives exactly what it always has — a scanner webhook call with a
+transcript window — except a window the backend already confirmed as pure
+Ella playback echo simply never arrives, and a `mixed` window arrives with
+only its live-speech portion. The node does not need to call the
+classifier itself, does not need to know `playback_candidates` was ever
+attached, and requires no change to keep working correctly. The rest of
+this document is kept as the schema/contract reference for
+`guardian_playback_source_v1` and for any future non-OMI caller that also
+needs to reason about this data — the backend's own classifier call is the
+canonical, executable implementation of everything described below.
 
 ## What changed
 
 The Echo Guard node used to make its own similarity/keyword-match verdict
 on whether the current transcript window was Ella's own audio being
 re-heard through the mic. That verdict is now made ONLY by the typed
-semantic classifier described below — never by text/regex/fuzzy matching
-in the node itself. The node's job is now: call the classifier, then apply
-its verdict. It must not compute one on its own.
+semantic classifier described below — the backend evaluates it before
+dispatch, so the node never needs to compute one on its own, whether by
+text/regex/fuzzy matching or by calling the classifier a second time.
 
-## Inputs the node now receives
+## What the backend attaches (for reference / any future caller)
 
-The OMI backend's scanner payload (`utils/ella/scanner.py:send_to_scanner`)
-now includes a `playback_candidates` array — the authenticated owner's own
-recently-PLAYED Guardian Whisper ledger entries (see
-`ella/services/guardian_playback_ledger.py`), selected purely by time/route
-proximity:
+`send_to_scanner` selects the owner's own recently-PLAYED Guardian Whisper
+ledger entries (see `ella/services/guardian_playback_ledger.py`), by
+time/route proximity, and attaches them to the payload as
+`playback_candidates` *before* running the classification described below.
+`playback_candidates` may still be present on the dispatched payload for
+observability, but by the time n8n sees a window, the backend has already
+applied the judgment — a confirmed echo never reaches this payload at all,
+and a mixed window's `segments` already contains only the live spans:
 
 ```json
 {
@@ -43,35 +67,47 @@ proximity:
 }
 ```
 
-`playback_candidates` may be an empty list. It is a SELECTION, not a
-verdict: presence of a candidate does not mean the transcript is an echo of
-it, and the scanner backend never suppresses dispatch based on it.
+`playback_candidates` may be an empty list. Selecting a candidate by
+time/route proximity is never itself a verdict — presence of a candidate
+does not mean the transcript is an echo of it. Only the classifier's
+judgment decides that, and (as of this change) that judgment is applied by
+the backend before dispatch, not by anything reading this payload.
 
 ## What the node must do
 
-1. If `playback_candidates` is empty, skip the classifier call and treat
-   the transcript as ordinary (possibly ambiguous) user speech. Do not call
-   the classifier with no candidates — it fails open on that case anyway
-   (see below), so calling it is wasted latency.
+**Nothing new.** The node does not need to call the classifier, does not
+need to branch on `playback_candidates`, and does not need any change for
+this contract — the backend has already applied steps 1–5 below before the
+node's webhook ever fires. This section is kept as the specification of
+what the backend's `send_to_scanner` / `classify_playback_source` call
+actually does, in case a future non-OMI caller needs to reproduce the same
+judgment:
+
+1. If there are no owner-bound PLAYED ledger candidates, skip the
+   classifier call and treat the transcript as ordinary (possibly
+   ambiguous) user speech. The classifier fails open on that case anyway
+   (see below), so calling it would be wasted latency.
 2. Otherwise call the typed classifier (Jev Decisions via OpenRouter
    `/api/alpha/decisions`, generic LLM chat-completion fallback) with
-   exactly the transcript window plus `playback_candidates` — never any
-   other user's data, never the raw scanner segments beyond this window.
+   exactly the transcript window plus the candidates — never any other
+   user's data, never the raw scanner segments beyond this window.
 3. Validate the response against the schema below. On timeout, a
    non-2xx/network error, or a schema-invalid response (including
-   non-extractive `live_speech_spans`), FAIL OPEN: treat the window as
-   ordinary user speech, do not suppress it, and do not let it
-   single-handedly create a Whisper.
-4. On a confirmed echo (`is_ella_playback: true`, `source` one of
-   `ella_playback`/`mixed`, `matched_playback_ids` non-empty): keep the
-   matched portion in context tagged as Ella's own output. It must never
+   non-extractive `live_speech_spans`, or a `mixed`/
+   `contains_additional_live_speech` claim with no non-blank extractive
+   span backing it), FAIL OPEN: treat the window as ordinary user speech,
+   do not suppress it, and do not let it single-handedly create a Whisper.
+4. On a confirmed echo with `source: "ella_playback"` (`is_ella_playback:
+   true`, `matched_playback_ids` non-empty): tag the window as Ella's own
+   output and do not dispatch it as user speech at all. It must never
    retrigger a Whisper and must never count toward repetition/confusion
    heuristics.
 5. On `source: "mixed"`: only the validated `live_speech_spans` continue
-   downstream as real user speech. The rest of the window stays tagged as
-   Ella output per (4). If spans can't be validated as literal substrings
-   of the transcript, the whole response is invalid per (3) — fail open on
-   the original, untouched transcript instead of guessing.
+   downstream as real user speech — dispatch just that portion. The rest
+   of the window stays tagged as Ella output per (4). If spans can't be
+   validated as literal substrings of the transcript, the whole response
+   is invalid per (3) — fail open on the original, untouched transcript
+   instead of guessing.
 
 ## Output schema (`guardian_playback_source_v1`)
 
