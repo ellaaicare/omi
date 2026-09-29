@@ -72,13 +72,16 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   void initState() {
     super.initState();
     unawaited(
-      _runtime.ensureBooted().then((provider) {
-        if (!mounted) return;
-        setState(() => _provider = provider);
-      }).catchError((Object error) {
-        if (!mounted) return;
-        setState(() => _message = context.l10n.upstreamCaptureUnavailable);
-      }),
+      _runtime
+          .ensureBooted()
+          .then((provider) {
+            if (!mounted) return;
+            setState(() => _provider = provider);
+          })
+          .catchError((Object error) {
+            if (!mounted) return;
+            setState(() => _message = context.l10n.upstreamCaptureUnavailable);
+          }),
     );
     unawaited(_loadWhispersState());
   }
@@ -101,7 +104,8 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   Future<void> _startWhisperNative() =>
       widget.guardianNativeStart?.call() ?? guardian_native.GuardianModeService().start();
 
-  Future<void> _stopWhisperNative() => widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop();
+  Future<void> _stopWhisperNative() =>
+      widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop();
 
   Future<void> _loadWhispersState() async {
     if (!_guardianAvailable) return;
@@ -168,24 +172,24 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   }
 
   Future<void> _startPhone() => _run(() async {
-        final started = await _runtime.startPhoneCapture(_uid);
-        if (!started && mounted) await _consentRequired();
-      });
+    final started = await _runtime.startPhoneCapture(_uid);
+    if (!started && mounted) await _consentRequired();
+  });
 
   Future<void> _connectNecklace() => _run(() async {
-        setState(() => _message = context.l10n.upstreamCaptureSearching);
-        final devices = await _runtime.discoverNecklaces();
-        if (!mounted) return;
-        if (devices.isEmpty) {
-          setState(() => _message = context.l10n.upstreamCaptureNoNecklaceFound);
-          return;
-        }
-        final device = devices.length == 1 ? devices.first : await _pickDevice(devices);
-        if (device == null || !mounted) return;
-        setState(() => _message = null);
-        final connected = await _runtime.connectNecklace(_uid, device);
-        if (!connected && mounted) await _consentRequired();
-      });
+    setState(() => _message = context.l10n.upstreamCaptureSearching);
+    final devices = await _runtime.discoverNecklaces();
+    if (!mounted) return;
+    if (devices.isEmpty) {
+      setState(() => _message = context.l10n.upstreamCaptureNoNecklaceFound);
+      return;
+    }
+    final device = devices.length == 1 ? devices.first : await _pickDevice(devices);
+    if (device == null || !mounted) return;
+    setState(() => _message = null);
+    final connected = await _runtime.connectNecklace(_uid, device);
+    if (!connected && mounted) await _consentRequired();
+  });
 
   Future<void> _consentRequired() async {
     setState(() => _message = context.l10n.upstreamCaptureConsentRequired);
@@ -227,10 +231,10 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
         final status = starting
             ? context.l10n.upstreamCaptureStarting
             : phoneLive
-                ? context.l10n.upstreamCaptureRecordingPhone
-                : necklaceLive
-                    ? context.l10n.upstreamCaptureRecordingNecklace
-                    : (_message ?? '');
+            ? context.l10n.upstreamCaptureRecordingPhone
+            : necklaceLive
+            ? context.l10n.upstreamCaptureRecordingNecklace
+            : (_message ?? '');
         return _DockSurface(
           child: Column(
             key: const Key('upstream-capture-dock'),
@@ -296,11 +300,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
               ],
               if (_whispersAvailable) ...[
                 const SizedBox(height: 10),
-                _WhispersRow(
-                  enabled: _whispersOn,
-                  busy: _whispersBusy,
-                  onChanged: _setWhispers,
-                ),
+                _WhispersRow(enabled: _whispersOn, busy: _whispersBusy, onChanged: _setWhispers),
               ],
             ],
           ),
@@ -322,10 +322,7 @@ class _TranscriptPanel extends StatelessWidget {
       constraints: const BoxConstraints(maxHeight: 220),
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: EllaColors.cardDeep,
-        borderRadius: BorderRadius.circular(16),
-      ),
+      decoration: BoxDecoration(color: EllaColors.cardDeep, borderRadius: BorderRadius.circular(16)),
       child: segments.isEmpty
           ? Text(context.l10n.upstreamCaptureStarting, style: const TextStyle(color: EllaColors.inkSoft))
           : ListView.builder(
@@ -376,11 +373,7 @@ class _WhispersRow extends StatelessWidget {
             child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
           )
         else
-          Switch(
-            key: const Key('upstream-capture-whispers-switch'),
-            value: enabled,
-            onChanged: onChanged,
-          ),
+          Switch(key: const Key('upstream-capture-whispers-switch'), value: enabled, onChanged: onChanged),
       ],
     );
   }
