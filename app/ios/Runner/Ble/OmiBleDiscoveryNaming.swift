@@ -79,4 +79,26 @@ enum OmiBleDiscoveryNaming {
         }
         return trimmed
     }
+
+    /// Whether a re-discovery of an already-sighted peripheral within the same
+    /// scan session carries naming/UUID information the first sighting lacked,
+    /// and so is worth forwarding to Dart a second time.
+    ///
+    /// ellaaicare/ella-ai#1280 RUN-016: with `CBCentralManagerScanOptionAllowDuplicatesKey`
+    /// enabled, CoreBluetooth can deliver a peripheral's local name or service UUIDs on a
+    /// later advertisement/scan-response packet than the first `didDiscover` callback for
+    /// it in the current scan — a legacy `flutter_blue_plus` necklace scan is not immune to
+    /// this either, but happens to get a merged first packet more often in practice. Without
+    /// re-forwarding the later, fuller packet, a peripheral whose first sighting was bare
+    /// (no name, no service UUID) stays rejected as `no_name` for the rest of the scan even
+    /// though a later packet did carry a name. This also prevents flooding Dart with a
+    /// repeat call for every identical re-advertisement once a peripheral is fully named.
+    static func shouldForwardRediscovery(
+        previousHasName: Bool,
+        previousHasServiceUuids: Bool,
+        newHasName: Bool,
+        newHasServiceUuids: Bool
+    ) -> Bool {
+        (newHasName && !previousHasName) || (newHasServiceUuids && !previousHasServiceUuids)
+    }
 }
