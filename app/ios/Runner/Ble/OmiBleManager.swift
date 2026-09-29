@@ -184,6 +184,8 @@ final class OmiBleManager: NSObject {
     private var scanTimer: Timer?
     /// Queued scan request if Bluetooth wasn't ready when startScan was called.
     private var pendingScan: (timeout: Int, serviceUuids: [String])?
+    /// Retrieval requested before CoreBluetooth reached a settled state; `true` runs it, `false` completes it empty.
+    private var pendingRetrieval: ((Bool) -> Void)?
 
     /// Per-scan-session record of whether each sighted peripheral's most recent
     /// forwarded packet carried a name and/or service UUIDs. Reset whenever a
@@ -289,6 +291,24 @@ final class OmiBleManager: NSObject {
         knownDeviceIds: [String],
         completion: @escaping (Result<[BlePeripheral], Error>) -> Void
     ) {
+        // Like startScan: CoreBluetooth retrieval is only valid once poweredOn. While the state is still
+        // settling, defer until poweredOn (as pendingScan does); if it settles to anything else, or is
+        // already off/unauthorized/unsupported, complete empty so the awaiting Dart call never hangs.
+        guard centralManager.state == .poweredOn else {
+            let settling = centralManager.state == .unknown || centralManager.state == .resetting
+            NSLog("[OmiBle] BT not ready for retrieval (state=\(getBluetoothState())), \(settling ? "deferring" : "returning empty")")
+            pendingRetrieval?(false)
+            pendingRetrieval = nil
+            if settling {
+                pendingRetrieval = { [weak self] run in
+                    guard run, let self else { completion(.success([])); return }
+                    self.retrieveConnectedAndKnownPeripherals(serviceUuids: serviceUuids, knownDeviceIds: knownDeviceIds, completion: completion)
+                }
+            } else {
+                completion(.success([]))
+            }
+            return
+        }
         let cbServiceUuids = serviceUuids.compactMap { CBUUID(string: $0) }
         let connectedPeripherals = cbServiceUuids.isEmpty ? [] : centralManager.retrieveConnectedPeripherals(withServices: cbServiceUuids)
 
@@ -854,6 +874,12 @@ extension OmiBleManager: CBCentralManagerDelegate {
         let state = getBluetoothState()
         NSLog("[OmiBle] centralManagerDidUpdateState: \(state), flutterApi=\(flutterApi != nil)")
         flutterApi?.onBluetoothStateChanged(state: state) { _ in }
+
+        // Run (poweredOn) or settle empty (any other non-transitional state) a queued retrieval
+        if let pending = pendingRetrieval, central.state != .unknown, central.state != .resetting {
+            pendingRetrieval = nil
+            pending(central.state == .poweredOn)
+        }
 
         // Execute queued scan if Bluetooth just became ready
         if central.state == .poweredOn, let pending = pendingScan {

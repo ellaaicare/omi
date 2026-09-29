@@ -131,7 +131,7 @@ void main() {
         '936a06128c1af218beefe217b72064d3da718aae');
     expect(patchedByPath['app/ios/Runner/Ble/OmiBleManager.swift']!.blob, '889d135a5a3fe1cbfccbb5baf88d980003df5c77');
     expect(
-        patchedByPath['app/ios/Runner/Ble/OmiBleManager.swift']!.localBlob, 'ab47b9adb639592e1a96b6c61dc237c0def5f698');
+        patchedByPath['app/ios/Runner/Ble/OmiBleManager.swift']!.localBlob, '3cfc843cd51b5b43e913a247c3fef5ebc6be0431');
     expect(
         patchedByPath['app/ios/Runner/PigeonCommunicator.g.swift']!.blob, 'b774502d0c755cecdab9efefbb7db7d7606c287a');
     expect(patchedByPath['app/ios/Runner/PigeonCommunicator.g.swift']!.localBlob,

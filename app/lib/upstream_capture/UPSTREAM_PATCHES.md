@@ -451,7 +451,7 @@ patch.
 | File | Manifest kind | Pin blob (unchanged upstream) | Approved local blob |
 | --- | --- | --- | --- |
 | `app/ios/Runner/Ble/BleHostApiImpl.swift` | `patched` | `415903a72829adfc83ca4c1321158db3b1ee059c` | `0965ab69aadaa375b6be7dd03bb62f28801907cb` |
-| `app/ios/Runner/Ble/OmiBleManager.swift` | `patched` | `889d135a5a3fe1cbfccbb5baf88d980003df5c77` | `ab47b9adb639592e1a96b6c61dc237c0def5f698` |
+| `app/ios/Runner/Ble/OmiBleManager.swift` | `patched` | `889d135a5a3fe1cbfccbb5baf88d980003df5c77` | `3cfc843cd51b5b43e913a247c3fef5ebc6be0431` |
 | `app/ios/Runner/PigeonCommunicator.g.swift` | `patched` | `b774502d0c755cecdab9efefbb7db7d7606c287a` | `de1bba67938c468d07ae766360634036649d6b0b` |
 | `app/lib/gen/pigeon_communicator.g.dart` | `patched` | `25034c9152ceac9b4a4cc9a264027697b372a539` | `8a1c25790b78a3f0b650005b15f19e4a38db887b` |
 | `app/lib/services/devices/discovery/native_bluetooth_discoverer.dart` | `patched` | `0a7aec27f031d61972599823158d8f77731dc2b4` | `5136dde20405c645d0f3dc1d86231e674a401a77` |
