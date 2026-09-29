@@ -2982,10 +2982,8 @@ void main() {
       tester,
       conversations: const [],
       guardianAvailability: () => true,
-      guardianModeLoader: () async => const GuardianModeInfo(
-            currentMode: GuardianModeKey.off,
-            twoTierState: GuardianModeState(),
-          ),
+      guardianModeLoader: () async =>
+          const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState()),
       guardianModeSetter: (state) async {
         guardianModeWrites++;
         writtenGuardianState = state;
@@ -3025,20 +3023,23 @@ void main() {
     );
   });
 
-  testWidgets('launch with server ON and stale local cache adopts server state without a PUT', (tester) async {
+  testWidgets('launch native start failure stays unavailable until the open controls sheet retry succeeds', (
+    tester,
+  ) async {
     // Regression for RUN-017 / build 878: the app must GET and adopt server
     // state on launch, never PUT, even when the in-memory default (the
     // "local cache") disagrees with what the server reports.
     var guardianModeWrites = 0;
+    var nativeStartCalls = 0;
 
     final harness = await _pumpHome(
       tester,
       conversations: const [],
       guardianAvailability: () => true,
       guardianModeLoader: () async => const GuardianModeInfo(
-            currentMode: GuardianModeKey.activeSupport,
-            twoTierState: GuardianModeState(features: ['ACTIVE_SUPPORT']),
-          ),
+        currentMode: GuardianModeKey.activeSupport,
+        twoTierState: GuardianModeState(features: ['ACTIVE_SUPPORT']),
+      ),
       guardianModeSetter: (_) async {
         guardianModeWrites++;
         return true;
@@ -3046,7 +3047,10 @@ void main() {
       // Simulate the native capture failing to confirm ON during a cold
       // launch (e.g. mic session not ready yet) — this must never trigger
       // a compensating PUT to turn guardian mode off.
-      guardianNativeStart: () async => throw StateError('simulated native start failure on launch'),
+      guardianNativeStart: () async {
+        nativeStartCalls++;
+        if (nativeStartCalls == 1) throw StateError('simulated native start failure on launch');
+      },
       guardianNativeStop: () async {},
     );
     addTearDown(harness.dispose);
@@ -3058,77 +3062,85 @@ void main() {
     await tester.tap(find.byKey(const Key('today-dock-status')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 250));
-    expect(find.text('Whispers are on'), findsOneWidget);
-    // A native-start failure during reconcile must never mark the toggle
-    // unverified or disable it — only a small non-blocking hint appears.
+    expect(find.text('Whispers are on'), findsNothing);
+    expect(find.text('Whispers are off'), findsNothing);
     expect(find.byKey(const Key('guardian-whispers-reconnecting-hint')), findsOneWidget);
     final l10n = AppLocalizations.of(tester.element(find.byType(TodayPage)));
-    expect(find.text(l10n.todayWhispersUnavailable), findsNothing);
+    expect(find.text(l10n.todayWhispersUnavailable), findsOneWidget);
     final whispersSwitch = tester.widget<Switch>(
       find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
     );
     expect(whispersSwitch.value, isTrue);
-    expect(whispersSwitch.onChanged, isNotNull, reason: 'a native-start failure must never disable the switch');
+    expect(whispersSwitch.onChanged, isNull, reason: 'native capture did not reconcile the server-reported ON state');
+    expect(guardianModeWrites, 0);
+
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+
+    expect(nativeStartCalls, 2);
+    expect(find.text('Whispers are on'), findsOneWidget);
+    expect(find.text(l10n.todayWhispersUnavailable), findsNothing);
+    expect(find.byKey(const Key('guardian-whispers-reconnecting-hint')), findsNothing);
+    final recoveredSwitch = tester.widget<Switch>(
+      find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
+    );
+    expect(recoveredSwitch.value, isTrue);
+    expect(recoveredSwitch.onChanged, isNotNull);
     expect(guardianModeWrites, 0);
   });
 
-  testWidgets(
-    'native Guardian start failures on launch retry with bounded backoff and never PUT',
-    (tester) async {
-      var guardianModeWrites = 0;
-      var nativeStartCalls = 0;
+  testWidgets('native Guardian start failures on launch retry with bounded backoff and never PUT', (tester) async {
+    var guardianModeWrites = 0;
+    var nativeStartCalls = 0;
 
-      final harness = await _pumpHome(
-        tester,
-        conversations: const [],
-        guardianAvailability: () => true,
-        guardianModeLoader: () async => const GuardianModeInfo(
-              currentMode: GuardianModeKey.activeSupport,
-              twoTierState: GuardianModeState(features: ['ACTIVE_SUPPORT']),
-            ),
-        guardianModeSetter: (_) async {
-          guardianModeWrites++;
-          return true;
-        },
-        guardianNativeStart: () async {
-          nativeStartCalls++;
-          throw StateError('simulated native start failure #$nativeStartCalls');
-        },
-        guardianNativeStop: () async {},
-      );
-      addTearDown(harness.dispose);
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      guardianAvailability: () => true,
+      guardianModeLoader: () async => const GuardianModeInfo(
+        currentMode: GuardianModeKey.activeSupport,
+        twoTierState: GuardianModeState(features: ['ACTIVE_SUPPORT']),
+      ),
+      guardianModeSetter: (_) async {
+        guardianModeWrites++;
+        return true;
+      },
+      guardianNativeStart: () async {
+        nativeStartCalls++;
+        throw StateError('simulated native start failure #$nativeStartCalls');
+      },
+      guardianNativeStop: () async {},
+    );
+    addTearDown(harness.dispose);
 
-      await tester.pump(const Duration(milliseconds: 250));
-      expect(nativeStartCalls, 1, reason: 'the launch reconcile attempts a native start once');
-      expect(guardianModeWrites, 0);
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(nativeStartCalls, 1, reason: 'the launch reconcile attempts a native start once');
+    expect(guardianModeWrites, 0);
 
-      await tester.pump(const Duration(seconds: 2));
-      expect(nativeStartCalls, 2, reason: 'the first retry fires after the initial backoff');
+    await tester.pump(const Duration(seconds: 2));
+    expect(nativeStartCalls, 2, reason: 'the first retry fires after the initial backoff');
 
-      await tester.pump(const Duration(seconds: 4));
-      expect(nativeStartCalls, 3, reason: 'the second retry backs off further');
+    await tester.pump(const Duration(seconds: 4));
+    expect(nativeStartCalls, 3, reason: 'the second retry backs off further');
 
-      await tester.pump(const Duration(seconds: 8));
-      expect(nativeStartCalls, 4, reason: 'the third retry is the last of the bounded attempts');
+    await tester.pump(const Duration(seconds: 8));
+    expect(nativeStartCalls, 4, reason: 'the third retry is the last of the bounded attempts');
 
-      await tester.pump(const Duration(seconds: 30));
-      expect(nativeStartCalls, 4, reason: 'retries are bounded and never continue indefinitely');
-      expect(guardianModeWrites, 0, reason: 'a native-start failure must never issue a PUT');
+    await tester.pump(const Duration(seconds: 30));
+    expect(nativeStartCalls, 4, reason: 'retries are bounded and never continue indefinitely');
+    expect(guardianModeWrites, 0, reason: 'a native-start failure must never issue a PUT');
 
-      await tester.tap(find.byKey(const Key('today-dock-status')));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 250));
-      expect(find.text('Whispers are on'), findsOneWidget);
-      expect(
-        tester
-            .widget<Switch>(
-              find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
-            )
-            .value,
-        isTrue,
-      );
-    },
-  );
+    await tester.tap(find.byKey(const Key('today-dock-status')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.text('Whispers are on'), findsNothing);
+    expect(find.text('Whispers are off'), findsNothing);
+    final whispersSwitch = tester.widget<Switch>(
+      find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
+    );
+    expect(whispersSwitch.value, isTrue);
+    expect(whispersSwitch.onChanged, isNull);
+  });
 
   testWidgets('launch with server OFF adopts server state without a PUT', (tester) async {
     var guardianModeWrites = 0;
@@ -3137,10 +3149,8 @@ void main() {
       tester,
       conversations: const [],
       guardianAvailability: () => true,
-      guardianModeLoader: () async => const GuardianModeInfo(
-            currentMode: GuardianModeKey.off,
-            twoTierState: GuardianModeState(),
-          ),
+      guardianModeLoader: () async =>
+          const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState()),
       guardianModeSetter: (_) async {
         guardianModeWrites++;
         return true;
