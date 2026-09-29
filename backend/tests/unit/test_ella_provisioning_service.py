@@ -1852,6 +1852,11 @@ if module_name == "ella.routers.callbacks":
     fake_writeback.InvalidConversationSummaryCategoryError = type(
         "InvalidConversationSummaryCategoryError", (Exception,), {}
     )
+    fake_writeback.TerminalEnrichmentStateConflictError = type(
+        "TerminalEnrichmentStateConflictError", (Exception,), {}
+    )
+    fake_writeback.TERMINAL_ENRICHMENT_REASONS = frozenset({"grounding_rejected"})
+    fake_writeback.write_terminal_enrichment_state = lambda *args, **kwargs: None
     fake_writeback.write_conversation_summary = lambda *args, **kwargs: None
     fake_writeback.write_conversation_summary_cas = lambda *args, **kwargs: None
     sys.modules["ella.services.summary_writeback"] = fake_writeback
