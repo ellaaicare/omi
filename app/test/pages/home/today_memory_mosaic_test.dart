@@ -15,6 +15,7 @@ import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
 import 'package:omi/ella/services/memory_artwork_api.dart';
@@ -2972,6 +2973,57 @@ void main() {
     expect(tester.takeException(), isNull);
     semantics.dispose();
   });
+
+  testWidgets('a successful 200 ON write is never rolled back by a native start failure', (tester) async {
+    var guardianModeWrites = 0;
+    GuardianModeState? writtenGuardianState;
+
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      guardianAvailability: () => true,
+      guardianModeLoader: () async => const GuardianModeInfo(
+            currentMode: GuardianModeKey.off,
+            twoTierState: GuardianModeState(),
+          ),
+      guardianModeSetter: (state) async {
+        guardianModeWrites++;
+        writtenGuardianState = state;
+        return true;
+      },
+      guardianNativeStart: () async => throw StateError('simulated native start failure'),
+      guardianNativeStop: () async {},
+    );
+    addTearDown(harness.dispose);
+
+    await tester.tap(find.byKey(const Key('today-dock-status')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(
+      find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+
+    // The write returned a successful 200 ON response — it must never be
+    // followed by a compensating OFF write, even though the native start
+    // call above threw.
+    expect(guardianModeWrites, 1);
+    expect(writtenGuardianState?.features, ['ACTIVE_SUPPORT']);
+
+    await tester.tap(find.byKey(const Key('today-dock-status')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.text('Whispers are on'), findsOneWidget);
+    expect(
+      tester
+          .widget<Switch>(
+            find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
+          )
+          .value,
+      isTrue,
+    );
+  });
 }
 
 TranscriptSegment _liveTranscriptSegment(String id) => TranscriptSegment(
@@ -3465,6 +3517,11 @@ Future<_HomeHarness> _pumpHome(
   MemoryArtworkAuthorityProvider? memoryArtworkAuthorityProvider,
   MemoryPresentationAuthorityProvider? memoryPresentationAuthorityProvider,
   TodayNowProvider? nowProvider,
+  GuardianAvailability? guardianAvailability,
+  GuardianModeLoader? guardianModeLoader,
+  GuardianModeSetter? guardianModeSetter,
+  GuardianNativeLifecycle? guardianNativeStart,
+  GuardianNativeLifecycle? guardianNativeStop,
 }) async {
   tester.view.physicalSize = viewport;
   tester.view.devicePixelRatio = 1;
@@ -3540,7 +3597,11 @@ Future<_HomeHarness> _pumpHome(
                       (uid: 'test-user', authorityKey: 'test-authority', isProvisioningReady: true),
                   todayCardAuthorityChanges: authorityChanges,
                   todayCardTalkRouteOpener: todayCardTalkRouteOpener,
-                  guardianAvailability: () => false,
+                  guardianAvailability: guardianAvailability ?? () => false,
+                  guardianModeLoader: guardianModeLoader,
+                  guardianModeSetter: guardianModeSetter,
+                  guardianNativeStart: guardianNativeStart,
+                  guardianNativeStop: guardianNativeStop,
                   memoryArtworkApi: memoryArtworkApi,
                   memoryArtworkAuthorityProvider: memoryArtworkAuthorityProvider,
                   memoryPresentationAuthorityProvider: memoryPresentationAuthorityProvider,
