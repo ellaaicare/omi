@@ -104,6 +104,11 @@ void main() {
     // discovered candidate, for redacted discovery diagnostics — touching the
     // native didDiscover path and the two generated BlePeripheral definitions it
     // and native_bluetooth_discoverer.dart share.
+    //
+    // RUN-020 / ellaaicare/ella-ai#1287 patch Six: connectPeripheral no longer skips
+    // GATT service discovery for a peripheral already connected at the CoreBluetooth
+    // level (OmiBleManager.swift), and the necklace pendant-session-start path no
+    // longer prompts for location (capture_coordinator.dart).
     final patched = entries.where((e) => e.kind == 'patched').toList();
     final patchedByPath = {for (final e in patched) e.localPath: e};
     expect(
@@ -115,6 +120,7 @@ void main() {
         'app/ios/Runner/Ble/OmiBleManager.swift',
         'app/ios/Runner/PigeonCommunicator.g.swift',
         'app/lib/upstream_capture/gen/pigeon_communicator.g.dart',
+        'app/lib/upstream_capture/services/capture/capture_coordinator.dart',
       },
     );
     expect(
@@ -131,7 +137,7 @@ void main() {
         '936a06128c1af218beefe217b72064d3da718aae');
     expect(patchedByPath['app/ios/Runner/Ble/OmiBleManager.swift']!.blob, '889d135a5a3fe1cbfccbb5baf88d980003df5c77');
     expect(
-        patchedByPath['app/ios/Runner/Ble/OmiBleManager.swift']!.localBlob, '3cfc843cd51b5b43e913a247c3fef5ebc6be0431');
+        patchedByPath['app/ios/Runner/Ble/OmiBleManager.swift']!.localBlob, 'c08b59564c9338c54439696d7e95ad27c16e1eeb');
     expect(
         patchedByPath['app/ios/Runner/PigeonCommunicator.g.swift']!.blob, 'b774502d0c755cecdab9efefbb7db7d7606c287a');
     expect(patchedByPath['app/ios/Runner/PigeonCommunicator.g.swift']!.localBlob,
@@ -143,6 +149,10 @@ void main() {
     expect(patchedByPath['app/ios/Runner/Ble/BleHostApiImpl.swift']!.blob, '415903a72829adfc83ca4c1321158db3b1ee059c');
     expect(patchedByPath['app/ios/Runner/Ble/BleHostApiImpl.swift']!.localBlob,
         '0965ab69aadaa375b6be7dd03bb62f28801907cb');
+    expect(patchedByPath['app/lib/upstream_capture/services/capture/capture_coordinator.dart']!.blob,
+        '17c33870dd18366a03cd599bcec9befb512f0b39');
+    expect(patchedByPath['app/lib/upstream_capture/services/capture/capture_coordinator.dart']!.localBlob,
+        'c86b5ab4c2fbd5b23635b755cd46de32e0ed33ae');
   });
 
   test('scripts/verify_upstream_capture_identity.py passes on this checkout', () async {

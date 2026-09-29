@@ -920,7 +920,19 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     _lastBatteryNotifyTime = null;
   }
 
-  Future periodicConnect(String printer, {bool boundDeviceOnly = false, int? operationGeneration}) async {
+  Future periodicConnect(
+    String printer, {
+    bool boundDeviceOnly = false,
+    int? operationGeneration,
+    // Only the launch checkpoint that calls this directly (Home mounting for
+    // the first time after process start — see HomePageWrapper) may offer the
+    // one-shot launch grace to the opportunistic already-connected branch
+    // below. It is spent on at most this call's own first scan tick, never a
+    // later tick from this same recurring timer, so the ordinary periodic
+    // reconnection loop and post-disconnect retries stay exactly as strict as
+    // before.
+    bool allowLaunchCaptureResumeGrace = false,
+  }) async {
     // Flag-ON graph: upstream capture owns the pendant; the legacy stack must not scan/connect.
     if (EllaCaptureHost.legacyCaptureSuppressed) return;
     final generation = operationGeneration ?? _deviceOperationGeneration;
@@ -935,7 +947,10 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     _automaticReconnectAttempts = 0;
     _automaticReconnectExhausted = false;
     _automaticReconnectCooldownUntil = null;
+    var isFirstScanTick = true;
     scan(t) async {
+      final useLaunchCaptureResumeGrace = allowLaunchCaptureResumeGrace && isFirstScanTick;
+      isFirstScanTick = false;
       if (!_isDeviceOperationCurrent(generation)) {
         t.cancel();
         return;
@@ -1009,7 +1024,11 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       } else {
         final device = connectedDevice;
         if (boundDeviceOnly && device != null) {
-          await _resumeCaptureForConnectedDevice(device, generation);
+          await _resumeCaptureForConnectedDevice(
+            device,
+            generation,
+            allowLaunchCaptureResumeGrace: useLaunchCaptureResumeGrace,
+          );
         }
         t.cancel();
       }
@@ -1256,14 +1275,16 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     final staleCaptureFailureBlocksResume = capture?.recordingState == RecordingState.error &&
         captureFailure != null &&
         _requiresFreshBleSessionForCaptureFailure(captureFailure);
-    // The grace only ever applies to a failure that is already stale the
-    // very first time resumeKnownDeviceConnection (app-resumed/cold-launch
-    // retained connection) checks it — never to the opportunistic
-    // already-connected branch of periodicConnect's scan loop, which also
-    // fires for reasons unrelated to a fresh app launch (BLE readiness
-    // cycling, the recurring reconnection timer, post-disconnect retries).
-    // A failure surfacing there is far more likely to have been produced,
-    // or still be mid-recovery, within this same process's lifetime.
+    // The grace only ever applies to a failure that is already stale the very
+    // first time a genuine launch checkpoint checks it — resumeKnownDeviceConnection
+    // (app-resumed/cold-launch retained connection), or the first scan tick of
+    // a periodicConnect call that explicitly opted in (the Home page mount
+    // checkpoint — see HomePageWrapper). It never applies to the ordinary,
+    // recurring ticks of periodicConnect's scan loop, which also fire for
+    // reasons unrelated to a fresh app launch (BLE readiness cycling, the
+    // recurring reconnection timer, post-disconnect retries). A failure
+    // surfacing there is far more likely to have been produced, or still be
+    // mid-recovery, within this same process's lifetime.
     final usesLaunchCaptureResumeGrace =
         allowLaunchCaptureResumeGrace && staleCaptureFailureBlocksResume && !_hasGrantedLaunchCaptureResumeGrace;
     if (!_isDeviceOperationCurrent(operationGeneration) ||
@@ -1274,6 +1295,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         capture.recordingState == RecordingState.pause ||
         capture.phoneCaptureOwnsMobileAudio ||
         SharedPreferencesUtil().ellaCaptureSource == EllaCaptureSource.phone.name ||
+        SharedPreferencesUtil().necklaceCaptureExplicitlyStopped ||
         (staleCaptureFailureBlocksResume && !usesLaunchCaptureResumeGrace) ||
         capture.recordingState == RecordingState.deviceRecord ||
         capture.recordingState == RecordingState.initialising) {
@@ -1430,6 +1452,10 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
       // battery probes are useful but must never prevent necklace recording.
       if (capture?.phoneCaptureOwnsMobileAudio == true) {
         _deferDeviceCaptureUntilPhoneReleases(device, operationGeneration);
+      } else if (SharedPreferencesUtil().necklaceCaptureExplicitlyStopped) {
+        // The user's last necklace action was an explicit Stop, not a
+        // disconnect/kill. A reconnect (this launch or a later one) must not
+        // silently restart recording behind their back.
       } else {
         final captureStarted = await _startDeviceCaptureWithRetry(device, operationGeneration);
         if (captureStarted) {

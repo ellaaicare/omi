@@ -1801,6 +1801,84 @@ void main() {
     expect(capture.recordingState, RecordingState.deviceRecord);
   });
 
+  test(
+      'a plain force-quit while actively recording auto-resumes capture at the Home page launch checkpoint '
+      '(not just resumeKnownDeviceConnection)', () async {
+    final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    // A plain force-quit mid-recording leaves nothing in SharedPreferences to
+    // say "explicitly stopped". On relaunch the BLE stack reconnects before
+    // this fresh CaptureProvider instance's own first capture-start attempt
+    // has settled — a real necklace can transiently fail that very first
+    // attempt (services/characteristics not fully ready yet right after
+    // connect), landing in exactly this stale, fresh-session-requiring
+    // failure state by the time Home mounts.
+    final capture = _RecordingCaptureProvider(
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.necklaceConnectionUnavailable,
+    )..updateRecordingState(RecordingState.error);
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      automaticallyReconnectOnReady: false,
+    )
+      ..setProviders(capture)
+      ..connectedDevice = necklace
+      ..pairedDevice = necklace
+      ..setIsConnected(true);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    // This is the call HomePageWrapper.initState makes once, via a
+    // post-frame callback, the first time Home mounts after process start —
+    // the cold-launch checkpoint that exists independently of whether
+    // AppLifecycleState.resumed ever fires for this launch.
+    await provider.periodicConnect(
+      'coming from HomePageWrapper',
+      boundDeviceOnly: true,
+      allowLaunchCaptureResumeGrace: true,
+    );
+
+    expect(capture.deviceStarts, 1);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+  });
+
+  test('an explicit user Stop does not auto-resume necklace capture on the next launch', () async {
+    final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    // Simulates the user tapping Stop before the app is later force-quit:
+    // the flag survives the relaunch in SharedPreferences even though this
+    // CaptureProvider instance itself starts out fresh.
+    SharedPreferencesUtil().necklaceCaptureExplicitlyStopped = true;
+    addTearDown(() => SharedPreferencesUtil().necklaceCaptureExplicitlyStopped = false);
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      automaticallyReconnectOnReady: false,
+    )
+      ..setProviders(capture)
+      ..connectedDevice = necklace
+      ..pairedDevice = necklace
+      ..setIsConnected(true);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    await provider.periodicConnect(
+      'coming from HomePageWrapper',
+      boundDeviceOnly: true,
+      allowLaunchCaptureResumeGrace: true,
+    );
+    await provider.resumeKnownDeviceConnection(reason: 'app resumed');
+
+    expect(capture.deviceStarts, 0, reason: 'an explicit Stop must not be silently undone by a reconnect');
+    expect(capture.recordingState, RecordingState.stop);
+
+    // A later, genuinely explicit Record tap still works and clears the flag
+    // (unrelated to DeviceProvider's automatic paths, exercised directly on
+    // CaptureProvider the way the UI calls it).
+    await capture.streamDeviceRecording(device: necklace);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+    expect(SharedPreferencesUtil().necklaceCaptureExplicitlyStopped, isFalse);
+  });
+
   test('foreground resume preserves explicit pause without transport or socket startup', () async {
     final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await bindRememberedDeviceForCurrentTestAuthority(necklace);

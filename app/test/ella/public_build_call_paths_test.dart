@@ -629,7 +629,7 @@ void main() {
       final initialFailureSwitch = tester.widget<Switch>(
         find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
       );
-      expect(guardianModeWrites, writesBeforeInitialFailure + 1);
+      expect(guardianModeWrites, writesBeforeInitialFailure);
       expect(guardianServerEnabled, isTrue);
       expect(initialFailureSwitch.value, isTrue);
       expect(initialFailureSwitch.onChanged, isNull);
@@ -646,11 +646,7 @@ void main() {
     // before navigation returns to Home.
     homeProvider.setIndex(3);
     await tester.pump();
-    authoritySnapshot = (
-      uid: 'test-user',
-      authorityKey: '',
-      isProvisioningReady: false,
-    );
+    authoritySnapshot = (uid: 'test-user', authorityKey: '', isProvisioningReady: false);
     authorityChanges.value++;
     await tester.pump();
     expect(find.text(todayCard.headline, skipOffstage: false), findsNothing);

@@ -286,6 +286,16 @@ jobs:
             -o "$RUNNER_TEMP/omi-ble-retrieval-tagging-tests"
           "$RUNNER_TEMP/omi-ble-retrieval-tagging-tests"
 
+      - name: Run OmiBleReconnectPolicy native connect-vs-discover unit tests
+        working-directory: .
+        run: |
+          set -euo pipefail
+          swiftc -warnings-as-errors \
+            app/ios/Runner/Ble/OmiBleReconnectPolicy.swift \
+            app/ios/Tests/OmiBleReconnectPolicyTests.swift \
+            -o "$RUNNER_TEMP/omi-ble-reconnect-policy-tests"
+          "$RUNNER_TEMP/omi-ble-reconnect-policy-tests"
+
       - name: Run Apple Reminders replay-idempotency production boundary
         working-directory: .
         run: |
@@ -626,7 +636,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          expected_issue_test_count=72
+          expected_issue_test_count=73
           issue_test_count="$(find test/ella test/backend test/pages/onboarding/ella -type f -name '*_test.dart' | sort | tee /tmp/ella-issue-tests.txt | wc -l | tr -d ' ')"
           if [[ "$issue_test_count" -ne "$expected_issue_test_count" ]]; then
             cat /tmp/ella-issue-tests.txt
@@ -634,7 +644,7 @@ jobs:
             exit 1
           fi
 
-          expected_app_test_count=116
+          expected_app_test_count=117
           all_app_test_count="$(find test -type f -name '*_test.dart' | sort | tee /tmp/ella-all-app-tests.txt | wc -l | tr -d ' ')"
           if [[ "$all_app_test_count" -ne "$expected_app_test_count" ]]; then
             cat /tmp/ella-all-app-tests.txt

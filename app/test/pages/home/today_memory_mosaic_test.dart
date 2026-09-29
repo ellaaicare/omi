@@ -3023,11 +3023,14 @@ void main() {
     );
   });
 
-  testWidgets('launch with server ON and stale local cache adopts server state without a PUT', (tester) async {
+  testWidgets('launch native start failure stays unavailable until the open controls sheet retry succeeds', (
+    tester,
+  ) async {
     // Regression for RUN-017 / build 878: the app must GET and adopt server
     // state on launch, never PUT, even when the in-memory default (the
     // "local cache") disagrees with what the server reports.
     var guardianModeWrites = 0;
+    var nativeStartCalls = 0;
 
     final harness = await _pumpHome(
       tester,
@@ -3044,7 +3047,10 @@ void main() {
       // Simulate the native capture failing to confirm ON during a cold
       // launch (e.g. mic session not ready yet) — this must never trigger
       // a compensating PUT to turn guardian mode off.
-      guardianNativeStart: () async => throw StateError('simulated native start failure on launch'),
+      guardianNativeStart: () async {
+        nativeStartCalls++;
+        if (nativeStartCalls == 1) throw StateError('simulated native start failure on launch');
+      },
       guardianNativeStop: () async {},
     );
     addTearDown(harness.dispose);
@@ -3056,17 +3062,30 @@ void main() {
     await tester.tap(find.byKey(const Key('today-dock-status')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 250));
-    expect(find.text('Whispers are on'), findsOneWidget);
-    // A native-start failure during reconcile must never mark the toggle
-    // unverified or disable it — only a small non-blocking hint appears.
+    expect(find.text('Whispers are on'), findsNothing);
+    expect(find.text('Whispers are off'), findsNothing);
     expect(find.byKey(const Key('guardian-whispers-reconnecting-hint')), findsOneWidget);
     final l10n = AppLocalizations.of(tester.element(find.byType(TodayPage)));
-    expect(find.text(l10n.todayWhispersUnavailable), findsNothing);
+    expect(find.text(l10n.todayWhispersUnavailable), findsOneWidget);
     final whispersSwitch = tester.widget<Switch>(
       find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
     );
     expect(whispersSwitch.value, isTrue);
-    expect(whispersSwitch.onChanged, isNotNull, reason: 'a native-start failure must never disable the switch');
+    expect(whispersSwitch.onChanged, isNull, reason: 'native capture did not reconcile the server-reported ON state');
+    expect(guardianModeWrites, 0);
+
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+
+    expect(nativeStartCalls, 2);
+    expect(find.text('Whispers are on'), findsOneWidget);
+    expect(find.text(l10n.todayWhispersUnavailable), findsNothing);
+    expect(find.byKey(const Key('guardian-whispers-reconnecting-hint')), findsNothing);
+    final recoveredSwitch = tester.widget<Switch>(
+      find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
+    );
+    expect(recoveredSwitch.value, isTrue);
+    expect(recoveredSwitch.onChanged, isNotNull);
     expect(guardianModeWrites, 0);
   });
 
@@ -3114,15 +3133,13 @@ void main() {
     await tester.tap(find.byKey(const Key('today-dock-status')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 250));
-    expect(find.text('Whispers are on'), findsOneWidget);
-    expect(
-      tester
-          .widget<Switch>(
-            find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
-          )
-          .value,
-      isTrue,
+    expect(find.text('Whispers are on'), findsNothing);
+    expect(find.text('Whispers are off'), findsNothing);
+    final whispersSwitch = tester.widget<Switch>(
+      find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
     );
+    expect(whispersSwitch.value, isTrue);
+    expect(whispersSwitch.onChanged, isNull);
   });
 
   testWidgets('launch with server OFF adopts server state without a PUT', (tester) async {
