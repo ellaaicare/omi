@@ -54,6 +54,7 @@
 		E11AC0DE2B00000000000008 /* OmiBleEnergyPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000007 /* OmiBleEnergyPolicy.swift */; };
 		E11AC0DE2B0000000000000A /* OmiBleManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000009 /* OmiBleManager.swift */; };
 		E11AC0DE2B0000000000000C /* OmiBlePairingPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F0000000000000B /* OmiBlePairingPolicy.swift */; };
+		E11AC0DE2B0000000000003D /* OmiBleReconnectPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F0000000000003C /* OmiBleReconnectPolicy.swift */; };
 		E11AC0DE2B0000000000003B /* OmiBleRetrievalTagging.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F0000000000003A /* OmiBleRetrievalTagging.swift */; };
 		E11AC0DE2B0000000000000F /* PhoneMicBatchAudioWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F0000000000000E /* PhoneMicBatchAudioWriter.swift */; };
 		E11AC0DE2B00000000000011 /* PhoneMicCaptureEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11AC0DE1F00000000000010 /* PhoneMicCaptureEngine.swift */; };
@@ -183,6 +184,7 @@
 		E11AC0DE1F00000000000007 /* OmiBleEnergyPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OmiBleEnergyPolicy.swift; sourceTree = "<group>"; };
 		E11AC0DE1F00000000000009 /* OmiBleManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OmiBleManager.swift; sourceTree = "<group>"; };
 		E11AC0DE1F0000000000000B /* OmiBlePairingPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OmiBlePairingPolicy.swift; sourceTree = "<group>"; };
+		E11AC0DE1F0000000000003C /* OmiBleReconnectPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OmiBleReconnectPolicy.swift; sourceTree = "<group>"; };
 		E11AC0DE1F0000000000003A /* OmiBleRetrievalTagging.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OmiBleRetrievalTagging.swift; sourceTree = "<group>"; };
 		E11AC0DE1F0000000000000E /* PhoneMicBatchAudioWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMicBatchAudioWriter.swift; sourceTree = "<group>"; };
 		E11AC0DE1F00000000000010 /* PhoneMicCaptureEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMicCaptureEngine.swift; sourceTree = "<group>"; };
@@ -388,6 +390,7 @@
 				E11AC0DE1F00000000000007 /* OmiBleEnergyPolicy.swift */,
 				E11AC0DE1F00000000000009 /* OmiBleManager.swift */,
 				E11AC0DE1F0000000000000B /* OmiBlePairingPolicy.swift */,
+				E11AC0DE1F0000000000003C /* OmiBleReconnectPolicy.swift */,
 				E11AC0DE1F0000000000003A /* OmiBleRetrievalTagging.swift */,
 			);
 			path = Ble;
@@ -701,6 +704,7 @@
 				E11AC0DE2B00000000000008 /* OmiBleEnergyPolicy.swift in Sources */,
 				E11AC0DE2B0000000000000A /* OmiBleManager.swift in Sources */,
 				E11AC0DE2B0000000000000C /* OmiBlePairingPolicy.swift in Sources */,
+				E11AC0DE2B0000000000003D /* OmiBleReconnectPolicy.swift in Sources */,
 				E11AC0DE2B0000000000003B /* OmiBleRetrievalTagging.swift in Sources */,
 				E11AC0DE2B0000000000000F /* PhoneMicBatchAudioWriter.swift in Sources */,
 				E11AC0DE2B00000000000011 /* PhoneMicCaptureEngine.swift in Sources */,
