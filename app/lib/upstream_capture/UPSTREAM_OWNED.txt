@@ -17,7 +17,7 @@ patched	415903a72829adfc83ca4c1321158db3b1ee059c	app/ios/Runner/Ble/BleHostApiIm
 verbatim	763fe14bed4e4b9b4aceae6081c4491fd88ed409	app/ios/Runner/Ble/OmiBleConnectionPolicy.swift	app/ios/Runner/Ble/OmiBleConnectionPolicy.swift
 patched	d078da9cb337a4a2a176861f91951e469bc3efcb	app/ios/Runner/Ble/OmiBleDiscoveryNaming.swift	app/ios/Runner/Ble/OmiBleDiscoveryNaming.swift	936a06128c1af218beefe217b72064d3da718aae
 verbatim	15a36a3d91e67a0d15ecc089d19a57f97bde576b	app/ios/Runner/Ble/OmiBleEnergyPolicy.swift	app/ios/Runner/Ble/OmiBleEnergyPolicy.swift
-patched	889d135a5a3fe1cbfccbb5baf88d980003df5c77	app/ios/Runner/Ble/OmiBleManager.swift	app/ios/Runner/Ble/OmiBleManager.swift	3cfc843cd51b5b43e913a247c3fef5ebc6be0431
+patched	889d135a5a3fe1cbfccbb5baf88d980003df5c77	app/ios/Runner/Ble/OmiBleManager.swift	app/ios/Runner/Ble/OmiBleManager.swift	c08b59564c9338c54439696d7e95ad27c16e1eeb
 verbatim	eec3c9a1459ed4c1b5677ee247dbbfd083779f29	app/ios/Runner/Ble/OmiBlePairingPolicy.swift	app/ios/Runner/Ble/OmiBlePairingPolicy.swift
 verbatim	52eebb9bfb36851a35ff436b535490b2fc4f3bbe	app/ios/Runner/Limitless/LimitlessFlashDrainEngine.swift	app/ios/Runner/Limitless/LimitlessFlashDrainEngine.swift
 verbatim	283db4cc4a3b1d17cb64ba1fdbff217f84fe7735	app/ios/Runner/Limitless/LimitlessProtocol.swift	app/ios/Runner/Limitless/LimitlessProtocol.swift
@@ -111,7 +111,7 @@ verbatim	c57400215fbe23f8cc3329b9a15f4548a0b5feae	app/lib/services/capture/CAPTU
 verbatim	de35882ebe47d9bd4e2a54212967a1aa31992a06	app/lib/services/capture/OWNERSHIP.md	app/lib/upstream_capture/services/capture/OWNERSHIP.md
 dart-relocated	413d5abc32cd764c20087c95732745df91a4f695	app/lib/services/capture/capture_composition.dart	app/lib/upstream_capture/services/capture/capture_composition.dart
 dart-relocated	dee714b169e4f4e45777399f72db4672599fed3a	app/lib/services/capture/capture_controller.dart	app/lib/upstream_capture/services/capture/capture_controller.dart
-dart-relocated	17c33870dd18366a03cd599bcec9befb512f0b39	app/lib/services/capture/capture_coordinator.dart	app/lib/upstream_capture/services/capture/capture_coordinator.dart
+patched	17c33870dd18366a03cd599bcec9befb512f0b39	app/lib/services/capture/capture_coordinator.dart	app/lib/upstream_capture/services/capture/capture_coordinator.dart	c86b5ab4c2fbd5b23635b755cd46de32e0ed33ae
 dart-relocated	9df4d7afeda2d4d60eeefb4075ea49087a27cd7b	app/lib/services/capture/capture_external_actions.dart	app/lib/upstream_capture/services/capture/capture_external_actions.dart
 dart-relocated	34e04cfb7be98ee4722086275c8c0c5797709530	app/lib/services/capture/capture_lifetime.dart	app/lib/upstream_capture/services/capture/capture_lifetime.dart
 dart-relocated	0ef69d352e76303e5d10bdfc426318ff1ea9b373	app/lib/services/capture/capture_metrics_tracker.dart	app/lib/upstream_capture/services/capture/capture_metrics_tracker.dart
