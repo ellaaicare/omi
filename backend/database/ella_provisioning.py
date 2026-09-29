@@ -782,7 +782,7 @@ class EllaProvisioningRepository:
                     )
                     VALUES (
                         $1, $2, $3, $4, $5, 'PENDING',
-                        'OFF', jsonb_build_object('omi_uid', $5::text, 'email', $2::text),
+                        NULL, jsonb_build_object('omi_uid', $5::text, 'email', $2::text),
                         '{}'::jsonb, ARRAY[]::text[], CURRENT_TIMESTAMP
                     )
                     RETURNING id, omi_uid, email, name, timezone, status
@@ -1419,7 +1419,6 @@ class EllaProvisioningRepository:
                     """
                     UPDATE users
                     SET status = 'ACTIVE',
-                        guardian_mode = COALESCE(guardian_mode, 'OFF'),
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = $1
                     """,
@@ -4233,7 +4232,6 @@ class EllaProvisioningRepository:
                     """
                     UPDATE users
                     SET status = 'ACTIVE',
-                        guardian_mode = COALESCE(guardian_mode, 'OFF'),
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = $1
                     """,
@@ -4262,7 +4260,6 @@ class EllaProvisioningRepository:
                     """
                     UPDATE users
                     SET status = 'ACTIVE',
-                        guardian_mode = COALESCE(guardian_mode, 'OFF'),
                         updated_at = CURRENT_TIMESTAMP
                     WHERE omi_uid = $1
                     """,
@@ -4295,7 +4292,7 @@ class EllaProvisioningRepository:
                     SET guardian_mode = CASE
                             WHEN LOWER(COALESCE(NULLIF(BTRIM($2), ''), 'off'))
                                 IN ('off', 'none', 'disabled', 'null', 'guardian_off')
-                            THEN 'OFF'
+                            THEN NULL
                             ELSE $2
                         END,
                         status = CASE

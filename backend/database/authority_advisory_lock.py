@@ -505,7 +505,7 @@ async def verify_self_owner_after_lock_or_bootstrap(
                 identities, updated_at
             )
             VALUES (
-                $1, $2, $3, 'Synthetic User', 'UTC', 'PENDING', 'OFF',
+                $1, $2, $3, 'Synthetic User', 'UTC', 'PENDING', NULL,
                 jsonb_build_object('omi_uid', $3::text, 'email', $2::text),
                 CURRENT_TIMESTAMP
             )
