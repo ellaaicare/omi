@@ -291,6 +291,125 @@ def test_terminal_authority_for_other_capture_reclaims_expired_drained_conversat
     assert claimed_conversation['capture_state'] == 'active'
 
 
+def test_terminal_authority_releases_orphaned_active_candidate_with_expired_lease(capture_protocol):
+    now = datetime.now(timezone.utc)
+    authority = _authority(
+        conversation_id='completed-capture',
+        generation='completed-generation',
+        owner='completed-owner',
+        state='terminal',
+    )
+    authority['lease_expires_at'] = now - timedelta(minutes=5)
+    authority_ref = _Document(authority)
+    conversation = _conversation(
+        conversation_id='orphan-capture',
+        generation='orphan-generation',
+        owner='orphan-owner',
+        state='active',
+    )
+    conversation['capture_owner_id'] = None
+    conversation['capture_lease_expires_at'] = now - timedelta(minutes=10)
+    conversation_ref = _Document(conversation)
+    transaction = _Transaction()
+
+    claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+        transaction,
+        authority_ref,
+        conversation_ref,
+        'orphan-capture',
+        'replacement-generation',
+        None,
+        'replacement-owner',
+        now,
+    )
+
+    assert claimed is True
+    claimed_authority = _updated(authority, transaction, authority_ref)
+    claimed_conversation = _updated(conversation, transaction, conversation_ref)
+    assert claimed_authority['conversation_id'] == 'orphan-capture'
+    assert claimed_authority['generation'] == 'replacement-generation'
+    assert claimed_authority['owner_token'] == 'replacement-owner'
+    assert claimed_authority['state'] == 'active'
+    assert claimed_conversation['capture_owner_id'] == 'replacement-owner'
+    assert claimed_conversation['capture_state'] == 'active'
+
+
+def test_terminal_authority_does_not_release_orphaned_active_candidate_with_live_lease(capture_protocol):
+    now = datetime.now(timezone.utc)
+    authority = _authority(
+        conversation_id='completed-capture',
+        generation='completed-generation',
+        owner='completed-owner',
+        state='terminal',
+    )
+    authority['lease_expires_at'] = now - timedelta(minutes=5)
+    authority_ref = _Document(authority)
+    conversation = _conversation(
+        conversation_id='orphan-capture',
+        generation='orphan-generation',
+        owner='orphan-owner',
+        state='active',
+    )
+    conversation['capture_owner_id'] = None
+    conversation['capture_lease_expires_at'] = now + timedelta(seconds=30)
+    conversation_ref = _Document(conversation)
+    transaction = _Transaction()
+
+    claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+        transaction,
+        authority_ref,
+        conversation_ref,
+        'orphan-capture',
+        'replacement-generation',
+        None,
+        'replacement-owner',
+        now,
+    )
+
+    assert claimed is False
+    assert transaction.sets == []
+    assert transaction.updates == []
+
+
+def test_terminal_authority_does_not_release_orphaned_candidate_with_live_finalization_claim(capture_protocol):
+    now = datetime.now(timezone.utc)
+    authority = _authority(
+        conversation_id='completed-capture',
+        generation='completed-generation',
+        owner='completed-owner',
+        state='terminal',
+    )
+    authority['lease_expires_at'] = now - timedelta(minutes=5)
+    authority_ref = _Document(authority)
+    conversation = _conversation(
+        conversation_id='orphan-capture',
+        generation='orphan-generation',
+        owner='orphan-owner',
+        state='active',
+    )
+    conversation['capture_owner_id'] = None
+    conversation['capture_lease_expires_at'] = now - timedelta(minutes=10)
+    conversation['capture_finalization_claim_token'] = 'live-claim'
+    conversation['capture_finalization_lease_expires_at'] = now + timedelta(seconds=30)
+    conversation_ref = _Document(conversation)
+    transaction = _Transaction()
+
+    claimed = capture_protocol._claim_reconnect_authority_transaction.to_wrap(
+        transaction,
+        authority_ref,
+        conversation_ref,
+        'orphan-capture',
+        'replacement-generation',
+        None,
+        'replacement-owner',
+        now,
+    )
+
+    assert claimed is False
+    assert transaction.sets == []
+    assert transaction.updates == []
+
+
 def test_expired_active_authority_releases_owner_bound_legacy_candidate_without_touching_content(capture_protocol):
     now = datetime.now(timezone.utc)
     authority = _authority(
@@ -585,6 +704,11 @@ def test_terminal_authority_for_other_capture_rejects_ambiguous_drained_conversa
     variants.append((authority, conversation))
     authority, conversation = valid_documents()
     conversation['capture_state'] = 'active'
+    conversation['capture_owner_id'] = None
+    conversation['capture_lease_expires_at'] = now + timedelta(seconds=30)
+    variants.append((authority, conversation))
+    authority, conversation = valid_documents()
+    conversation['capture_state'] = 'finalizing'
     conversation['capture_owner_id'] = None
     variants.append((authority, conversation))
     authority, conversation = valid_documents()
