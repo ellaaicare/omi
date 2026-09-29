@@ -508,6 +508,7 @@ async def synchronize_grant(
     allow_fresh_uid_bootstrap: bool = False,
     bootstrap_email: str = "",
     grant_is_current: Optional[Callable[[], Awaitable[bool]]] = None,
+    compatible_runtime_contracts: tuple[ConsentContract, ...] = (),
 ) -> dict[str, Any]:
     """Publish a Firestore grant into the PostgreSQL ordering authority.
 
@@ -517,6 +518,17 @@ async def synchronize_grant(
     Without it, the strict ``authority_lock_owner_missing`` behavior is preserved.
     """
     grant.validate()
+    grant_contract = (
+        grant.policy_version,
+        grant.processor_set_hash,
+        grant.scope_version,
+        grant.scope_hash,
+    )
+    if compatible_runtime_contracts:
+        if any(len(contract) != 4 or not all(contract) for contract in compatible_runtime_contracts):
+            raise ManagedCloudAuthorityDenied("managed_cloud_runtime_contract_invalid")
+        if grant_contract not in compatible_runtime_contracts:
+            raise ManagedCloudAuthorityDenied("managed_cloud_runtime_contract_invalid")
     try:
         pool = await voice_canary.get_pool()
         async with pool.acquire() as conn:
@@ -592,6 +604,34 @@ async def synchronize_grant(
                             grant.account_uid,
                             grant.consent_receipt_id,
                         ),
+                    )
+                elif _grant_matches_allowed_successor(
+                    row,
+                    grant,
+                    compatible_runtime_contracts,
+                ):
+                    row = await conn.fetchrow(
+                        """
+                        UPDATE ella_managed_cloud_consent_authority
+                        SET consent_receipt_ref = $2,
+                            policy_version = $3,
+                            processor_set_hash = $4,
+                            scope_version = $5,
+                            scope_hash = $6,
+                            revision = revision + 1,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE user_id = $1
+                        RETURNING *
+                        """,
+                        user_id,
+                        consent_receipt_ref(
+                            grant.account_uid,
+                            grant.consent_receipt_id,
+                        ),
+                        grant.policy_version,
+                        grant.processor_set_hash,
+                        grant.scope_version,
+                        grant.scope_hash,
                     )
                 else:
                     row = await conn.fetchrow(

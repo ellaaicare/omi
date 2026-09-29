@@ -17,6 +17,7 @@ from ella.services.ai_consent import (
     consent_policy_contract,
     is_exact_v11_upgrade_decline,
     managed_cloud_real_data_enabled,
+    managed_runtime_policy_contracts,
 )
 from ella.services.provisioning import self_hosted_fresh_uid_relax_enabled
 
@@ -182,7 +183,14 @@ async def submit_with_managed_cloud_authority(
     if submission.decision in {"declined", "revoked"}:
         await _erase_artwork_for_denial(uid)
     if managed and submission.decision == "granted":
-        receipt_id = str((payload.get("receipt") or {}).get("receipt_id") or "")
+        receipt = dict(payload.get("receipt") or {})
+        receipt_id = str(receipt.get("receipt_id") or "")
+        runtime_contracts = managed_runtime_policy_contracts(
+            receipt.get("policy_version"),
+            receipt.get("processor_set_hash"),
+            receipt.get("scope_version"),
+            receipt.get("scope_hash"),
+        )
 
         async def grant_is_current() -> bool:
             status = await run_in_threadpool(service.status, uid)
@@ -202,5 +210,14 @@ async def submit_with_managed_cloud_authority(
             allow_fresh_uid_bootstrap=self_hosted_fresh_uid_relax_enabled(),
             bootstrap_email=verified_email,
             grant_is_current=grant_is_current,
+            compatible_runtime_contracts=tuple(
+                (
+                    contract.version,
+                    contract.processor_set_hash,
+                    contract.scope_version,
+                    contract.scope_hash,
+                )
+                for contract in runtime_contracts
+            ),
         )
     return payload

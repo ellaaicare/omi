@@ -2010,29 +2010,13 @@ def test_consent_bootstrap_creates_users_row_and_grant():
     asyncio.run(_run_with_database(scenario))
 
 
-def test_v10_to_v11_grant_preserves_null_guardian_mode_under_production_constraint():
+def test_v10_to_v11_grant_preserves_null_guardian_mode_under_production_constraint(monkeypatch):
     async def scenario(pool):
         uid = "synthetic-consent-v11-upgrade"
-        v10 = managed_cloud_consent.ManagedCloudGrant(
-            account_uid=uid,
-            profile_uid=uid,
-            consent_receipt_id="synthetic-v10-receipt",
-            profile_binding_id="synthetic-profile",
-            policy_version="ai-data-processors-v10",
-            processor_set_hash="sha256:" + ("1" * 64),
-            scope_version="managed-cloud-internal-pilot-v4",
-            scope_hash="sha256:" + ("2" * 64),
-        )
-        v11 = managed_cloud_consent.ManagedCloudGrant(
-            account_uid=uid,
-            profile_uid=uid,
-            consent_receipt_id="synthetic-v11-receipt",
-            profile_binding_id=v10.profile_binding_id,
-            policy_version="ai-data-processors-v11",
-            processor_set_hash="sha256:" + ("3" * 64),
-            scope_version=v10.scope_version,
-            scope_hash=v10.scope_hash,
-        )
+        repository = ai_consent.InMemoryConsentRepository()
+        service = ai_consent.AiConsentService(repository)
+        monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", uid)
+        monkeypatch.setattr(ai_consent, "_repository", repository)
         async with pool.acquire() as conn:
             await conn.execute(
                 """
@@ -2055,43 +2039,171 @@ def test_v10_to_v11_grant_preserves_null_guardian_mode_under_production_constrai
                 uid,
                 "synthetic-consent-v11-upgrade@example.invalid",
             )
+
+        await consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            submission=ai_consent.ConsentSubmission(
+                decision="granted",
+                policy_version=ai_consent.LEGACY_POLICY_VERSION_V10,
+                processor_set_hash=ai_consent.LEGACY_V10_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+                request_id="synthetic-v10-before-v11-upgrade",
+                app_version="1.0.0",
+                build_number="873",
+                locale="en-US",
+            ),
+            service=service,
+        )
+        assert await EllaProvisioningRepository(pool).seed_voice_entitlement_if_absent(uid=uid) is True
+        async with pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO ella_managed_cloud_consent_authority (
-                    user_id, decision, consent_receipt_ref, profile_binding_id,
-                    policy_version, processor_set_hash, scope_version, scope_hash
-                ) VALUES ($1, 'granted', $2, $3, $4, $5, $6, $7)
+                INSERT INTO ella_provisioning_jobs (
+                    user_id, target_schema_version, request_payload_hash,
+                    state, stage, retryable
+                ) VALUES ($1, 'hermes-user-v1', 'synthetic', 'ready', 'active', FALSE)
                 """,
                 user_id,
-                managed_cloud_consent.consent_receipt_ref(uid, v10.consent_receipt_id),
-                v10.profile_binding_id,
-                v10.policy_version,
-                v10.processor_set_hash,
-                v10.scope_version,
-                v10.scope_hash,
             )
-
-        result = await managed_cloud_consent.synchronize_grant(grant=v11)
-
-        assert result["policy_version"] == v11.policy_version
-        async with pool.acquire() as observer:
-            row = await observer.fetchrow(
+            await conn.execute(
                 """
-                SELECT account.status, account.guardian_mode,
-                       authority.policy_version, authority.processor_set_hash
+                INSERT INTO ella_runtime_bindings (
+                    user_id, account_user_id, profile_user_id,
+                    role, provider, profile_name, agent_id,
+                    template_version, model_policy_version, voice_policy_version,
+                    health_state, health_receipt, runtime_target_mode,
+                    status, active
+                ) VALUES (
+                    $1, $1, $1,
+                    'user', 'hermes', 'v11-upgrade-profile', 'v11-upgrade-agent',
+                    'hermes-user-v1', 'model-policy-v1', 'voice-policy-v1',
+                    'healthy', '{}'::jsonb, 'hermes-chat', 'active', TRUE
+                )
+                """,
+                user_id,
+            )
+            before = await conn.fetchrow(
+                """
+                SELECT authority.authority_epoch, authority.revision AS authority_revision,
+                       authority.policy_version, authority.processor_set_hash,
+                       entitlement.status AS entitlement_status,
+                       entitlement.revision AS entitlement_revision,
+                       binding.status AS binding_status, binding.active,
+                       binding.health_state, binding.revision AS binding_revision,
+                       job.state AS job_state, job.stage AS job_stage,
+                       job.updated_at AS job_updated_at
                 FROM users account
-                JOIN ella_managed_cloud_consent_authority authority
-                  ON authority.user_id = account.id
+                JOIN ella_managed_cloud_consent_authority authority ON authority.user_id = account.id
+                JOIN voice_entitlements entitlement ON entitlement.uid = account.omi_uid
+                JOIN ella_runtime_bindings binding ON binding.user_id = account.id
+                JOIN ella_provisioning_jobs job ON job.user_id = account.id
                 WHERE account.omi_uid = $1
                 """,
                 uid,
             )
-        assert tuple(row.values()) == (
-            "ACTIVE",
-            None,
-            v11.policy_version,
-            v11.processor_set_hash,
+
+        granted = await consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            submission=ai_consent.ConsentSubmission(
+                decision="granted",
+                policy_version=ai_consent.CURRENT_POLICY_VERSION,
+                processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+                request_id="synthetic-v11-upgrade",
+                app_version="1.0.0",
+                build_number="873",
+                locale="en-US",
+            ),
+            service=service,
         )
+
+        async with pool.acquire() as observer:
+            row = await observer.fetchrow(
+                """
+                SELECT account.status, account.guardian_mode,
+                       authority.authority_epoch, authority.revision AS authority_revision,
+                       authority.policy_version, authority.processor_set_hash,
+                       entitlement.status AS entitlement_status,
+                       entitlement.revision AS entitlement_revision,
+                       binding.status AS binding_status, binding.active,
+                       binding.health_state, binding.revision AS binding_revision,
+                       job.state AS job_state, job.stage AS job_stage,
+                       job.updated_at AS job_updated_at
+                FROM users account
+                JOIN ella_managed_cloud_consent_authority authority
+                  ON authority.user_id = account.id
+                JOIN voice_entitlements entitlement ON entitlement.uid = account.omi_uid
+                JOIN ella_runtime_bindings binding ON binding.user_id = account.id
+                JOIN ella_provisioning_jobs job ON job.user_id = account.id
+                WHERE account.omi_uid = $1
+                """,
+                uid,
+            )
+        assert row["status"] == "ACTIVE"
+        assert row["guardian_mode"] is None
+        assert row["authority_epoch"] == before["authority_epoch"]
+        assert row["authority_revision"] == before["authority_revision"] + 1
+        assert row["policy_version"] == ai_consent.CURRENT_POLICY_VERSION
+        assert row["processor_set_hash"] == ai_consent.CURRENT_PROCESSOR_SET_HASH
+        assert row["entitlement_status"] == before["entitlement_status"] == "active"
+        assert row["entitlement_revision"] == before["entitlement_revision"]
+        assert row["binding_status"] == before["binding_status"] == "active"
+        assert row["active"] is before["active"] is True
+        assert row["health_state"] == before["health_state"] == "healthy"
+        assert row["binding_revision"] == before["binding_revision"]
+        assert row["job_state"] == before["job_state"] == "ready"
+        assert row["job_stage"] == before["job_stage"] == "active"
+        assert row["job_updated_at"] == before["job_updated_at"]
+        assert granted["authorized"] is True
+        assert ai_consent.resolve_ai_consent_egress_decision(uid).typesafe_egress_authorized is True
+
+        replayed = await consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            submission=ai_consent.ConsentSubmission(
+                decision="granted",
+                policy_version=ai_consent.CURRENT_POLICY_VERSION,
+                processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+                request_id="synthetic-v11-upgrade-replay",
+                app_version="1.0.0",
+                build_number="873",
+                locale="en-US",
+            ),
+            service=service,
+        )
+        replayed_state = await pool.fetchrow(
+            """
+            SELECT authority.authority_epoch, authority.revision AS authority_revision,
+                   authority.policy_version,
+                   entitlement.status AS entitlement_status,
+                   binding.status AS binding_status, binding.active,
+                   binding.health_state, binding.quarantine_reason,
+                   job.state AS job_state, job.stage AS job_stage
+            FROM users account
+            JOIN ella_managed_cloud_consent_authority authority ON authority.user_id = account.id
+            JOIN voice_entitlements entitlement ON entitlement.uid = account.omi_uid
+            JOIN ella_runtime_bindings binding ON binding.user_id = account.id
+            JOIN ella_provisioning_jobs job ON job.user_id = account.id
+            WHERE account.omi_uid = $1
+            """,
+            uid,
+        )
+        assert dict(replayed_state) == {
+            "authority_epoch": row["authority_epoch"],
+            "authority_revision": row["authority_revision"] + 1,
+            "policy_version": ai_consent.CURRENT_POLICY_VERSION,
+            "entitlement_status": "active",
+            "binding_status": "active",
+            "active": True,
+            "health_state": "healthy",
+            "quarantine_reason": None,
+            "job_state": "ready",
+            "job_stage": "active",
+        }
+        assert replayed["authorized"] is True
 
     asyncio.run(_run_with_database(scenario))
 
@@ -2099,8 +2211,10 @@ def test_v10_to_v11_grant_preserves_null_guardian_mode_under_production_constrai
 def test_v11_upgrade_decline_preserves_v10_authority_and_active_entitlement(monkeypatch):
     async def scenario(pool):
         uid = "synthetic-v11-upgrade-decline-preserves-v10"
-        service = ai_consent.AiConsentService(ai_consent.InMemoryConsentRepository())
+        consent_repository = ai_consent.InMemoryConsentRepository()
+        service = ai_consent.AiConsentService(consent_repository)
         monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", uid)
+        monkeypatch.setattr(ai_consent, "_repository", consent_repository)
         await pool.execute(
             """
             INSERT INTO users (omi_uid, email, profile_class)
@@ -2128,11 +2242,46 @@ def test_v11_upgrade_decline_preserves_v10_authority_and_active_entitlement(monk
         )
         repository = EllaProvisioningRepository(pool)
         assert await repository.seed_voice_entitlement_if_absent(uid=uid) is True
+        user_id = await pool.fetchval("SELECT id FROM users WHERE omi_uid = $1", uid)
+        await pool.execute(
+            """
+            INSERT INTO ella_provisioning_jobs (
+                user_id, target_schema_version, request_payload_hash,
+                state, stage, retryable
+            ) VALUES ($1, 'hermes-user-v1', 'synthetic', 'ready', 'active', FALSE)
+            """,
+            user_id,
+        )
+        await pool.execute(
+            """
+            INSERT INTO ella_runtime_bindings (
+                user_id, account_user_id, profile_user_id,
+                role, provider, profile_name, agent_id,
+                template_version, model_policy_version, voice_policy_version,
+                health_state, health_receipt, runtime_target_mode,
+                status, active
+            ) VALUES (
+                $1, $1, $1,
+                'user', 'hermes', 'v11-decline-profile', 'v11-decline-agent',
+                'hermes-user-v1', 'model-policy-v1', 'voice-policy-v1',
+                'healthy', '{}'::jsonb, 'hermes-chat', 'active', TRUE
+            )
+            """,
+            user_id,
+        )
         before = await pool.fetchrow(
             """
-            SELECT status, revision, managed_consent_recoverable
-            FROM voice_entitlements
-            WHERE uid = $1
+            SELECT entitlement.status, entitlement.revision,
+                   entitlement.managed_consent_recoverable,
+                   binding.status AS binding_status, binding.active,
+                   binding.health_state, binding.revision AS binding_revision,
+                   job.state AS job_state, job.stage AS job_stage,
+                   job.updated_at AS job_updated_at
+            FROM voice_entitlements entitlement
+            JOIN users account ON account.omi_uid = entitlement.uid
+            JOIN ella_runtime_bindings binding ON binding.user_id = account.id
+            JOIN ella_provisioning_jobs job ON job.user_id = account.id
+            WHERE entitlement.uid = $1
             """,
             uid,
         )
@@ -2157,10 +2306,16 @@ def test_v11_upgrade_decline_preserves_v10_authority_and_active_entitlement(monk
             """
             SELECT entitlement.status, entitlement.revision,
                    entitlement.managed_consent_recoverable,
+                   binding.status AS binding_status, binding.active,
+                   binding.health_state, binding.revision AS binding_revision,
+                   job.state AS job_state, job.stage AS job_stage,
+                   job.updated_at AS job_updated_at,
                    authority.decision, authority.consent_receipt_ref,
                    authority.policy_version
             FROM voice_entitlements entitlement
             JOIN users account ON account.omi_uid = entitlement.uid
+            JOIN ella_runtime_bindings binding ON binding.user_id = account.id
+            JOIN ella_provisioning_jobs job ON job.user_id = account.id
             JOIN ella_managed_cloud_consent_authority authority
               ON authority.user_id = account.id
             WHERE entitlement.uid = $1
@@ -2171,11 +2326,25 @@ def test_v11_upgrade_decline_preserves_v10_authority_and_active_entitlement(monk
             "status": "active",
             "revision": 1,
             "managed_consent_recoverable": False,
+            "binding_status": "active",
+            "active": True,
+            "health_state": "healthy",
+            "binding_revision": before["binding_revision"],
+            "job_state": "ready",
+            "job_stage": "active",
+            "job_updated_at": before["job_updated_at"],
         }
         assert dict(after) == {
             "status": "active",
             "revision": 1,
             "managed_consent_recoverable": False,
+            "binding_status": "active",
+            "active": True,
+            "health_state": "healthy",
+            "binding_revision": before["binding_revision"],
+            "job_state": "ready",
+            "job_stage": "active",
+            "job_updated_at": before["job_updated_at"],
             "decision": "granted",
             "consent_receipt_ref": managed_cloud_consent.consent_receipt_ref(
                 uid,
@@ -2186,6 +2355,7 @@ def test_v11_upgrade_decline_preserves_v10_authority_and_active_entitlement(monk
         assert declined["authorized"] is True
         assert declined["consent"]["receipt_id"] == v10["receipt"]["receipt_id"]
         assert declined["receipt"]["receipt_kind"] == "policy_upgrade_decline"
+        assert ai_consent.resolve_ai_consent_egress_decision(uid).typesafe_egress_authorized is False
 
     asyncio.run(_run_with_database(scenario))
 
@@ -2459,6 +2629,45 @@ def test_v11_denial_uses_null_guardian_mode_under_production_constraint():
                 "sha256:" + ("1" * 64),
                 "sha256:" + ("2" * 64),
             )
+            await conn.execute(
+                """
+                INSERT INTO voice_entitlements (
+                    uid, status, provider_allowlist, model_allowlist,
+                    mode_allowlist, fallback_policy
+                ) VALUES (
+                    $1, 'active', ARRAY['hermes'], ARRAY['gpt-oss:120b'],
+                    ARRAY['stream', 'transcribe'],
+                    '{"enabled":false,"order":[]}'::jsonb
+                )
+                """,
+                uid,
+            )
+            await conn.execute(
+                """
+                INSERT INTO ella_provisioning_jobs (
+                    user_id, target_schema_version, request_payload_hash,
+                    state, stage, retryable
+                ) VALUES ($1, 'hermes-user-v1', 'synthetic', 'ready', 'active', FALSE)
+                """,
+                user_id,
+            )
+            await conn.execute(
+                """
+                INSERT INTO ella_runtime_bindings (
+                    user_id, account_user_id, profile_user_id,
+                    role, provider, profile_name, agent_id,
+                    template_version, model_policy_version, voice_policy_version,
+                    health_state, health_receipt, runtime_target_mode,
+                    status, active
+                ) VALUES (
+                    $1, $1, $1,
+                    'user', 'hermes', 'v11-revoke-profile', 'v11-revoke-agent',
+                    'hermes-user-v1', 'model-policy-v1', 'voice-policy-v1',
+                    'healthy', '{}'::jsonb, 'hermes-chat', 'active', TRUE
+                )
+                """,
+                user_id,
+            )
 
         result = await managed_cloud_consent.synchronize_denial(
             uid=uid,
@@ -2470,15 +2679,36 @@ def test_v11_denial_uses_null_guardian_mode_under_production_constraint():
             row = await observer.fetchrow(
                 """
                 SELECT account.guardian_mode, authority.decision,
-                       authority.policy_version, authority.consent_receipt_ref
+                       authority.policy_version, authority.consent_receipt_ref,
+                       entitlement.status AS entitlement_status,
+                       entitlement.managed_consent_recoverable,
+                       binding.status AS binding_status, binding.active,
+                       binding.health_state, binding.quarantine_reason,
+                       job.state AS job_state, job.error_code
                 FROM users account
                 JOIN ella_managed_cloud_consent_authority authority
                   ON authority.user_id = account.id
+                JOIN voice_entitlements entitlement ON entitlement.uid = account.omi_uid
+                JOIN ella_runtime_bindings binding ON binding.user_id = account.id
+                JOIN ella_provisioning_jobs job ON job.user_id = account.id
                 WHERE account.omi_uid = $1
                 """,
                 uid,
             )
-        assert tuple(row.values()) == (None, "revoked", None, None)
+        assert tuple(row.values()) == (
+            None,
+            "revoked",
+            None,
+            None,
+            "revoked",
+            True,
+            "disabled",
+            False,
+            "unhealthy",
+            "managed_cloud_consent_revoked",
+            "blocked",
+            "invitation_authority_revoked",
+        )
 
     asyncio.run(_run_with_database(scenario))
 

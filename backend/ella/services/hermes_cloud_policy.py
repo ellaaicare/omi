@@ -37,6 +37,16 @@ class CurrentCloudAuthority:
     profile_binding_id: str
     lineage: RuntimeTargetLineage
     grant_epoch: str = ""
+    runtime_lineage: Optional[RuntimeTargetLineage] = None
+    compatible_runtime_lineages: tuple[RuntimeTargetLineage, ...] = ()
+
+    @property
+    def runtime_target_lineage(self) -> RuntimeTargetLineage:
+        return self.runtime_lineage or self.lineage
+
+    @property
+    def runtime_target_lineages(self) -> tuple[RuntimeTargetLineage, ...]:
+        return self.compatible_runtime_lineages or (self.runtime_target_lineage,)
 
 
 def _stable_json(value: Any) -> str:
@@ -128,6 +138,12 @@ def current_cloud_authority(
         scope_version=str(consent.get("scope_version") or ""),
         scope_hash=str(consent.get("scope_hash") or ""),
     )
+    runtime_contracts = ai_consent.managed_runtime_policy_contracts(
+        lineage.policy_version,
+        lineage.processor_set_hash,
+        lineage.scope_version,
+        lineage.scope_hash,
+    )
     if status.get("authority_state") == "unavailable":
         raise ProvisioningError("managed_cloud_consent_authority_unavailable", retryable=True)
     if (
@@ -135,13 +151,39 @@ def current_cloud_authority(
         or consent.get("decision") != "granted"
         or consent.get("profile_binding_id") != expected_profile_binding
         or not consent.get("receipt_id")
+        or not runtime_contracts
     ):
         raise ProvisioningError("managed_cloud_consent_stale", retryable=False)
+    runtime_contract = ai_consent.managed_runtime_policy_contract(
+        lineage.policy_version,
+        lineage.processor_set_hash,
+        lineage.scope_version,
+        lineage.scope_hash,
+    )
+    if runtime_contract is None:
+        raise ProvisioningError("managed_cloud_consent_stale", retryable=False)
+    runtime_lineage = RuntimeTargetLineage(
+        policy_version=runtime_contract.version,
+        processor_set_hash=runtime_contract.processor_set_hash,
+        scope_version=runtime_contract.scope_version,
+        scope_hash=runtime_contract.scope_hash,
+    ).validate()
+    compatible_runtime_lineages = tuple(
+        RuntimeTargetLineage(
+            policy_version=contract.version,
+            processor_set_hash=contract.processor_set_hash,
+            scope_version=contract.scope_version,
+            scope_hash=contract.scope_hash,
+        ).validate()
+        for contract in runtime_contracts
+    )
     return CurrentCloudAuthority(
         consent_receipt_id=str(consent["receipt_id"]),
         profile_binding_id=expected_profile_binding,
         lineage=lineage.validate(),
         grant_epoch=grant_epoch,
+        runtime_lineage=runtime_lineage,
+        compatible_runtime_lineages=compatible_runtime_lineages,
     )
 
 

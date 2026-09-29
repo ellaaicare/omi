@@ -337,7 +337,7 @@ def runtime_from_binding(
                 or ""
             ),
         )
-        if stored_lineage.validate() != authority.lineage:
+        if stored_lineage.validate() not in authority.runtime_target_lineages:
             raise ProvisioningError("cloud_runtime_target_lineage_stale", retryable=False)
         try:
             consent_authority_epoch = str(UUID(str(binding.get("consent_authority_epoch") or "").strip()))
@@ -584,13 +584,17 @@ async def resolve_isolated_runtime(
                 memory_provider=MANAGED_CLOUD_MEMORY_PROVIDER,
                 photon_scope=MANAGED_CLOUD_PHOTON_SCOPE,
             )
-            binding = await repository.resolve_active_runtime(
-                uid,
-                target_mode=target_mode,
-                required_provider=CLOUD_RUNTIME_PROVIDER,
-                authority_lineage=authority.lineage,
-                model=CLOUD_RUNTIME_MODEL,
-            )
+            binding = None
+            for runtime_lineage in authority.runtime_target_lineages:
+                binding = await repository.resolve_active_runtime(
+                    uid,
+                    target_mode=target_mode,
+                    required_provider=CLOUD_RUNTIME_PROVIDER,
+                    authority_lineage=runtime_lineage,
+                    model=CLOUD_RUNTIME_MODEL,
+                )
+                if binding:
+                    break
         elif self_hosted_required:
             self_hosted_mode = _self_hosted_target_mode(target_mode)
             authority_lineage = (

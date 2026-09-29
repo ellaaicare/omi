@@ -124,6 +124,24 @@ def _build_871_refresh_accepts(policy, status, uid):
 
 def test_policy_matches_exact_managed_cloud_v11_typesafe_contract():
     policy = consent.AiConsentService.policy()
+    v10_runtime = consent.managed_runtime_policy_contract(
+        consent.LEGACY_POLICY_VERSION_V10,
+        consent.LEGACY_V10_PROCESSOR_SET_HASH,
+        consent.CURRENT_SCOPE_VERSION,
+        consent.CURRENT_SCOPE_HASH,
+    )
+    v11_runtime = consent.managed_runtime_policy_contract(
+        consent.CURRENT_POLICY_VERSION,
+        consent.CURRENT_PROCESSOR_SET_HASH,
+        consent.CURRENT_SCOPE_VERSION,
+        consent.CURRENT_SCOPE_HASH,
+    )
+    v11_compatible_runtimes = consent.managed_runtime_policy_contracts(
+        consent.CURRENT_POLICY_VERSION,
+        consent.CURRENT_PROCESSOR_SET_HASH,
+        consent.CURRENT_SCOPE_VERSION,
+        consent.CURRENT_SCOPE_HASH,
+    )
 
     assert consent.LEGACY_V10_PROCESSOR_SET_HASH == (
         "sha256:84c1007429613ba0f5cdee2e64194e262c6fec8f296af2219f7ad6c8b2da1b2d"
@@ -134,6 +152,13 @@ def test_policy_matches_exact_managed_cloud_v11_typesafe_contract():
     assert policy["processor_set_hash"] == "sha256:16a0ca2b738ce6b4f31e9619960ef5d611be51a43a1a43b83dbf8f391ef1a591"
     assert policy["scope_version"] == "managed-cloud-internal-pilot-v4"
     assert policy["scope_hash"] == consent.CURRENT_SCOPE_HASH
+    assert v10_runtime == v11_runtime
+    assert v11_runtime == consent.SUPPORTED_CONSENT_POLICY_CONTRACTS[consent.LEGACY_POLICY_VERSION_V10]
+    assert v11_compatible_runtimes == (
+        consent.SUPPORTED_CONSENT_POLICY_CONTRACTS[consent.CURRENT_POLICY_VERSION],
+        consent.SUPPORTED_CONSENT_POLICY_CONTRACTS[consent.LEGACY_POLICY_VERSION_V10],
+    )
+    assert set(consent.CURRENT_PROCESSOR_IDS) - set(consent.LEGACY_V10_PROCESSOR_IDS) == {consent.TYPESAFE_PROCESSOR_ID}
     assert (
         "|".join(
             [
@@ -1594,6 +1619,20 @@ def test_self_hosted_grant_passes_only_verified_email_to_authority(monkeypatch):
 
     assert captured["allow_fresh_uid_bootstrap"] is True
     assert captured["bootstrap_email"] == "User-A@Example.invalid"
+    assert captured["compatible_runtime_contracts"] == (
+        (
+            consent.CURRENT_POLICY_VERSION,
+            consent.CURRENT_PROCESSOR_SET_HASH,
+            consent.CURRENT_SCOPE_VERSION,
+            consent.CURRENT_SCOPE_HASH,
+        ),
+        (
+            consent.LEGACY_POLICY_VERSION_V10,
+            consent.LEGACY_V10_PROCESSOR_SET_HASH,
+            consent.CURRENT_SCOPE_VERSION,
+            consent.CURRENT_SCOPE_HASH,
+        ),
+    )
 
 
 def test_managed_cloud_denial_authority_error_prevents_firestore_mutation(

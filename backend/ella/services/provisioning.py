@@ -1170,16 +1170,20 @@ class ProvisioningCoordinator:
                 memory_provider=MANAGED_CLOUD_MEMORY_PROVIDER,
                 photon_scope=MANAGED_CLOUD_PHOTON_SCOPE,
             )
-            binding = await self._repository_call(
-                authority_snapshot,
-                self.repository.resolve_active_runtime,
-                identity.uid,
-                template_version=target_schema_version,
-                target_mode="hermes-cloud-chat",
-                required_provider=CLOUD_RUNTIME_PROVIDER,
-                authority_lineage=authority.lineage,
-                model=CLOUD_RUNTIME_MODEL,
-            )
+            binding = None
+            for runtime_lineage in authority.runtime_target_lineages:
+                binding = await self._repository_call(
+                    authority_snapshot,
+                    self.repository.resolve_active_runtime,
+                    identity.uid,
+                    template_version=target_schema_version,
+                    target_mode="hermes-cloud-chat",
+                    required_provider=CLOUD_RUNTIME_PROVIDER,
+                    authority_lineage=runtime_lineage,
+                    model=CLOUD_RUNTIME_MODEL,
+                )
+                if binding:
+                    break
         else:
             binding = await self._repository_call(
                 authority_snapshot,
@@ -1755,7 +1759,7 @@ class ProvisioningCoordinator:
                     "account_profile_bound": True,
                     "content_free": True,
                 },
-                **final_authority.lineage.as_dict(),
+                **final_authority.runtime_target_lineage.as_dict(),
                 "admission_revision": admitted_entitlement_revision,
             }
             activated = await self.repository.finalize_cloud_pool_claim(
@@ -1763,7 +1767,7 @@ class ProvisioningCoordinator:
                 job_id=str(job["id"]),
                 claim_token=claim_token,
                 admitted_entitlement_revision=admitted_entitlement_revision,
-                authority_lineage=final_authority.lineage,
+                authority_lineage=final_authority.runtime_target_lineage,
                 health_receipt=health_receipt,
                 status=os.getenv("ELLA_HERMES_CLOUD_INITIAL_STATUS", "shadow").strip().lower(),
                 provider=str(pool_policy["provider"]),
