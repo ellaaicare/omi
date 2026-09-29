@@ -1722,6 +1722,46 @@ void main() {
     expect(capture.deviceStarts, 1, reason: 'the fresh-session gate still applies after the launch grace is spent');
   });
 
+  test('an unrelated gate failure must not consume the auto-resume grace', () async {
+    final boundNecklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final unboundNecklace = BtDevice(name: 'Other', id: 'necklace-2', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(boundNecklace);
+    final capture = _RecordingCaptureProvider(
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.necklaceConnectionUnavailable,
+    )..updateRecordingState(RecordingState.error);
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      automaticallyReconnectOnReady: false,
+    )
+      ..setProviders(capture)
+      // Connected to a device that is not the current owner-bound necklace —
+      // an unrelated gate inside _resumeCaptureForConnectedDevice, distinct
+      // from the stale-capture-failure gate the launch grace exists for.
+      ..connectedDevice = unboundNecklace
+      ..pairedDevice = unboundNecklace
+      ..setIsConnected(true);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    await provider.resumeKnownDeviceConnection(reason: 'connected to an unbound device');
+
+    // Blocked by the unrelated owner-binding gate, not by (or using) the
+    // stale-capture-failure grace.
+    expect(capture.deviceStarts, 0);
+    expect(capture.recordingState, RecordingState.error);
+
+    // The same stale capture failure is still present, and the device is now
+    // the genuinely owner-bound necklace — this call is otherwise eligible
+    // and must still be able to spend the untouched launch grace.
+    provider
+      ..connectedDevice = boundNecklace
+      ..pairedDevice = boundNecklace;
+    await provider.resumeKnownDeviceConnection(reason: 'now connected to the owner-bound device');
+
+    expect(capture.deviceStarts, 1, reason: 'the launch grace must still be available for the eligible call');
+    expect(capture.recordingState, RecordingState.deviceRecord);
+  });
+
   test('foreground resume preserves explicit pause without transport or socket startup', () async {
     final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await bindRememberedDeviceForCurrentTestAuthority(necklace);
