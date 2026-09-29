@@ -292,6 +292,13 @@ class ConversationTerminalEnrichmentUpdate(BaseModel):
         "provider_replay_exhausted",
     ]
     idempotency_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    expected_trace_id: str = Field(min_length=1, max_length=256, pattern=r"^[\x21-\x7e]+$")
+    expected_source_transcript_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    expected_source_active_summary_version_id: str = Field(
+        min_length=1,
+        max_length=256,
+        pattern=r"^[\x20-\x7e]+$",
+    )
 
     model_config = ConfigDict(extra="forbid")
 
@@ -675,6 +682,9 @@ async def update_conversation_enrichment_state(
             conversation_id=conversation_id,
             reason=update.reason,
             idempotency_sha256=update.idempotency_sha256,
+            expected_trace_id=update.expected_trace_id,
+            expected_source_transcript_hash=update.expected_source_transcript_hash,
+            expected_source_active_summary_version_id=update.expected_source_active_summary_version_id,
         )
     except ConversationSummaryNotFoundError:
         raise HTTPException(status_code=404, detail="Conversation not found")

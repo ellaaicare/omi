@@ -125,6 +125,9 @@ async def write_terminal_enrichment_state(
     conversation_id: str,
     reason: str,
     idempotency_sha256: str,
+    expected_trace_id: str,
+    expected_source_transcript_hash: str,
+    expected_source_active_summary_version_id: str,
 ) -> dict[str, Any]:
     """Record one permanent enrichment failure without replacing a successful writeback."""
     if reason not in TERMINAL_ENRICHMENT_REASONS:
@@ -139,6 +142,18 @@ async def write_terminal_enrichment_state(
                 'terminal': False,
                 'idempotent_replay': True,
             }
+        observed_identity = {
+            'trace_id': str(current_state.get('trace_id') or ''),
+            'source_transcript_hash': transcript_grounding_hash(_conversation_transcript_segments(conversation)),
+            'source_active_summary_version_id': str(conversation.get('active_summary_version_id') or ''),
+        }
+        expected_identity = {
+            'trace_id': expected_trace_id,
+            'source_transcript_hash': expected_source_transcript_hash,
+            'source_active_summary_version_id': expected_source_active_summary_version_id,
+        }
+        if observed_identity != expected_identity:
+            raise TerminalEnrichmentStateConflictError('terminal_enrichment_source_changed')
         if current_state.get('status') == 'terminal':
             if current_state.get('reason') != reason or current_state.get('idempotency_sha256') != idempotency_sha256:
                 raise TerminalEnrichmentStateConflictError('terminal_enrichment_state_conflict')

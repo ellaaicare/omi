@@ -193,13 +193,18 @@ def test_terminal_summary_schedules_artwork_without_blocking_text_writeback(monk
 
 
 def test_terminal_enrichment_state_is_monotonic_and_idempotent(monkeypatch):
+    transcript_segments = [{"text": "Synthetic terminal enrichment source."}]
+    transcript_hash = summary_writeback.transcript_grounding_hash(transcript_segments)
     conversation = {
+        "active_summary_version_id": "summary-v1",
+        "transcript_segments": transcript_segments,
         "enrichment_state": {
             "status": "failed",
             "pending": True,
             "source": "observer",
             "kind": "observer_enriched",
-        }
+            "trace_id": "trace-current",
+        },
     }
 
     def update_with_builder(uid, conversation_id, builder):
@@ -218,6 +223,9 @@ def test_terminal_enrichment_state_is_monotonic_and_idempotent(monkeypatch):
         "conversation_id": "conv-terminal",
         "reason": "grounding_rejected",
         "idempotency_sha256": "sha256:" + "a" * 64,
+        "expected_trace_id": "trace-current",
+        "expected_source_transcript_hash": transcript_hash,
+        "expected_source_active_summary_version_id": "summary-v1",
     }
 
     first = asyncio.run(summary_writeback.write_terminal_enrichment_state(**arguments))
@@ -256,6 +264,9 @@ def test_terminal_enrichment_state_never_replaces_applied_writeback(monkeypatch)
             conversation_id="conv-applied",
             reason="provider_rejected",
             idempotency_sha256="sha256:" + "b" * 64,
+            expected_trace_id="trace-applied",
+            expected_source_transcript_hash="sha256:" + "c" * 64,
+            expected_source_active_summary_version_id="summary-applied",
         )
     )
 
@@ -271,8 +282,57 @@ def test_terminal_enrichment_state_never_replaces_applied_writeback(monkeypatch)
                 conversation_id="conv-applied",
                 reason="provider_rejected",
                 idempotency_sha256="sha256:" + "b" * 64,
+                expected_trace_id="trace-pending",
+                expected_source_transcript_hash="sha256:" + "c" * 64,
+                expected_source_active_summary_version_id="summary-pending",
             )
         )
+
+
+def test_terminal_enrichment_rejects_stale_attempt_identity(monkeypatch):
+    transcript_segments = [{"text": "Synthetic current enrichment source."}]
+    conversation = {
+        "active_summary_version_id": "summary-current",
+        "transcript_segments": transcript_segments,
+        "enrichment_state": {
+            "status": "failed",
+            "pending": True,
+            "trace_id": "trace-current",
+        },
+    }
+
+    def update_with_builder(_uid, _conversation_id, builder):
+        update_data, result = builder(conversation)
+        conversation.update(update_data)
+        return {"update_data": update_data, "result": result}
+
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "update_conversation_with_builder",
+        update_with_builder,
+    )
+
+    with pytest.raises(
+        summary_writeback.TerminalEnrichmentStateConflictError,
+        match="terminal_enrichment_source_changed",
+    ):
+        asyncio.run(
+            summary_writeback.write_terminal_enrichment_state(
+                uid="user-terminal",
+                conversation_id="conv-terminal",
+                reason="grounding_rejected",
+                idempotency_sha256="sha256:" + "d" * 64,
+                expected_trace_id="trace-stale",
+                expected_source_transcript_hash=summary_writeback.transcript_grounding_hash(transcript_segments),
+                expected_source_active_summary_version_id="summary-current",
+            )
+        )
+
+    assert conversation["enrichment_state"] == {
+        "status": "failed",
+        "pending": True,
+        "trace_id": "trace-current",
+    }
 
 
 def test_terminal_enrichment_callback_forwards_validated_owner_scoped_state(monkeypatch):
@@ -290,6 +350,9 @@ def test_terminal_enrichment_callback_forwards_validated_owner_scoped_state(monk
                 status="terminal",
                 reason="reservation_exhausted",
                 idempotency_sha256="sha256:" + "c" * 64,
+                expected_trace_id="trace-terminal",
+                expected_source_transcript_hash="sha256:" + "d" * 64,
+                expected_source_active_summary_version_id="summary-terminal",
             ),
             uid="user-terminal",
             service=_service_authority("user-terminal"),
@@ -302,6 +365,9 @@ def test_terminal_enrichment_callback_forwards_validated_owner_scoped_state(monk
         "conversation_id": "conv-terminal",
         "reason": "reservation_exhausted",
         "idempotency_sha256": "sha256:" + "c" * 64,
+        "expected_trace_id": "trace-terminal",
+        "expected_source_transcript_hash": "sha256:" + "d" * 64,
+        "expected_source_active_summary_version_id": "summary-terminal",
     }
 
 
