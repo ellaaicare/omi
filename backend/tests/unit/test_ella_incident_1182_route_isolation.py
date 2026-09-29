@@ -783,6 +783,9 @@ MOUNTED_ROUTE_CONTRACT = {
     ("callbacks", "PATCH", "/v1/ella/conversation/{conversation_id}/summary"): _contract(
         "update_conversation_summary", "ella.routers.callbacks:require_callback_service"
     ),
+    ("callbacks", "PATCH", "/v1/ella/conversation/{conversation_id}/enrichment-state"): _contract(
+        "update_conversation_enrichment_state", "ella.routers.callbacks:require_callback_service"
+    ),
     ("callbacks", "GET", "/v1/ella/conversations/enrichment/reconcile-candidates"): _contract(
         "list_enrichment_reconcile_candidates", "ella.routers.callbacks:require_callback_service"
     ),
@@ -982,7 +985,7 @@ def test_real_mounted_route_manifest_has_exact_paths_authorities_and_no_duplicat
                 assert dependencies, f"unclassified authority: {key}"
 
     assert set(actual) == set(MOUNTED_ROUTE_CONTRACT)
-    assert len(actual) == len(MOUNTED_ROUTE_CONTRACT) == 51
+    assert len(actual) == len(MOUNTED_ROUTE_CONTRACT) == 52
     assert len(path_methods) == len(set(path_methods)), Counter(path_methods)
 
 

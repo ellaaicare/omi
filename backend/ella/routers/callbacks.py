@@ -17,6 +17,7 @@ Endpoints:
 - POST   /v1/ella/chat/stream                           - Stream chat response from Grok (xAI)
 NOTE: Caregiver CRUD endpoints moved to n8n (ella-ai-care repo). iOS calls n8n webhooks directly.
 - GET    /v1/ella/health                               - Health check
+- PATCH  /v1/ella/conversation/{id}/enrichment-state   - Record terminal enrichment state (internal)
 - GET    /v1/ella/conversation/{id}/data               - Fetch conversation data with transcript (internal)
 """
 
@@ -82,6 +83,9 @@ from ella.services.summary_writeback import (
     ConversationSummaryOutcomeUnknownError,
     ConversationSummaryNotFoundError,
     InvalidConversationSummaryCategoryError,
+    TERMINAL_ENRICHMENT_REASONS,
+    TerminalEnrichmentStateConflictError,
+    write_terminal_enrichment_state,
     write_conversation_summary,
     write_conversation_summary_cas,
 )
@@ -279,6 +283,26 @@ class ConversationSummaryUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ConversationTerminalEnrichmentUpdate(BaseModel):
+    status: Literal["terminal"]
+    reason: Literal[
+        "grounding_rejected",
+        "provider_rejected",
+        "reservation_exhausted",
+        "provider_replay_exhausted",
+    ]
+    idempotency_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    expected_trace_id: str = Field(min_length=1, max_length=256, pattern=r"^[\x21-\x7e]+$")
+    expected_source_transcript_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    expected_source_active_summary_version_id: str = Field(
+        min_length=1,
+        max_length=256,
+        pattern=r"^[\x20-\x7e]+$",
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
 def _summary_cas_mode() -> str:
     value = os.getenv(SUMMARY_CAS_MODE_ENV, SUMMARY_CAS_OPTIONAL).strip().lower()
     return value if value in {SUMMARY_CAS_OPTIONAL, SUMMARY_CAS_REQUIRED} else SUMMARY_CAS_REQUIRED
@@ -370,7 +394,7 @@ def _active_summary_version(conversation: dict) -> Optional[dict]:
 def _enrichment_candidate_reason(conversation: dict) -> Optional[str]:
     enrichment_state = conversation.get("enrichment_state") or {}
     status = enrichment_state.get("status")
-    if status == "writeback_applied":
+    if status in {"writeback_applied", "terminal"}:
         return None
     if status == "failed":
         return "enrichment_failed"
@@ -637,6 +661,35 @@ async def update_conversation_summary(
     except Exception:
         logging.error("Failed to update conversation summary", extra={"stage": "summary_writeback"})
         raise HTTPException(status_code=500, detail="Conversation summary update failed")
+
+
+@router.patch("/conversation/{conversation_id}/enrichment-state")
+async def update_conversation_enrichment_state(
+    conversation_id: str,
+    update: ConversationTerminalEnrichmentUpdate,
+    uid: str = None,
+    service: EllaRequestAuthority = Depends(require_callback_service),
+):
+    """Record a validated terminal enrichment outcome for reconciliation."""
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid query parameter required")
+    uid = service.require_uid(uid, feature="Conversation enrichment-state callback")
+    if update.reason not in TERMINAL_ENRICHMENT_REASONS:
+        raise HTTPException(status_code=400, detail="Unsupported terminal enrichment reason")
+    try:
+        return await write_terminal_enrichment_state(
+            uid=uid,
+            conversation_id=conversation_id,
+            reason=update.reason,
+            idempotency_sha256=update.idempotency_sha256,
+            expected_trace_id=update.expected_trace_id,
+            expected_source_transcript_hash=update.expected_source_transcript_hash,
+            expected_source_active_summary_version_id=update.expected_source_active_summary_version_id,
+        )
+    except ConversationSummaryNotFoundError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    except TerminalEnrichmentStateConflictError:
+        raise HTTPException(status_code=409, detail="Terminal enrichment state conflict")
 
 
 @router.get("/conversations/enrichment/reconcile-candidates")

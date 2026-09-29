@@ -19,6 +19,8 @@ from urllib.request import Request, urlopen
 
 import httpx
 from ella.services.ai_consent import assert_current_ai_consent
+from ella.services.runtime_errors import ProvisioningError
+from ella.services.runtime_resolver import require_isolated_runtime
 from pydantic import BaseModel, Field
 
 from database.honcho_attestation import authority_credential
@@ -39,8 +41,7 @@ HONCHO_FACT_WRITE_ENABLED = os.getenv("ELLA_CORRECTION_HONCHO_FACT_WRITE_ENABLED
     "on",
 }
 HONCHO_FACT_MIN_CONFIDENCE = float(os.getenv("ELLA_CORRECTION_HONCHO_FACT_MIN_CONFIDENCE", "0.9"))
-HERMES_GATEWAY_URL = os.getenv("HERMES_GATEWAY_URL", "http://100.76.138.56:8642").rstrip("/")
-HERMES_MODEL = os.getenv("HERMES_MODEL", "plato-eval")
+HONCHO_PROFILE_HOST_MODEL = os.getenv("HERMES_MODEL", "plato-eval")
 HERMES_TIMEOUT_SECONDS = float(os.getenv("ELLA_CORRECTION_HONCHO_FACT_TIMEOUT_SECONDS", "20"))
 HONCHO_FACT_WRITE_TRANSPORT = os.getenv("ELLA_CORRECTION_HONCHO_FACT_WRITE_TRANSPORT", "hermes").strip().lower()
 HONCHO_BASE_URL = (
@@ -204,7 +205,11 @@ def _profile_target_from_entry(entry: Any) -> dict[str, str] | None:
     if not isinstance(entry, dict):
         return None
     hosts = entry.get("hosts") if isinstance(entry.get("hosts"), dict) else {}
-    host_entry = hosts.get(f"hermes.{HERMES_MODEL}") if isinstance(hosts.get(f"hermes.{HERMES_MODEL}"), dict) else {}
+    host_entry = (
+        hosts.get(f"hermes.{HONCHO_PROFILE_HOST_MODEL}")
+        if isinstance(hosts.get(f"hermes.{HONCHO_PROFILE_HOST_MODEL}"), dict)
+        else {}
+    )
     if host_entry:
         entry = {**entry, **host_entry}
     workspace = str(entry.get("workspace") or entry.get("honcho_workspace") or "").strip()
@@ -1040,7 +1045,25 @@ async def write_honcho_fact_candidate(
             session_key=candidate.session_key,
         )
 
-    api_token = token if token is not None else os.getenv("HERMES_API_SERVER_KEY", os.getenv("API_SERVER_KEY", ""))
+    try:
+        runtime = await require_isolated_runtime(
+            candidate.uid,
+            target_mode="hermes-cloud-transcript",
+        )
+    except ProvisioningError as exc:
+        return HonchoFactWriteDecision(
+            action="error",
+            reason=exc.code,
+            uid=candidate.uid,
+            correction_id=candidate.correction_id,
+            fingerprint=candidate.fingerprint,
+            idempotency_key=candidate.idempotency_key,
+            confidence=candidate.confidence,
+            session_key=candidate.session_key,
+        )
+    url = runtime.gateway_url.rstrip("/")
+    api_token = runtime.gateway_token
+    model_name = runtime.agent_id
     if not api_token:
         return HonchoFactWriteDecision(
             action="skip",
@@ -1054,7 +1077,6 @@ async def write_honcho_fact_candidate(
         )
 
     assert_current_ai_consent(candidate.uid)
-    url = (gateway_url or HERMES_GATEWAY_URL).rstrip("/")
     started = time.monotonic()
     session_id = (
         f"honcho-fact:{safe_session_component(candidate.uid)}:{candidate.correction_id}:{candidate.fingerprint}"
@@ -1072,7 +1094,7 @@ async def write_honcho_fact_candidate(
                     "X-Trace-Id": candidate.trace_id,
                 },
                 json={
-                    "model": model or HERMES_MODEL,
+                    "model": model_name,
                     "messages": [
                         {
                             "role": "system",

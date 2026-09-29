@@ -42,6 +42,17 @@ def _load_module(monkeypatch):
     sys.modules.pop("ella.routers.plato_mcp", None)
     module = importlib.import_module("ella.routers.plato_mcp")
     module._rate_limits.clear()
+
+    async def required_runtime(uid, *, target_mode=None):
+        assert uid == module._plato_uid()
+        assert target_mode == "hermes-cloud-chat"
+        return types.SimpleNamespace(
+            gateway_url="https://owner-hermes.test",
+            gateway_token="owner-hermes-token",
+            agent_id="owner-hermes-agent",
+        )
+
+    monkeypatch.setattr(module, "require_isolated_runtime", required_runtime)
     return module
 
 
@@ -1145,6 +1156,43 @@ def test_plato_consult_includes_deep_workspace_search(monkeypatch):
     assert "Initial 504 meeting for Meisheng" in user_message
     assert result["context_source"] == "canonical_timeline_with_hermes_workspace_search"
     assert result["context_events"] == 1
+
+
+def test_plato_consult_fails_closed_without_owner_runtime(monkeypatch):
+    module = _load_module(monkeypatch)
+    provider_calls = 0
+
+    async def missing_runtime(_uid, *, target_mode=None):
+        assert target_mode == "hermes-cloud-chat"
+        raise module.ProvisioningError("companion_runtime_binding_not_found", retryable=False)
+
+    class TrackingClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *_args, **_kwargs):
+            nonlocal provider_calls
+            provider_calls += 1
+            raise AssertionError("provider must not be called")
+
+    monkeypatch.setattr(module, "require_isolated_runtime", missing_runtime)
+    monkeypatch.setattr(module, "_recent_context", lambda arguments: asyncio.sleep(0, result={"events": []}))
+    monkeypatch.setattr(module, "_fetch_workspace_search", lambda prompt, limit: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(module.httpx, "AsyncClient", TrackingClient)
+
+    try:
+        asyncio.run(module._consult_plato({"prompt": "Synthetic prompt"}))
+    except module.ToolExecutionError as exc:
+        assert exc.message == "companion_runtime_binding_not_found"
+    else:
+        raise AssertionError("missing owner runtime must fail closed")
+    assert provider_calls == 0
 
 
 def test_initialize_returns_session_header(monkeypatch):

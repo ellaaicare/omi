@@ -192,6 +192,197 @@ def test_terminal_summary_schedules_artwork_without_blocking_text_writeback(monk
     assert background_tasks.tasks[0].args == ("user-artwork", "conv-artwork")
 
 
+def test_terminal_enrichment_state_is_monotonic_and_idempotent(monkeypatch):
+    transcript_segments = [{"text": "Synthetic terminal enrichment source."}]
+    transcript_hash = summary_writeback.transcript_grounding_hash(transcript_segments)
+    conversation = {
+        "active_summary_version_id": "summary-v1",
+        "transcript_segments": transcript_segments,
+        "enrichment_state": {
+            "status": "failed",
+            "pending": True,
+            "source": "observer",
+            "kind": "observer_enriched",
+            "trace_id": "trace-current",
+        },
+    }
+
+    def update_with_builder(uid, conversation_id, builder):
+        assert (uid, conversation_id) == ("user-terminal", "conv-terminal")
+        update_data, result = builder(conversation)
+        conversation.update(update_data)
+        return {"update_data": update_data, "result": result}
+
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "update_conversation_with_builder",
+        update_with_builder,
+    )
+    arguments = {
+        "uid": "user-terminal",
+        "conversation_id": "conv-terminal",
+        "reason": "grounding_rejected",
+        "idempotency_sha256": "sha256:" + "a" * 64,
+        "expected_trace_id": "trace-current",
+        "expected_source_transcript_hash": transcript_hash,
+        "expected_source_active_summary_version_id": "summary-v1",
+    }
+
+    first = asyncio.run(summary_writeback.write_terminal_enrichment_state(**arguments))
+    replay = asyncio.run(summary_writeback.write_terminal_enrichment_state(**arguments))
+
+    assert first == {
+        "conversation_id": "conv-terminal",
+        "status": "terminal",
+        "terminal": True,
+        "idempotent_replay": False,
+    }
+    assert replay["idempotent_replay"] is True
+    assert conversation["enrichment_state"]["status"] == "terminal"
+    assert conversation["enrichment_state"]["pending"] is False
+    assert conversation["enrichment_state"]["reason"] == "grounding_rejected"
+    assert conversation["enrichment_state"]["idempotency_sha256"] == "sha256:" + "a" * 64
+
+
+def test_terminal_enrichment_state_never_replaces_applied_writeback(monkeypatch):
+    conversation = {"enrichment_state": {"status": "writeback_applied", "pending": False}}
+
+    def update_with_builder(_uid, _conversation_id, builder):
+        update_data, result = builder(conversation)
+        assert update_data == {}
+        return {"update_data": update_data, "result": result}
+
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "update_conversation_with_builder",
+        update_with_builder,
+    )
+
+    result = asyncio.run(
+        summary_writeback.write_terminal_enrichment_state(
+            uid="user-applied",
+            conversation_id="conv-applied",
+            reason="provider_rejected",
+            idempotency_sha256="sha256:" + "b" * 64,
+            expected_trace_id="trace-applied",
+            expected_source_transcript_hash="sha256:" + "c" * 64,
+            expected_source_active_summary_version_id="summary-applied",
+        )
+    )
+
+    assert result["status"] == "writeback_applied"
+    assert result["terminal"] is False
+    assert conversation["enrichment_state"] == {"status": "writeback_applied", "pending": False}
+
+    conversation["enrichment_state"] = {"status": "writeback_pending_canonical", "pending": True}
+    with pytest.raises(summary_writeback.TerminalEnrichmentStateConflictError):
+        asyncio.run(
+            summary_writeback.write_terminal_enrichment_state(
+                uid="user-applied",
+                conversation_id="conv-applied",
+                reason="provider_rejected",
+                idempotency_sha256="sha256:" + "b" * 64,
+                expected_trace_id="trace-pending",
+                expected_source_transcript_hash="sha256:" + "c" * 64,
+                expected_source_active_summary_version_id="summary-pending",
+            )
+        )
+
+
+def test_terminal_enrichment_rejects_stale_attempt_identity(monkeypatch):
+    transcript_segments = [{"text": "Synthetic current enrichment source."}]
+    conversation = {
+        "active_summary_version_id": "summary-current",
+        "transcript_segments": transcript_segments,
+        "enrichment_state": {
+            "status": "failed",
+            "pending": True,
+            "trace_id": "trace-current",
+        },
+    }
+
+    def update_with_builder(_uid, _conversation_id, builder):
+        update_data, result = builder(conversation)
+        conversation.update(update_data)
+        return {"update_data": update_data, "result": result}
+
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "update_conversation_with_builder",
+        update_with_builder,
+    )
+
+    with pytest.raises(
+        summary_writeback.TerminalEnrichmentStateConflictError,
+        match="terminal_enrichment_source_changed",
+    ):
+        asyncio.run(
+            summary_writeback.write_terminal_enrichment_state(
+                uid="user-terminal",
+                conversation_id="conv-terminal",
+                reason="grounding_rejected",
+                idempotency_sha256="sha256:" + "d" * 64,
+                expected_trace_id="trace-stale",
+                expected_source_transcript_hash=summary_writeback.transcript_grounding_hash(transcript_segments),
+                expected_source_active_summary_version_id="summary-current",
+            )
+        )
+
+    assert conversation["enrichment_state"] == {
+        "status": "failed",
+        "pending": True,
+        "trace_id": "trace-current",
+    }
+
+
+def test_terminal_enrichment_callback_forwards_validated_owner_scoped_state(monkeypatch):
+    captured = {}
+
+    async def writer(**kwargs):
+        captured.update(kwargs)
+        return {"conversation_id": kwargs["conversation_id"], "status": "terminal"}
+
+    monkeypatch.setattr(callbacks, "write_terminal_enrichment_state", writer)
+    result = asyncio.run(
+        callbacks.update_conversation_enrichment_state(
+            "conv-terminal",
+            callbacks.ConversationTerminalEnrichmentUpdate(
+                status="terminal",
+                reason="reservation_exhausted",
+                idempotency_sha256="sha256:" + "c" * 64,
+                expected_trace_id="trace-terminal",
+                expected_source_transcript_hash="sha256:" + "d" * 64,
+                expected_source_active_summary_version_id="summary-terminal",
+            ),
+            uid="user-terminal",
+            service=_service_authority("user-terminal"),
+        )
+    )
+
+    assert result["status"] == "terminal"
+    assert captured == {
+        "uid": "user-terminal",
+        "conversation_id": "conv-terminal",
+        "reason": "reservation_exhausted",
+        "idempotency_sha256": "sha256:" + "c" * 64,
+        "expected_trace_id": "trace-terminal",
+        "expected_source_transcript_hash": "sha256:" + "d" * 64,
+        "expected_source_active_summary_version_id": "summary-terminal",
+    }
+
+
+def test_terminal_enrichment_is_not_a_reconcile_candidate():
+    conversation = {
+        "enrichment_state": {
+            "status": "terminal",
+            "reason": "provider_replay_exhausted",
+            "idempotency_sha256": "sha256:" + "d" * 64,
+        }
+    }
+
+    assert callbacks._enrichment_candidate_reason(conversation) is None
+
+
 def test_update_conversation_summary_adds_missing_ella_prefix(monkeypatch):
     captured = {}
 
