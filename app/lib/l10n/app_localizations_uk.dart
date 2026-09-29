@@ -10167,4 +10167,34 @@ class AppLocalizationsUk extends AppLocalizations {
 
   @override
   String get experimentalModeCyborgDescription => 'Reacts to everything it hears.';
+  @override
+  String get whispersAndExperimentalModesTitle => 'Whispers & Experimental Modes';
+
+  @override
+  String get whispersModeSectionTitle => 'Whispers mode';
+
+  @override
+  String get whispersModeSectionDescription =>
+      'Choose how Whispers supports you. Critical-safety alerts, like falls or chest pain, are always delivered in every mode.';
+
+  @override
+  String get coreModeMemorySupportTitle => 'Memory Support';
+
+  @override
+  String get coreModeMemorySupportDescription =>
+      'Proactive memory cues and gentle recall assistance for cognitive support.';
+
+  @override
+  String get coreModeActiveSupportTitle => 'Active Support';
+
+  @override
+  String get coreModeActiveSupportDescription =>
+      'Emergency alerts, recall assistance, schedule reminders, and pattern monitoring.';
+
+  @override
+  String get coreModeEmergencyOnlyTitle => 'Emergency Only';
+
+  @override
+  String get coreModeEmergencyOnlyDescription =>
+      'Critical alerts only - fall detection, medical emergencies, and similar emergencies.';
 }
