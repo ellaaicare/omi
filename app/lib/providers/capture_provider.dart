@@ -2131,6 +2131,11 @@ class CaptureProvider extends ChangeNotifier
 
   void updateRecordingState(RecordingState state) {
     recordingState = state;
+    if (state == RecordingState.deviceRecord) {
+      // Necklace capture is genuinely running again (a manual Record tap or a
+      // legitimate auto-resume) — any earlier explicit Stop no longer applies.
+      SharedPreferencesUtil().necklaceCaptureExplicitlyStopped = false;
+    }
     notifyListeners();
     _broadcastRecordingState();
   }
@@ -2830,6 +2835,7 @@ class CaptureProvider extends ChangeNotifier
       _updateRecordingDevice(null);
     }
     updateRecordingState(RecordingState.stop);
+    SharedPreferencesUtil().necklaceCaptureExplicitlyStopped = true;
     await _socket?.stop(reason: 'stop stream device recording');
   }
 
@@ -2847,6 +2853,7 @@ class CaptureProvider extends ChangeNotifier
     await _cleanupCurrentState();
     if (cleanDevice) _updateRecordingDevice(null);
     updateRecordingState(RecordingState.stop);
+    SharedPreferencesUtil().necklaceCaptureExplicitlyStopped = true;
     final shouldFinalize = _captureDiagnostics.hasPhysicalAudio || hasCapturableContent;
     try {
       if (!shouldFinalize) {
