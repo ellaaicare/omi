@@ -176,6 +176,7 @@ Future<EllaNativeDiscoveryDiagnostics> loadNativeDiscoveryDiagnostics([BleHostAp
     queuedScansFired: native.queuedScansFired,
     didDiscoverCount: native.didDiscoverCount,
     flutterApiNilDropCount: native.flutterApiNilDropCount,
+    nameArrivedLate: native.nameArrivedLate,
   );
 }
 
