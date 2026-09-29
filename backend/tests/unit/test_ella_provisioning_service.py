@@ -3494,12 +3494,27 @@ def test_fresh_uid_relax_prefers_healthy_direct_binding_over_late_legacy_cluster
     assert runtime.provider == "hermes"
     assert runtime.runtime_target_mode == ""
 
+    # /v4/listen resolves through this same retained-compatible direct-binding
+    # path with target_mode="hermes-cloud-transcript". The direct lookup below
+    # ignores target_mode entirely, so transcript listen must resolve the
+    # binding rather than being rejected (regression guard for the prod-wide
+    # 403 that blocked every retained owner's /v4/listen call).
+    transcript_runtime = asyncio.run(
+        resolve_isolated_runtime(
+            "fresh-user",
+            repository=repository,
+            target_mode="hermes-cloud-transcript",
+        )
+    )
+    assert transcript_runtime.uid == "fresh-user"
+    assert transcript_runtime.provider == "hermes"
+
     with pytest.raises(ProvisioningError, match="self_hosted_runtime_target_mode_required") as unsupported:
         asyncio.run(
             resolve_isolated_runtime(
                 "fresh-user",
                 repository=repository,
-                target_mode="hermes-cloud-transcript",
+                target_mode="hermes-cloud-guardian",
             )
         )
     assert unsupported.value.retryable is False
