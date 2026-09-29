@@ -1209,30 +1209,20 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     }
     if (!mounted) return;
     final serverEnabled = _whispersEnabled(info);
-    var resolvedEnabled = serverEnabled;
     var resolvedVerified = false;
     try {
       await _reconcileWhisperNative(serverEnabled);
       resolvedVerified = true;
     } catch (_) {
-      // If native capture cannot match an authoritative ON response, disable
-      // the server mode only when both the write and readback confirm OFF.
-      // Otherwise keep the last authoritative value behind an unavailable
-      // control and make no ON/OFF claim.
-      if (serverEnabled && await _writeWhisperState(const GuardianModeState())) {
-        final confirmed = await _readWhisperState();
-        if (confirmed != null && !_whispersEnabled(confirmed)) {
-          resolvedEnabled = false;
-          try {
-            await _reconcileWhisperNative(false);
-            resolvedVerified = true;
-          } catch (_) {}
-        }
-      }
+      // The server is the source of truth for guardian mode. A native
+      // capture failure here must never trigger a compensating PUT — launch,
+      // resume, and reconcile paths only GET and adopt server state. Show
+      // the last-known server value with the control marked unavailable
+      // rather than writing anything back.
     }
     if (!mounted) return;
     setState(() {
-      _whispersOn = resolvedEnabled;
+      _whispersOn = serverEnabled;
       _whispersVerified = resolvedVerified;
     });
   }
