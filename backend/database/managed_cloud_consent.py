@@ -29,6 +29,12 @@ class ManagedCloudAuthorityUnavailable(RuntimeError):
     pass
 
 
+class _ExactGrantActionError(RuntimeError):
+    def __init__(self, original: Exception):
+        super().__init__(str(original))
+        self.original = original
+
+
 @dataclass(frozen=True)
 class ManagedCloudGrant:
     account_uid: str
@@ -406,6 +412,60 @@ async def lock_or_bootstrap_grant_on_connection(
     if row is None or not _grant_matches(row, grant):
         raise ManagedCloudAuthorityDenied("managed_cloud_authority_stale")
     return uuid.UUID(str(row["authority_epoch"]))
+
+
+async def run_with_exact_grant_current(
+    *,
+    grant: ManagedCloudGrant,
+    action: Callable[[], Awaitable[None]],
+) -> bool:
+    """Run an external receipt write while the exact PostgreSQL grant is locked."""
+    grant.validate()
+    try:
+        pool = await voice_canary.get_pool()
+        async with pool.acquire() as conn:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                conn,
+                uid=grant.account_uid,
+            )
+            async with conn.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    conn,
+                    owner=owner,
+                )
+                await voice_canary.lock_runtime_authority_on_connection(
+                    conn,
+                    uid=grant.account_uid,
+                )
+                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                    conn,
+                    uid=grant.account_uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                row = await conn.fetchrow(
+                    """
+                    SELECT *
+                    FROM ella_managed_cloud_consent_authority
+                    WHERE user_id = $1
+                    FOR UPDATE
+                    """,
+                    user_id,
+                )
+                if row is None or not _grant_matches(row, grant):
+                    return False
+                try:
+                    await action()
+                except Exception as exc:
+                    raise _ExactGrantActionError(exc) from exc
+                return True
+    except _ExactGrantActionError as exc:
+        raise exc.original
+    except ManagedCloudAuthorityUnavailable:
+        raise
+    except Exception as exc:
+        logger.warning("managed_cloud_exact_consent_read_failed error=%s", type(exc).__name__)
+        raise ManagedCloudAuthorityUnavailable("managed_cloud_authority_unavailable") from exc
 
 
 async def synchronize_grant(

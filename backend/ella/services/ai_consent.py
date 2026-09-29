@@ -310,6 +310,19 @@ def consent_policy_contract(
     return contract
 
 
+def is_exact_v11_upgrade_decline(submission: "ConsentSubmission") -> bool:
+    return bool(
+        submission.decision == "declined"
+        and consent_policy_contract(
+            submission.policy_version,
+            submission.processor_set_hash,
+            submission.scope_version,
+            submission.scope_hash,
+        )
+        == SUPPORTED_CONSENT_POLICY_CONTRACTS[CURRENT_POLICY_VERSION]
+    )
+
+
 ACCOUNT_DELETION_CONTRACT = {
     "method": "DELETE",
     "path": "/v1/users/delete-account",
@@ -407,6 +420,15 @@ class ConsentRepository(Protocol):
         request_fingerprint: str,
     ) -> tuple[dict[str, Any], dict[str, Any], bool]: ...
 
+    def record_policy_upgrade_decline(
+        self,
+        uid: str,
+        receipt_id: str,
+        receipt: dict[str, Any],
+        request_fingerprint: str,
+        expected_current_receipt_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], bool]: ...
+
     def complete_account_deletion(
         self,
         uid: str,
@@ -436,6 +458,30 @@ def _receipt_fingerprint(receipt: dict[str, Any]) -> str:
     }
     encoded = json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _is_exact_policy_grant(
+    uid: str,
+    state: Optional[dict[str, Any]],
+    receipt: Optional[dict[str, Any]],
+    policy_version: str,
+) -> bool:
+    contract = SUPPORTED_CONSENT_POLICY_CONTRACTS.get(policy_version)
+    processor_ids = (state or {}).get("processor_ids")
+    return bool(
+        contract is not None
+        and _authority_state(uid, state, receipt) == "authorized"
+        and (state or {}).get("decision") == "granted"
+        and consent_policy_contract(
+            (state or {}).get("policy_version"),
+            (state or {}).get("processor_set_hash"),
+            (state or {}).get("scope_version"),
+            (state or {}).get("scope_hash"),
+        )
+        == contract
+        and isinstance(processor_ids, list)
+        and tuple(processor_ids) == contract.processor_ids
+    )
 
 
 def _account_epoch_hash(token: Any) -> str:
@@ -571,6 +617,64 @@ def _record_firestore_receipt(
 
 
 @transactional
+def _record_firestore_policy_upgrade_decline(
+    transaction,
+    user_ref,
+    receipt_ref,
+    receipt: dict[str, Any],
+    request_fingerprint: str,
+    expected_current_receipt_id: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], bool]:
+    existing_snapshot = receipt_ref.get(transaction=transaction)
+    user_snapshot = user_ref.get(transaction=transaction)
+    user_data = user_snapshot.to_dict() if user_snapshot.exists else {}
+    current_state = dict(user_data.get("ai_consent") or {})
+    current_receipt_id = str(current_state.get("receipt_id") or "")
+    current_receipt_snapshot = (
+        user_ref.collection("ai_consent_receipts").document(current_receipt_id).get(transaction=transaction)
+        if current_receipt_id
+        else None
+    )
+    current_receipt = (
+        current_receipt_snapshot.to_dict()
+        if current_receipt_snapshot is not None and current_receipt_snapshot.exists
+        else None
+    )
+
+    if existing_snapshot.exists:
+        existing = existing_snapshot.to_dict()
+        if (
+            existing.get("request_fingerprint") != request_fingerprint
+            or existing.get("receipt_kind") != "policy_upgrade_decline"
+        ):
+            raise ConsentIdempotencyConflict("request_id was already used with different consent metadata")
+        if not current_receipt:
+            raise ConsentAuthorityUnavailable("ai_consent_authority_unavailable")
+        return existing, current_state, current_receipt, False
+
+    if (
+        receipt.get("decision") != "declined"
+        or receipt.get("policy_version") != CURRENT_POLICY_VERSION
+        or current_receipt_id != expected_current_receipt_id
+        or not _is_exact_policy_grant(
+            str(receipt.get("subject_uid") or ""),
+            current_state,
+            current_receipt,
+            LEGACY_POLICY_VERSION_V10,
+        )
+    ):
+        raise ConsentAuthorityUnavailable("ai_consent_upgrade_authority_changed")
+
+    stored_receipt = {
+        **receipt,
+        "receipt_kind": "policy_upgrade_decline",
+        "request_fingerprint": request_fingerprint,
+    }
+    transaction.set(receipt_ref, stored_receipt)
+    return stored_receipt, current_state, current_receipt, True
+
+
+@transactional
 def _complete_firestore_account_deletion(
     transaction,
     user_ref,
@@ -682,6 +786,26 @@ class FirestoreConsentRepository:
             receipt_ref,
             receipt,
             request_fingerprint,
+        )
+
+    def record_policy_upgrade_decline(
+        self,
+        uid: str,
+        receipt_id: str,
+        receipt: dict[str, Any],
+        request_fingerprint: str,
+        expected_current_receipt_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], bool]:
+        db = self._configured_db()
+        user_ref = db.collection("users").document(uid)
+        receipt_ref = user_ref.collection("ai_consent_receipts").document(receipt_id)
+        return _record_firestore_policy_upgrade_decline(
+            db.transaction(),
+            user_ref,
+            receipt_ref,
+            receipt,
+            request_fingerprint,
+            expected_current_receipt_id,
         )
 
     def complete_account_deletion(
@@ -799,6 +923,50 @@ class InMemoryConsentRepository:
             self.receipts[(uid, receipt_id)] = stored
             self.states[uid] = state
             return dict(stored), dict(state), True
+
+    def record_policy_upgrade_decline(
+        self,
+        uid: str,
+        receipt_id: str,
+        receipt: dict[str, Any],
+        request_fingerprint: str,
+        expected_current_receipt_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], bool]:
+        with self._lock:
+            key = (uid, receipt_id)
+            current_state = dict(self.states.get(uid) or {})
+            current_receipt_id = str(current_state.get("receipt_id") or "")
+            current_receipt = dict(self.receipts.get((uid, current_receipt_id)) or {})
+            existing = self.receipts.get(key)
+            if existing:
+                if (
+                    existing.get("request_fingerprint") != request_fingerprint
+                    or existing.get("receipt_kind") != "policy_upgrade_decline"
+                ):
+                    raise ConsentIdempotencyConflict("request_id was already used with different consent metadata")
+                if not current_receipt:
+                    raise ConsentAuthorityUnavailable("ai_consent_authority_unavailable")
+                return dict(existing), current_state, current_receipt, False
+            if (
+                receipt.get("decision") != "declined"
+                or receipt.get("policy_version") != CURRENT_POLICY_VERSION
+                or current_receipt_id != expected_current_receipt_id
+                or not _is_exact_policy_grant(
+                    uid,
+                    current_state,
+                    current_receipt,
+                    LEGACY_POLICY_VERSION_V10,
+                )
+            ):
+                raise ConsentAuthorityUnavailable("ai_consent_upgrade_authority_changed")
+
+            stored = {
+                **receipt,
+                "receipt_kind": "policy_upgrade_decline",
+                "request_fingerprint": request_fingerprint,
+            }
+            self.receipts[key] = stored
+            return dict(stored), current_state, current_receipt, True
 
     def complete_account_deletion(
         self,
@@ -922,7 +1090,7 @@ class AiConsentService:
             return None
         return _public_receipt(receipt)
 
-    def submit(self, uid: str, submission: ConsentSubmission) -> dict[str, Any]:
+    def _build_receipt(self, uid: str, submission: ConsentSubmission) -> dict[str, Any]:
         grant_contract = consent_policy_contract(
             submission.policy_version,
             submission.processor_set_hash,
@@ -933,7 +1101,6 @@ class AiConsentService:
             raise ConsentPolicyMismatch("grant does not match the server-required processor policy")
 
         receipt_id = "aicr_" + hashlib.sha256(f"{uid}:{submission.request_id}".encode()).hexdigest()[:32]
-        profile_binding_id = derive_profile_binding_id(account_uid=uid, profile_uid=uid)
         receipt = {
             "receipt_id": receipt_id,
             "subject_uid": uid,
@@ -943,7 +1110,7 @@ class AiConsentService:
             "processor_ids": list(
                 (grant_contract or SUPPORTED_CONSENT_POLICY_CONTRACTS[CURRENT_POLICY_VERSION]).processor_ids
             ),
-            "profile_binding_id": profile_binding_id,
+            "profile_binding_id": derive_profile_binding_id(account_uid=uid, profile_uid=uid),
             "scope_version": submission.scope_version,
             "scope_hash": submission.scope_hash,
             "request_id": submission.request_id,
@@ -957,6 +1124,11 @@ class AiConsentService:
             receipt["account_epoch_auth_time"] = submission.account_epoch_auth_time
         if submission.decision == "deleted":
             receipt["deletion_phase"] = "pending"
+        return receipt
+
+    def submit(self, uid: str, submission: ConsentSubmission) -> dict[str, Any]:
+        receipt = self._build_receipt(uid, submission)
+        receipt_id = str(receipt["receipt_id"])
         fingerprint = _receipt_fingerprint(receipt)
         try:
             stored_receipt, state, created = self.repository.record(uid, receipt_id, receipt, fingerprint)
@@ -971,6 +1143,55 @@ class AiConsentService:
         payload["receipt"] = _public_receipt(stored_receipt)
         payload["receipt_created"] = created
         return payload
+
+    def record_policy_upgrade_decline(
+        self,
+        uid: str,
+        submission: ConsentSubmission,
+        *,
+        expected_current_receipt_id: str,
+    ) -> dict[str, Any]:
+        if not is_exact_v11_upgrade_decline(submission):
+            raise ConsentPolicyMismatch("upgrade decline does not match the current processor policy")
+        receipt = self._build_receipt(uid, submission)
+        receipt_id = str(receipt["receipt_id"])
+        fingerprint = _receipt_fingerprint(receipt)
+        try:
+            decline_receipt, state, current_receipt, created = self.repository.record_policy_upgrade_decline(
+                uid,
+                receipt_id,
+                receipt,
+                fingerprint,
+                expected_current_receipt_id,
+            )
+        except (ConsentAuthorityUnavailable, ConsentIdempotencyConflict):
+            raise
+        except Exception as exc:
+            logger.warning("ai_consent_upgrade_decline_record_failed error=%s", type(exc).__name__)
+            raise ConsentAuthorityUnavailable("ai_consent_authority_unavailable") from exc
+        payload = _status_payload(uid, state, current_receipt)
+        payload["receipt"] = _public_receipt(decline_receipt)
+        payload["receipt_created"] = created
+        payload["upgrade_declined"] = True
+        return payload
+
+    def is_policy_upgrade_decline_replay(
+        self,
+        uid: str,
+        submission: ConsentSubmission,
+    ) -> bool:
+        if not is_exact_v11_upgrade_decline(submission):
+            return False
+        receipt = self._build_receipt(uid, submission)
+        try:
+            existing = self.repository.get_receipt(uid, str(receipt["receipt_id"]))
+        except Exception as exc:
+            raise ConsentAuthorityUnavailable("ai_consent_authority_unavailable") from exc
+        return bool(
+            existing
+            and existing.get("receipt_kind") == "policy_upgrade_decline"
+            and existing.get("request_fingerprint") == _receipt_fingerprint(receipt)
+        )
 
     def record_account_deletion(self, uid: str, *, request_id: str) -> dict[str, Any]:
         """Persist a server-only pending tombstone before account unlink."""
@@ -1031,6 +1252,7 @@ def _public_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
             "app_version",
             "build_number",
             "locale",
+            "receipt_kind",
         )
     }
 

@@ -15,6 +15,7 @@ from database import authority_advisory_lock, managed_cloud_consent, voice_canar
 from database.ella_provisioning import EllaProvisioningRepository, RuntimePoolClaimError
 from database.runtime_targets import RuntimeTargetLineage
 from ella.routers import guardian
+from ella.services import ai_consent, consent_authority
 from ella.services.provisioning import current_self_hosted_runtime_lineage
 from utils.ella import exact_firebase_auth
 
@@ -180,12 +181,10 @@ async def _seed_grant(pool, uid):
 
 def test_guardian_mode_get_returns_only_exact_case_sensitive_firebase_subject():
     async def scenario(pool):
-        await pool.execute(
-            """
+        await pool.execute("""
             INSERT INTO users (omi_uid, guardian_mode)
             VALUES ('CaseUID', 'EMERGENCY_ONLY'), ('caseuid', 'ACTIVE_SUPPORT')
-            """
-        )
+            """)
         previous_pool = guardian._pool
         guardian._pool = pool
         try:
@@ -202,8 +201,7 @@ def test_guardian_mode_get_returns_only_exact_case_sensitive_firebase_subject():
 
 def test_mounted_guardian_alert_history_isolates_case_distinct_firebase_subjects(monkeypatch):
     async def scenario(pool):
-        await pool.execute(
-            """
+        await pool.execute("""
             CREATE TABLE guardian_queue (
                 id TEXT PRIMARY KEY,
                 uid TEXT NOT NULL,
@@ -280,8 +278,7 @@ def test_mounted_guardian_alert_history_isolates_case_distinct_firebase_subjects
                     'owner-local-trace', 'caseuid', 'imessage', 'lower-private-target', 'sent',
                     'LOWER_DELIVERY_PRIVATE', '2026-08-03T12:00:20Z', '2026-08-03T12:00:20Z'
                 );
-            """
-        )
+            """)
 
         before = {
             table: [tuple(row.values()) for row in await pool.fetch(f"SELECT * FROM {table} ORDER BY id")]
@@ -629,23 +626,19 @@ def test_omi_revoke_lock_blocks_broker_and_releases_without_deadlock():
             str(owner.profile_id),
         )
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
+            await conn.execute("""
                 CREATE FUNCTION hold_authority_revoke() RETURNS trigger AS $$
                 BEGIN
                     PERFORM pg_sleep(0.6);
                     RETURN NEW;
                 END
                 $$ LANGUAGE plpgsql
-                """
-            )
-            await conn.execute(
-                """
+                """)
+            await conn.execute("""
                 CREATE TRIGGER hold_authority_revoke
                 BEFORE UPDATE ON ella_managed_cloud_consent_authority
                 FOR EACH ROW EXECUTE FUNCTION hold_authority_revoke()
-                """
-            )
+                """)
 
         revoke = asyncio.create_task(
             managed_cloud_consent.synchronize_denial(
@@ -2033,8 +2026,7 @@ def test_v10_to_v11_grant_preserves_null_guardian_mode_under_production_constrai
             scope_hash=v10.scope_hash,
         )
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
+            await conn.execute("""
                 ALTER TABLE users
                 ADD CONSTRAINT guardian_mode_check
                 CHECK (
@@ -2043,8 +2035,7 @@ def test_v10_to_v11_grant_preserves_null_guardian_mode_under_production_constrai
                         'CUSTOM', 'CYBORG', 'CHATBOT', 'MEMORY_SUPPORT', 'DEMO'
                     )
                 )
-                """
-            )
+                """)
             user_id = await conn.fetchval(
                 """
                 INSERT INTO users (omi_uid, email, status, guardian_mode, profile_class)
@@ -2095,12 +2086,176 @@ def test_v10_to_v11_grant_preserves_null_guardian_mode_under_production_constrai
     asyncio.run(_run_with_database(scenario))
 
 
+def test_v11_upgrade_decline_preserves_v10_authority_and_active_entitlement(monkeypatch):
+    async def scenario(pool):
+        uid = "synthetic-v11-upgrade-decline-preserves-v10"
+        service = ai_consent.AiConsentService(ai_consent.InMemoryConsentRepository())
+        monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", uid)
+        await pool.execute(
+            """
+            INSERT INTO users (omi_uid, email, profile_class)
+            VALUES ($1, $2, 'synthetic')
+            """,
+            uid,
+            "upgrade-decline@example.invalid",
+        )
+
+        v10 = await consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            verified_email="upgrade-decline@example.invalid",
+            submission=ai_consent.ConsentSubmission(
+                decision="granted",
+                policy_version=ai_consent.LEGACY_POLICY_VERSION_V10,
+                processor_set_hash=ai_consent.LEGACY_V10_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+                request_id="synthetic-v10-before-upgrade-decline",
+                app_version="1.0.0",
+                build_number="873",
+                locale="en-US",
+            ),
+            service=service,
+        )
+        repository = EllaProvisioningRepository(pool)
+        assert await repository.seed_voice_entitlement_if_absent(uid=uid) is True
+        before = await pool.fetchrow(
+            """
+            SELECT status, revision, managed_consent_recoverable
+            FROM voice_entitlements
+            WHERE uid = $1
+            """,
+            uid,
+        )
+
+        declined = await consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            submission=ai_consent.ConsentSubmission(
+                decision="declined",
+                policy_version=ai_consent.CURRENT_POLICY_VERSION,
+                processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+                request_id="synthetic-v11-upgrade-decline",
+                app_version="1.0.0",
+                build_number="873",
+                locale="en-US",
+            ),
+            service=service,
+        )
+
+        after = await pool.fetchrow(
+            """
+            SELECT entitlement.status, entitlement.revision,
+                   entitlement.managed_consent_recoverable,
+                   authority.decision, authority.consent_receipt_ref,
+                   authority.policy_version
+            FROM voice_entitlements entitlement
+            JOIN users account ON account.omi_uid = entitlement.uid
+            JOIN ella_managed_cloud_consent_authority authority
+              ON authority.user_id = account.id
+            WHERE entitlement.uid = $1
+            """,
+            uid,
+        )
+        assert dict(before) == {
+            "status": "active",
+            "revision": 1,
+            "managed_consent_recoverable": False,
+        }
+        assert dict(after) == {
+            "status": "active",
+            "revision": 1,
+            "managed_consent_recoverable": False,
+            "decision": "granted",
+            "consent_receipt_ref": managed_cloud_consent.consent_receipt_ref(
+                uid,
+                v10["receipt"]["receipt_id"],
+            ),
+            "policy_version": ai_consent.LEGACY_POLICY_VERSION_V10,
+        }
+        assert declined["authorized"] is True
+        assert declined["consent"]["receipt_id"] == v10["receipt"]["receipt_id"]
+        assert declined["receipt"]["receipt_kind"] == "policy_upgrade_decline"
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_v11_upgrade_decline_then_v11_grant_authorizes_typesafe(monkeypatch):
+    async def scenario(_pool):
+        uid = "synthetic-v11-upgrade-decline-then-grant"
+        repository = ai_consent.InMemoryConsentRepository()
+        service = ai_consent.AiConsentService(repository)
+        monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", uid)
+        monkeypatch.setattr(ai_consent, "_repository", repository)
+        await _pool.execute(
+            """
+            INSERT INTO users (omi_uid, email, profile_class)
+            VALUES ($1, $2, 'synthetic')
+            """,
+            uid,
+            "upgrade-decline-grant@example.invalid",
+        )
+
+        await consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            verified_email="upgrade-decline-grant@example.invalid",
+            submission=ai_consent.ConsentSubmission(
+                decision="granted",
+                policy_version=ai_consent.LEGACY_POLICY_VERSION_V10,
+                processor_set_hash=ai_consent.LEGACY_V10_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+                request_id="synthetic-v10-before-decline-and-grant",
+                app_version="1.0.0",
+                build_number="873",
+                locale="en-US",
+            ),
+            service=service,
+        )
+        declined = await consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            submission=ai_consent.ConsentSubmission(
+                decision="declined",
+                policy_version=ai_consent.CURRENT_POLICY_VERSION,
+                processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+                request_id="synthetic-v11-decline-before-v11-grant",
+                app_version="1.0.0",
+                build_number="873",
+                locale="en-US",
+            ),
+            service=service,
+        )
+        granted = await consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            submission=ai_consent.ConsentSubmission(
+                decision="granted",
+                policy_version=ai_consent.CURRENT_POLICY_VERSION,
+                processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+                request_id="synthetic-v11-after-upgrade-decline",
+                app_version="1.0.0",
+                build_number="873",
+                locale="en-US",
+            ),
+            service=service,
+        )
+
+        assert declined["authorized"] is True
+        assert granted["authorized"] is True
+        assert granted["consent"]["policy_version"] == ai_consent.CURRENT_POLICY_VERSION
+        assert ai_consent.resolve_ai_consent_egress_decision(uid).typesafe_egress_authorized is True
+
+    asyncio.run(_run_with_database(scenario))
+
+
 def test_v11_denial_uses_null_guardian_mode_under_production_constraint():
     async def scenario(pool):
         uid = "synthetic-consent-v11-denial"
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
+            await conn.execute("""
                 ALTER TABLE users
                 ADD CONSTRAINT guardian_mode_check
                 CHECK (
@@ -2109,8 +2264,7 @@ def test_v11_denial_uses_null_guardian_mode_under_production_constraint():
                         'CUSTOM', 'CYBORG', 'CHATBOT', 'MEMORY_SUPPORT', 'DEMO'
                     )
                 )
-                """
-            )
+                """)
             user_id = await conn.fetchval(
                 """
                 INSERT INTO users (omi_uid, email, status, guardian_mode, profile_class)
