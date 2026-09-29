@@ -346,14 +346,18 @@ async def onboarding_status(
             memory_provider=MANAGED_CLOUD_MEMORY_PROVIDER,
             photon_scope=MANAGED_CLOUD_PHOTON_SCOPE,
         )
-        binding = await repository.resolve_active_runtime(
-            uid,
-            template_version=target_schema_version,
-            target_mode="hermes-cloud-chat",
-            required_provider=CLOUD_RUNTIME_PROVIDER,
-            authority_lineage=authority.lineage,
-            model=CLOUD_RUNTIME_MODEL,
-        )
+        binding = None
+        for runtime_lineage in authority.runtime_target_lineages:
+            binding = await repository.resolve_active_runtime(
+                uid,
+                template_version=target_schema_version,
+                target_mode="hermes-cloud-chat",
+                required_provider=CLOUD_RUNTIME_PROVIDER,
+                authority_lineage=runtime_lineage,
+                model=CLOUD_RUNTIME_MODEL,
+            )
+            if binding:
+                break
     else:
         self_hosted_required = self_hosted_provisioning_enabled(uid, admission=invitation_admission)
         authority_lineage = (

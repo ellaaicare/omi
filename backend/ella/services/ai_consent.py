@@ -310,6 +310,67 @@ def consent_policy_contract(
     return contract
 
 
+def managed_runtime_policy_contracts(
+    policy_version: Any,
+    processor_set_hash: Any,
+    scope_version: Any,
+    scope_hash: Any,
+) -> tuple[ConsentPolicyContract, ...]:
+    """Return the exact and compatible runtime contracts for one receipt.
+
+    V11 adds only the separately enforced TypeSafe processor. The managed
+    runtime provider, model route, memory provider, and Photon scope remain the
+    exact v10 contract, so a v10/v11 transition must not rotate runtime
+    authority or reprovision an existing binding.
+    """
+    consent_contract = consent_policy_contract(
+        policy_version,
+        processor_set_hash,
+        scope_version,
+        scope_hash,
+    )
+    v10 = SUPPORTED_CONSENT_POLICY_CONTRACTS[LEGACY_POLICY_VERSION_V10]
+    v11 = SUPPORTED_CONSENT_POLICY_CONTRACTS[CURRENT_POLICY_VERSION]
+    if consent_contract not in {v10, v11}:
+        return ()
+    if not (
+        v10.scope_version == v11.scope_version
+        and hmac.compare_digest(v10.scope_hash, v11.scope_hash)
+        and set(v11.processor_ids) - set(v10.processor_ids) == {TYPESAFE_PROCESSOR_ID}
+        and set(v10.processor_ids).issubset(v11.processor_ids)
+        and all(
+            value in CANONICAL_SCOPE
+            for value in (
+                f"runtime_provider={MANAGED_CLOUD_RUNTIME_PROVIDER}",
+                f"model_route={MANAGED_CLOUD_MODEL_ROUTE}",
+                f"memory_provider={MANAGED_CLOUD_MEMORY_PROVIDER}",
+                f"photon_scope={MANAGED_CLOUD_PHOTON_SCOPE}",
+            )
+        )
+    ):
+        return ()
+    other = v11 if consent_contract == v10 else v10
+    return consent_contract, other
+
+
+def managed_runtime_policy_contract(
+    policy_version: Any,
+    processor_set_hash: Any,
+    scope_version: Any,
+    scope_hash: Any,
+) -> Optional[ConsentPolicyContract]:
+    """Return the canonical lineage used for newly-created runtime targets."""
+    contracts = managed_runtime_policy_contracts(
+        policy_version,
+        processor_set_hash,
+        scope_version,
+        scope_hash,
+    )
+    if not contracts:
+        return None
+    return SUPPORTED_CONSENT_POLICY_CONTRACTS[LEGACY_POLICY_VERSION_V10]
+
+
 def is_exact_v11_upgrade_decline(submission: "ConsentSubmission") -> bool:
     return bool(
         submission.decision == "declined"

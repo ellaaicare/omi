@@ -566,10 +566,14 @@ async def _stage_attested_local_binding(
     return await repository.stage_runtime_binding(uid=uid, binding=binding)
 
 
-def test_self_hosted_redemption_binds_verified_email_identity_and_target_atomically():
+def test_self_hosted_redemption_binds_verified_email_identity_and_target_atomically(monkeypatch):
     async def scenario(pool: asyncpg.Pool) -> None:
         uid = "firebase-self-hosted-one"
         email = "pilot.one@example.test"
+        consent_repository = ai_consent.InMemoryConsentRepository()
+        consent_service = ai_consent.AiConsentService(consent_repository)
+        monkeypatch.setattr(ai_consent, "_repository", consent_repository)
+        monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", uid)
         issued = await pilot_invite_admin._issue_invitation(
             code="WXYZ-2345",
             code_file_existed=False,
@@ -636,20 +640,23 @@ def test_self_hosted_redemption_binds_verified_email_identity_and_target_atomica
         assert all(item["target_entitlement_revision"] == item["entitlement_revision"] == 1 for item in rows)
         assert row["consumed_slots"] == 1
 
-        grant = managed_cloud_consent.ManagedCloudGrant(
-            account_uid=uid,
-            profile_uid=uid,
-            consent_receipt_id="receipt-self-hosted-one",
-            profile_binding_id=ai_consent.derive_profile_binding_id(
-                account_uid=uid,
-                profile_uid=uid,
+        submitted = await consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            verified_email=email,
+            submission=ai_consent.ConsentSubmission(
+                decision="granted",
+                policy_version=ai_consent.CURRENT_POLICY_VERSION,
+                processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+                request_id="request-self-hosted-v11-invitation",
+                app_version="synthetic",
+                build_number="1",
+                locale="en",
             ),
-            policy_version=ai_consent.CURRENT_POLICY_VERSION,
-            processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
-            scope_version=ai_consent.CURRENT_SCOPE_VERSION,
-            scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+            service=consent_service,
         )
-        await managed_cloud_consent.synchronize_grant(grant=grant)
+        grant = managed_cloud_consent.ManagedCloudGrant.from_mapping(uid, submitted["receipt"])
         repository = EllaProvisioningRepository(pool)
         admission = await repository.get_self_hosted_invitation_admission(uid)
         assert admission is not None
@@ -684,6 +691,65 @@ def test_self_hosted_redemption_binds_verified_email_identity_and_target_atomica
         assert {target["mode"] for target in ready_targets} == {"hermes-chat", "hermes-voice"}
         assert all(target["status"] == "ready" for target in ready_targets)
         assert all(target["runtime_binding_id"] == staged["id"] for target in ready_targets)
+
+        compatible_contracts = (
+            (
+                ai_consent.CURRENT_POLICY_VERSION,
+                ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                ai_consent.CURRENT_SCOPE_VERSION,
+                ai_consent.CURRENT_SCOPE_HASH,
+            ),
+            (
+                ai_consent.LEGACY_POLICY_VERSION_V10,
+                ai_consent.LEGACY_V10_PROCESSOR_SET_HASH,
+                ai_consent.CURRENT_SCOPE_VERSION,
+                ai_consent.CURRENT_SCOPE_HASH,
+            ),
+        )
+        v10_authority = await managed_cloud_consent.synchronize_grant(
+            grant=managed_cloud_consent.ManagedCloudGrant(
+                account_uid=uid,
+                profile_uid=uid,
+                consent_receipt_id="receipt-self-hosted-v10-compatible",
+                profile_binding_id=grant.profile_binding_id,
+                policy_version=ai_consent.LEGACY_POLICY_VERSION_V10,
+                processor_set_hash=ai_consent.LEGACY_V10_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+            ),
+            compatible_runtime_contracts=compatible_contracts,
+        )
+        assert v10_authority["authority_epoch"] == admission["current_authority_epoch"]
+        assert await repository.get_self_hosted_invitation_admission(uid) is not None
+        resolved = await repository.resolve_active_runtime(
+            uid,
+            target_mode="hermes-chat",
+            required_provider="hermes",
+            authority_lineage=RuntimeTargetLineage(
+                policy_version=ai_consent.CURRENT_POLICY_VERSION,
+                processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+            ),
+            model=SELF_HOSTED_RUNTIME_MODEL,
+        )
+        assert resolved is not None
+        assert resolved["id"] == staged["id"]
+
+        v11_authority = await managed_cloud_consent.synchronize_grant(
+            grant=managed_cloud_consent.ManagedCloudGrant(
+                account_uid=uid,
+                profile_uid=uid,
+                consent_receipt_id="receipt-self-hosted-v11-compatible",
+                profile_binding_id=grant.profile_binding_id,
+                policy_version=ai_consent.CURRENT_POLICY_VERSION,
+                processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+            ),
+            compatible_runtime_contracts=compatible_contracts,
+        )
+        assert v11_authority["authority_epoch"] == admission["current_authority_epoch"]
 
         after_consent_retry = await _redeem_self_hosted(uid, email, "WXYZ-2345")
         assert after_consent_retry["revision"] == 3
@@ -3898,6 +3964,23 @@ def test_default_gate_requires_v8_exact_allowlists_and_synthetic_profile(
             pool,
             code="ABCD-6789",
             target_uids=[allowed],
+        )
+        await _ensure_users_for_test(pool, [allowed], profile_class="synthetic")
+        monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", allowed)
+        await consent_authority.submit_with_managed_cloud_authority(
+            uid=allowed,
+            submission=ai_consent.ConsentSubmission(
+                decision="granted",
+                policy_version=ai_consent.CURRENT_POLICY_VERSION,
+                processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+                request_id="request-synthetic-consented-sql-authority",
+                app_version="synthetic",
+                build_number="1",
+                locale="en",
+            ),
+            service=ai_consent.AiConsentService(repository),
         )
         result = await _redeem(allowed, "ABCD-6789", use_real_gate=True)
         assert result["status"] == "invited"

@@ -656,10 +656,6 @@ class EllaProvisioningRepository:
               AND voice_target.processor_set_hash = target.processor_set_hash
               AND voice_target.scope_version = target.scope_version
               AND voice_target.scope_hash = target.scope_hash
-              AND authority.policy_version = entitlement.consent_policy_version
-              AND authority.processor_set_hash = entitlement.consent_processor_set_hash
-              AND authority.scope_version = entitlement.consent_scope_version
-              AND authority.scope_hash = entitlement.consent_scope_hash
               AND invitation.required_consent_policy_version = entitlement.consent_policy_version
               AND invitation.required_consent_processor_set_hash = entitlement.consent_processor_set_hash
               AND invitation.required_consent_scope_version = entitlement.consent_scope_version
@@ -4128,10 +4124,6 @@ class EllaProvisioningRepository:
                           AND consent.decision = 'granted'
                           AND consent.consent_receipt_ref IS NOT NULL
                           AND consent.profile_binding_id IS NOT NULL
-                          AND consent.policy_version = target.policy_version
-                          AND consent.processor_set_hash = target.processor_set_hash
-                          AND consent.scope_version = target.scope_version
-                          AND consent.scope_hash = target.scope_hash
                         FOR UPDATE OF target, voice_target, invitation_target, redemption,
                             invitation, entitlement, consent
                         """,
@@ -4604,10 +4596,6 @@ class EllaProvisioningRepository:
                           AND authority.decision = 'granted'
                           AND authority.consent_receipt_ref IS NOT NULL
                           AND authority.profile_binding_id IS NOT NULL
-                          AND authority.policy_version = target.policy_version
-                          AND authority.processor_set_hash = target.processor_set_hash
-                          AND authority.scope_version = target.scope_version
-                          AND authority.scope_hash = target.scope_hash
                           AND invitation.required_consent_policy_version = target.policy_version
                           AND invitation.required_consent_processor_set_hash = target.processor_set_hash
                           AND invitation.required_consent_scope_version = target.scope_version

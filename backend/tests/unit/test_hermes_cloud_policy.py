@@ -8,6 +8,7 @@ from ella.services import ai_consent
 from ella.services.hermes_cloud_policy import (
     ApprovedRuntimeManifestStore,
     assert_cloud_identity_gate,
+    current_cloud_authority,
 )
 from ella.services.provisioning import ProvisioningError
 
@@ -130,6 +131,21 @@ def test_managed_cloud_gate_requires_exact_policy_and_current_receipt(monkeypatc
     )
     monkeypatch.setattr(ai_consent, "_repository", repository)
     assert_cloud_identity_gate("user-a", **_managed_route())
+    authority = current_cloud_authority(
+        "user-a",
+        profile_class="real",
+        **_managed_route(),
+    )
+    assert authority.lineage.policy_version == ai_consent.CURRENT_POLICY_VERSION
+    assert authority.lineage.processor_set_hash == ai_consent.CURRENT_PROCESSOR_SET_HASH
+    assert authority.runtime_target_lineage.policy_version == ai_consent.LEGACY_POLICY_VERSION_V10
+    assert authority.runtime_target_lineage.processor_set_hash == ai_consent.LEGACY_V10_PROCESSOR_SET_HASH
+    assert authority.runtime_target_lineage.scope_version == authority.lineage.scope_version
+    assert authority.runtime_target_lineage.scope_hash == authority.lineage.scope_hash
+    assert authority.runtime_target_lineages == (
+        authority.lineage,
+        authority.runtime_target_lineage,
+    )
 
     monkeypatch.setenv("ELLA_HERMES_CLOUD_CONSENT_POLICY_VERSION", "stale-policy")
     with pytest.raises(ProvisioningError) as error:
