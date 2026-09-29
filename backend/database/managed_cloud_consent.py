@@ -17,6 +17,7 @@ from database.ella_provisioning import invalidate_self_hosted_authority_on_conne
 from database.runtime_targets import SELF_HOSTED_RUNTIME_TARGET_MODES
 
 AuthorityDecision = Literal["granted", "declined", "revoked"]
+ConsentContract = tuple[str, str, str, str]
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,31 @@ def _grant_matches(row: asyncpg.Record, grant: ManagedCloudGrant) -> bool:
             str(row["consent_receipt_ref"] or ""),
             consent_receipt_ref(grant.account_uid, grant.consent_receipt_id),
         )
+    )
+
+
+def _grant_matches_allowed_successor(
+    row: asyncpg.Record,
+    grant: ManagedCloudGrant,
+    allowed_successor_contracts: tuple[ConsentContract, ...],
+) -> bool:
+    if row["decision"] != "granted" or not hmac.compare_digest(
+        str(row["profile_binding_id"] or ""),
+        grant.profile_binding_id,
+    ):
+        return False
+    row_contract = tuple(
+        str(row[field] or "")
+        for field in (
+            "policy_version",
+            "processor_set_hash",
+            "scope_version",
+            "scope_hash",
+        )
+    )
+    return any(
+        all(hmac.compare_digest(actual, expected) for actual, expected in zip(row_contract, contract))
+        for contract in allowed_successor_contracts
     )
 
 
@@ -418,8 +444,9 @@ async def run_with_exact_grant_current(
     *,
     grant: ManagedCloudGrant,
     action: Callable[[], Awaitable[None]],
+    allowed_successor_contracts: tuple[ConsentContract, ...] = (),
 ) -> bool:
-    """Run an external receipt write while the exact PostgreSQL grant is locked."""
+    """Run a receipt write while the expected or allowed successor grant is locked."""
     grant.validate()
     try:
         pool = await voice_canary.get_pool()
@@ -452,7 +479,14 @@ async def run_with_exact_grant_current(
                     """,
                     user_id,
                 )
-                if row is None or not _grant_matches(row, grant):
+                if row is None or not (
+                    _grant_matches(row, grant)
+                    or _grant_matches_allowed_successor(
+                        row,
+                        grant,
+                        allowed_successor_contracts,
+                    )
+                ):
                     return False
                 try:
                     await action()

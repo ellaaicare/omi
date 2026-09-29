@@ -1949,9 +1949,13 @@ def test_v11_upgrade_decline_preserves_exact_v10_authority(monkeypatch):
     denials = []
     erasures = []
 
-    async def with_exact_grant(*, grant, action):
+    async def with_exact_grant(*, grant, action, allowed_successor_contracts):
         assert grant.consent_receipt_id == v10["receipt"]["receipt_id"]
         assert grant.policy_version == consent.LEGACY_POLICY_VERSION_V10
+        assert {contract[0] for contract in allowed_successor_contracts} == {
+            consent.LEGACY_POLICY_VERSION_V10,
+            consent.CURRENT_POLICY_VERSION,
+        }
         await action()
         return True
 

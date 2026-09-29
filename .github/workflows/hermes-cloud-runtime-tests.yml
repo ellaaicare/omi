@@ -1319,6 +1319,9 @@ jobs:
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_v11_upgrade_decline_then_v11_grant_authorizes_typesafe" \
             <<<"$authority_lock_ids"
           grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_concurrent_v11_grant_supersedes_classified_upgrade_decline_without_denial" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_v11_denial_uses_null_guardian_mode_under_production_constraint" \
             <<<"$authority_lock_ids"
           grep -Fqx \
@@ -1345,7 +1348,7 @@ jobs:
           grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_delete_re_resolves_email_owner_created_while_waiting_on_uid_lock" \
             <<<"$authority_lock_ids"
-          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 92
+          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 93
           pytest \
             tests/unit/test_authority_advisory_lock.py \
             tests/unit/test_authority_writer_guard.py \

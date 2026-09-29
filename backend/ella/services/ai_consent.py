@@ -652,16 +652,32 @@ def _record_firestore_policy_upgrade_decline(
             raise ConsentAuthorityUnavailable("ai_consent_authority_unavailable")
         return existing, current_state, current_receipt, False
 
-    if (
-        receipt.get("decision") != "declined"
-        or receipt.get("policy_version") != CURRENT_POLICY_VERSION
-        or current_receipt_id != expected_current_receipt_id
-        or not _is_exact_policy_grant(
+    current_is_expected_v10 = bool(
+        current_receipt_id == expected_current_receipt_id
+        and _is_exact_policy_grant(
             str(receipt.get("subject_uid") or ""),
             current_state,
             current_receipt,
             LEGACY_POLICY_VERSION_V10,
         )
+    )
+    current_is_supported_successor = bool(
+        expected_current_receipt_id
+        and current_receipt_id != expected_current_receipt_id
+        and any(
+            _is_exact_policy_grant(
+                str(receipt.get("subject_uid") or ""),
+                current_state,
+                current_receipt,
+                policy_version,
+            )
+            for policy_version in SUPPORTED_CONSENT_POLICY_CONTRACTS
+        )
+    )
+    if (
+        receipt.get("decision") != "declined"
+        or receipt.get("policy_version") != CURRENT_POLICY_VERSION
+        or not (current_is_expected_v10 or current_is_supported_successor)
     ):
         raise ConsentAuthorityUnavailable("ai_consent_upgrade_authority_changed")
 
@@ -947,16 +963,32 @@ class InMemoryConsentRepository:
                 if not current_receipt:
                     raise ConsentAuthorityUnavailable("ai_consent_authority_unavailable")
                 return dict(existing), current_state, current_receipt, False
-            if (
-                receipt.get("decision") != "declined"
-                or receipt.get("policy_version") != CURRENT_POLICY_VERSION
-                or current_receipt_id != expected_current_receipt_id
-                or not _is_exact_policy_grant(
+            current_is_expected_v10 = bool(
+                current_receipt_id == expected_current_receipt_id
+                and _is_exact_policy_grant(
                     uid,
                     current_state,
                     current_receipt,
                     LEGACY_POLICY_VERSION_V10,
                 )
+            )
+            current_is_supported_successor = bool(
+                expected_current_receipt_id
+                and current_receipt_id != expected_current_receipt_id
+                and any(
+                    _is_exact_policy_grant(
+                        uid,
+                        current_state,
+                        current_receipt,
+                        policy_version,
+                    )
+                    for policy_version in SUPPORTED_CONSENT_POLICY_CONTRACTS
+                )
+            )
+            if (
+                receipt.get("decision") != "declined"
+                or receipt.get("policy_version") != CURRENT_POLICY_VERSION
+                or not (current_is_expected_v10 or current_is_supported_successor)
             ):
                 raise ConsentAuthorityUnavailable("ai_consent_upgrade_authority_changed")
 

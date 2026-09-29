@@ -129,9 +129,18 @@ async def _record_v11_upgrade_decline_if_current_v10(
         preserved = await managed_cloud_consent.run_with_exact_grant_current(
             grant=grant,
             action=record_decline,
+            allowed_successor_contracts=tuple(
+                (
+                    contract.version,
+                    contract.processor_set_hash,
+                    contract.scope_version,
+                    contract.scope_hash,
+                )
+                for contract in SUPPORTED_CONSENT_POLICY_CONTRACTS.values()
+            ),
         )
         if not preserved:
-            return None
+            raise ConsentAuthorityUnavailable("ai_consent_upgrade_authority_changed")
     else:
         await record_decline()
     if payload is None:
