@@ -370,11 +370,23 @@ final class OmiBleManager: NSObject {
         pairingLostBlocked.remove(uuid)
 
         if let peripheral = peripherals[uuid] {
-            if peripheral.state == .connected {
-                NSLog("[OmiBle] connectPeripheral: \(uuid) already connected, skipping")
-                return
+            switch OmiBleReconnectPolicy.decision(for: peripheral.state) {
+            case .discoverServicesDirectly:
+                // ellaaicare/ella-ai#1287 RUN-020: a peripheral surfaced via
+                // retrieveConnectedAndKnownPeripherals (or restored via willRestoreState)
+                // can already be connected at the CoreBluetooth/system level, but this
+                // process's own GATT session — service/characteristic discovery, then
+                // audio-notify subscription — is separate and was never established.
+                // centralManager.connect() on an already-connected peripheral is a no-op
+                // that never invokes didConnect, so simply returning here (the previous
+                // behavior) left the app "connected" system-wide but never actually
+                // discovering services: Dart's device-ready wait then just timed out.
+                // Drive the same ready flow didConnect would have driven instead.
+                NSLog("[OmiBle] connectPeripheral: \(uuid) already connected at CB level, discovering services directly")
+                beginServiceDiscovery(for: peripheral)
+            case .connect:
+                centralManager.connect(peripheral, options: nil)
             }
-            centralManager.connect(peripheral, options: nil)
             return
         }
 
@@ -386,6 +398,28 @@ final class OmiBleManager: NSObject {
             peripherals[uuid] = peripheral
             centralManager.connect(peripheral, options: nil)
         }
+    }
+
+    /// Bookkeeping + service discovery kickoff shared by `didConnect` (CoreBluetooth just
+    /// established the link) and `connectPeripheral`'s already-connected branch (the link
+    /// was already up, e.g. from `retrieveConnectedAndKnownPeripherals`, so `didConnect`
+    /// will never fire for it).
+    private func beginServiceDiscovery(for peripheral: CBPeripheral) {
+        let uuid = peripheralUuidString(peripheral)
+
+        // Track reconnections (not first connect)
+        if everConnected.contains(uuid) {
+            incrementReconnectionCount(uuid: uuid)
+            // Backfill the prior unexpected event with how long it took to recover.
+            backfillTimeToReconnect(uuid: uuid)
+        }
+        everConnected.insert(uuid)
+        readyNotified.remove(uuid)
+        pairingRecoveryInFlight.remove(uuid)
+        connectionStartTimes[uuid] = Int64(Date().timeIntervalSince1970 * 1000)
+
+        peripheral.delegate = self
+        peripheral.discoverServices(nil)
     }
 
     func disconnectPeripheral(uuid: String) {
@@ -997,20 +1031,7 @@ extension OmiBleManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         let uuid = peripheralUuidString(peripheral)
         NSLog("[OmiBle] didConnect: \(peripheral.name ?? "<nil>"), uuid=\(uuid)")
-
-        // Track reconnections (not first connect)
-        if everConnected.contains(uuid) {
-            incrementReconnectionCount(uuid: uuid)
-            // Backfill the prior unexpected event with how long it took to recover.
-            backfillTimeToReconnect(uuid: uuid)
-        }
-        everConnected.insert(uuid)
-        readyNotified.remove(uuid)
-        pairingRecoveryInFlight.remove(uuid)
-        connectionStartTimes[uuid] = Int64(Date().timeIntervalSince1970 * 1000)
-
-        peripheral.delegate = self
-        peripheral.discoverServices(nil)
+        beginServiceDiscovery(for: peripheral)
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {

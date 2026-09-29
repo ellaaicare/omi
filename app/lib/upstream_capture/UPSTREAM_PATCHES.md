@@ -487,6 +487,127 @@ Pigeon method, a new field on an existing struct, three new counters, one new pu
 with no fork-specific dependencies in the touched upstream-owned files; recorded as a local patch
 only, as with patches **One** through **Four**.
 
+### Six: necklace admitted via retrievedKnown never actually connects (RUN-020) — plus an unwanted location prompt and a dishonest dock
+
+**Symptom** (ellaaicare/ella-ai#1287 RUN-020, build 881, flag ON): patch Five's discovery-admission
+fix works — a necklace already connected/known at the CoreBluetooth level is now admitted
+(`source=retrievedKnown`, `retrievedKnownCount=1`, `admitted=1`, confirmed on build 881). But after
+admission the dock shows "Recording with your necklace" while necklace audio is 0 B/s and Settings →
+Connected Device shows "Not connected." Two further problems were reproduced on the same build: an
+"Allow While Using App" **location** prompt during connect, and the flag-ON dock missing controls
+(Transcript, Whispers) the flag-OFF Home dock has, with **Finish conversation** stuck greyed out.
+
+**Root cause (the connect bug)**: `OmiBleManager.connectPeripheral(uuid:)` already tracks the
+peripheral once it has been surfaced through `retrieveConnectedAndKnownPeripherals` (patch Five sets
+`peripherals[info.uuid] = peripheral` for every retrieved candidate). When Dart's
+`NativeBleTransport.connect()` calls `manageDevice` → `connectPeripheral` for that uuid, the
+peripheral can already report `CBPeripheralState.connected` at the CoreBluetooth/system level (a
+prior app lifetime connected it, or the OS itself still holds the link). The pre-patch code took a
+shortcut for that case:
+
+```swift
+if peripheral.state == .connected {
+    NSLog("[OmiBle] connectPeripheral: \(uuid) already connected, skipping")
+    return
+}
+```
+
+This never called `centralManager.connect(peripheral, options: nil)` — correctly, since CoreBluetooth
+treats that as a no-op on an already-connected peripheral and will not invoke `didConnect` — but it
+also never called `peripheral.discoverServices(nil)` directly, unlike the equivalent
+already-connected branch in `willRestoreState`. So this process's own GATT session (service +
+characteristic discovery, then the audio-notify subscribe `NativeBleTransport` performs once services
+are known) was never established. Dart's `_deviceReadyCompleter` in `NativeBleTransport.connect()`
+then never completes, `RecordingState` never reliably reaches a genuinely connected state, and the
+dock's `starting`/Finish-button logic (driven by that same pending state) stays stuck.
+
+**Fix**: `connectPeripheral` now drives the same ready flow `didConnect` drives — service discovery,
+plus the same reconnection-count/timestamp bookkeeping `didConnect` already did — instead of a bare
+`return`, whenever the peripheral is already connected at the CoreBluetooth level. The decision itself
+(`connect` vs. `discoverServicesDirectly`) is extracted into a new pure-logic file,
+`OmiBleReconnectPolicy.swift` (fork-owned, no upstream counterpart, same as `OmiBleRetrievalTagging.swift`),
+so it is covered by a `swiftc`-executable test without a live `CBPeripheral`.
+
+**Root cause (the location prompt)**: `capture_coordinator.dart`'s pendant-session-start transition
+had one call site, `_reduceDeviceStart`, that built `StartDeviceSessionStage` with
+`promptLocation: device != null` — i.e. every necklace session start requested
+`Geolocator.requestPermission()` (routed through `capture_controller.dart`'s
+`_startDeviceSessionBody` → `_captureSessionLocation(promptIfDenied: true)` →
+`ConversationLocationCapture`). Every other `StartDeviceSessionStage` construction in this same file
+already passes `promptLocation: false` — this was the one outlier. Location is not part of Ella's
+consent model and is not needed for BLE.
+
+Grepped `CLLocationManager`, `Permission.location`, `Geolocator.requestPermission`, and
+`Geolocator.getCurrentPosition` across `app/lib/upstream_capture/` and `app/lib/ella/upstream_capture/`:
+the only other location-permission-adjacent reference is `bluetooth_readiness.dart`'s Android-only
+`Permission.locationWhenInUse.isGranted` **check** (not a request) gating pre-Android-12 BLE scan
+readiness — unrelated to iOS necklace connect, and a check rather than a prompt. No other call site
+requests location during a plain necklace connect.
+
+**Fix**: `promptLocation: device != null` → `promptLocation: false` at that one call site.
+
+**Root cause (the dock)**: `EllaUpstreamCaptureDock` (fork-owned) only had phone/necklace record
+buttons and Finish — no live Transcript view or Whispers on/off controls, unlike
+`today_page.dart`'s flag-OFF Home dock. Finish's `onPressed: starting ? null : ...` stayed disabled
+because `starting` (`_busy || state == RecordingState.initialising`) never cleared while the connect
+bug above left `connectNecklace()`'s `ensureConnection` call pending.
+
+**Fix**: added a Transcript toggle (reads `CaptureProvider.segments`, the same field
+`capture_controller.dart` already populates — no transcript logic reimplemented) and a Whispers
+on/off row that reuses `today_page.dart`'s own `whisperStatusLead`/`whisperStatusDetail` status-text
+functions and the same `GuardianModeLoader`/`GuardianModeSetter`/`GuardianNativeLifecycle`/
+`GuardianAvailability` testing seams `today_page.dart` already defines (imported, not duplicated),
+calling the same underlying `guardian_mode_api`/`guardian_mode_service` APIs `today_page.dart`'s
+`_setWhispers` calls. Finish's greyed-out state needed no separate code change: fixing the connect bug
+above means `connectNecklace()` resolves promptly instead of hanging, so `starting` clears correctly;
+this is verified directly by a widget test that drives a scripted `connectNecklace` to genuinely-live
+state and asserts Finish becomes tappable.
+
+| File | Manifest kind | Pin blob (unchanged upstream) | Approved local blob |
+| --- | --- | --- | --- |
+| `app/ios/Runner/Ble/OmiBleManager.swift` | `patched` | `889d135a5a3fe1cbfccbb5baf88d980003df5c77` | `c08b59564c9338c54439696d7e95ad27c16e1eeb` |
+| `app/lib/upstream_capture/services/capture/capture_coordinator.dart` | `patched` (was `dart-relocated`) | `17c33870dd18366a03cd599bcec9befb512f0b39` | `c86b5ab4c2fbd5b23635b755cd46de32e0ed33ae` |
+
+(Every other patched file's row from patches One through Five is unchanged by this patch; their
+current approved blobs are recorded in those tables above. `OmiBleReconnectPolicy.swift` is a
+brand-new, Ella-only file with no upstream counterpart — like `OmiBleRetrievalTagging.swift`, it is
+not listed in `UPSTREAM_OWNED.txt`.)
+
+**Confirmed identical upstream (before this patch)**: `OmiBleManager.swift` carried patches Two,
+Three, and Five's local fixes only; `capture_coordinator.dart` was `dart-relocated` (byte-identical to
+the pin modulo the import relocation) — the `promptLocation: device != null` call site was upstream's
+own code, unchanged by this fork until now. Upstream has no `retrieveConnectedAndKnownPeripherals`
+equivalent at all (that capability is this fork's own addition from patch Five), so there is no
+upstream connect-flow bug to compare against for the first fix; the location-prompt call site is
+upstream's own `DeviceStartRequested` handling, prompting on every device connect — this fork already
+diverges from that default at every other call site in this file (the "recording is the tap; location
+is metadata" product decision predates this patch).
+
+**Upstream base SHA**: same pin, `f16699aea7fe9ba089baceb628922f2882c51153`. **No upstream PR** — both
+fixes are fork-specific (the first patches a fork-only code path added by patch Five; the second is
+Ella's own consent-model product decision, consistent with every other call site in this file),
+recorded as local patches only, same as patches One through Five.
+
+**Tests**: `app/ios/Tests/OmiBleReconnectPolicyTests.swift` (new, `swiftc`-executable, following the
+`OmiBleDiscoveryNamingTests.swift` / `OmiBleRetrievalTaggingTests.swift` pattern — no XCTest target
+exists for this native BLE code) covers `OmiBleReconnectPolicy.decision(for:)` for `.connected`,
+`.disconnected`, `.connecting`, and `.disconnecting` states, wired into
+`.github/workflows/ella-ios-source-ci.yml`.
+`app/test/ella/upstream_capture/upstream_capture_no_location_prompt_test.dart` (new) statically
+asserts every `StartDeviceSessionStage(...)` construction in `capture_coordinator.dart` passes a
+literal `promptLocation: false`.
+`app/test/ella/upstream_capture/ella_upstream_capture_dock_test.dart` gained two widget tests: one
+asserting Transcript and Whispers render once a necklace session is genuinely live (not just
+selected), the other asserting Finish stays disabled while a scripted `connectNecklace` is in flight
+and becomes enabled once it resolves.
+`upstream_capture_byte_identity_test.dart`'s hardcoded blob expectations were updated for the two
+re-patched files (seven patched entries total).
+
+**Upstreamability**: neither fix is upstreamable as a drop-in — the connect fix patches a fork-only
+code path (patch Five's retrieval sources have no upstream equivalent), and the location-prompt
+removal is Ella's own consent-model product decision, not a general bug fix; both are recorded as
+local patches only, as with patches One through Five.
+
 ## Fork-side changes that are NOT upstream patches
 
 These touch fork (non-upstream-owned) files so the vendored files can stay byte-identical:

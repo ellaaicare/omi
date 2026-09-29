@@ -2338,7 +2338,12 @@ CaptureTransition _reduceDeviceStart(
     sessionKey: key,
     telemetrySource: mode == CaptureTransport.batch ? 'pendant_batch' : 'pendant_live',
   ));
-  effects.add(RunStage(StartDeviceSessionStage(deviceRequested: true, promptLocation: device != null)));
+  // ellaaicare/ella-ai#1287 RUN-020: location is not part of Ella's consent model and
+  // is not needed for BLE — every other StartDeviceSessionStage call site in this file
+  // already passes promptLocation: false. This was the one path that prompted for
+  // location (for upstream's optional conversation-metadata geotagging) on every
+  // necklace session start.
+  effects.add(const RunStage(StartDeviceSessionStage(deviceRequested: true, promptLocation: false)));
 
   return CaptureTransition(
     state.copyWith(
