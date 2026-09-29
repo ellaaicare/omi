@@ -28,6 +28,7 @@ class EllaNativeDiscoveryDiagnostics {
     required this.queuedScansFired,
     required this.didDiscoverCount,
     required this.flutterApiNilDropCount,
+    this.nameArrivedLate = 0,
   });
 
   /// CoreBluetooth state observed at the most recent startScan call.
@@ -41,6 +42,11 @@ class EllaNativeDiscoveryDiagnostics {
 
   /// Count of didDiscover callbacks dropped because flutterApi was nil.
   final int flutterApiNilDropCount;
+
+  /// Count of re-discoveries forwarded because a later advertisement packet
+  /// added a name or service UUID the first sighting lacked
+  /// (ellaaicare/ella-ai#1280 RUN-016). See `OmiBleDiscoveryNaming.shouldForwardRediscovery`.
+  final int nameArrivedLate;
 }
 
 class EllaCaptureHost {
