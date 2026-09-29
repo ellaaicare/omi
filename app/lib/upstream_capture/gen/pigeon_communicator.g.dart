@@ -46,6 +46,7 @@ class BlePeripheral {
     required this.serviceUuids,
     this.hasAdvertisedLocalName = false,
     this.hasPeripheralName = false,
+    this.source = 'scan',
   });
 
   String uuid;
@@ -64,6 +65,14 @@ class BlePeripheral {
   /// Redacted discovery diagnostic; never paired with the name/UUID values themselves.
   bool hasPeripheralName;
 
+  /// How this candidate reached the capture layer: 'scan' (an active
+  /// `didDiscover` callback), 'retrievedConnected' (already connected
+  /// system-wide, found via `retrieveConnectedPeripherals(withServices:)`),
+  /// 'retrievedKnown' (a saved/paired device id, found via
+  /// `retrievePeripherals(withIdentifiers:)`), or 'restored' (delivered via
+  /// `centralManager(_:willRestoreState:)`). ellaaicare/ella-ai#1287 RUN-018.
+  String source;
+
   List<Object?> _toList() {
     return <Object?>[
       uuid,
@@ -72,6 +81,7 @@ class BlePeripheral {
       serviceUuids,
       hasAdvertisedLocalName,
       hasPeripheralName,
+      source,
     ];
   }
 
@@ -88,6 +98,7 @@ class BlePeripheral {
       serviceUuids: (result[3] as List<Object?>?)!.cast<String>(),
       hasAdvertisedLocalName: result.length > 4 ? (result[4] as bool?) ?? false : false,
       hasPeripheralName: result.length > 5 ? (result[5] as bool?) ?? false : false,
+      source: result.length > 6 ? (result[6] as String?) ?? 'scan' : 'scan',
     );
   }
 
@@ -387,6 +398,9 @@ class BleNativeDiscoveryDiagnostics {
     required this.didDiscoverCount,
     required this.flutterApiNilDropCount,
     this.nameArrivedLate = 0,
+    this.retrievedConnectedCount = 0,
+    this.retrievedKnownCount = 0,
+    this.restoredCount = 0,
   });
 
   /// CoreBluetooth state observed at the most recent startScan call.
@@ -408,6 +422,18 @@ class BleNativeDiscoveryDiagnostics {
   /// added a name or service UUID the first sighting lacked.
   int nameArrivedLate;
 
+  /// Count of peripherals surfaced via `retrieveConnectedPeripherals(withServices:)`.
+  /// ellaaicare/ella-ai#1287 RUN-018.
+  int retrievedConnectedCount;
+
+  /// Count of peripherals surfaced via `retrievePeripherals(withIdentifiers:)`
+  /// for a saved/paired device id. ellaaicare/ella-ai#1287 RUN-018.
+  int retrievedKnownCount;
+
+  /// Count of peripherals surfaced via `centralManager(_:willRestoreState:)`.
+  /// ellaaicare/ella-ai#1287 RUN-018.
+  int restoredCount;
+
   List<Object?> _toList() {
     return <Object?>[
       lastStartScanCbState,
@@ -417,6 +443,9 @@ class BleNativeDiscoveryDiagnostics {
       didDiscoverCount,
       flutterApiNilDropCount,
       nameArrivedLate,
+      retrievedConnectedCount,
+      retrievedKnownCount,
+      restoredCount,
     ];
   }
 
@@ -434,6 +463,9 @@ class BleNativeDiscoveryDiagnostics {
       didDiscoverCount: result[4]! as int,
       flutterApiNilDropCount: result[5]! as int,
       nameArrivedLate: result.length > 6 ? (result[6] as int?) ?? 0 : 0,
+      retrievedConnectedCount: result.length > 7 ? (result[7] as int?) ?? 0 : 0,
+      retrievedKnownCount: result.length > 8 ? (result[8] as int?) ?? 0 : 0,
+      restoredCount: result.length > 9 ? (result[9] as int?) ?? 0 : 0,
     );
   }
 
@@ -1694,6 +1726,37 @@ class BleHostApi {
       );
     } else {
       return (pigeonVar_replyList[0] as List<Object?>?)!.cast<BleBatteryPoint>();
+    }
+  }
+
+  /// ellaaicare/ella-ai#1287 RUN-018: surface peripherals that a fresh scan can never see
+  /// because they are already connected system-wide or already paired — source-tagged
+  /// `retrievedConnected` / `retrievedKnown` (see `BlePeripheral.source`).
+  Future<List<BlePeripheral>> retrieveConnectedAndKnownPeripherals(List<String> serviceUuids, List<String> knownDeviceIds) async {
+    final String pigeonVar_channelName =
+        'dev.flutter.pigeon.omi_pigeon.BleHostApi.retrieveConnectedAndKnownPeripherals$pigeonVar_messageChannelSuffix';
+    final BasicMessageChannel<Object?> pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[serviceUuids, knownDeviceIds]);
+    final List<Object?>? pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    if (pigeonVar_replyList == null) {
+      throw _createConnectionError(pigeonVar_channelName);
+    } else if (pigeonVar_replyList.length > 1) {
+      throw PlatformException(
+        code: pigeonVar_replyList[0]! as String,
+        message: pigeonVar_replyList[1] as String?,
+        details: pigeonVar_replyList[2],
+      );
+    } else if (pigeonVar_replyList[0] == null) {
+      throw PlatformException(
+        code: 'null-error',
+        message: 'Host platform returned null value for non-null return value.',
+      );
+    } else {
+      return (pigeonVar_replyList[0] as List<Object?>?)!.cast<BlePeripheral>();
     }
   }
 
