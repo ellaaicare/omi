@@ -301,7 +301,13 @@ async def _quarantine_on_connection(
         FROM ella_managed_cloud_consent_authority authority
         WHERE entitlement.uid = $1
           AND authority.user_id = $2
-          AND entitlement.status <> 'revoked'
+          AND (
+              entitlement.status <> 'revoked'
+              OR (
+                  $3 IS FALSE
+                  AND entitlement.managed_consent_recoverable IS TRUE
+              )
+          )
         """,
         uid,
         user_id,

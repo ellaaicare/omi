@@ -4009,6 +4009,13 @@ def test_delete_unlinks_users_row_and_consent_authority_freeing_uid():
             allow_fresh_uid_bootstrap=True,
             bootstrap_email="fresh-delete@example.invalid",
         )
+        repository = EllaProvisioningRepository(pool)
+        assert await repository.seed_voice_entitlement_if_absent(uid=uid) is True
+        denied = await managed_cloud_consent.synchronize_denial(
+            uid=uid,
+            decision="revoked",
+        )
+        assert denied["decision"] == "revoked"
 
         async with pool.acquire() as observer:
             assert (
@@ -4025,6 +4032,22 @@ def test_delete_unlinks_users_row_and_consent_authority_freeing_uid():
                 )
                 == 1
             )
+            assert (
+                dict(
+                    await observer.fetchrow(
+                        """
+                    SELECT status, managed_consent_recoverable
+                    FROM voice_entitlements
+                    WHERE uid = $1
+                    """,
+                        uid,
+                    )
+                )
+                == {
+                    "status": "revoked",
+                    "managed_consent_recoverable": True,
+                }
+            )
 
         # Unlink the account.
         await managed_cloud_consent.unlink_self_owner_account_on_deletion(uid=uid)
@@ -4036,6 +4059,22 @@ def test_delete_unlinks_users_row_and_consent_authority_freeing_uid():
                     uid,
                 )
                 == 0
+            )
+            assert (
+                dict(
+                    await observer.fetchrow(
+                        """
+                    SELECT status, managed_consent_recoverable
+                    FROM voice_entitlements
+                    WHERE uid = $1
+                    """,
+                        uid,
+                    )
+                )
+                == {
+                    "status": "revoked",
+                    "managed_consent_recoverable": False,
+                }
             )
             assert (
                 await observer.fetchval(
