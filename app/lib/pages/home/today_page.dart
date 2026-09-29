@@ -1337,7 +1337,10 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       _updatingWhispers = true;
       _whisperReconnecting = false;
     });
-    final state = enabled ? const GuardianModeState(features: ['ACTIVE_SUPPORT']) : const GuardianModeState();
+    // Launch default is MEMORY_SUPPORT, not ACTIVE_SUPPORT (product decision, G4).
+    // Critical-safety Whispers (falls, chest pain, etc.) are never gated by this
+    // client-selected mode — that policy is enforced server-side in every mode.
+    final state = enabled ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState();
     var success = false;
     if (!enabled) {
       try {

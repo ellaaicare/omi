@@ -11118,5 +11118,65 @@
   "noDiagnosticsYet": "No diagnostics recorded yet. Run a device scan to populate this.",
   "@noDiagnosticsYet": {
     "description": "Empty state shown on the Device Diagnostics screen before any scan has run"
+  },
+  "experimentalModes": "Experimental modes",
+  "@experimentalModes": {
+    "description": "Section header for the experimental modes (einstein, cyborg) portion of the Whispers & Experimental Modes settings page"
+  },
+  "experimentalModesDescription": "Preview modes that will require server activation and rate-limit support before they can be enabled.",
+  "@experimentalModesDescription": {
+    "description": "Description shown at the top of the Experimental modes settings page"
+  },
+  "experimentalModeEinsteinTitle": "Einstein",
+  "@experimentalModeEinsteinTitle": {
+    "description": "Title for the Einstein experimental mode toggle"
+  },
+  "experimentalModeEinsteinDescription": "Listens in, then answers, enhances, or fact-checks what it hears on the fly.",
+  "@experimentalModeEinsteinDescription": {
+    "description": "Description for the Einstein experimental mode toggle"
+  },
+  "experimentalModeCyborgTitle": "Cyborg",
+  "@experimentalModeCyborgTitle": {
+    "description": "Title for the Cyborg experimental mode toggle"
+  },
+  "experimentalModeCyborgDescription": "Reacts to everything it hears.",
+  "@experimentalModeCyborgDescription": {
+    "description": "Description for the Cyborg experimental mode toggle"
+  },
+  "whispersAndExperimentalModesTitle": "Whispers & Experimental Modes",
+  "@whispersAndExperimentalModesTitle": {
+    "description": "Settings drawer item and page title for the combined Whispers mode and Experimental modes settings screen"
+  },
+  "whispersModeSectionTitle": "Whispers mode",
+  "@whispersModeSectionTitle": {
+    "description": "Section header for the core Whispers mode picker on the Whispers & Experimental Modes settings page"
+  },
+  "whispersModeSectionDescription": "Choose how Whispers supports you. Critical-safety alerts, like falls or chest pain, are always delivered in every mode.",
+  "@whispersModeSectionDescription": {
+    "description": "Description shown under the Whispers mode section header"
+  },
+  "coreModeMemorySupportTitle": "Memory Support",
+  "@coreModeMemorySupportTitle": {
+    "description": "Title for the Memory Support core Whispers mode option (default)"
+  },
+  "coreModeMemorySupportDescription": "Proactive memory cues and gentle recall assistance for cognitive support.",
+  "@coreModeMemorySupportDescription": {
+    "description": "Description for the Memory Support core Whispers mode option"
+  },
+  "coreModeActiveSupportTitle": "Active Support",
+  "@coreModeActiveSupportTitle": {
+    "description": "Title for the Active Support core Whispers mode option"
+  },
+  "coreModeActiveSupportDescription": "Emergency alerts, recall assistance, schedule reminders, and pattern monitoring.",
+  "@coreModeActiveSupportDescription": {
+    "description": "Description for the Active Support core Whispers mode option"
+  },
+  "coreModeEmergencyOnlyTitle": "Emergency Only",
+  "@coreModeEmergencyOnlyTitle": {
+    "description": "Title for the Emergency Only core Whispers mode option"
+  },
+  "coreModeEmergencyOnlyDescription": "Critical alerts only - fall detection, medical emergencies, and similar emergencies.",
+  "@coreModeEmergencyOnlyDescription": {
+    "description": "Description for the Emergency Only core Whispers mode option"
   }
 }

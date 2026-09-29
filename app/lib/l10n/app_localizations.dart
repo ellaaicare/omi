@@ -18734,6 +18734,96 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'No diagnostics recorded yet. Run a device scan to populate this.'**
   String get noDiagnosticsYet;
+
+  /// Section header for the experimental modes (einstein, cyborg) portion of the Whispers & Experimental Modes settings page
+  ///
+  /// In en, this message translates to:
+  /// **'Experimental modes'**
+  String get experimentalModes;
+
+  /// Description shown at the top of the Experimental modes settings page
+  ///
+  /// In en, this message translates to:
+  /// **'Preview modes that will require server activation and rate-limit support before they can be enabled.'**
+  String get experimentalModesDescription;
+
+  /// Title for the Einstein experimental mode toggle
+  ///
+  /// In en, this message translates to:
+  /// **'Einstein'**
+  String get experimentalModeEinsteinTitle;
+
+  /// Description for the Einstein experimental mode toggle
+  ///
+  /// In en, this message translates to:
+  /// **'Listens in, then answers, enhances, or fact-checks what it hears on the fly.'**
+  String get experimentalModeEinsteinDescription;
+
+  /// Title for the Cyborg experimental mode toggle
+  ///
+  /// In en, this message translates to:
+  /// **'Cyborg'**
+  String get experimentalModeCyborgTitle;
+
+  /// Description for the Cyborg experimental mode toggle
+  ///
+  /// In en, this message translates to:
+  /// **'Reacts to everything it hears.'**
+  String get experimentalModeCyborgDescription;
+
+  /// Settings drawer item and page title for the combined Whispers mode and Experimental modes settings screen
+  ///
+  /// In en, this message translates to:
+  /// **'Whispers & Experimental Modes'**
+  String get whispersAndExperimentalModesTitle;
+
+  /// Section header for the core Whispers mode picker on the Whispers & Experimental Modes settings page
+  ///
+  /// In en, this message translates to:
+  /// **'Whispers mode'**
+  String get whispersModeSectionTitle;
+
+  /// Description shown under the Whispers mode section header
+  ///
+  /// In en, this message translates to:
+  /// **'Choose how Whispers supports you. Critical-safety alerts, like falls or chest pain, are always delivered in every mode.'**
+  String get whispersModeSectionDescription;
+
+  /// Title for the Memory Support core Whispers mode option (default)
+  ///
+  /// In en, this message translates to:
+  /// **'Memory Support'**
+  String get coreModeMemorySupportTitle;
+
+  /// Description for the Memory Support core Whispers mode option
+  ///
+  /// In en, this message translates to:
+  /// **'Proactive memory cues and gentle recall assistance for cognitive support.'**
+  String get coreModeMemorySupportDescription;
+
+  /// Title for the Active Support core Whispers mode option
+  ///
+  /// In en, this message translates to:
+  /// **'Active Support'**
+  String get coreModeActiveSupportTitle;
+
+  /// Description for the Active Support core Whispers mode option
+  ///
+  /// In en, this message translates to:
+  /// **'Emergency alerts, recall assistance, schedule reminders, and pattern monitoring.'**
+  String get coreModeActiveSupportDescription;
+
+  /// Title for the Emergency Only core Whispers mode option
+  ///
+  /// In en, this message translates to:
+  /// **'Emergency Only'**
+  String get coreModeEmergencyOnlyTitle;
+
+  /// Description for the Emergency Only core Whispers mode option
+  ///
+  /// In en, this message translates to:
+  /// **'Critical alerts only - fall detection, medical emergencies, and similar emergencies.'**
+  String get coreModeEmergencyOnlyDescription;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

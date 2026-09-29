@@ -10136,4 +10136,55 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get noDiagnosticsYet => 'No diagnostics recorded yet. Run a device scan to populate this.';
+
+  @override
+  String get experimentalModes => 'Experimental modes';
+
+  @override
+  String get experimentalModesDescription =>
+      'Preview modes that will require server activation and rate-limit support before they can be enabled.';
+
+  @override
+  String get experimentalModeEinsteinTitle => 'Einstein';
+
+  @override
+  String get experimentalModeEinsteinDescription =>
+      'Listens in, then answers, enhances, or fact-checks what it hears on the fly.';
+
+  @override
+  String get experimentalModeCyborgTitle => 'Cyborg';
+
+  @override
+  String get experimentalModeCyborgDescription => 'Reacts to everything it hears.';
+
+  @override
+  String get whispersAndExperimentalModesTitle => 'Whispers & Experimental Modes';
+
+  @override
+  String get whispersModeSectionTitle => 'Whispers mode';
+
+  @override
+  String get whispersModeSectionDescription =>
+      'Choose how Whispers supports you. Critical-safety alerts, like falls or chest pain, are always delivered in every mode.';
+
+  @override
+  String get coreModeMemorySupportTitle => 'Memory Support';
+
+  @override
+  String get coreModeMemorySupportDescription =>
+      'Proactive memory cues and gentle recall assistance for cognitive support.';
+
+  @override
+  String get coreModeActiveSupportTitle => 'Active Support';
+
+  @override
+  String get coreModeActiveSupportDescription =>
+      'Emergency alerts, recall assistance, schedule reminders, and pattern monitoring.';
+
+  @override
+  String get coreModeEmergencyOnlyTitle => 'Emergency Only';
+
+  @override
+  String get coreModeEmergencyOnlyDescription =>
+      'Critical alerts only - fall detection, medical emergencies, and similar emergencies.';
 }
