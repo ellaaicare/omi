@@ -180,10 +180,12 @@ async def _seed_grant(pool, uid):
 
 def test_guardian_mode_get_returns_only_exact_case_sensitive_firebase_subject():
     async def scenario(pool):
-        await pool.execute("""
+        await pool.execute(
+            """
             INSERT INTO users (omi_uid, guardian_mode)
             VALUES ('CaseUID', 'EMERGENCY_ONLY'), ('caseuid', 'ACTIVE_SUPPORT')
-            """)
+            """
+        )
         previous_pool = guardian._pool
         guardian._pool = pool
         try:
@@ -200,7 +202,8 @@ def test_guardian_mode_get_returns_only_exact_case_sensitive_firebase_subject():
 
 def test_mounted_guardian_alert_history_isolates_case_distinct_firebase_subjects(monkeypatch):
     async def scenario(pool):
-        await pool.execute("""
+        await pool.execute(
+            """
             CREATE TABLE guardian_queue (
                 id TEXT PRIMARY KEY,
                 uid TEXT NOT NULL,
@@ -277,7 +280,8 @@ def test_mounted_guardian_alert_history_isolates_case_distinct_firebase_subjects
                     'owner-local-trace', 'caseuid', 'imessage', 'lower-private-target', 'sent',
                     'LOWER_DELIVERY_PRIVATE', '2026-08-03T12:00:20Z', '2026-08-03T12:00:20Z'
                 );
-            """)
+            """
+        )
 
         before = {
             table: [tuple(row.values()) for row in await pool.fetch(f"SELECT * FROM {table} ORDER BY id")]
@@ -625,19 +629,23 @@ def test_omi_revoke_lock_blocks_broker_and_releases_without_deadlock():
             str(owner.profile_id),
         )
         async with pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 CREATE FUNCTION hold_authority_revoke() RETURNS trigger AS $$
                 BEGIN
                     PERFORM pg_sleep(0.6);
                     RETURN NEW;
                 END
                 $$ LANGUAGE plpgsql
-                """)
-            await conn.execute("""
+                """
+            )
+            await conn.execute(
+                """
                 CREATE TRIGGER hold_authority_revoke
                 BEFORE UPDATE ON ella_managed_cloud_consent_authority
                 FOR EACH ROW EXECUTE FUNCTION hold_authority_revoke()
-                """)
+                """
+            )
 
         revoke = asyncio.create_task(
             managed_cloud_consent.synchronize_denial(
@@ -2025,7 +2033,8 @@ def test_v10_to_v11_grant_preserves_null_guardian_mode_under_production_constrai
             scope_hash=v10.scope_hash,
         )
         async with pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 ALTER TABLE users
                 ADD CONSTRAINT guardian_mode_check
                 CHECK (
@@ -2034,7 +2043,8 @@ def test_v10_to_v11_grant_preserves_null_guardian_mode_under_production_constrai
                         'CUSTOM', 'CYBORG', 'CHATBOT', 'MEMORY_SUPPORT', 'DEMO'
                     )
                 )
-                """)
+                """
+            )
             user_id = await conn.fetchval(
                 """
                 INSERT INTO users (omi_uid, email, status, guardian_mode, profile_class)
@@ -2089,7 +2099,8 @@ def test_v11_denial_uses_null_guardian_mode_under_production_constraint():
     async def scenario(pool):
         uid = "synthetic-consent-v11-denial"
         async with pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 ALTER TABLE users
                 ADD CONSTRAINT guardian_mode_check
                 CHECK (
@@ -2098,7 +2109,8 @@ def test_v11_denial_uses_null_guardian_mode_under_production_constraint():
                         'CUSTOM', 'CYBORG', 'CHATBOT', 'MEMORY_SUPPORT', 'DEMO'
                     )
                 )
-                """)
+                """
+            )
             user_id = await conn.fetchval(
                 """
                 INSERT INTO users (omi_uid, email, status, guardian_mode, profile_class)
