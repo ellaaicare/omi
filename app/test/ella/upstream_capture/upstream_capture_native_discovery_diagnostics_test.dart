@@ -68,6 +68,9 @@ void main() {
       didDiscoverCount: 5,
       flutterApiNilDropCount: 3,
       nameArrivedLate: 2,
+      retrievedConnectedCount: 1,
+      retrievedKnownCount: 1,
+      restoredCount: 1,
     );
     final fakeHost = _FakeBleHostApi(native);
     DebugLogManager.bleFlutterApiSetUpAtMs = DateTime.utc(2026, 1, 2, 3, 4, 5).millisecondsSinceEpoch;
@@ -89,6 +92,10 @@ void main() {
     expect(find.textContaining('didDiscoverCount=5'), findsOneWidget);
     expect(find.textContaining('flutterApiNilDropCount=3'), findsOneWidget);
     expect(find.textContaining('nameArrivedLate=2'), findsOneWidget);
+    // ellaaicare/ella-ai#1287 RUN-018: the three additional capture-layer sources.
+    expect(find.textContaining('retrievedConnectedCount=1'), findsOneWidget);
+    expect(find.textContaining('retrievedKnownCount=1'), findsOneWidget);
+    expect(find.textContaining('restoredCount=1'), findsOneWidget);
 
     // Bridge layer: when BleFlutterApi.setUp(BleBridge.instance) ran.
     expect(find.textContaining('2026-01-02T03:04:05'), findsOneWidget);
@@ -113,6 +120,9 @@ void main() {
     expect(copied, contains('cbStateAtLastStartScan=on'));
     expect(copied, contains('flutterApiNilDropCount=3'));
     expect(copied, contains('nameArrivedLate=2'));
+    expect(copied, contains('retrievedConnectedCount=1'));
+    expect(copied, contains('retrievedKnownCount=1'));
+    expect(copied, contains('restoredCount=1'));
     expect(copied, contains('2026-01-02T03:04:05'));
     expect(copied, contains('candidatesSeen=5'));
   });
