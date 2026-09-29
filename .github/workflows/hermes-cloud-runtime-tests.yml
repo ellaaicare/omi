@@ -1092,7 +1092,8 @@ jobs:
           # database/sync_segments.py directly, including the SYNC-V2-002
           # retry-after-commit/stale-lease regressions, rather than through this file's own
           # route-level fakes).
-          test "$collected" -eq 674
+          # + 1 (retained-owner transcript listen regression, omi#623).
+          test "$collected" -eq 675
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \

@@ -547,7 +547,10 @@ async def resolve_isolated_runtime(
                     raise ProvisioningError("self_hosted_invitation_authority_unavailable", retryable=True) from exc
                 if retained_compatible:
                     # A late legacy cluster marker must not hide an already-published exact-user binding.
-                    _self_hosted_target_mode(target_mode)
+                    # Retained owners resolve through the retained lane, which admits every mode; the
+                    # self-hosted lane guard (26028b7878) applies only to non-retained users.
+                    if not retained_required:
+                        _self_hosted_target_mode(target_mode)
                     try:
                         direct_binding = await repository.resolve_self_hosted_active_direct(uid=uid)
                     except Exception as exc:
