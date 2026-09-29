@@ -3,10 +3,25 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/services/ai_consent_coordinator.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
+import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
+import 'package:omi/ella/services/guardian_mode_service.dart' as guardian_native;
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
+// Reuses today_page's own Whispers status text and testing seams instead of
+// reimplementing them — see UPSTREAM_PATCHES.md patch Six.
+import 'package:omi/pages/home/today_page.dart'
+    show
+        whisperStatusLead,
+        whisperStatusDetail,
+        GuardianAvailability,
+        GuardianModeLoader,
+        GuardianModeSetter,
+        GuardianNativeLifecycle;
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart';
+import 'package:omi/upstream_capture/backend/schema/transcript_segment.dart';
 import 'package:omi/upstream_capture/providers/capture_provider.dart';
 import 'package:omi/upstream_capture/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
@@ -15,11 +30,27 @@ import 'package:omi/utils/l10n_extensions.dart';
 /// Every button is one call into [EllaUpstreamCaptureRuntime], which forwards
 /// to upstream's public capture/device API after the consent bind.
 class EllaUpstreamCaptureDock extends StatefulWidget {
-  const EllaUpstreamCaptureDock({super.key, EllaUpstreamCaptureRuntime? runtime, this.authenticatedUid})
-      : _runtime = runtime;
+  const EllaUpstreamCaptureDock({
+    super.key,
+    EllaUpstreamCaptureRuntime? runtime,
+    this.authenticatedUid,
+    this.guardianAvailability,
+    this.guardianModeLoader,
+    this.guardianModeSetter,
+    this.guardianNativeStart,
+    this.guardianNativeStop,
+  }) : _runtime = runtime;
 
   final EllaUpstreamCaptureRuntime? _runtime;
   final String Function()? authenticatedUid;
+
+  // Same injectable seams `today_page.dart`'s dock uses for Whispers, reused
+  // here rather than reimplemented — see UPSTREAM_PATCHES.md patch Six.
+  final GuardianAvailability? guardianAvailability;
+  final GuardianModeLoader? guardianModeLoader;
+  final GuardianModeSetter? guardianModeSetter;
+  final GuardianNativeLifecycle? guardianNativeStart;
+  final GuardianNativeLifecycle? guardianNativeStop;
 
   @override
   State<EllaUpstreamCaptureDock> createState() => _EllaUpstreamCaptureDockState();
@@ -30,6 +61,10 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   CaptureProvider? _provider;
   bool _busy = false;
   String? _message;
+  bool _showTranscript = false;
+  bool _whispersAvailable = false;
+  bool _whispersOn = false;
+  bool _whispersBusy = false;
 
   String get _uid => widget.authenticatedUid?.call() ?? WalOwnerAuthority.authenticatedUid;
 
@@ -45,6 +80,76 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
         setState(() => _message = context.l10n.upstreamCaptureUnavailable);
       }),
     );
+    unawaited(_loadWhispersState());
+  }
+
+  bool get _guardianAvailable => widget.guardianAvailability?.call() ?? allowsGuardianSurface();
+
+  Future<GuardianModeInfo?> _readWhisperState() async {
+    final loader = widget.guardianModeLoader;
+    if (loader != null) return loader();
+    final result = await guardian_api.getGuardianMode();
+    return result.isSuccess ? result.value : null;
+  }
+
+  Future<bool> _writeWhisperState(GuardianModeState state) async {
+    final setter = widget.guardianModeSetter;
+    if (setter != null) return setter(state);
+    return (await guardian_api.setGuardianModeTwoTier(state)).isSuccess;
+  }
+
+  Future<void> _startWhisperNative() =>
+      widget.guardianNativeStart?.call() ?? guardian_native.GuardianModeService().start();
+
+  Future<void> _stopWhisperNative() => widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop();
+
+  Future<void> _loadWhispersState() async {
+    if (!_guardianAvailable) return;
+    try {
+      final info = await _readWhisperState();
+      if (!mounted || info == null) return;
+      setState(() {
+        _whispersAvailable = true;
+        _whispersOn = !(info.twoTierState?.isOff ?? info.currentMode == GuardianModeKey.off);
+      });
+    } catch (_) {
+      // Leave whispers hidden; _whispersAvailable stays false.
+    }
+  }
+
+  Future<void> _setWhispers(bool enabled) async {
+    if (_whispersBusy || !_whispersAvailable) return;
+    setState(() {
+      _whispersOn = enabled;
+      _whispersBusy = true;
+    });
+    final state = enabled ? const GuardianModeState(features: ['ACTIVE_SUPPORT']) : const GuardianModeState();
+    if (!enabled) {
+      try {
+        await _stopWhisperNative();
+      } catch (_) {}
+    }
+    var success = false;
+    try {
+      success = await _writeWhisperState(state);
+    } catch (_) {
+      success = false;
+    }
+    if (enabled) {
+      try {
+        if (success) {
+          await _startWhisperNative();
+        } else {
+          await _stopWhisperNative();
+          await _writeWhisperState(const GuardianModeState());
+        }
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    setState(() {
+      _whispersBusy = false;
+      if (!success) _whispersOn = !enabled;
+    });
   }
 
   Future<void> _run(Future<void> Function() action) async {
@@ -167,7 +272,19 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
                   ),
                 ],
               ),
-              if (phoneLive || necklaceLive)
+              if (phoneLive || necklaceLive) ...[
+                const SizedBox(height: 6),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton(
+                    key: const Key('upstream-capture-view-transcript'),
+                    onPressed: () => setState(() => _showTranscript = !_showTranscript),
+                    child: Text(
+                      necklaceLive ? context.l10n.todayDockTranscriptNecklace : context.l10n.todayDockTranscriptPhone,
+                    ),
+                  ),
+                ),
+                if (_showTranscript) _TranscriptPanel(segments: provider.segments),
                 Align(
                   alignment: Alignment.centerRight,
                   child: TextButton(
@@ -176,10 +293,95 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
                     child: Text(context.l10n.upstreamCaptureFinish),
                   ),
                 ),
+              ],
+              if (_whispersAvailable) ...[
+                const SizedBox(height: 10),
+                _WhispersRow(
+                  enabled: _whispersOn,
+                  busy: _whispersBusy,
+                  onChanged: _setWhispers,
+                ),
+              ],
             ],
           ),
         );
       },
+    );
+  }
+}
+
+class _TranscriptPanel extends StatelessWidget {
+  const _TranscriptPanel({required this.segments});
+
+  final List<TranscriptSegment> segments;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      key: const Key('upstream-capture-transcript-panel'),
+      constraints: const BoxConstraints(maxHeight: 220),
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: EllaColors.cardDeep,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: segments.isEmpty
+          ? Text(context.l10n.upstreamCaptureStarting, style: const TextStyle(color: EllaColors.inkSoft))
+          : ListView.builder(
+              shrinkWrap: true,
+              itemCount: segments.length,
+              itemBuilder: (context, index) {
+                final segment = segments[index];
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Text(segment.text, style: const TextStyle(color: EllaColors.ink)),
+                );
+              },
+            ),
+    );
+  }
+}
+
+class _WhispersRow extends StatelessWidget {
+  const _WhispersRow({required this.enabled, required this.busy, required this.onChanged});
+
+  final bool enabled;
+  final bool busy;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      key: const Key('upstream-capture-whispers-row'),
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                whisperStatusLead(enabled),
+                key: const Key('upstream-capture-whispers-status'),
+                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: EllaColors.ink),
+              ),
+              Text(whisperStatusDetail(enabled), style: const TextStyle(fontSize: 12, color: EllaColors.inkSoft)),
+            ],
+          ),
+        ),
+        if (busy)
+          const SizedBox(
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+          )
+        else
+          Switch(
+            key: const Key('upstream-capture-whispers-switch'),
+            value: enabled,
+            onChanged: onChanged,
+          ),
+      ],
     );
   }
 }
