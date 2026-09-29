@@ -277,9 +277,18 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   _HomeCaptureSource? _homeCaptureSource;
   bool _whispersOn = false;
   bool _whispersVerified = false;
+  bool _whisperReconnecting = false;
   bool _whisperStateLoading = false;
   bool _whisperStateReloadPending = false;
   bool _updatingWhispers = false;
+  Timer? _whisperNativeRetryTimer;
+  int _whisperNativeRetryAttempt = 0;
+  int _whisperReconcileGeneration = 0;
+  static const List<Duration> _whisperNativeRetryBackoff = [
+    Duration(seconds: 2),
+    Duration(seconds: 4),
+    Duration(seconds: 8),
+  ];
   bool _showBackToRecent = false;
   bool _homeMemoryPrefetchScheduled = false;
   bool _homeArtworkReloadScheduled = false;
@@ -440,11 +449,14 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         _homeCaptureSource = null;
       });
     }
+    _whisperReconcileGeneration++;
+    _cancelWhisperNativeRetry();
     if (mounted) {
       setState(() {
         // Never retain a previous account's mode while exact authority changes.
         _whispersOn = false;
         _whispersVerified = false;
+        _whisperReconnecting = false;
         _homeMemoryLayout = MemoryGalleryLayout.journal;
         _homeMemorySort = MemoryGallerySort.recent;
         _homeArtworkPreferences = null;
@@ -500,6 +512,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       ..dispose();
     _homeArtworkBackfillPollTimer?.cancel();
     _homeArtworkQueuePollTimer?.cancel();
+    _whisperNativeRetryTimer?.cancel();
     _homeArtworkStudioState.dispose();
     super.dispose();
   }
@@ -1195,46 +1208,78 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }
 
   Future<void> _loadWhisperStateOnce() async {
+    final generation = ++_whisperReconcileGeneration;
+    _cancelWhisperNativeRetry();
     final info = await _readWhisperState();
     if (info == null) {
+      // "Couldn't be verified" / disabled-switch is reserved for the server
+      // GET itself failing — never for a native capture failure below.
       try {
         await _reconcileWhisperNative(false);
       } catch (_) {}
-      if (!mounted) return;
+      if (!mounted || generation != _whisperReconcileGeneration) return;
       setState(() {
         _whispersOn = false;
         _whispersVerified = false;
+        _whisperReconnecting = false;
       });
       return;
     }
-    if (!mounted) return;
+    if (!mounted || generation != _whisperReconcileGeneration) return;
     final serverEnabled = _whispersEnabled(info);
-    var resolvedEnabled = serverEnabled;
-    var resolvedVerified = false;
+    var nativeStarted = false;
     try {
       await _reconcileWhisperNative(serverEnabled);
-      resolvedVerified = true;
+      nativeStarted = true;
     } catch (_) {
-      // If native capture cannot match an authoritative ON response, disable
-      // the server mode only when both the write and readback confirm OFF.
-      // Otherwise keep the last authoritative value behind an unavailable
-      // control and make no ON/OFF claim.
-      if (serverEnabled && await _writeWhisperState(const GuardianModeState())) {
-        final confirmed = await _readWhisperState();
-        if (confirmed != null && !_whispersEnabled(confirmed)) {
-          resolvedEnabled = false;
-          try {
-            await _reconcileWhisperNative(false);
-            resolvedVerified = true;
-          } catch (_) {}
-        }
-      }
+      // The server is the source of truth for guardian mode. A native
+      // capture failure here must never trigger a compensating PUT, and it
+      // must never hide or disable the server-reported toggle — launch,
+      // resume, and reconcile paths only GET and adopt server state. Show
+      // the server value as-is and quietly retry the native start.
     }
-    if (!mounted) return;
+    if (!mounted || generation != _whisperReconcileGeneration) return;
+    final reconnecting = serverEnabled && !nativeStarted;
     setState(() {
-      _whispersOn = resolvedEnabled;
-      _whispersVerified = resolvedVerified;
+      _whispersOn = serverEnabled;
+      _whispersVerified = true;
+      _whisperReconnecting = reconnecting;
     });
+    if (reconnecting) _scheduleWhisperNativeRetry(generation);
+  }
+
+  void _cancelWhisperNativeRetry() {
+    _whisperNativeRetryTimer?.cancel();
+    _whisperNativeRetryTimer = null;
+    _whisperNativeRetryAttempt = 0;
+  }
+
+  void _scheduleWhisperNativeRetry(int generation) {
+    if (generation != _whisperReconcileGeneration) return;
+    if (_whisperNativeRetryAttempt >= _whisperNativeRetryBackoff.length) return;
+    final delay = _whisperNativeRetryBackoff[_whisperNativeRetryAttempt];
+    _whisperNativeRetryAttempt++;
+    _whisperNativeRetryTimer?.cancel();
+    _whisperNativeRetryTimer = Timer(delay, () => unawaited(_retryWhisperNativeStart(generation)));
+  }
+
+  Future<void> _retryWhisperNativeStart(int generation) async {
+    // A newer GET, an explicit toggle, or an account switch may have taken
+    // over reconciliation since this retry was scheduled.
+    if (!mounted || generation != _whisperReconcileGeneration || !_guardianAvailable) return;
+    var nativeStarted = false;
+    try {
+      await _reconcileWhisperNative(true);
+      nativeStarted = true;
+    } catch (_) {}
+    if (!mounted || generation != _whisperReconcileGeneration) return;
+    if (nativeStarted) {
+      _whisperNativeRetryAttempt = 0;
+      if (_whisperReconnecting) setState(() => _whisperReconnecting = false);
+      return;
+    }
+    if (!_whisperReconnecting) setState(() => _whisperReconnecting = true);
+    _scheduleWhisperNativeRetry(generation);
   }
 
   Future<GuardianModeInfo?> _readWhisperState() async {
@@ -1273,9 +1318,12 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   Future<void> _setWhispers(bool enabled) async {
     if (_updatingWhispers || !_guardianAvailable) return;
     final previousEnabled = _whispersOn;
+    _whisperReconcileGeneration++;
+    _cancelWhisperNativeRetry();
     setState(() {
       _whispersOn = enabled;
       _updatingWhispers = true;
+      _whisperReconnecting = false;
     });
     final state = enabled ? const GuardianModeState(features: ['ACTIVE_SUPPORT']) : const GuardianModeState();
     var success = false;
@@ -1895,6 +1943,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         showWhispers: showGuardianSurfaces,
         whispersEnabled: _whispersOn,
         whispersVerified: _whispersVerified,
+        whispersReconnecting: _whisperReconnecting,
         whispersUpdating: _updatingWhispers,
         onWhispersChanged: (enabled) {
           Navigator.of(sheetContext).pop();
@@ -3608,6 +3657,7 @@ class _HomeControlsSheet extends StatelessWidget {
     required this.showWhispers,
     required this.whispersEnabled,
     required this.whispersVerified,
+    this.whispersReconnecting = false,
     required this.whispersUpdating,
     required this.onWhispersChanged,
     required this.onWhispersHistory,
@@ -3620,6 +3670,7 @@ class _HomeControlsSheet extends StatelessWidget {
   final bool showWhispers;
   final bool whispersEnabled;
   final bool whispersVerified;
+  final bool whispersReconnecting;
   final bool whispersUpdating;
   final ValueChanged<bool> onWhispersChanged;
   final VoidCallback onWhispersHistory;
@@ -3741,14 +3792,26 @@ class _HomeControlsSheet extends StatelessWidget {
                           padding: const EdgeInsets.symmetric(horizontal: 16),
                           child: Row(
                             children: [
-                              EllaBreathingDot(active: whispersVerified && whispersEnabled),
+                              EllaBreathingDot(active: whispersVerified && whispersEnabled && !whispersReconnecting),
                               const SizedBox(width: 16),
                               Expanded(
-                                child: Text(
-                                  whispersVerified
-                                      ? whisperStatusLead(whispersEnabled)
-                                      : context.l10n.todayWhispersUnavailable,
-                                  style: EllaTextStyles.secondary.copyWith(fontWeight: FontWeight.w600),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      whispersVerified
+                                          ? whisperStatusLead(whispersEnabled)
+                                          : context.l10n.todayWhispersUnavailable,
+                                      style: EllaTextStyles.secondary.copyWith(fontWeight: FontWeight.w600),
+                                    ),
+                                    if (whispersReconnecting)
+                                      Text(
+                                        context.l10n.todayStripReconnecting,
+                                        key: const Key('guardian-whispers-reconnecting-hint'),
+                                        style: EllaTextStyles.caption.copyWith(color: EllaColors.warning),
+                                      ),
+                                  ],
                                 ),
                               ),
                               if (whispersUpdating)
