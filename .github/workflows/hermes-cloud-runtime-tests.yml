@@ -1341,7 +1341,10 @@ jobs:
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_guardian_reenable_fails_closed_after_consent_revocation" \
             <<<"$authority_lock_ids"
           grep -Fqx \
-            "tests/postgres/test_authority_advisory_lock_postgres.py::test_runtime_activation_initializes_explicit_guardian_default" \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_guardian_mode_route_round_trips_on_off_on_under_production_constraint" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_runtime_activation_leaves_null_guardian_mode_under_production_constraint" \
             <<<"$authority_lock_ids"
           grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_retained_runtime_rearm_rejects_stale_authority_revision" \
@@ -1355,7 +1358,10 @@ jobs:
           grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_delete_re_resolves_email_owner_created_while_waiting_on_uid_lock" \
             <<<"$authority_lock_ids"
-          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 95
+          # 96 (guardian OFF/NULL canonicalization: PUT /v1/ella/guardian/mode
+          # ON -> OFF -> ON regression test added alongside the guardian_mode_check
+          # production-constraint fix).
+          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 96
           pytest \
             tests/unit/test_authority_advisory_lock.py \
             tests/unit/test_authority_writer_guard.py \
