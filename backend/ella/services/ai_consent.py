@@ -521,6 +521,62 @@ def _receipt_fingerprint(receipt: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _retained_v10_receipt_for_upgrade_decline(
+    current_receipt: dict[str, Any],
+    decline_receipt: dict[str, Any],
+) -> dict[str, Any]:
+    contract = SUPPORTED_CONSENT_POLICY_CONTRACTS[LEGACY_POLICY_VERSION_V10]
+    subject_uid = str(current_receipt.get("subject_uid") or "")
+    decline_request_id = str(decline_receipt.get("request_id") or "")
+    retained_receipt_id = (
+        "aicr_" + hashlib.sha256(f"{subject_uid}:{decline_request_id}:retained-v10".encode()).hexdigest()[:32]
+    )
+    retained_request_id = "aicretain_" + hashlib.sha256(f"{subject_uid}:{decline_request_id}".encode()).hexdigest()[:32]
+    return {
+        **{key: value for key, value in current_receipt.items() if key not in {"request_fingerprint", "receipt_kind"}},
+        "receipt_id": retained_receipt_id,
+        "decision": "granted",
+        "policy_version": contract.version,
+        "processor_set_hash": contract.processor_set_hash,
+        "processor_ids": list(contract.processor_ids),
+        "scope_version": contract.scope_version,
+        "scope_hash": contract.scope_hash,
+        "request_id": retained_request_id,
+        "server_decided_at": decline_receipt.get("server_decided_at"),
+        "app_version": decline_receipt.get("app_version"),
+        "build_number": decline_receipt.get("build_number"),
+        "locale": decline_receipt.get("locale"),
+        "receipt_kind": "policy_upgrade_retained_v10",
+        "source_consent_receipt_id": current_receipt.get("receipt_id"),
+        "source_decline_receipt_id": decline_receipt.get("receipt_id"),
+    }
+
+
+def _consent_state_from_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: receipt.get(key)
+        for key in (
+            "receipt_id",
+            "decision",
+            "policy_version",
+            "processor_set_hash",
+            "processor_ids",
+            "profile_binding_id",
+            "scope_version",
+            "scope_hash",
+            "server_decided_at",
+            "app_version",
+            "build_number",
+            "locale",
+            "receipt_kind",
+            "deletion_phase",
+            "deletion_completed_at",
+            "account_epoch_hash",
+            "account_epoch_auth_time",
+        )
+    }
+
+
 def _is_exact_policy_grant(
     uid: str,
     state: Optional[dict[str, Any]],
@@ -713,15 +769,22 @@ def _record_firestore_policy_upgrade_decline(
             raise ConsentAuthorityUnavailable("ai_consent_authority_unavailable")
         return existing, current_state, current_receipt, False
 
-    current_is_expected_v10 = bool(
-        current_receipt_id == expected_current_receipt_id
-        and _is_exact_policy_grant(
-            str(receipt.get("subject_uid") or ""),
-            current_state,
-            current_receipt,
-            LEGACY_POLICY_VERSION_V10,
-        )
+    current_expected_policy_version = next(
+        (
+            policy_version
+            for policy_version in SUPPORTED_CONSENT_POLICY_CONTRACTS
+            if current_receipt_id == expected_current_receipt_id
+            and _is_exact_policy_grant(
+                str(receipt.get("subject_uid") or ""),
+                current_state,
+                current_receipt,
+                policy_version,
+            )
+        ),
+        None,
     )
+    current_is_expected_supported = current_expected_policy_version is not None
+    current_is_expected_v11 = current_expected_policy_version == CURRENT_POLICY_VERSION
     current_is_supported_successor = bool(
         expected_current_receipt_id
         and current_receipt_id != expected_current_receipt_id
@@ -738,7 +801,7 @@ def _record_firestore_policy_upgrade_decline(
     if (
         receipt.get("decision") != "declined"
         or receipt.get("policy_version") != CURRENT_POLICY_VERSION
-        or not (current_is_expected_v10 or current_is_supported_successor)
+        or not (current_is_expected_supported or current_is_supported_successor)
     ):
         raise ConsentAuthorityUnavailable("ai_consent_upgrade_authority_changed")
 
@@ -747,6 +810,31 @@ def _record_firestore_policy_upgrade_decline(
         "receipt_kind": "policy_upgrade_decline",
         "request_fingerprint": request_fingerprint,
     }
+    if current_is_expected_v11:
+        retained_receipt = _retained_v10_receipt_for_upgrade_decline(
+            current_receipt,
+            stored_receipt,
+        )
+        retained_receipt["request_fingerprint"] = _receipt_fingerprint(retained_receipt)
+        retained_ref = user_ref.collection("ai_consent_receipts").document(str(retained_receipt["receipt_id"]))
+        retained_snapshot = retained_ref.get(transaction=transaction)
+        if retained_snapshot.exists:
+            existing_retained = retained_snapshot.to_dict()
+            if existing_retained.get("request_fingerprint") != retained_receipt["request_fingerprint"]:
+                raise ConsentIdempotencyConflict(
+                    "retained v10 request was already used with different consent metadata"
+                )
+            retained_receipt = existing_retained
+        retained_state = _consent_state_from_receipt(retained_receipt)
+        transaction.set(receipt_ref, stored_receipt)
+        if not retained_snapshot.exists:
+            transaction.set(retained_ref, retained_receipt)
+        transaction.set(
+            user_ref,
+            {"ai_consent": retained_state},
+            merge=True,
+        )
+        return stored_receipt, retained_state, retained_receipt, True
     transaction.set(receipt_ref, stored_receipt)
     return stored_receipt, current_state, current_receipt, True
 
@@ -1024,15 +1112,22 @@ class InMemoryConsentRepository:
                 if not current_receipt:
                     raise ConsentAuthorityUnavailable("ai_consent_authority_unavailable")
                 return dict(existing), current_state, current_receipt, False
-            current_is_expected_v10 = bool(
-                current_receipt_id == expected_current_receipt_id
-                and _is_exact_policy_grant(
-                    uid,
-                    current_state,
-                    current_receipt,
-                    LEGACY_POLICY_VERSION_V10,
-                )
+            current_expected_policy_version = next(
+                (
+                    policy_version
+                    for policy_version in SUPPORTED_CONSENT_POLICY_CONTRACTS
+                    if current_receipt_id == expected_current_receipt_id
+                    and _is_exact_policy_grant(
+                        uid,
+                        current_state,
+                        current_receipt,
+                        policy_version,
+                    )
+                ),
+                None,
             )
+            current_is_expected_supported = current_expected_policy_version is not None
+            current_is_expected_v11 = current_expected_policy_version == CURRENT_POLICY_VERSION
             current_is_supported_successor = bool(
                 expected_current_receipt_id
                 and current_receipt_id != expected_current_receipt_id
@@ -1049,7 +1144,7 @@ class InMemoryConsentRepository:
             if (
                 receipt.get("decision") != "declined"
                 or receipt.get("policy_version") != CURRENT_POLICY_VERSION
-                or not (current_is_expected_v10 or current_is_supported_successor)
+                or not (current_is_expected_supported or current_is_supported_successor)
             ):
                 raise ConsentAuthorityUnavailable("ai_consent_upgrade_authority_changed")
 
@@ -1059,6 +1154,25 @@ class InMemoryConsentRepository:
                 "request_fingerprint": request_fingerprint,
             }
             self.receipts[key] = stored
+            if current_is_expected_v11:
+                retained = _retained_v10_receipt_for_upgrade_decline(
+                    current_receipt,
+                    stored,
+                )
+                retained["request_fingerprint"] = _receipt_fingerprint(retained)
+                retained_key = (uid, str(retained["receipt_id"]))
+                existing_retained = self.receipts.get(retained_key)
+                if existing_retained:
+                    if existing_retained.get("request_fingerprint") != retained["request_fingerprint"]:
+                        raise ConsentIdempotencyConflict(
+                            "retained v10 request was already used with different consent metadata"
+                        )
+                    retained = dict(existing_retained)
+                else:
+                    self.receipts[retained_key] = retained
+                retained_state = _consent_state_from_receipt(retained)
+                self.states[uid] = retained_state
+                return dict(stored), retained_state, dict(retained), True
             return dict(stored), current_state, current_receipt, True
 
     def complete_account_deletion(

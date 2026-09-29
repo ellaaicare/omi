@@ -665,6 +665,32 @@ def test_firestore_shaped_v10_user_can_upgrade_to_v11_through_api(monkeypatch):
     assert decision.authorized is True
     assert decision.typesafe_egress_authorized is True
 
+    user_path = ("users", "user-upgrade")
+    database.documents[user_path]["private_cloud_sync_enabled"] = False
+    withdrawal_response = client.post(
+        "/v1/users/ai-consent",
+        json={
+            "decision": "declined",
+            "policy_version": consent.CURRENT_POLICY_VERSION,
+            "processor_set_hash": consent.CURRENT_PROCESSOR_SET_HASH,
+            "scope_version": consent.CURRENT_SCOPE_VERSION,
+            "scope_hash": consent.CURRENT_SCOPE_HASH,
+            "request_id": "request-current-v11-typesafe-withdrawal",
+            "app_version": "1.0.0",
+            "build_number": "873",
+            "locale": "en-US",
+        },
+    )
+
+    assert withdrawal_response.status_code == 200
+    withdrawal = withdrawal_response.json()
+    assert withdrawal["authorized"] is True
+    assert withdrawal["upgrade_declined"] is True
+    assert withdrawal["consent"]["policy_version"] == consent.LEGACY_POLICY_VERSION_V10
+    assert withdrawal["consent"]["receipt_kind"] == "policy_upgrade_retained_v10"
+    assert consent.resolve_ai_consent_egress_decision("user-upgrade").typesafe_egress_authorized is False
+    assert database.documents[user_path]["private_cloud_sync_enabled"] is False
+
 
 def test_consent_record_failure_logs_only_exception_type(caplog):
     class SyntheticFirestoreFailure(RuntimeError):
@@ -2036,6 +2062,39 @@ def test_v11_upgrade_decline_preserves_exact_v10_authority(monkeypatch):
     assert service.status(uid)["consent"]["receipt_id"] == v10["receipt"]["receipt_id"]
     assert denials == []
     assert erasures == []
+
+
+def test_current_v11_decline_retains_v10_authority_and_disables_typesafe(monkeypatch):
+    uid = "user-v11-typesafe-withdrawal"
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    v11 = service.submit(uid, _submission(request_id="request-v11-before-withdrawal"))
+    monkeypatch.setattr(consent, "_repository", repository)
+
+    declined = asyncio.run(
+        consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            submission=_submission(
+                decision="declined",
+                request_id="request-v11-typesafe-withdrawal",
+            ),
+            service=service,
+        )
+    )
+
+    status = service.status(uid, requested_policy_version=consent.CURRENT_POLICY_VERSION)
+    assert declined["authorized"] is True
+    assert declined["upgrade_declined"] is True
+    assert declined["receipt"]["decision"] == "declined"
+    assert declined["receipt"]["receipt_kind"] == "policy_upgrade_decline"
+    assert declined["consent"]["decision"] == "granted"
+    assert declined["consent"]["policy_version"] == consent.LEGACY_POLICY_VERSION_V10
+    assert declined["consent"]["receipt_kind"] == "policy_upgrade_retained_v10"
+    assert declined["consent"]["receipt_id"] != v11["receipt"]["receipt_id"]
+    assert status["authorized"] is True
+    assert status["consent"] == declined["consent"]
+    assert service.receipt(uid, v11["receipt"]["receipt_id"]) == v11["receipt"]
+    assert consent.resolve_ai_consent_egress_decision(uid).typesafe_egress_authorized is False
 
 
 def test_v11_upgrade_decline_then_v11_grant_authorizes_typesafe(monkeypatch):

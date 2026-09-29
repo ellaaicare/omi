@@ -1084,7 +1084,7 @@ jobs:
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
           )" -eq 21
-          # 645 (consent v10/v11 compatibility and scanner TypeSafe authority) + 18
+          # 646 (consent v10/v11 compatibility and scanner TypeSafe authority) + 18
           # (test_ella_sync_v2_contract.py, now wired into
           # this collection for the first time) + 10
           # (test_ella_sync_segments_state_machine.py -- new: exercises the real
@@ -1092,7 +1092,7 @@ jobs:
           # database/sync_segments.py directly, including the SYNC-V2-002
           # retry-after-commit/stale-lease regressions, rather than through this file's own
           # route-level fakes).
-          test "$collected" -eq 673
+          test "$collected" -eq 674
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
@@ -1316,10 +1316,16 @@ jobs:
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_v11_upgrade_decline_preserves_v10_authority_and_active_entitlement" \
             <<<"$authority_lock_ids"
           grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_current_v11_decline_retains_v10_authority_without_runtime_quarantine" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_v11_upgrade_decline_then_v11_grant_authorizes_typesafe" \
             <<<"$authority_lock_ids"
           grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_concurrent_v11_grant_supersedes_classified_upgrade_decline_without_denial" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_concurrent_v11_grant_supersedes_current_v11_withdrawal" \
             <<<"$authority_lock_ids"
           grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_v11_denial_uses_null_guardian_mode_under_production_constraint" \
@@ -1348,7 +1354,7 @@ jobs:
           grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_delete_re_resolves_email_owner_created_while_waiting_on_uid_lock" \
             <<<"$authority_lock_ids"
-          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 93
+          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 95
           pytest \
             tests/unit/test_authority_advisory_lock.py \
             tests/unit/test_authority_writer_guard.py \
