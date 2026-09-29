@@ -275,6 +275,16 @@ jobs:
             -o "$RUNNER_TEMP/omi-ble-discovery-naming-tests"
           "$RUNNER_TEMP/omi-ble-discovery-naming-tests"
 
+      - name: Run OmiBleRetrievalTagging native discovery unit tests
+        working-directory: .
+        run: |
+          set -euo pipefail
+          swiftc -warnings-as-errors \
+            app/ios/Runner/Ble/OmiBleRetrievalTagging.swift \
+            app/ios/Tests/OmiBleRetrievalTaggingTests.swift \
+            -o "$RUNNER_TEMP/omi-ble-retrieval-tagging-tests"
+          "$RUNNER_TEMP/omi-ble-retrieval-tagging-tests"
+
       - name: Run Apple Reminders replay-idempotency production boundary
         working-directory: .
         run: |
