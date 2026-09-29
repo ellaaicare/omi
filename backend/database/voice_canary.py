@@ -534,6 +534,7 @@ async def upsert_entitlement(
                 )
                 ON CONFLICT (uid) DO UPDATE SET
                     status = 'active',
+                    managed_consent_recoverable = FALSE,
                     plan = EXCLUDED.plan,
                     revision = voice_entitlements.revision + 1,
                     daily_limit_s = EXCLUDED.daily_limit_s,
@@ -588,6 +589,7 @@ async def update_entitlement_status(
                 """
                 UPDATE voice_entitlements entitlement
                 SET status = $2,
+                    managed_consent_recoverable = FALSE,
                     revision = entitlement.revision + 1,
                     operator_note = COALESCE($3, operator_note),
                     consent_authority_revision = COALESCE(

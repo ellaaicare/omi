@@ -182,12 +182,13 @@ async def _rearm_fresh_self_hosted_regrant_on_connection(
               FROM ella_invitation_redemptions redemption
               WHERE redemption.user_id = account.id
           )
-          AND NOT EXISTS (
+          AND EXISTS (
               SELECT 1
               FROM voice_entitlements entitlement
               WHERE entitlement.uid = $2
-                AND NOT (
+                AND (
                     entitlement.status = 'revoked'
+                    AND entitlement.managed_consent_recoverable IS TRUE
                     AND entitlement.invitation_id IS NULL
                     AND entitlement.plan = 'canary'
                     AND entitlement.daily_limit_s = 2700
@@ -201,7 +202,7 @@ async def _rearm_fresh_self_hosted_regrant_on_connection(
                     AND entitlement.operator_note = 'auto-provision self-hosted grok voice'
                     AND entitlement.consent_authority_epoch IS NULL
                     AND entitlement.invitation_consent_pending = FALSE
-                )
+                ) IS TRUE
           )
         FOR UPDATE OF job, binding
         """,
@@ -273,6 +274,7 @@ async def _quarantine_on_connection(
     uid: str,
     user_id: uuid.UUID,
     reason: str,
+    consent_recoverable: bool = False,
     owner_lock: authority_advisory_lock.AuthorityLockProof,
 ) -> None:
     await authority_advisory_lock.require_self_owner_lock(
@@ -285,6 +287,7 @@ async def _quarantine_on_connection(
         uid=uid,
         user_id=user_id,
         reason=reason,
+        managed_consent_recoverable=consent_recoverable,
         owner_lock=owner_lock,
     )
     await conn.execute(
@@ -293,14 +296,22 @@ async def _quarantine_on_connection(
         SET status = 'revoked',
             revision = entitlement.revision + 1,
             consent_authority_revision = authority.revision,
+            managed_consent_recoverable = $3,
             updated_at = CURRENT_TIMESTAMP
         FROM ella_managed_cloud_consent_authority authority
         WHERE entitlement.uid = $1
           AND authority.user_id = $2
-          AND entitlement.status <> 'revoked'
+          AND (
+              entitlement.status <> 'revoked'
+              OR (
+                  $3 IS FALSE
+                  AND entitlement.managed_consent_recoverable IS TRUE
+              )
+          )
         """,
         uid,
         user_id,
+        consent_recoverable,
     )
     await conn.execute(
         "DELETE FROM voice_active_sessions WHERE uid = $1",
@@ -521,6 +532,7 @@ async def synchronize_grant(
                         uid=grant.account_uid,
                         user_id=user_id,
                         reason="managed_cloud_consent_grant_changed",
+                        consent_recoverable=True,
                         owner_lock=owner_lock,
                     )
                 if row is None or not _grant_matches(row, grant):
@@ -687,10 +699,14 @@ async def unlink_self_owner_account_on_deletion(*, uid: str) -> None:
                                 """
                                 UPDATE voice_entitlements
                                 SET status = 'revoked',
+                                    managed_consent_recoverable = FALSE,
                                     revision = revision + 1,
                                     updated_at = CURRENT_TIMESTAMP
                                 WHERE uid = $1
-                                  AND status <> 'revoked'
+                                  AND (
+                                      status <> 'revoked'
+                                      OR managed_consent_recoverable IS TRUE
+                                  )
                                 """,
                                 uid,
                             )
@@ -706,6 +722,7 @@ async def unlink_self_owner_account_on_deletion(*, uid: str) -> None:
                             uid=uid,
                             user_id=user_id,
                             reason="account_deletion_confirmed",
+                            consent_recoverable=False,
                             owner_lock=owner_lock,
                         )
                         # ella_invitation_redemptions.user_id is ON DELETE RESTRICT; detach it.
@@ -798,10 +815,14 @@ async def synchronize_denial(
                         """
                         UPDATE voice_entitlements
                         SET status = 'revoked',
+                            managed_consent_recoverable = FALSE,
                             revision = revision + 1,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE uid = $1
-                          AND status <> 'revoked'
+                          AND (
+                              status <> 'revoked'
+                              OR managed_consent_recoverable IS TRUE
+                          )
                         """,
                         uid,
                     )
@@ -897,6 +918,7 @@ async def synchronize_denial(
                     uid=uid,
                     user_id=user_id,
                     reason=f"managed_cloud_consent_{decision}",
+                    consent_recoverable=True,
                     owner_lock=owner_lock,
                 )
                 if row is None or row["decision"] != decision:

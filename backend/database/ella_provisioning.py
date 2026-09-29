@@ -125,6 +125,7 @@ REQUIRED_CLOUD_VOICE_ENTITLEMENT_COLUMNS = (
     "consent_scope_version",
     "consent_scope_hash",
     "consent_authority_revision",
+    "managed_consent_recoverable",
 )
 REQUIRED_CLOUD_RUNTIME_CONSTRAINTS = (
     "ella_runtime_bindings_claim_job_id_fkey",
@@ -144,6 +145,7 @@ REQUIRED_SELF_HOSTED_INVITE_COLUMNS = (
     ("ella_invitation_targets", "revoked_at"),
     ("voice_entitlements", "invitation_consent_pending"),
     ("voice_entitlements", "consent_authority_revision"),
+    ("voice_entitlements", "managed_consent_recoverable"),
     ("ella_runtime_targets", "invitation_target_id"),
 )
 
@@ -198,6 +200,7 @@ async def invalidate_self_hosted_authority_on_connection(
     reason: str,
     owner_lock: authority_advisory_lock.AuthorityLockProof,
     invitation_id: Optional[uuid.UUID] = None,
+    managed_consent_recoverable: bool = False,
 ) -> dict[str, int]:
     """Atomically make an invitation-owned local Hermes runtime unusable."""
     await authority_advisory_lock.require_self_owner_lock(
@@ -217,9 +220,16 @@ async def invalidate_self_hosted_authority_on_connection(
         UPDATE voice_entitlements entitlement
         SET status = 'revoked',
             revision = revision + 1,
+            managed_consent_recoverable = $4,
             updated_at = CURRENT_TIMESTAMP
         WHERE entitlement.uid = $1
-          AND entitlement.status <> 'revoked'
+          AND (
+              entitlement.status <> 'revoked'
+              OR (
+                  $4 IS FALSE
+                  AND entitlement.managed_consent_recoverable IS TRUE
+              )
+          )
           AND ($3::uuid IS NULL OR entitlement.invitation_id = $3)
           AND EXISTS (
               SELECT 1
@@ -235,6 +245,7 @@ async def invalidate_self_hosted_authority_on_connection(
         uid,
         user_id,
         invitation_id,
+        managed_consent_recoverable,
     )
     session_result = await connection.execute(
         "DELETE FROM voice_active_sessions WHERE uid = $1",
@@ -3139,9 +3150,8 @@ class EllaProvisioningRepository:
         explicit quota (daily 2700s / monthly 43200s / session 1200s).
 
         No-clobber / row precedence: every existing entitlement is left
-        untouched except the exact invitationless auto-provision shape tied to
-        the content-free recovery receipt for a previous
-        ``managed_cloud_consent_grant_changed`` quarantine. A current lineage
+        untouched except the exact invitationless auto-provision shape marked
+        as recoverable by managed-consent quarantine. A current lineage
         additionally permits an active retained account to recover that exact
         row when its retained cluster and current consent authority are both
         proven in the same locked transaction. Returns True when a row was newly
@@ -3257,6 +3267,10 @@ class EllaProvisioningRepository:
                         JOIN voice_entitlements entitlement
                           ON entitlement.uid = account.omi_uid
                          AND authority.revision > COALESCE(entitlement.consent_authority_revision, 0)
+                         AND (
+                             entitlement.status = 'active'
+                             OR entitlement.managed_consent_recoverable IS TRUE
+                         )
                         WHERE account.omi_uid = $1
                           AND account.status = 'ACTIVE'
                           AND account.profile_class = 'real'
@@ -3314,6 +3328,7 @@ class EllaProvisioningRepository:
                     SET status = 'active',
                         revision = revision + 1,
                         consent_authority_revision = COALESCE($2, consent_authority_revision),
+                        managed_consent_recoverable = FALSE,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE uid = $1
                       AND (
@@ -3325,6 +3340,10 @@ class EllaProvisioningRepository:
                           )
                       )
                       AND invitation_id IS NULL
+                      AND (
+                          status = 'active'
+                          OR managed_consent_recoverable IS TRUE
+                      )
                       AND plan = 'canary'
                       AND daily_limit_s = 2700
                       AND monthly_limit_s = 43200
@@ -4154,6 +4173,7 @@ class EllaProvisioningRepository:
                             """
                             UPDATE voice_entitlements
                             SET status = 'active',
+                                managed_consent_recoverable = FALSE,
                                 revision = revision + 1,
                                 updated_at = CURRENT_TIMESTAMP
                             WHERE uid = $1

@@ -230,6 +230,7 @@ async def _run_with_database(
                 "014_add_synthetic_invitation_operator_audit.sql",
                 "015_add_invitation_allowed_email_hash.sql",
                 "017_add_voice_entitlement_consent_revision.sql",
+                "019_add_voice_entitlement_consent_recovery_marker.sql",
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
             assert await conn.fetchval(
@@ -1702,6 +1703,24 @@ def test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation(monkey
                 issued["receipt_id"],
             )
 
+        denied = await managed_cloud_consent.synchronize_denial(
+            uid=users[0][0],
+            decision="revoked",
+        )
+        assert denied["decision"] == "revoked"
+        async with pool.acquire() as conn:
+            assert (
+                await conn.fetchval(
+                    """
+                    SELECT managed_consent_recoverable
+                    FROM voice_entitlements
+                    WHERE uid = $1
+                    """,
+                    users[0][0],
+                )
+                is True
+            )
+
         revoked = await pilot_invite_admin._revoke_invitation(
             receipt_id=issued["receipt_id"],
             expected_version=version,
@@ -1728,6 +1747,9 @@ def test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation(monkey
                      WHERE invitation.id = $1::uuid) AS capacity_state,
                     (SELECT COUNT(*) FROM voice_entitlements
                      WHERE uid = ANY($2::text[]) AND status = 'revoked') AS revoked_entitlements,
+                    (SELECT COUNT(*) FROM voice_entitlements
+                     WHERE uid = ANY($2::text[]) AND managed_consent_recoverable IS TRUE)
+                        AS recoverable_entitlements,
                     (SELECT COUNT(*) FROM ella_runtime_targets target
                      JOIN ella_invitation_targets invitation_target
                        ON invitation_target.id = target.invitation_target_id
@@ -1749,7 +1771,7 @@ def test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation(monkey
                 [uid for uid, _email in users],
                 staged["id"],
             )
-        assert tuple(state.values()) == ("revoked", "released", 2, 4, 2, 0, 0, 1, 2)
+        assert tuple(state.values()) == ("revoked", "released", 2, 0, 4, 2, 0, 0, 1, 2)
 
         with pytest.raises(ProvisioningError) as revoked_voice:
             await resolve_isolated_runtime(
@@ -1760,6 +1782,18 @@ def test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation(monkey
         assert revoked_voice.value.code == "self_hosted_invitation_runtime_not_provisioned"
 
         await managed_cloud_consent.synchronize_grant(grant=_self_hosted_grant(users[0][0]))
+        async with pool.acquire() as conn:
+            assert (
+                await conn.fetchval(
+                    """
+                    SELECT managed_consent_recoverable
+                    FROM voice_entitlements
+                    WHERE uid = $1
+                    """,
+                    users[0][0],
+                )
+                is False
+            )
         with pytest.raises((RuntimePoolClaimError, RuntimeError)):
             await repository.activate_runtime_binding(
                 uid=users[0][0],

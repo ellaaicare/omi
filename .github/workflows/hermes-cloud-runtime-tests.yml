@@ -106,6 +106,7 @@ on:
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
       - "backend/migrations/016_create_today_cards.sql"
       - "backend/migrations/017_add_voice_entitlement_consent_revision.sql"
+      - "backend/migrations/019_add_voice_entitlement_consent_recovery_marker.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
@@ -289,6 +290,7 @@ on:
       - "backend/migrations/015_add_invitation_allowed_email_hash.sql"
       - "backend/migrations/016_create_today_cards.sql"
       - "backend/migrations/017_add_voice_entitlement_consent_revision.sql"
+      - "backend/migrations/019_add_voice_entitlement_consent_recovery_marker.sql"
       - "backend/scripts/pilot_invite_admin.py"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
@@ -1299,6 +1301,9 @@ jobs:
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine" \
             <<<"$authority_lock_ids"
           grep -Fqx \
+            "tests/postgres/test_authority_advisory_lock_postgres.py::test_fresh_regrant_rejects_nullable_non_auto_entitlement_shape" \
+            <<<"$authority_lock_ids"
+          grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_current_retained_consent_rearms_only_exact_quarantine" \
             <<<"$authority_lock_ids"
           grep -Fqx \
@@ -1331,7 +1336,7 @@ jobs:
           grep -Fqx \
             "tests/postgres/test_authority_advisory_lock_postgres.py::test_delete_re_resolves_email_owner_created_while_waiting_on_uid_lock" \
             <<<"$authority_lock_ids"
-          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 89
+          test "$(grep -c '::' <<<"$authority_lock_ids")" -eq 90
           pytest \
             tests/unit/test_authority_advisory_lock.py \
             tests/unit/test_authority_writer_guard.py \
