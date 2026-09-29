@@ -13,11 +13,11 @@ pin f16699aea7fe9ba089baceb628922f2882c51153
 verbatim	1cf0db68110598db438e4eed38f4b82e2ac3bf96	app/ios/Runner/Batch/BaseBatchAudioWriter.swift	app/ios/Runner/Batch/BaseBatchAudioWriter.swift
 verbatim	5c4b6fcb7578b0ff76aec06b8baec8136f596f00	app/ios/Runner/Batch/BatchAudioWriter.swift	app/ios/Runner/Batch/BatchAudioWriter.swift
 verbatim	e52df34539a317f05a53403b1d27f2109ebad35a	app/ios/Runner/Batch/LimitlessBatchAudioWriter.swift	app/ios/Runner/Batch/LimitlessBatchAudioWriter.swift
-patched	415903a72829adfc83ca4c1321158db3b1ee059c	app/ios/Runner/Ble/BleHostApiImpl.swift	app/ios/Runner/Ble/BleHostApiImpl.swift	21618a4c26f51b5cce2c22e9db7588c8a5607797
+patched	415903a72829adfc83ca4c1321158db3b1ee059c	app/ios/Runner/Ble/BleHostApiImpl.swift	app/ios/Runner/Ble/BleHostApiImpl.swift	0965ab69aadaa375b6be7dd03bb62f28801907cb
 verbatim	763fe14bed4e4b9b4aceae6081c4491fd88ed409	app/ios/Runner/Ble/OmiBleConnectionPolicy.swift	app/ios/Runner/Ble/OmiBleConnectionPolicy.swift
 patched	d078da9cb337a4a2a176861f91951e469bc3efcb	app/ios/Runner/Ble/OmiBleDiscoveryNaming.swift	app/ios/Runner/Ble/OmiBleDiscoveryNaming.swift	936a06128c1af218beefe217b72064d3da718aae
 verbatim	15a36a3d91e67a0d15ecc089d19a57f97bde576b	app/ios/Runner/Ble/OmiBleEnergyPolicy.swift	app/ios/Runner/Ble/OmiBleEnergyPolicy.swift
-patched	889d135a5a3fe1cbfccbb5baf88d980003df5c77	app/ios/Runner/Ble/OmiBleManager.swift	app/ios/Runner/Ble/OmiBleManager.swift	db4893d5864eefffd462e6161dc90e6e23342418
+patched	889d135a5a3fe1cbfccbb5baf88d980003df5c77	app/ios/Runner/Ble/OmiBleManager.swift	app/ios/Runner/Ble/OmiBleManager.swift	ab47b9adb639592e1a96b6c61dc237c0def5f698
 verbatim	eec3c9a1459ed4c1b5677ee247dbbfd083779f29	app/ios/Runner/Ble/OmiBlePairingPolicy.swift	app/ios/Runner/Ble/OmiBlePairingPolicy.swift
 verbatim	52eebb9bfb36851a35ff436b535490b2fc4f3bbe	app/ios/Runner/Limitless/LimitlessFlashDrainEngine.swift	app/ios/Runner/Limitless/LimitlessFlashDrainEngine.swift
 verbatim	283db4cc4a3b1d17cb64ba1fdbff217f84fe7735	app/ios/Runner/Limitless/LimitlessProtocol.swift	app/ios/Runner/Limitless/LimitlessProtocol.swift
@@ -35,7 +35,7 @@ verbatim	c4a4469d3a308d3c5d017793492d4683427edfa4	app/ios/Runner/PhoneMic/PhoneM
 verbatim	fbe6aebefd76141978fb1492fc0675f228e6378d	app/ios/Runner/PhoneMic/PhoneMicPermissionGate.swift	app/ios/Runner/PhoneMic/PhoneMicPermissionGate.swift
 verbatim	7aaaebfefaaa163d91d395324bb40f3127b60dcd	app/ios/Runner/PhoneMic/PhoneMicPigeon.g.swift	app/ios/Runner/PhoneMic/PhoneMicPigeon.g.swift
 verbatim	1bcf4ba2c31df28f72f7007c9202ec96ece6fe5c	app/ios/Runner/PhoneMic/PhoneMicSessionConfigurator.swift	app/ios/Runner/PhoneMic/PhoneMicSessionConfigurator.swift
-patched	b774502d0c755cecdab9efefbb7db7d7606c287a	app/ios/Runner/PigeonCommunicator.g.swift	app/ios/Runner/PigeonCommunicator.g.swift	55b306e3d7cefacd185450ab17fe4b640887003f
+patched	b774502d0c755cecdab9efefbb7db7d7606c287a	app/ios/Runner/PigeonCommunicator.g.swift	app/ios/Runner/PigeonCommunicator.g.swift	de1bba67938c468d07ae766360634036649d6b0b
 verbatim	a3797f15782044e0c4fabec93ae1fa4273ddb437	app/ios/Runner/SyncTransferBackgroundLease.swift	app/ios/Runner/SyncTransferBackgroundLease.swift
 dart-relocated	519d7af87c4708e67d597532787c419596289790	app/lib/app_globals.dart	app/lib/upstream_capture/app_globals.dart
 dart-relocated	f23bfdca3b0ac80ed765676e126133e3d230e11c	app/lib/backend/http/api/conversations.dart	app/lib/upstream_capture/backend/http/api/conversations.dart
@@ -81,7 +81,7 @@ dart-relocated	b361474a3905b101e435df921c86b8cd800a1ca8	app/lib/backend/schema/t
 dart-relocated	650f5da594397913528d944099d2bbd26ceb746b	app/lib/env/env.dart	app/lib/upstream_capture/env/env.dart
 dart-relocated	e8f7c5b1b1af959d0e3a140e41a5c318ff70a899	app/lib/env/environment_profile.dart	app/lib/upstream_capture/env/environment_profile.dart
 dart-relocated	4f43eefa85b963645bf001e7d9db4abc8e8dff53	app/lib/gen/phone_mic_pigeon.g.dart	app/lib/upstream_capture/gen/phone_mic_pigeon.g.dart
-patched	25034c9152ceac9b4a4cc9a264027697b372a539	app/lib/gen/pigeon_communicator.g.dart	app/lib/upstream_capture/gen/pigeon_communicator.g.dart	c8f25e93ec06b7a8b7f1c3a0fc8afb58d9d92945
+patched	25034c9152ceac9b4a4cc9a264027697b372a539	app/lib/gen/pigeon_communicator.g.dart	app/lib/upstream_capture/gen/pigeon_communicator.g.dart	8a1c25790b78a3f0b650005b15f19e4a38db887b
 dart-relocated	ff925972c9cdd9d14be7587fd588232c4b47a2f6	app/lib/models/audio_route.dart	app/lib/upstream_capture/models/audio_route.dart
 dart-relocated	e8648051fbd23628ae6639f59edc90a7983470e6	app/lib/models/chat_evidence_reference.dart	app/lib/upstream_capture/models/chat_evidence_reference.dart
 dart-relocated	2cb33614538396143d4d2f1f471af9d9c26e9411	app/lib/models/custom_stt_config.dart	app/lib/upstream_capture/models/custom_stt_config.dart
@@ -150,7 +150,7 @@ dart-relocated	e1e75012b7e3267a245bf1dec9ea15d2cd4f92f4	app/lib/services/devices
 dart-relocated	9b5e9474f1342f60b68a36a5b181fd3cfb803f30	app/lib/services/devices/discovery/apple_watch_discoverer.dart	app/lib/upstream_capture/services/devices/discovery/apple_watch_discoverer.dart
 dart-relocated	804d9a8b7483f94a828f4aa2be5b8350c1771222	app/lib/services/devices/discovery/device_discoverer.dart	app/lib/upstream_capture/services/devices/discovery/device_discoverer.dart
 dart-relocated	01bc9a4d30e5b6c2aa72da89a5ef2e7bc5bfa7c2	app/lib/services/devices/discovery/device_locator.dart	app/lib/upstream_capture/services/devices/discovery/device_locator.dart
-patched	0a7aec27f031d61972599823158d8f77731dc2b4	app/lib/services/devices/discovery/native_bluetooth_discoverer.dart	app/lib/upstream_capture/services/devices/discovery/native_bluetooth_discoverer.dart	e4b26c6f0eccccdcef0f6cf8a449baad6f4c187d
+patched	0a7aec27f031d61972599823158d8f77731dc2b4	app/lib/services/devices/discovery/native_bluetooth_discoverer.dart	app/lib/upstream_capture/services/devices/discovery/native_bluetooth_discoverer.dart	5136dde20405c645d0f3dc1d86231e674a401a77
 dart-relocated	bb9187a358b52ad1ee17ffc4122b5a5232d4ecba	app/lib/services/devices/discovery/rayban_meta_discoverer.dart	app/lib/upstream_capture/services/devices/discovery/rayban_meta_discoverer.dart
 dart-relocated	3ed5ae3add699aefd5d7f29fdb914abfcfae194a	app/lib/services/devices/models.dart	app/lib/upstream_capture/services/devices/models.dart
 dart-relocated	04826a6fd9337588c80cb8c851d14edc2a94e4d5	app/lib/services/devices/ring_protocol.dart	app/lib/upstream_capture/services/devices/ring_protocol.dart
