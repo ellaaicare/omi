@@ -626,7 +626,7 @@ def test_self_hosted_redemption_binds_verified_email_identity_and_target_atomica
         assert row["omi_uid"] == uid
         assert row["email"] == email
         assert row["profile_class"] == "real"
-        assert row["guardian_mode"] == "OFF"
+        assert row["guardian_mode"] is None
         assert row["invitation_consent_pending"] is True
         assert row["consent_authority_epoch"] is None
         assert row["redemption_user_id"] is not None
