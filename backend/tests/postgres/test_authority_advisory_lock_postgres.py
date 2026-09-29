@@ -2771,6 +2771,111 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
             assert await observer.fetchval("SELECT status FROM users WHERE id = $1", user_id) == "ACTIVE"
             assert await observer.fetchval("SELECT status FROM voice_entitlements WHERE uid = $1", uid) == "active"
 
+        # A terminal consent decision can arrive while the fresh-regrant job is
+        # in flight. A later valid grant must rearm that exact quarantine so the
+        # normal attestation/smoke path can restore the entitlement.
+        denied = await managed_cloud_consent.synchronize_denial(
+            uid=uid,
+            decision="revoked",
+        )
+        assert denied["decision"] == "revoked"
+        async with pool.acquire() as observer:
+            denied_state = await observer.fetchrow(
+                """
+                SELECT job.state, job.error_detail ->> 'reason' AS reason,
+                       binding.status, binding.quarantine_reason,
+                       entitlement.status AS entitlement_status
+                FROM ella_provisioning_jobs job
+                JOIN ella_runtime_bindings binding
+                  ON binding.user_id = job.user_id
+                JOIN voice_entitlements entitlement
+                  ON entitlement.uid = $2
+                WHERE job.id = $1
+                """,
+                job_id,
+                uid,
+            )
+        assert tuple(denied_state.values()) == (
+            "blocked",
+            "managed_cloud_consent_revoked",
+            "disabled",
+            "managed_cloud_consent_revoked",
+            "revoked",
+        )
+
+        post_revoke_grant = _reissued_managed_cloud_grant(
+            initial_grant,
+            receipt_id="synthetic-receipt-after-revoke",
+        )
+        await managed_cloud_consent.synchronize_grant(
+            grant=post_revoke_grant,
+            allow_fresh_uid_bootstrap=True,
+            bootstrap_email="fresh-regrant@example.invalid",
+        )
+        async with pool.acquire() as observer:
+            rearmed_state = await observer.fetchrow(
+                """
+                SELECT job.state, job.stage, job.retryable, job.error_code,
+                       binding.status, binding.health_state, binding.active,
+                       binding.quarantine_reason,
+                       entitlement.status AS entitlement_status
+                FROM ella_provisioning_jobs job
+                JOIN ella_runtime_bindings binding
+                  ON binding.user_id = job.user_id
+                JOIN voice_entitlements entitlement
+                  ON entitlement.uid = $2
+                WHERE job.id = $1
+                """,
+                job_id,
+                uid,
+            )
+        assert tuple(rearmed_state.values()) == (
+            "pending",
+            "identity_ready",
+            True,
+            None,
+            "shadow",
+            "pending",
+            False,
+            None,
+            "revoked",
+        )
+
+        await repository.stage_runtime_binding(
+            uid=uid,
+            binding={
+                "binding_id": str(binding_id),
+                "provider": "hermes",
+                "profile_name": "fresh-regrant-profile",
+                "agent_id": "fresh-regrant-agent",
+                "template_version": "hermes-user-v1",
+                "model_policy_version": "model-policy-v1",
+                "voice_policy_version": "voice-policy-v1",
+                "health_state": "healthy",
+                "health_receipt": {"content_free": True},
+                "runtime_target_mode": "hermes-chat",
+            },
+        )
+        await repository.update_job(
+            job_id=str(job_id),
+            state="provisioning",
+            stage="smoke_passed",
+            retryable=True,
+            receipt={"type": "runtime_smoke_passed", "content_free": True},
+        )
+        assert await repository.seed_voice_entitlement_if_absent(uid=uid) is True
+        await repository.activate_runtime_binding(
+            uid=uid,
+            provider="hermes",
+            require_invitation_target=False,
+        )
+        async with pool.acquire() as observer:
+            assert await observer.fetchval("SELECT status FROM voice_entitlements WHERE uid = $1", uid) == "active"
+            pre_retained_revision = await observer.fetchval(
+                "SELECT revision FROM voice_entitlements WHERE uid = $1",
+                uid,
+            )
+
         # Returning pre-invitation accounts can retain a valid legacy Hermes
         # cluster after a consent-change quarantine. Recovery must still require
         # the exact current lineage and exact stale quarantine shape.
@@ -2865,7 +2970,10 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
             recovered_authority_revision = current_lineage_authority["revision"]
         if isinstance(recovery_receipts, str):
             recovery_receipts = json.loads(recovery_receipts)
-        assert dict(recovered_entitlement) == {"status": "active", "revision": 5}
+        assert dict(recovered_entitlement) == {
+            "status": "active",
+            "revision": pre_retained_revision + 2,
+        }
         expected_recovery_receipt = {
             "type": "retained_entitlement_recovered",
             "content_free": True,
@@ -2902,7 +3010,10 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
                 "SELECT status, revision FROM voice_entitlements WHERE uid = $1",
                 uid,
             )
-        assert dict(final_entitlement) == {"status": "revoked", "revision": 6}
+        assert dict(final_entitlement) == {
+            "status": "revoked",
+            "revision": pre_retained_revision + 3,
+        }
 
         # A later receipt for the same exact contract is a new consent-driven
         # transition, not an operator override. Its authority revision must
@@ -2943,7 +3054,10 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
             )
         if isinstance(rotated_receipts, str):
             rotated_receipts = json.loads(rotated_receipts)
-        assert dict(rotated_entitlement) == {"status": "active", "revision": 7}
+        assert dict(rotated_entitlement) == {
+            "status": "active",
+            "revision": pre_retained_revision + 4,
+        }
         assert {
             "type": "retained_entitlement_recovered",
             "content_free": True,

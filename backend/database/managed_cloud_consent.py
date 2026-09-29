@@ -131,7 +131,7 @@ async def _rearm_fresh_self_hosted_regrant_on_connection(
     user_id: uuid.UUID,
     owner_lock: authority_advisory_lock.AuthorityLockProof,
 ) -> bool:
-    """Rearm only the exact fresh-relax quarantine left by a prior regrant.
+    """Rearm only the exact fresh-relax quarantine left by prior consent.
 
     This does not reactivate a runtime. It moves one content-free, invitationless
     provisioning attempt back to ``pending`` and its disabled binding back to a
@@ -163,11 +163,19 @@ async def _rearm_fresh_self_hosted_regrant_on_connection(
           AND job.stage = 'runtime_ready'
           AND job.retryable = FALSE
           AND job.error_code = 'invitation_authority_revoked'
-          AND job.error_detail ->> 'reason' = 'managed_cloud_consent_grant_changed'
+          AND job.error_detail ->> 'reason' IN (
+              'managed_cloud_consent_grant_changed',
+              'managed_cloud_consent_declined',
+              'managed_cloud_consent_revoked'
+          )
           AND binding.status = 'disabled'
           AND binding.active = FALSE
           AND binding.health_state = 'unhealthy'
-          AND binding.quarantine_reason = 'managed_cloud_consent_grant_changed'
+          AND binding.quarantine_reason IN (
+              'managed_cloud_consent_grant_changed',
+              'managed_cloud_consent_declined',
+              'managed_cloud_consent_revoked'
+          )
           AND binding.runtime_target_mode = 'hermes-chat'
           AND NOT EXISTS (
               SELECT 1
@@ -222,6 +230,11 @@ async def _rearm_fresh_self_hosted_regrant_on_connection(
         WHERE id = $1
           AND state = 'blocked'
           AND error_code = 'invitation_authority_revoked'
+          AND error_detail ->> 'reason' IN (
+              'managed_cloud_consent_grant_changed',
+              'managed_cloud_consent_declined',
+              'managed_cloud_consent_revoked'
+          )
         """,
         candidate["job_id"],
     )
@@ -241,7 +254,11 @@ async def _rearm_fresh_self_hosted_regrant_on_connection(
           AND status = 'disabled'
           AND active = FALSE
           AND health_state = 'unhealthy'
-          AND quarantine_reason = 'managed_cloud_consent_grant_changed'
+          AND quarantine_reason IN (
+              'managed_cloud_consent_grant_changed',
+              'managed_cloud_consent_declined',
+              'managed_cloud_consent_revoked'
+          )
         """,
         candidate["binding_id"],
     )
