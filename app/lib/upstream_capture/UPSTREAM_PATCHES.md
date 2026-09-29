@@ -279,6 +279,116 @@ Local regressions live in `app/test/ella/upstream_capture/upstream_capture_nativ
 (Dart, via a fake `BleHostApi`) and `upstream_capture_byte_identity_test.dart` (now six patched
 entries); the patch artifact contains no private identifiers or environment assignments.
 
+### Four: native discovery still admits nothing on build 877 (RUN-016) — scan-response timing, not a filter or naming bug
+
+**Symptom** (ellaaicare/ella-ai#1280 RUN-016): build 877 — flag ON, carrying patches **One**
+through **Three** — still lists no necklace. Native `didDiscoverCount` == 9 and Dart
+`candidatesSeen` == 9 (so the bridge/Pigeon layer is not the bug, confirming patch **Three**'s
+diagnostics). Of those 9: `admitted` = 0, `no_name` = 8, `no_signature_match` = 1. **All 9
+rejected candidates had `uuidCount == 0` AND `hasAdvName == false` AND no `peripheral.name`
+either** — including the strongest-RSSI candidate (~-30 to -20 dBm), believed to be the actual
+necklace. The legacy `flutter_blue_plus` path finds and names the same physical device within
+~5s on the same phone, same room.
+
+**Investigation of the legacy path** (`app/lib/services/devices/discovery/bluetooth_discoverer.dart`
+and `app/lib/utils/bluetooth/bluetooth_adapter.dart`, cross-checked against
+`flutter_blue_plus` 2.1.0 / `flutter_blue_plus_darwin` 8.1.0's iOS implementation, pulled from
+pub.dev for this investigation):
+
+1. **Service-UUID filter**: `bluetooth_discoverer.dart:46` calls
+   `BluetoothAdapter.startScan(timeout: Duration(seconds: timeout))` with **no** `withServices`
+   argument. `BluetoothAdapter.startScan` (`bluetooth_adapter.dart:31-40`) defaults an omitted
+   `withServices` to `<Guid>[]`. In `flutter_blue_plus_darwin`'s Obj-C plugin
+   (`FlutterBluePlusPlugin.m:271-290`), an empty `with_services` array becomes
+   `scanForPeripheralsWithServices:@[] options:...]` — CoreBluetooth's documented "match
+   everything" form. **The legacy path is already unfiltered**, exactly like
+   `NativeBluetoothDiscoverer` (confirmed already by patch **Two**). Ruled out; no change made.
+2. **`CBCentralManagerScanOptionAllowDuplicatesKey`**: `FlutterBluePlus.startScan`
+   (`flutter_blue_plus.dart:217-234`) defaults `continuousUpdates: false`, which the legacy
+   discoverer never overrides. In the Obj-C plugin (`FlutterBluePlusPlugin.m:257-261`), the key
+   is only added to the scan options dictionary `if ([continuousUpdates boolValue])` — i.e. when
+   `continuousUpdates` is false, the key is **omitted entirely** rather than explicitly set to
+   `NO`. `NativeBluetoothDiscoverer`/`OmiBleManager` (pre-this-patch) instead explicitly passed
+   `CBCentralManagerScanOptionAllowDuplicatesKey: false` — the documented default, so *as coded*
+   this was not a difference either. But CoreBluetooth's real (not just documented) behavior is
+   that duplicate filtering caps each peripheral at exactly one `didDiscover` callback for the
+   whole scan session — if that single delivered packet is the bare primary advertisement
+   (common when the scan-response carrying the local name/service UUIDs is a separate radio
+   event that hasn't arrived yet when CoreBluetooth reports the discovery), the app never gets a
+   second chance within that scan, matching RUN-016's evidence exactly (bare on the one and only
+   callback). This is consistent with, though not provably identical to, why the legacy path —
+   subject to the same race in principle — happened to get a fuller first packet in its ~5s
+   window during the comparison run.
+3. **`retrieveConnectedPeripherals(withServices:)` / `retrievePeripherals(withIdentifiers:)`**:
+   the legacy discoverer's discovery path (`bluetooth_discoverer.dart`) calls neither; nothing in
+   `app/lib/services/devices.dart`'s discovery flow does either.
+   `retrievePeripheralsWithIdentifiers:` is used only later, by `OmiBleManager.connectPeripheral`,
+   for reconnecting a *previously connected* device by known UUID — not applicable to RUN-016's
+   never-bonded necklace, which is not connected anywhere and so would not appear in
+   `retrieveConnectedPeripherals` either. Not implemented.
+
+**Fix implemented: (b) only** — `AllowDuplicatesKey` on, plus a targeted re-emit:
+
+- `OmiBleManager.startScan` now passes `CBCentralManagerScanOptionAllowDuplicatesKey: true`
+  (`app/ios/Runner/Ble/OmiBleManager.swift`), so CoreBluetooth is no longer capped at one
+  `didDiscover` callback per peripheral for the scan session.
+- A new pure helper, `OmiBleDiscoveryNaming.shouldForwardRediscovery` (in
+  `app/ios/Runner/Ble/OmiBleDiscoveryNaming.swift`), decides whether a later sighting of an
+  already-seen peripheral (this scan) carries a name or service UUIDs the first sighting
+  lacked. `OmiBleManager` tracks each peripheral's most recently forwarded naming state in a
+  per-scan-session dictionary (`scanSightings`, cleared on every `startScan`/`stopScan`) and
+  only calls `flutterApi?.onPeripheralDiscovered` again when that helper says yes — so a
+  peripheral that keeps re-advertising identical (still-bare, or already-fully-named) data does
+  **not** flood the Pigeon channel every scan interval; only a genuinely fuller packet does.
+- `(a)` and `(c)` were investigated and are not implemented: the scan is already unfiltered
+  (unchanged from patch **Two**), and no discovery-time code path — legacy or native — calls
+  `retrieveConnectedPeripherals`/`retrievePeripherals(withIdentifiers:)`, which would not help a
+  peripheral that was never connected anyway.
+
+**Diagnostics**: a new `nameArrivedLate` counter (`OmiBleDiagnostics`, surfaced through
+`BleNativeDiscoveryDiagnostics` / `EllaNativeDiscoveryDiagnostics` / `DeviceDiagnosticsPage`,
+same three-layer plumbing patch **Three** built) counts re-discoveries that were forwarded
+because a later packet added naming/UUID information. The existing `didDiscoverCount` /
+`candidatesSeen` counters are kept, but with `AllowDuplicatesKey` on they are expected to
+diverge going forward (raw CoreBluetooth callback volume vs. Dart-forwarded candidates) where
+they previously matched 1:1 — the gap between them is itself now a useful signal, not a
+regression.
+
+| File | Manifest kind | Pin blob (unchanged upstream) | Approved local blob |
+| --- | --- | --- | --- |
+| `app/ios/Runner/Ble/OmiBleDiscoveryNaming.swift` | `patched` | `d078da9cb337a4a2a176861f91951e469bc3efcb` | `936a06128c1af218beefe217b72064d3da718aae` |
+| `app/ios/Runner/Ble/OmiBleManager.swift` | `patched` | `889d135a5a3fe1cbfccbb5baf88d980003df5c77` | `db4893d5864eefffd462e6161dc90e6e23342418` |
+| `app/ios/Runner/PigeonCommunicator.g.swift` | `patched` | `b774502d0c755cecdab9efefbb7db7d7606c287a` | `55b306e3d7cefacd185450ab17fe4b640887003f` |
+| `app/lib/gen/pigeon_communicator.g.dart` | `patched` | `25034c9152ceac9b4a4cc9a264027697b372a539` | `c8f25e93ec06b7a8b7f1c3a0fc8afb58d9d92945` |
+
+(`native_bluetooth_discoverer.dart` and `BleHostApiImpl.swift` are unchanged by this patch;
+their rows in the tables above still carry their current approved blobs.)
+
+**Confirmed identical upstream (before this patch)**: `OmiBleDiscoveryNaming.swift` and
+`OmiBleManager.swift` carried patch **Two**'s and **Three**'s local fixes only — the
+`AllowDuplicatesKey` value and the single-sighting-per-scan behavior were otherwise as upstream
+wrote them (upstream's own `didDiscover` also omits `CBCentralManagerScanOptionAllowDuplicatesKey`
+entirely, the FBP-equivalent default). This diverges further from upstream's native scan
+behavior for the reasons above; there is no upstream fix to re-vendor.
+
+**Upstream base SHA**: same pin, `f16699aea7fe9ba089baceb628922f2882c51153`. Upstream PR: none —
+recorded as a local patch only, same as patches **One** through **Three**.
+
+**Tests**: `app/test/ella/upstream_capture/upstream_capture_discovery_admission_test.dart` gained
+a regression test simulating two `peripheralDiscoveredCallback` deliveries for the same
+peripheral uuid (first bare, second named) and asserting exactly one admitted device.
+`app/test/ella/upstream_capture/upstream_capture_native_discovery_diagnostics_test.dart` was
+extended to cover `nameArrivedLate`. `app/ios/Tests/OmiBleDiscoveryNamingTests.swift` (new,
+`swiftc`-executable, following the existing `GuardianNativePolicyTests.swift` pattern — there is
+no XCTest target for this native code) covers `shouldForwardRediscovery` directly, wired into
+`.github/workflows/ella-ios-source-ci.yml`. `upstream_capture_byte_identity_test.dart`'s
+hardcoded blob expectations were updated for all four touched files.
+
+**Upstreamability**: `AllowDuplicatesKey` and the re-emit dedup are a behavior change to native
+scan semantics (more callback volume, traded for correctness on slow-to-respond peripherals),
+not upstreamable as a drop-in fix without upstream also wanting the added Pigeon field and
+diagnostics; recorded as a local patch only, as with patches **One** through **Three**.
+
 ## Fork-side changes that are NOT upstream patches
 
 These touch fork (non-upstream-owned) files so the vendored files can stay byte-identical:

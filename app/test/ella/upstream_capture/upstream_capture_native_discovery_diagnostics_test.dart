@@ -67,6 +67,7 @@ void main() {
       queuedScansFired: 1,
       didDiscoverCount: 5,
       flutterApiNilDropCount: 3,
+      nameArrivedLate: 2,
     );
     final fakeHost = _FakeBleHostApi(native);
     DebugLogManager.bleFlutterApiSetUpAtMs = DateTime.utc(2026, 1, 2, 3, 4, 5).millisecondsSinceEpoch;
@@ -87,6 +88,7 @@ void main() {
     expect(find.textContaining('queuedScansFired=1'), findsOneWidget);
     expect(find.textContaining('didDiscoverCount=5'), findsOneWidget);
     expect(find.textContaining('flutterApiNilDropCount=3'), findsOneWidget);
+    expect(find.textContaining('nameArrivedLate=2'), findsOneWidget);
 
     // Bridge layer: when BleFlutterApi.setUp(BleBridge.instance) ran.
     expect(find.textContaining('2026-01-02T03:04:05'), findsOneWidget);
@@ -110,6 +112,7 @@ void main() {
     final copied = (clipboardCalls.single.arguments as Map)['text'] as String;
     expect(copied, contains('cbStateAtLastStartScan=on'));
     expect(copied, contains('flutterApiNilDropCount=3'));
+    expect(copied, contains('nameArrivedLate=2'));
     expect(copied, contains('2026-01-02T03:04:05'));
     expect(copied, contains('candidatesSeen=5'));
   });

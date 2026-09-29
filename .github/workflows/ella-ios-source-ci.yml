@@ -265,6 +265,16 @@ jobs:
             -o "$RUNNER_TEMP/guardian-native-policy-tests"
           "$RUNNER_TEMP/guardian-native-policy-tests"
 
+      - name: Run OmiBleDiscoveryNaming native discovery unit tests
+        working-directory: .
+        run: |
+          set -euo pipefail
+          swiftc -warnings-as-errors \
+            app/ios/Runner/Ble/OmiBleDiscoveryNaming.swift \
+            app/ios/Tests/OmiBleDiscoveryNamingTests.swift \
+            -o "$RUNNER_TEMP/omi-ble-discovery-naming-tests"
+          "$RUNNER_TEMP/omi-ble-discovery-naming-tests"
+
       - name: Run Apple Reminders replay-idempotency production boundary
         working-directory: .
         run: |

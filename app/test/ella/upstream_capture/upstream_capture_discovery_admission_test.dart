@@ -257,6 +257,44 @@ void main() {
       expect(host.lastServiceUuids, isEmpty);
     });
 
+    // ellaaicare/ella-ai#1280 RUN-016: hard evidence from a real necklace scan (build 877,
+    // flag ON) showed the strongest-RSSI candidate was rejected `no_name` for the entire
+    // scan window even though the same necklace, same phone, named itself within ~5s over
+    // the legacy flutter_blue_plus path. `OmiBleManager` now scans with
+    // `CBCentralManagerScanOptionAllowDuplicatesKey` on and re-forwards a peripheral when a
+    // later advertisement/scan-response packet adds a name it initially lacked — this
+    // exercises the Dart side of that: two `peripheralDiscoveredCallback` calls for the same
+    // uuid, the first bare, the second named, must still yield exactly one admitted device.
+    test('re-admits a peripheral once a later packet adds the name the first packet lacked', () async {
+      final startCompleter = Completer<void>();
+      final host = _FakeBleHostApi(startScanHandler: () => startCompleter.future);
+      final discoverer = NativeBluetoothDiscoverer(hostApi: host, bluetoothReadiness: readiness);
+
+      final discovery = discoverer.discover(timeout: 0);
+      await Future<void>.delayed(Duration.zero);
+      expect(host.startScanCalls, 1);
+
+      BleBridge.instance.peripheralDiscoveredCallback!(BlePeripheral(
+        uuid: '0000-aaaa-0006',
+        name: '',
+        rssi: -40,
+        serviceUuids: [],
+      ));
+      BleBridge.instance.peripheralDiscoveredCallback!(BlePeripheral(
+        uuid: '0000-aaaa-0006',
+        name: 'Friend',
+        rssi: -40,
+        serviceUuids: [],
+      ));
+
+      startCompleter.complete();
+      final result = await discovery;
+
+      expect(result.devices, hasLength(1));
+      expect(result.devices.single.name, 'Friend');
+      expect(result.devices.single.type, DeviceType.omi);
+    });
+
     test('handles stopScan failure and restores the callback', () async {
       final host = _FakeBleHostApi(
         stopScanHandler: () => Future<void>.error(PlatformException(code: 'channel-error')),

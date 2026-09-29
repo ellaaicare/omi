@@ -128,18 +128,18 @@ void main() {
     expect(patchedByPath['app/ios/Runner/Ble/OmiBleDiscoveryNaming.swift']!.blob,
         'd078da9cb337a4a2a176861f91951e469bc3efcb');
     expect(patchedByPath['app/ios/Runner/Ble/OmiBleDiscoveryNaming.swift']!.localBlob,
-        '82da0ef8a59db3e5917a31bb61f15957a3cbbb87');
+        '936a06128c1af218beefe217b72064d3da718aae');
     expect(patchedByPath['app/ios/Runner/Ble/OmiBleManager.swift']!.blob, '889d135a5a3fe1cbfccbb5baf88d980003df5c77');
     expect(
-        patchedByPath['app/ios/Runner/Ble/OmiBleManager.swift']!.localBlob, 'f6904c00f7b9cf28ed127e3ea95f60b6e9c10daf');
+        patchedByPath['app/ios/Runner/Ble/OmiBleManager.swift']!.localBlob, 'db4893d5864eefffd462e6161dc90e6e23342418');
     expect(
         patchedByPath['app/ios/Runner/PigeonCommunicator.g.swift']!.blob, 'b774502d0c755cecdab9efefbb7db7d7606c287a');
     expect(patchedByPath['app/ios/Runner/PigeonCommunicator.g.swift']!.localBlob,
-        '23bc2e8eaa23d20b116bf09cffb0902880ea1a8d');
+        '55b306e3d7cefacd185450ab17fe4b640887003f');
     expect(patchedByPath['app/lib/upstream_capture/gen/pigeon_communicator.g.dart']!.blob,
         '25034c9152ceac9b4a4cc9a264027697b372a539');
     expect(patchedByPath['app/lib/upstream_capture/gen/pigeon_communicator.g.dart']!.localBlob,
-        '93c039f0938575adb3ec3929e6024506f07c3407');
+        'c8f25e93ec06b7a8b7f1c3a0fc8afb58d9d92945');
     expect(patchedByPath['app/ios/Runner/Ble/BleHostApiImpl.swift']!.blob, '415903a72829adfc83ca4c1321158db3b1ee059c');
     expect(patchedByPath['app/ios/Runner/Ble/BleHostApiImpl.swift']!.localBlob,
         '21618a4c26f51b5cce2c22e9db7588c8a5607797');
