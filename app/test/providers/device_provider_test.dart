@@ -1762,6 +1762,45 @@ void main() {
     expect(capture.recordingState, RecordingState.deviceRecord);
   });
 
+  test(
+      'a BLE-ready event must not spend the launch grace, but resumeKnownDeviceConnection can still use it '
+      'on a failure genuinely inherited from a previous launch', () async {
+    final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    // The capture failure is already present the moment this DeviceProvider
+    // instance starts checking it — standing in for a failure inherited from
+    // before this process existed (e.g. a Process Now interrupted by a
+    // force-quit on a previous launch), with no disconnect attempt made
+    // during this instance's own lifetime.
+    final capture = _RecordingCaptureProvider(
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+    )..updateRecordingState(RecordingState.error);
+    final service = _FakeDeviceService(DeviceServiceStatus.init);
+    final provider = DeviceProvider(deviceService: service)
+      ..setProviders(capture)
+      ..connectedDevice = necklace
+      ..pairedDevice = necklace
+      ..setIsConnected(true);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    // The native BLE stack becoming ready is not itself proof of a fresh app
+    // launch (it can also fire mid-session, e.g. after Bluetooth cycling) —
+    // it must not spend the one-shot grace.
+    service.publish(DeviceServiceStatus.ready);
+    await pumpEventQueue();
+    expect(capture.deviceStarts, 0, reason: 'a bare BLE-ready event must not use the launch grace');
+    expect(capture.recordingState, RecordingState.error);
+
+    // resumeKnownDeviceConnection — the app-resumed / cold-launch-retained-
+    // connection checkpoint — still has the untouched grace available and
+    // auto-resumes exactly once on the same, still-stale failure.
+    await provider.resumeKnownDeviceConnection(reason: 'app resumed');
+
+    expect(capture.deviceStarts, 1);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+  });
+
   test('foreground resume preserves explicit pause without transport or socket startup', () async {
     final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await bindRememberedDeviceForCurrentTestAuthority(necklace);
