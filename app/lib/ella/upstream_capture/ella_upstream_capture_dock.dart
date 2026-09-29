@@ -72,16 +72,13 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   void initState() {
     super.initState();
     unawaited(
-      _runtime
-          .ensureBooted()
-          .then((provider) {
-            if (!mounted) return;
-            setState(() => _provider = provider);
-          })
-          .catchError((Object error) {
-            if (!mounted) return;
-            setState(() => _message = context.l10n.upstreamCaptureUnavailable);
-          }),
+      _runtime.ensureBooted().then((provider) {
+        if (!mounted) return;
+        setState(() => _provider = provider);
+      }).catchError((Object error) {
+        if (!mounted) return;
+        setState(() => _message = context.l10n.upstreamCaptureUnavailable);
+      }),
     );
     unawaited(_loadWhispersState());
   }
@@ -172,24 +169,24 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   }
 
   Future<void> _startPhone() => _run(() async {
-    final started = await _runtime.startPhoneCapture(_uid);
-    if (!started && mounted) await _consentRequired();
-  });
+        final started = await _runtime.startPhoneCapture(_uid);
+        if (!started && mounted) await _consentRequired();
+      });
 
   Future<void> _connectNecklace() => _run(() async {
-    setState(() => _message = context.l10n.upstreamCaptureSearching);
-    final devices = await _runtime.discoverNecklaces();
-    if (!mounted) return;
-    if (devices.isEmpty) {
-      setState(() => _message = context.l10n.upstreamCaptureNoNecklaceFound);
-      return;
-    }
-    final device = devices.length == 1 ? devices.first : await _pickDevice(devices);
-    if (device == null || !mounted) return;
-    setState(() => _message = null);
-    final connected = await _runtime.connectNecklace(_uid, device);
-    if (!connected && mounted) await _consentRequired();
-  });
+        setState(() => _message = context.l10n.upstreamCaptureSearching);
+        final devices = await _runtime.discoverNecklaces();
+        if (!mounted) return;
+        if (devices.isEmpty) {
+          setState(() => _message = context.l10n.upstreamCaptureNoNecklaceFound);
+          return;
+        }
+        final device = devices.length == 1 ? devices.first : await _pickDevice(devices);
+        if (device == null || !mounted) return;
+        setState(() => _message = null);
+        final connected = await _runtime.connectNecklace(_uid, device);
+        if (!connected && mounted) await _consentRequired();
+      });
 
   Future<void> _consentRequired() async {
     setState(() => _message = context.l10n.upstreamCaptureConsentRequired);
@@ -231,10 +228,10 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
         final status = starting
             ? context.l10n.upstreamCaptureStarting
             : phoneLive
-            ? context.l10n.upstreamCaptureRecordingPhone
-            : necklaceLive
-            ? context.l10n.upstreamCaptureRecordingNecklace
-            : (_message ?? '');
+                ? context.l10n.upstreamCaptureRecordingPhone
+                : necklaceLive
+                    ? context.l10n.upstreamCaptureRecordingNecklace
+                    : (_message ?? '');
         return _DockSurface(
           child: Column(
             key: const Key('upstream-capture-dock'),
