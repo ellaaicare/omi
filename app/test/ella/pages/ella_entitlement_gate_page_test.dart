@@ -220,7 +220,7 @@ void main() {
     expect(find.text('ONBOARDING READY'), findsOneWidget);
   });
 
-  testWidgets('revoked recovery stays closed when consent is declined', (tester) async {
+  testWidgets('revoked recovery refreshes entitlement after consent decline and continues when active', (tester) async {
     final transport = _RecoveryEntitlementTransport();
     final provider = EllaEntitlementProvider(
       transport: transport,
@@ -258,8 +258,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(declineCalls, 1);
-    expect(transport.fetchCalls, 1);
-    expect(find.text('ONBOARDING READY'), findsNothing);
+    expect(transport.fetchCalls, 2);
+    expect(find.text('ONBOARDING READY'), findsOneWidget);
   });
 
   testWidgets('account drift during revoked recovery cannot retry under the replacement account', (tester) async {

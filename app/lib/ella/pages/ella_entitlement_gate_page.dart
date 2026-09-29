@@ -141,7 +141,7 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
     final uid = provider.boundUid ?? '';
     if (uid.isEmpty) return;
     final consentService = EllaAiConsentService();
-    final accepted = await AiConsentSheet.show(
+    final decision = await AiConsentSheet.show(
       context,
       onAccept: () async {
         if (provider.boundUid != uid) {
@@ -159,7 +159,7 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
       },
       canPersistDecision: () => provider.boundUid == uid,
     );
-    if (!mounted || accepted != true || provider.boundUid != uid) return;
+    if (!mounted || decision == null || provider.boundUid != uid) return;
     await provider.retry();
   }
 
