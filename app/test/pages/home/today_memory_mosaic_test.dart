@@ -3024,6 +3024,90 @@ void main() {
       isTrue,
     );
   });
+
+  testWidgets('launch with server ON and stale local cache adopts server state without a PUT', (tester) async {
+    // Regression for RUN-017 / build 878: the app must GET and adopt server
+    // state on launch, never PUT, even when the in-memory default (the
+    // "local cache") disagrees with what the server reports.
+    var guardianModeWrites = 0;
+
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      guardianAvailability: () => true,
+      guardianModeLoader: () async => const GuardianModeInfo(
+            currentMode: GuardianModeKey.activeSupport,
+            twoTierState: GuardianModeState(features: ['ACTIVE_SUPPORT']),
+          ),
+      guardianModeSetter: (_) async {
+        guardianModeWrites++;
+        return true;
+      },
+      // Simulate the native capture failing to confirm ON during a cold
+      // launch (e.g. mic session not ready yet) — this must never trigger
+      // a compensating PUT to turn guardian mode off.
+      guardianNativeStart: () async => throw StateError('simulated native start failure on launch'),
+      guardianNativeStop: () async {},
+    );
+    addTearDown(harness.dispose);
+
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(guardianModeWrites, 0);
+
+    await tester.tap(find.byKey(const Key('today-dock-status')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.text('Whispers are on'), findsOneWidget);
+    expect(
+      tester
+          .widget<Switch>(
+            find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
+          )
+          .value,
+      isTrue,
+    );
+    expect(guardianModeWrites, 0);
+  });
+
+  testWidgets('launch with server OFF adopts server state without a PUT', (tester) async {
+    var guardianModeWrites = 0;
+
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      guardianAvailability: () => true,
+      guardianModeLoader: () async => const GuardianModeInfo(
+            currentMode: GuardianModeKey.off,
+            twoTierState: GuardianModeState(),
+          ),
+      guardianModeSetter: (_) async {
+        guardianModeWrites++;
+        return true;
+      },
+      guardianNativeStart: () async {},
+      guardianNativeStop: () async {},
+    );
+    addTearDown(harness.dispose);
+
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(guardianModeWrites, 0);
+
+    await tester.tap(find.byKey(const Key('today-dock-status')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.text('Whispers are off'), findsOneWidget);
+    expect(
+      tester
+          .widget<Switch>(
+            find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)),
+          )
+          .value,
+      isFalse,
+    );
+    expect(guardianModeWrites, 0);
+  });
 }
 
 TranscriptSegment _liveTranscriptSegment(String id) => TranscriptSegment(
