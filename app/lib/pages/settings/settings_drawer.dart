@@ -8,6 +8,7 @@ import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/pages/persona/persona_provider.dart';
 import 'package:omi/utils/auth_utils.dart';
 import 'package:omi/pages/settings/developer.dart';
+import 'package:omi/pages/settings/experimental_modes_settings_page.dart';
 import 'package:omi/pages/settings/notifications_settings_page.dart';
 import 'package:omi/pages/settings/profile.dart';
 import 'package:omi/pages/settings/integrations_page.dart';
@@ -370,6 +371,16 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
                   showBetaTag: true,
                   onTap: () {
                     Navigator.of(context).push(MaterialPageRoute(builder: (context) => const IntegrationsPage()));
+                  },
+                ),
+                const Divider(height: 1, color: Color(0xFF3C3C43)),
+                _buildSettingsItem(
+                  title: context.l10n.experimentalModes,
+                  icon: const FaIcon(FontAwesomeIcons.brain, color: Color(0xFF8E8E93), size: 20),
+                  showBetaTag: true,
+                  onTap: () {
+                    Navigator.of(context)
+                        .push(MaterialPageRoute(builder: (context) => const ExperimentalModesSettingsPage()));
                   },
                 ),
               ],
