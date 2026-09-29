@@ -1247,7 +1247,6 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         captureFailure != null &&
         _requiresFreshBleSessionForCaptureFailure(captureFailure);
     final usesLaunchCaptureResumeGrace = staleCaptureFailureBlocksResume && !_hasGrantedLaunchCaptureResumeGrace;
-    if (usesLaunchCaptureResumeGrace) _hasGrantedLaunchCaptureResumeGrace = true;
     if (!_isDeviceOperationCurrent(operationGeneration) ||
         !_isCurrentOwnerBoundDevice(device.id) ||
         _hasPendingFreshBleSessionRequirement() ||
@@ -1261,6 +1260,10 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         capture.recordingState == RecordingState.initialising) {
       return;
     }
+    // Every other gate has passed and resume is genuinely proceeding — only
+    // now is the one-shot launch grace actually spent, so a call blocked for
+    // an unrelated reason never burns it before a genuinely eligible call.
+    if (usesLaunchCaptureResumeGrace) _hasGrantedLaunchCaptureResumeGrace = true;
     final captureStarted = await _startDeviceCaptureWithRetry(device, operationGeneration);
     if (captureStarted) {
       _resetConnectedCaptureRecoveryBudget();
