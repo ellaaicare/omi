@@ -70,7 +70,7 @@ class _Connection:
         assert "$5::text" in query
         assert "$2::text" in query
         assert "guardian_mode" in query
-        assert "'OFF'" in query
+        assert "NULL" in query
         return {
             "id": args[0],
             "omi_uid": args[4],
