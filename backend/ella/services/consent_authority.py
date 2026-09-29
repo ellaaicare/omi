@@ -10,7 +10,12 @@ from fastapi.concurrency import run_in_threadpool
 from database import managed_cloud_consent
 from ella.services.ai_consent import (
     AiConsentService,
+    ConsentAuthorityUnavailable,
     ConsentSubmission,
+    LEGACY_POLICY_VERSION_V10,
+    SUPPORTED_CONSENT_POLICY_CONTRACTS,
+    consent_policy_contract,
+    is_exact_v11_upgrade_decline,
     managed_cloud_real_data_enabled,
 )
 from ella.services.provisioning import self_hosted_fresh_uid_relax_enabled
@@ -53,6 +58,96 @@ def _managed_authority_required(uid: str) -> bool:
     return managed_cloud_real_data_enabled(uid) or cloud_enabled or uid in cloud_uids or self_hosted_enabled
 
 
+def _exact_v10_grant_from_status(
+    uid: str,
+    status: dict[str, Any],
+) -> managed_cloud_consent.ManagedCloudGrant | None:
+    current = dict(status.get("consent") or {})
+    processor_ids = current.get("processor_ids")
+    v10_contract = SUPPORTED_CONSENT_POLICY_CONTRACTS[LEGACY_POLICY_VERSION_V10]
+    if not (
+        status.get("authority_state") == "authorized"
+        and current.get("decision") == "granted"
+        and consent_policy_contract(
+            current.get("policy_version"),
+            current.get("processor_set_hash"),
+            current.get("scope_version"),
+            current.get("scope_hash"),
+        )
+        == v10_contract
+        and isinstance(processor_ids, list)
+        and tuple(processor_ids) == v10_contract.processor_ids
+    ):
+        return None
+    return managed_cloud_consent.ManagedCloudGrant.from_mapping(uid, current)
+
+
+async def _record_v11_upgrade_decline_if_current_v10(
+    *,
+    uid: str,
+    submission: ConsentSubmission,
+    service: AiConsentService,
+    managed: bool,
+) -> dict[str, Any] | None:
+    if not is_exact_v11_upgrade_decline(submission):
+        return None
+
+    if await run_in_threadpool(service.is_policy_upgrade_decline_replay, uid, submission):
+        return await run_in_threadpool(
+            service.record_policy_upgrade_decline,
+            uid,
+            submission,
+            expected_current_receipt_id="",
+        )
+
+    status = await run_in_threadpool(service.status, uid)
+    if status.get("authority_state") == "unavailable":
+        raise ConsentAuthorityUnavailable("ai_consent_authority_unavailable")
+    grant = _exact_v10_grant_from_status(uid, status)
+    if grant is None:
+        if await run_in_threadpool(service.is_policy_upgrade_decline_replay, uid, submission):
+            return await run_in_threadpool(
+                service.record_policy_upgrade_decline,
+                uid,
+                submission,
+                expected_current_receipt_id="",
+            )
+        return None
+
+    payload: dict[str, Any] | None = None
+
+    async def record_decline() -> None:
+        nonlocal payload
+        payload = await run_in_threadpool(
+            service.record_policy_upgrade_decline,
+            uid,
+            submission,
+            expected_current_receipt_id=grant.consent_receipt_id,
+        )
+
+    if managed:
+        preserved = await managed_cloud_consent.run_with_exact_grant_current(
+            grant=grant,
+            action=record_decline,
+            allowed_successor_contracts=tuple(
+                (
+                    contract.version,
+                    contract.processor_set_hash,
+                    contract.scope_version,
+                    contract.scope_hash,
+                )
+                for contract in SUPPORTED_CONSENT_POLICY_CONTRACTS.values()
+            ),
+        )
+        if not preserved:
+            raise ConsentAuthorityUnavailable("ai_consent_upgrade_authority_changed")
+    else:
+        await record_decline()
+    if payload is None:
+        raise ConsentAuthorityUnavailable("ai_consent_authority_unavailable")
+    return payload
+
+
 async def submit_with_managed_cloud_authority(
     *,
     uid: str,
@@ -68,6 +163,14 @@ async def submit_with_managed_cloud_authority(
     a PostgreSQL error cannot create usable authority without a receipt.
     """
     managed = _managed_authority_required(uid)
+    upgrade_decline = await _record_v11_upgrade_decline_if_current_v10(
+        uid=uid,
+        submission=submission,
+        service=service,
+        managed=managed,
+    )
+    if upgrade_decline is not None:
+        return upgrade_decline
     if managed and submission.decision in {"declined", "revoked"}:
         await managed_cloud_consent.synchronize_denial(
             uid=uid,

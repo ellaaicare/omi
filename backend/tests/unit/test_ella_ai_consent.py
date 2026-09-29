@@ -571,6 +571,11 @@ def test_firestore_shaped_v10_user_can_upgrade_to_v11_through_api(monkeypatch):
         "_read_firestore_current_receipt",
         consent._read_firestore_current_receipt.to_wrap,
     )
+    monkeypatch.setattr(
+        consent,
+        "_record_firestore_policy_upgrade_decline",
+        consent._record_firestore_policy_upgrade_decline.to_wrap,
+    )
     monkeypatch.setattr(consent, "_repository", repository)
     monkeypatch.setattr(ai_consent, "get_ai_consent_service", lambda: service)
     monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED", "false")
@@ -579,12 +584,27 @@ def test_firestore_shaped_v10_user_can_upgrade_to_v11_through_api(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "")
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "false")
 
-    service.submit("user-upgrade", _v10_submission(request_id="request-v10-original"))
+    v10 = service.submit("user-upgrade", _v10_submission(request_id="request-v10-original"))
 
     app = FastAPI()
     app.include_router(ai_consent.router)
     app.dependency_overrides[get_firebase_token_identity] = lambda: FirebaseTokenIdentity(uid="user-upgrade")
-    response = TestClient(app).post(
+    client = TestClient(app)
+    decline_response = client.post(
+        "/v1/users/ai-consent",
+        json={
+            "decision": "declined",
+            "policy_version": consent.CURRENT_POLICY_VERSION,
+            "processor_set_hash": consent.CURRENT_PROCESSOR_SET_HASH,
+            "scope_version": consent.CURRENT_SCOPE_VERSION,
+            "scope_hash": consent.CURRENT_SCOPE_HASH,
+            "request_id": "request-v11-upgrade-decline",
+            "app_version": "1.0.0",
+            "build_number": "873",
+            "locale": "en-US",
+        },
+    )
+    response = client.post(
         "/v1/users/ai-consent",
         json={
             "decision": "granted",
@@ -599,6 +619,12 @@ def test_firestore_shaped_v10_user_can_upgrade_to_v11_through_api(monkeypatch):
         },
     )
 
+    assert decline_response.status_code == 200
+    decline_payload = decline_response.json()
+    assert decline_payload["authorized"] is True
+    assert decline_payload["upgrade_declined"] is True
+    assert decline_payload["consent"]["receipt_id"] == v10["receipt"]["receipt_id"]
+    assert decline_payload["receipt"]["receipt_kind"] == "policy_upgrade_decline"
     assert response.status_code == 200
     payload = response.json()
     assert payload["authorized"] is True
@@ -1913,6 +1939,133 @@ def test_v10_receipt_keeps_capture_working_without_forced_reconsent(monkeypatch)
 
     client = TestClient(app)
     assert client.get("/capture", params={"uid": "user-v10"}).status_code == 200
+
+
+def test_v11_upgrade_decline_preserves_exact_v10_authority(monkeypatch):
+    uid = "user-v10-upgrade-decline"
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    v10 = service.submit(uid, _v10_submission(request_id="request-v10-before-decline"))
+    denials = []
+    erasures = []
+
+    async def with_exact_grant(*, grant, action, allowed_successor_contracts):
+        assert grant.consent_receipt_id == v10["receipt"]["receipt_id"]
+        assert grant.policy_version == consent.LEGACY_POLICY_VERSION_V10
+        assert {contract[0] for contract in allowed_successor_contracts} == {
+            consent.LEGACY_POLICY_VERSION_V10,
+            consent.CURRENT_POLICY_VERSION,
+        }
+        await action()
+        return True
+
+    async def deny(**kwargs):
+        denials.append(kwargs)
+        return {"decision": kwargs["decision"]}
+
+    async def erase(uid_to_erase):
+        erasures.append(uid_to_erase)
+
+    monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", uid)
+    monkeypatch.setattr(
+        consent_authority.managed_cloud_consent,
+        "run_with_exact_grant_current",
+        with_exact_grant,
+    )
+    monkeypatch.setattr(consent_authority.managed_cloud_consent, "synchronize_denial", deny)
+    monkeypatch.setattr(consent_authority, "_erase_artwork_for_denial", erase)
+
+    declined = asyncio.run(
+        consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            submission=_submission(
+                decision="declined",
+                request_id="request-v11-upgrade-decline",
+            ),
+            service=service,
+        )
+    )
+
+    assert declined["authorized"] is True
+    assert declined["authority_state"] == "authorized"
+    assert declined["upgrade_declined"] is True
+    assert declined["consent"]["receipt_id"] == v10["receipt"]["receipt_id"]
+    assert declined["consent"]["policy_version"] == consent.LEGACY_POLICY_VERSION_V10
+    assert declined["receipt"]["decision"] == "declined"
+    assert declined["receipt"]["policy_version"] == consent.CURRENT_POLICY_VERSION
+    assert declined["receipt"]["receipt_kind"] == "policy_upgrade_decline"
+    assert service.status(uid)["consent"]["receipt_id"] == v10["receipt"]["receipt_id"]
+    assert denials == []
+    assert erasures == []
+
+
+def test_v11_upgrade_decline_then_v11_grant_authorizes_typesafe(monkeypatch):
+    uid = "user-v10-decline-then-v11"
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    service.submit(uid, _v10_submission(request_id="request-v10-before-later-v11"))
+    monkeypatch.setattr(consent, "_repository", repository)
+
+    declined = asyncio.run(
+        consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            submission=_submission(
+                decision="declined",
+                request_id="request-v11-decline-before-grant",
+            ),
+            service=service,
+        )
+    )
+    granted = service.submit(
+        uid,
+        _submission(request_id="request-v11-after-upgrade-decline"),
+    )
+
+    assert declined["authorized"] is True
+    assert granted["authorized"] is True
+    assert consent.resolve_ai_consent_egress_decision(uid).typesafe_egress_authorized is True
+
+
+def test_v11_upgrade_decline_replay_cannot_revoke_later_v11_grant(monkeypatch):
+    uid = "user-upgrade-decline-replay"
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    service.submit(uid, _v10_submission(request_id="request-v10-before-replay"))
+    decline = _submission(
+        decision="declined",
+        request_id="request-v11-upgrade-decline-replay",
+    )
+    denials = []
+
+    async def deny(**kwargs):
+        denials.append(kwargs)
+        return {"decision": kwargs["decision"]}
+
+    monkeypatch.setattr(consent_authority.managed_cloud_consent, "synchronize_denial", deny)
+    first = asyncio.run(
+        consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            submission=decline,
+            service=service,
+        )
+    )
+    v11 = service.submit(uid, _submission(request_id="request-v11-after-decline-replay"))
+    monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", uid)
+
+    replay = asyncio.run(
+        consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            submission=decline,
+            service=service,
+        )
+    )
+
+    assert first["receipt_created"] is True
+    assert replay["receipt_created"] is False
+    assert replay["authorized"] is True
+    assert replay["consent"]["receipt_id"] == v11["receipt"]["receipt_id"]
+    assert replay["consent"]["policy_version"] == consent.CURRENT_POLICY_VERSION
+    assert denials == []
 
 
 def test_build_871_refresh_semantics_keep_exact_v10_receipt_verified(monkeypatch):

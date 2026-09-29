@@ -17,6 +17,7 @@ from database.ella_provisioning import invalidate_self_hosted_authority_on_conne
 from database.runtime_targets import SELF_HOSTED_RUNTIME_TARGET_MODES
 
 AuthorityDecision = Literal["granted", "declined", "revoked"]
+ConsentContract = tuple[str, str, str, str]
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,12 @@ class ManagedCloudAuthorityDenied(RuntimeError):
 
 class ManagedCloudAuthorityUnavailable(RuntimeError):
     pass
+
+
+class _ExactGrantActionError(RuntimeError):
+    def __init__(self, original: Exception):
+        super().__init__(str(original))
+        self.original = original
 
 
 @dataclass(frozen=True)
@@ -121,6 +128,31 @@ def _grant_matches(row: asyncpg.Record, grant: ManagedCloudGrant) -> bool:
             str(row["consent_receipt_ref"] or ""),
             consent_receipt_ref(grant.account_uid, grant.consent_receipt_id),
         )
+    )
+
+
+def _grant_matches_allowed_successor(
+    row: asyncpg.Record,
+    grant: ManagedCloudGrant,
+    allowed_successor_contracts: tuple[ConsentContract, ...],
+) -> bool:
+    if row["decision"] != "granted" or not hmac.compare_digest(
+        str(row["profile_binding_id"] or ""),
+        grant.profile_binding_id,
+    ):
+        return False
+    row_contract = tuple(
+        str(row[field] or "")
+        for field in (
+            "policy_version",
+            "processor_set_hash",
+            "scope_version",
+            "scope_hash",
+        )
+    )
+    return any(
+        all(hmac.compare_digest(actual, expected) for actual, expected in zip(row_contract, contract))
+        for contract in allowed_successor_contracts
     )
 
 
@@ -406,6 +438,68 @@ async def lock_or_bootstrap_grant_on_connection(
     if row is None or not _grant_matches(row, grant):
         raise ManagedCloudAuthorityDenied("managed_cloud_authority_stale")
     return uuid.UUID(str(row["authority_epoch"]))
+
+
+async def run_with_exact_grant_current(
+    *,
+    grant: ManagedCloudGrant,
+    action: Callable[[], Awaitable[None]],
+    allowed_successor_contracts: tuple[ConsentContract, ...] = (),
+) -> bool:
+    """Run a receipt write while the expected or allowed successor grant is locked."""
+    grant.validate()
+    try:
+        pool = await voice_canary.get_pool()
+        async with pool.acquire() as conn:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                conn,
+                uid=grant.account_uid,
+            )
+            async with conn.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    conn,
+                    owner=owner,
+                )
+                await voice_canary.lock_runtime_authority_on_connection(
+                    conn,
+                    uid=grant.account_uid,
+                )
+                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                    conn,
+                    uid=grant.account_uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                row = await conn.fetchrow(
+                    """
+                    SELECT *
+                    FROM ella_managed_cloud_consent_authority
+                    WHERE user_id = $1
+                    FOR UPDATE
+                    """,
+                    user_id,
+                )
+                if row is None or not (
+                    _grant_matches(row, grant)
+                    or _grant_matches_allowed_successor(
+                        row,
+                        grant,
+                        allowed_successor_contracts,
+                    )
+                ):
+                    return False
+                try:
+                    await action()
+                except Exception as exc:
+                    raise _ExactGrantActionError(exc) from exc
+                return True
+    except _ExactGrantActionError as exc:
+        raise exc.original
+    except ManagedCloudAuthorityUnavailable:
+        raise
+    except Exception as exc:
+        logger.warning("managed_cloud_exact_consent_read_failed error=%s", type(exc).__name__)
+        raise ManagedCloudAuthorityUnavailable("managed_cloud_authority_unavailable") from exc
 
 
 async def synchronize_grant(
