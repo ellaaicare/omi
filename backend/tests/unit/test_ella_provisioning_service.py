@@ -3494,22 +3494,17 @@ def test_fresh_uid_relax_prefers_healthy_direct_binding_over_late_legacy_cluster
     assert runtime.provider == "hermes"
     assert runtime.runtime_target_mode == ""
 
-    # /v4/listen resolves through this same retained-compatible direct-binding
-    # path with target_mode="hermes-cloud-transcript". The direct lookup below
-    # ignores target_mode entirely, so transcript listen must resolve the
-    # binding rather than being rejected (regression guard for the prod-wide
-    # 403 that blocked every retained owner's /v4/listen call).
-    transcript_runtime = asyncio.run(
-        resolve_isolated_runtime(
-            "fresh-user",
-            repository=repository,
-            target_mode="hermes-cloud-transcript",
-        )
-    )
-    assert transcript_runtime.uid == "fresh-user"
-    assert transcript_runtime.provider == "hermes"
-
     with pytest.raises(ProvisioningError, match="self_hosted_runtime_target_mode_required") as unsupported:
+        asyncio.run(
+            resolve_isolated_runtime(
+                "fresh-user",
+                repository=repository,
+                target_mode="hermes-cloud-transcript",
+            )
+        )
+    assert unsupported.value.retryable is False
+
+    with pytest.raises(ProvisioningError, match="self_hosted_runtime_target_mode_required") as unsupported_guardian:
         asyncio.run(
             resolve_isolated_runtime(
                 "fresh-user",
@@ -3517,7 +3512,43 @@ def test_fresh_uid_relax_prefers_healthy_direct_binding_over_late_legacy_cluster
                 target_mode="hermes-cloud-guardian",
             )
         )
-    assert unsupported.value.retryable is False
+    assert unsupported_guardian.value.retryable is False
+
+
+def test_retained_owner_bypasses_self_hosted_lane_guard_for_transcript_listen(monkeypatch):
+    # /v4/listen resolves through this same retained-compatible direct-binding
+    # path with target_mode="hermes-cloud-transcript". Retained owners
+    # (runtime_bindings_enabled=True) resolve through the retained lane, which
+    # admits every mode, so the self-hosted lane guard must be skipped for
+    # them entirely -- regression guard for the prod-wide 403 that blocked
+    # every retained owner's /v4/listen call.
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_RELAX_FRESH_UID", "true")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED_UIDS", "retained-owner-user")
+    monkeypatch.setenv("ELLA_HERMES_GATEWAY_KEY_USER_A", "test-runtime-credential")
+    binding = {
+        **_extract(_runtime_receipt()),
+        "id": "55555555-5555-5555-5555-555555555555",
+        "omi_uid": "retained-owner-user",
+        "active": True,
+        "status": "active",
+        "revision": 2,
+        "user_status": "ACTIVE",
+    }
+    repository = FakeRepository(binding=binding, active_retained=True)
+
+    runtime = asyncio.run(
+        resolve_isolated_runtime(
+            "retained-owner-user",
+            repository=repository,
+            target_mode="hermes-cloud-transcript",
+        )
+    )
+
+    assert runtime.uid == "retained-owner-user"
+    assert runtime.provider == "hermes"
 
 
 def test_fresh_uid_relax_reports_missing_isolated_binding_as_provisioning(monkeypatch):
