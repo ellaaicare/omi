@@ -1685,6 +1685,43 @@ void main() {
     expect(capture.recordingState, RecordingState.deviceRecord);
   });
 
+  test('a stale capture failure from an interrupted Process Now does not block the first resume after launch',
+      () async {
+    final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    // Simulates the capture state observed right after a cold relaunch that
+    // follows a force-quit shortly after "Process Now" — the necklace BLE
+    // connection is already back, but the last-known capture diagnostic is
+    // still the failure that requires a fresh session.
+    final capture = _RecordingCaptureProvider(
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.necklaceConnectionUnavailable,
+    )..updateRecordingState(RecordingState.error);
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      automaticallyReconnectOnReady: false,
+    )
+      ..setProviders(capture)
+      ..connectedDevice = necklace
+      ..pairedDevice = necklace
+      ..setIsConnected(true);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    await provider.resumeKnownDeviceConnection(reason: 'cold launch after interrupted Process Now');
+
+    // Auto-resumes instead of parking behind "needs attention".
+    expect(capture.deviceStarts, 1);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+
+    // The one-time launch grace does not turn into a permanent bypass: a
+    // second, later failure of the same kind still requires a fresh session
+    // as before.
+    capture.updateRecordingState(RecordingState.error);
+    await provider.resumeKnownDeviceConnection(reason: 'later failure in the same session');
+
+    expect(capture.deviceStarts, 1, reason: 'the fresh-session gate still applies after the launch grace is spent');
+  });
+
   test('foreground resume preserves explicit pause without transport or socket startup', () async {
     final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await bindRememberedDeviceForCurrentTestAuthority(necklace);
