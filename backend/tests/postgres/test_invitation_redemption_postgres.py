@@ -230,10 +230,10 @@ async def _run_with_database(
                 "014_add_synthetic_invitation_operator_audit.sql",
                 "015_add_invitation_allowed_email_hash.sql",
                 "017_add_voice_entitlement_consent_revision.sql",
+                "019_add_voice_entitlement_consent_recovery_marker.sql",
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
-            assert await conn.fetchval(
-                """
+            assert await conn.fetchval("""
                 SELECT EXISTS (
                     SELECT 1
                     FROM information_schema.columns
@@ -242,8 +242,7 @@ async def _run_with_database(
                       AND column_name = 'profile_class'
                       AND is_nullable = 'NO'
                 )
-                """
-            )
+                """)
             assert await conn.fetchval("SELECT to_regclass('ella_invitation_targets') IS NOT NULL")
         await scenario(pool)
     finally:
@@ -1092,8 +1091,7 @@ def test_pilot_capacity_concurrent_sixth_denial_has_zero_side_effects_and_review
         assert len(receipts) == 5
 
         async with pool.acquire() as conn:
-            counts = await conn.fetchrow(
-                """
+            counts = await conn.fetchrow("""
                 SELECT
                     (SELECT COUNT(*) FROM ella_invitations) AS invitations,
                     (SELECT COUNT(*) FROM ella_invitation_capacity_reservations) AS reservations,
@@ -1103,8 +1101,7 @@ def test_pilot_capacity_concurrent_sixth_denial_has_zero_side_effects_and_review
                      FROM ella_invitation_capacity_reservations
                      WHERE pool_key = 'self_hosted_pilot'
                        AND state IN ('reserved', 'consumed')) AS pilot_slots
-                """
-            )
+                """)
         assert tuple(counts.values()) == (5, 5, 5, 5)
 
         await pilot_invite_admin._issue(
@@ -1118,15 +1115,13 @@ def test_pilot_capacity_concurrent_sixth_denial_has_zero_side_effects_and_review
             )
         )
         async with pool.acquire() as conn:
-            pools = await conn.fetch(
-                """
+            pools = await conn.fetch("""
                 SELECT pool_key, SUM(reserved_slots)::int AS slots
                 FROM ella_invitation_capacity_reservations
                 WHERE state IN ('reserved', 'consumed')
                 GROUP BY pool_key
                 ORDER BY pool_key
-                """
-            )
+                """)
         assert [(row["pool_key"], row["slots"]) for row in pools] == [
             ("app_review", 2),
             ("self_hosted_pilot", 5),
@@ -1183,8 +1178,7 @@ def test_pilot_issue_absolute_expiry_recovers_ambiguous_outcome_without_duplicat
         assert output.exists()
 
         async with pool.acquire() as conn:
-            counts = await conn.fetchrow(
-                """
+            counts = await conn.fetchrow("""
                 SELECT
                     (SELECT COUNT(*) FROM ella_invitations) AS invitations,
                     (SELECT COUNT(*) FROM ella_invitation_capacity_reservations) AS reservations,
@@ -1197,8 +1191,7 @@ def test_pilot_issue_absolute_expiry_recovers_ambiguous_outcome_without_duplicat
                      LEFT JOIN ella_invitations invitation
                        ON invitation.capacity_reservation_id = reservation.id
                      WHERE invitation.id IS NULL) AS orphan_reservations
-                """
-            )
+                """)
         assert tuple(counts.values()) == (1, 1, 1, 1, 0)
         rendered = repr(receipts)
         assert output.read_text(encoding="ascii").strip() not in rendered
@@ -2730,8 +2723,7 @@ def test_revocation_transaction_error_rolls_back_epoch_and_quarantine():
                 """,
                 uid,
             )
-            await conn.execute(
-                """
+            await conn.execute("""
                 CREATE FUNCTION fail_consent_quarantine() RETURNS trigger
                 LANGUAGE plpgsql AS $$
                 BEGIN
@@ -2743,8 +2735,7 @@ def test_revocation_transaction_error_rolls_back_epoch_and_quarantine():
                 FOR EACH ROW
                 WHEN (NEW.status = 'revoked')
                 EXECUTE FUNCTION fail_consent_quarantine();
-                """
-            )
+                """)
 
         with pytest.raises(managed_cloud_consent.ManagedCloudAuthorityUnavailable):
             await managed_cloud_consent.synchronize_denial(
@@ -2924,15 +2915,10 @@ def test_rate_limit_uses_hmac_refs_and_emits_authoritative_retry():
         assert error.value.retry_after_s and error.value.retry_after_s <= 900
 
         async with pool.acquire() as conn:
-            stored = [
-                dict(row)
-                for row in await conn.fetch(
-                    """
+            stored = [dict(row) for row in await conn.fetch("""
                     SELECT uid_ref_hmac, source_ref_hmac
                     FROM ella_invitation_rate_limit_events
-                    """
-                )
-            ]
+                    """)]
         assert len(stored) == 5
         serialized = json.dumps(stored)
         assert uid not in serialized
@@ -3090,8 +3076,7 @@ def test_operator_issue_redeem_is_hmac_only_single_use_and_idempotent():
             )
 
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
+            await conn.execute("""
                 CREATE FUNCTION fail_operator_issue_audit() RETURNS trigger
                 LANGUAGE plpgsql AS $$
                 BEGIN
@@ -3103,8 +3088,7 @@ def test_operator_issue_redeem_is_hmac_only_single_use_and_idempotent():
                 FOR EACH ROW
                 WHEN (NEW.event_type = 'operator_issued')
                 EXECUTE FUNCTION fail_operator_issue_audit();
-                """
-            )
+                """)
         with pytest.raises(
             asyncpg.PostgresError,
             match="injected operator precommit failure",
@@ -3120,13 +3104,11 @@ def test_operator_issue_redeem_is_hmac_only_single_use_and_idempotent():
                 "SELECT EXISTS (SELECT 1 FROM ella_invitations WHERE code_hmac = $1)",
                 invitations.code_hmac(OPERATOR_CONFIG, "BCDE2345"),
             )
-            await conn.execute(
-                """
+            await conn.execute("""
                 DROP TRIGGER fail_operator_issue_audit
                     ON ella_invitation_audit_receipts;
                 DROP FUNCTION fail_operator_issue_audit();
-                """
-            )
+                """)
         precommit_recovered = await _issue_operator_invitation(
             pool,
             uid=precommit_uid,
@@ -4163,15 +4145,11 @@ def test_kill_switch_after_invite_blocks_claim_and_preserves_pool(monkeypatch):
             )
         assert error.value.code == "runtime_admission_provider_disabled"
         async with pool.acquire() as conn:
-            binding = dict(
-                await conn.fetchrow(
-                    """
+            binding = dict(await conn.fetchrow("""
                     SELECT status, user_id, claim_job_id, claim_token
                     FROM ella_runtime_bindings
                     WHERE runtime_instance_id = 'kill-switch-a'
-                    """
-                )
-            )
+                    """))
         assert binding == {
             "status": "pool_available",
             "user_id": None,

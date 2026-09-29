@@ -129,6 +129,7 @@ async def _run_with_database(scenario):
                 "014_add_synthetic_invitation_operator_audit.sql",
                 "015_add_invitation_allowed_email_hash.sql",
                 "017_add_voice_entitlement_consent_revision.sql",
+                "019_add_voice_entitlement_consent_recovery_marker.sql",
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
         await scenario(pool)
@@ -179,12 +180,10 @@ async def _seed_grant(pool, uid):
 
 def test_guardian_mode_get_returns_only_exact_case_sensitive_firebase_subject():
     async def scenario(pool):
-        await pool.execute(
-            """
+        await pool.execute("""
             INSERT INTO users (omi_uid, guardian_mode)
             VALUES ('CaseUID', 'EMERGENCY_ONLY'), ('caseuid', 'ACTIVE_SUPPORT')
-            """
-        )
+            """)
         previous_pool = guardian._pool
         guardian._pool = pool
         try:
@@ -201,8 +200,7 @@ def test_guardian_mode_get_returns_only_exact_case_sensitive_firebase_subject():
 
 def test_mounted_guardian_alert_history_isolates_case_distinct_firebase_subjects(monkeypatch):
     async def scenario(pool):
-        await pool.execute(
-            """
+        await pool.execute("""
             CREATE TABLE guardian_queue (
                 id TEXT PRIMARY KEY,
                 uid TEXT NOT NULL,
@@ -279,8 +277,7 @@ def test_mounted_guardian_alert_history_isolates_case_distinct_firebase_subjects
                     'owner-local-trace', 'caseuid', 'imessage', 'lower-private-target', 'sent',
                     'LOWER_DELIVERY_PRIVATE', '2026-08-03T12:00:20Z', '2026-08-03T12:00:20Z'
                 );
-            """
-        )
+            """)
 
         before = {
             table: [tuple(row.values()) for row in await pool.fetch(f"SELECT * FROM {table} ORDER BY id")]
@@ -628,23 +625,19 @@ def test_omi_revoke_lock_blocks_broker_and_releases_without_deadlock():
             str(owner.profile_id),
         )
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
+            await conn.execute("""
                 CREATE FUNCTION hold_authority_revoke() RETURNS trigger AS $$
                 BEGIN
                     PERFORM pg_sleep(0.6);
                     RETURN NEW;
                 END
                 $$ LANGUAGE plpgsql
-                """
-            )
-            await conn.execute(
-                """
+                """)
+            await conn.execute("""
                 CREATE TRIGGER hold_authority_revoke
                 BEFORE UPDATE ON ella_managed_cloud_consent_authority
                 FOR EACH ROW EXECUTE FUNCTION hold_authority_revoke()
-                """
-            )
+                """)
 
         revoke = asyncio.create_task(
             managed_cloud_consent.synchronize_denial(
@@ -2032,8 +2025,7 @@ def test_v10_to_v11_grant_preserves_null_guardian_mode_under_production_constrai
             scope_hash=v10.scope_hash,
         )
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
+            await conn.execute("""
                 ALTER TABLE users
                 ADD CONSTRAINT guardian_mode_check
                 CHECK (
@@ -2042,8 +2034,7 @@ def test_v10_to_v11_grant_preserves_null_guardian_mode_under_production_constrai
                         'CUSTOM', 'CYBORG', 'CHATBOT', 'MEMORY_SUPPORT', 'DEMO'
                     )
                 )
-                """
-            )
+                """)
             user_id = await conn.fetchval(
                 """
                 INSERT INTO users (omi_uid, email, status, guardian_mode, profile_class)
@@ -2098,8 +2089,7 @@ def test_v11_denial_uses_null_guardian_mode_under_production_constraint():
     async def scenario(pool):
         uid = "synthetic-consent-v11-denial"
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
+            await conn.execute("""
                 ALTER TABLE users
                 ADD CONSTRAINT guardian_mode_check
                 CHECK (
@@ -2108,8 +2098,7 @@ def test_v11_denial_uses_null_guardian_mode_under_production_constraint():
                         'CUSTOM', 'CYBORG', 'CHATBOT', 'MEMORY_SUPPORT', 'DEMO'
                     )
                 )
-                """
-            )
+                """)
             user_id = await conn.fetchval(
                 """
                 INSERT INTO users (omi_uid, email, status, guardian_mode, profile_class)
@@ -2644,7 +2633,9 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
             await conn.execute(
                 """
                 UPDATE voice_entitlements
-                SET status = 'revoked', revision = revision + 1
+                SET status = 'revoked',
+                    managed_consent_recoverable = TRUE,
+                    revision = revision + 1
                 WHERE uid = $1
                 """,
                 uid,
@@ -2784,7 +2775,8 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
                 """
                 SELECT job.state, job.error_detail ->> 'reason' AS reason,
                        binding.status, binding.quarantine_reason,
-                       entitlement.status AS entitlement_status
+                       entitlement.status AS entitlement_status,
+                       entitlement.managed_consent_recoverable
                 FROM ella_provisioning_jobs job
                 JOIN ella_runtime_bindings binding
                   ON binding.user_id = job.user_id
@@ -2801,6 +2793,7 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
             "disabled",
             "managed_cloud_consent_revoked",
             "revoked",
+            True,
         )
 
         post_revoke_grant = _reissued_managed_cloud_grant(
@@ -2818,7 +2811,8 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
                 SELECT job.state, job.stage, job.retryable, job.error_code,
                        binding.status, binding.health_state, binding.active,
                        binding.quarantine_reason,
-                       entitlement.status AS entitlement_status
+                       entitlement.status AS entitlement_status,
+                       entitlement.managed_consent_recoverable
                 FROM ella_provisioning_jobs job
                 JOIN ella_runtime_bindings binding
                   ON binding.user_id = job.user_id
@@ -2839,6 +2833,7 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
             False,
             None,
             "revoked",
+            True,
         )
 
         await repository.stage_runtime_binding(
@@ -2915,6 +2910,7 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
                 """
                 UPDATE voice_entitlements
                 SET status = 'revoked',
+                    managed_consent_recoverable = TRUE,
                     operator_note = 'Owner-authorized Plato Grok voice restore for ella-ai#1171 on 2026-07-31',
                     fallback_policy = to_jsonb('{"order": [], "enabled": false}'::text),
                     revision = revision + 1
@@ -3007,18 +3003,22 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
         )
         async with pool.acquire() as observer:
             final_entitlement = await observer.fetchrow(
-                "SELECT status, revision FROM voice_entitlements WHERE uid = $1",
+                """
+                SELECT status, revision, managed_consent_recoverable
+                FROM voice_entitlements
+                WHERE uid = $1
+                """,
                 uid,
             )
         assert dict(final_entitlement) == {
             "status": "revoked",
             "revision": pre_retained_revision + 3,
+            "managed_consent_recoverable": False,
         }
 
-        # A later receipt for the same exact contract is a new consent-driven
-        # transition, not an operator override. Its authority revision must
-        # make the recovery receipt unique even though all lineage hashes stay
-        # byte-identical.
+        # A later receipt for the same exact contract cannot override operator
+        # authority. The consent authority may advance, but the entitlement
+        # remains non-recoverable and revoked.
         same_lineage_grant = managed_cloud_consent.ManagedCloudGrant(
             account_uid=uid,
             profile_uid=uid,
@@ -3041,11 +3041,15 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
                 uid=uid,
                 retained_authority_lineage=current_lineage,
             )
-            is True
+            is False
         )
         async with pool.acquire() as observer:
             rotated_entitlement = await observer.fetchrow(
-                "SELECT status, revision FROM voice_entitlements WHERE uid = $1",
+                """
+                SELECT status, revision, managed_consent_recoverable
+                FROM voice_entitlements
+                WHERE uid = $1
+                """,
                 uid,
             )
             rotated_receipts = await observer.fetchval(
@@ -3055,18 +3059,114 @@ def test_fresh_regrant_is_idempotent_and_recovers_only_exact_quarantine():
         if isinstance(rotated_receipts, str):
             rotated_receipts = json.loads(rotated_receipts)
         assert dict(rotated_entitlement) == {
-            "status": "active",
-            "revision": pre_retained_revision + 4,
+            "status": "revoked",
+            "revision": pre_retained_revision + 3,
+            "managed_consent_recoverable": False,
         }
-        assert {
-            "type": "retained_entitlement_recovered",
-            "content_free": True,
-            "policy_version": current_lineage.policy_version,
-            "processor_set_hash": current_lineage.processor_set_hash,
-            "scope_version": current_lineage.scope_version,
-            "scope_hash": current_lineage.scope_hash,
-            "authority_revision": same_lineage_authority["revision"],
-        } in rotated_receipts
+        assert all(
+            receipt.get("authority_revision") != same_lineage_authority["revision"]
+            for receipt in rotated_receipts
+            if receipt.get("type") == "retained_entitlement_recovered"
+        )
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_fresh_regrant_rejects_nullable_non_auto_entitlement_shape():
+    async def scenario(pool):
+        uid = "synthetic-fresh-regrant-nullable-shape"
+        grant = _managed_cloud_grant(uid)
+        authority = await managed_cloud_consent.synchronize_grant(
+            grant=grant,
+            allow_fresh_uid_bootstrap=True,
+            bootstrap_email="fresh-regrant-nullable@example.invalid",
+        )
+        user_id = authority["user_id"]
+        job_id = uuid.uuid4()
+        binding_id = uuid.uuid4()
+        repository = EllaProvisioningRepository(pool)
+        assert await repository.seed_voice_entitlement_if_absent(uid=uid) is True
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO ella_provisioning_jobs (
+                    id, user_id, target_schema_version, request_payload_hash,
+                    state, stage, retryable
+                ) VALUES (
+                    $1, $2, 'hermes-user-v1', 'synthetic-nullable-shape',
+                    'ready', 'active', FALSE
+                )
+                """,
+                job_id,
+                user_id,
+            )
+            await conn.execute(
+                """
+                INSERT INTO ella_runtime_bindings (
+                    id, user_id, account_user_id, profile_user_id,
+                    role, provider, profile_name, agent_id,
+                    template_version, model_policy_version, voice_policy_version,
+                    health_state, health_receipt, runtime_target_mode,
+                    status, active
+                ) VALUES (
+                    $1, $2, $2, $2,
+                    'user', 'hermes', 'nullable-shape-profile', 'nullable-shape-agent',
+                    'hermes-user-v1', 'model-policy-v1', 'voice-policy-v1',
+                    'healthy', '{}'::jsonb, 'hermes-chat',
+                    'active', TRUE
+                )
+                """,
+                binding_id,
+                user_id,
+            )
+
+        denied = await managed_cloud_consent.synchronize_denial(
+            uid=uid,
+            decision="revoked",
+        )
+        assert denied["decision"] == "revoked"
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE voice_entitlements SET operator_note = NULL WHERE uid = $1",
+                uid,
+            )
+
+        await managed_cloud_consent.synchronize_grant(
+            grant=_reissued_managed_cloud_grant(
+                grant,
+                receipt_id="synthetic-receipt-nullable-shape-regrant",
+            ),
+            allow_fresh_uid_bootstrap=True,
+            bootstrap_email="fresh-regrant-nullable@example.invalid",
+        )
+
+        async with pool.acquire() as observer:
+            state = await observer.fetchrow(
+                """
+                SELECT job.state, job.error_code,
+                       binding.status, binding.active,
+                       entitlement.status AS entitlement_status,
+                       entitlement.operator_note,
+                       entitlement.managed_consent_recoverable
+                FROM ella_provisioning_jobs job
+                JOIN ella_runtime_bindings binding ON binding.user_id = job.user_id
+                JOIN voice_entitlements entitlement ON entitlement.uid = $2
+                WHERE job.id = $1
+                """,
+                job_id,
+                uid,
+            )
+        assert tuple(state.values()) == (
+            "blocked",
+            "invitation_authority_revoked",
+            "disabled",
+            False,
+            "revoked",
+            None,
+            True,
+        )
+        assert await repository.seed_voice_entitlement_if_absent(uid=uid) is False
 
     asyncio.run(_run_with_database(scenario))
 

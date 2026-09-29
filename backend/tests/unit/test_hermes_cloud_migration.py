@@ -76,6 +76,7 @@ def test_runtime_authority_migrations_and_documented_psql_are_fail_fast_atomic()
         "012_create_account_profile_runtime_targets.sql",
         "013_create_managed_cloud_consent_authority.sql",
         "017_add_voice_entitlement_consent_revision.sql",
+        "019_add_voice_entitlement_consent_recovery_marker.sql",
     ):
         migration = (backend / "migrations" / filename).read_text(encoding="utf-8").strip()
         statements = [
@@ -95,8 +96,9 @@ def test_runtime_authority_migrations_and_documented_psql_are_fail_fast_atomic()
             or "012_create_account_profile_runtime_targets.sql" in line
             or "013_create_managed_cloud_consent_authority.sql" in line
             or "017_add_voice_entitlement_consent_revision.sql" in line
+            or "019_add_voice_entitlement_consent_recovery_marker.sql" in line
         )
     ]
-    assert len(documented_commands) == 4
+    assert len(documented_commands) == 5
     assert all("-X" in command for command in documented_commands)
     assert all("--set=ON_ERROR_STOP=1" in command for command in documented_commands)
