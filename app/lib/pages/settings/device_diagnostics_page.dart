@@ -81,7 +81,9 @@ class _DeviceDiagnosticsPageState extends State<DeviceDiagnosticsPage> {
     return 'native: cbStateAtLastStartScan=${native.lastStartScanCbState} '
         'scansStartedImmediately=${native.scansStartedImmediately} scansQueued=${native.scansQueued} '
         'queuedScansFired=${native.queuedScansFired} didDiscoverCount=${native.didDiscoverCount} '
-        'flutterApiNilDropCount=${native.flutterApiNilDropCount} nameArrivedLate=${native.nameArrivedLate}';
+        'flutterApiNilDropCount=${native.flutterApiNilDropCount} nameArrivedLate=${native.nameArrivedLate} '
+        'retrievedConnectedCount=${native.retrievedConnectedCount} retrievedKnownCount=${native.retrievedKnownCount} '
+        'restoredCount=${native.restoredCount}';
   }
 
   String _bridgeSummaryText() {

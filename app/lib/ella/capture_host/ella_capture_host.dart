@@ -29,6 +29,9 @@ class EllaNativeDiscoveryDiagnostics {
     required this.didDiscoverCount,
     required this.flutterApiNilDropCount,
     this.nameArrivedLate = 0,
+    this.retrievedConnectedCount = 0,
+    this.retrievedKnownCount = 0,
+    this.restoredCount = 0,
   });
 
   /// CoreBluetooth state observed at the most recent startScan call.
@@ -47,6 +50,18 @@ class EllaNativeDiscoveryDiagnostics {
   /// added a name or service UUID the first sighting lacked
   /// (ellaaicare/ella-ai#1280 RUN-016). See `OmiBleDiscoveryNaming.shouldForwardRediscovery`.
   final int nameArrivedLate;
+
+  /// Count of peripherals surfaced via `retrieveConnectedPeripherals(withServices:)`
+  /// (ellaaicare/ella-ai#1287 RUN-018).
+  final int retrievedConnectedCount;
+
+  /// Count of peripherals surfaced via `retrievePeripherals(withIdentifiers:)` for a
+  /// saved/paired device id (ellaaicare/ella-ai#1287 RUN-018).
+  final int retrievedKnownCount;
+
+  /// Count of peripherals delivered via `centralManager(_:willRestoreState:)`
+  /// (ellaaicare/ella-ai#1287 RUN-018).
+  final int restoredCount;
 }
 
 class EllaCaptureHost {
