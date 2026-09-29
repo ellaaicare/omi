@@ -173,6 +173,13 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   ({String deviceId, String ownerBinding, int authorityGeneration})? _freshBleSessionRequirement;
   bool _disposed = false;
 
+  // Consumed at most once per app launch (this DeviceProvider instance).
+  // Guards against a capture failure left over from a session that was
+  // interrupted mid-finalization (e.g. Process Now cut short by a
+  // force-quit) permanently parking necklace auto-resume behind a "needs
+  // attention" state — see `_resumeCaptureForConnectedDevice`.
+  bool _hasGrantedLaunchCaptureResumeGrace = false;
+
   void Function(BtDevice device)? onDeviceConnected;
 
   bool _isDeviceOperationCurrent(int generation) =>
@@ -1236,6 +1243,11 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   Future<void> _resumeCaptureForConnectedDevice(BtDevice device, int operationGeneration) async {
     final capture = captureProvider;
     final captureFailure = capture?.captureDiagnostics.failure;
+    final staleCaptureFailureBlocksResume = capture?.recordingState == RecordingState.error &&
+        captureFailure != null &&
+        _requiresFreshBleSessionForCaptureFailure(captureFailure);
+    final usesLaunchCaptureResumeGrace = staleCaptureFailureBlocksResume && !_hasGrantedLaunchCaptureResumeGrace;
+    if (usesLaunchCaptureResumeGrace) _hasGrantedLaunchCaptureResumeGrace = true;
     if (!_isDeviceOperationCurrent(operationGeneration) ||
         !_isCurrentOwnerBoundDevice(device.id) ||
         _hasPendingFreshBleSessionRequirement() ||
@@ -1244,9 +1256,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         capture.recordingState == RecordingState.pause ||
         capture.phoneCaptureOwnsMobileAudio ||
         SharedPreferencesUtil().ellaCaptureSource == EllaCaptureSource.phone.name ||
-        (capture.recordingState == RecordingState.error &&
-            captureFailure != null &&
-            _requiresFreshBleSessionForCaptureFailure(captureFailure)) ||
+        (staleCaptureFailureBlocksResume && !usesLaunchCaptureResumeGrace) ||
         capture.recordingState == RecordingState.deviceRecord ||
         capture.recordingState == RecordingState.initialising) {
       return;
