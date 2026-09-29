@@ -281,6 +281,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   bool _whisperStateLoading = false;
   bool _whisperStateReloadPending = false;
   bool _updatingWhispers = false;
+  final ValueNotifier<int> _whisperControlsRevision = ValueNotifier(0);
   Timer? _whisperNativeRetryTimer;
   int _whisperNativeRetryAttempt = 0;
   int _whisperReconcileGeneration = 0;
@@ -468,6 +469,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         _homeArtworkDisplayEpoch++;
         _selectedCaptureSource = null;
       });
+      _whisperControlsRevision.value++;
       _publishHomeArtworkStudioState();
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -513,6 +515,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _homeArtworkBackfillPollTimer?.cancel();
     _homeArtworkQueuePollTimer?.cancel();
     _whisperNativeRetryTimer?.cancel();
+    _whisperControlsRevision.dispose();
     _homeArtworkStudioState.dispose();
     super.dispose();
   }
@@ -1212,8 +1215,6 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _cancelWhisperNativeRetry();
     final info = await _readWhisperState();
     if (info == null) {
-      // "Couldn't be verified" / disabled-switch is reserved for the server
-      // GET itself failing — never for a native capture failure below.
       try {
         await _reconcileWhisperNative(false);
       } catch (_) {}
@@ -1223,6 +1224,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         _whispersVerified = false;
         _whisperReconnecting = false;
       });
+      _whisperControlsRevision.value++;
       return;
     }
     if (!mounted || generation != _whisperReconcileGeneration) return;
@@ -1245,6 +1247,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       _whispersVerified = nativeStarted;
       _whisperReconnecting = reconnecting;
     });
+    _whisperControlsRevision.value++;
     if (reconnecting) _scheduleWhisperNativeRetry(generation);
   }
 
@@ -1280,10 +1283,14 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
           _whispersVerified = true;
           _whisperReconnecting = false;
         });
+        _whisperControlsRevision.value++;
       }
       return;
     }
-    if (!_whisperReconnecting) setState(() => _whisperReconnecting = true);
+    if (!_whisperReconnecting) {
+      setState(() => _whisperReconnecting = true);
+      _whisperControlsRevision.value++;
+    }
     _scheduleWhisperNativeRetry(generation);
   }
 
@@ -1385,6 +1392,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       _whispersOn = resolvedEnabled;
       _whispersVerified = resolvedVerified;
     });
+    _whisperControlsRevision.value++;
     if (!success) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.anErrorOccurredTryAgain)));
     }
@@ -1943,30 +1951,33 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       useSafeArea: true,
       backgroundColor: EllaColors.bgPrimary,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
-      builder: (sheetContext) => _HomeControlsSheet(
-        selectedCaptureSource: selectedCaptureSource,
-        showWhispers: showGuardianSurfaces,
-        whispersEnabled: _whispersOn,
-        whispersVerified: _whispersVerified,
-        whispersReconnecting: _whisperReconnecting,
-        whispersUpdating: _updatingWhispers,
-        onWhispersChanged: (enabled) {
-          Navigator.of(sheetContext).pop();
-          unawaited(_setWhispers(enabled));
-        },
-        onWhispersHistory: () {
-          Navigator.of(sheetContext).pop();
-          Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage()));
-        },
-        onManageNecklace: () {
-          Navigator.of(sheetContext).pop();
-          Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ConnectDevicePage()));
-        },
-        onReconnectNecklace: onReconnectNecklace,
-        onConfirmLegacyNecklace: () {
-          Navigator.of(sheetContext).pop();
-          onConfirmLegacyNecklace();
-        },
+      builder: (sheetContext) => ValueListenableBuilder<int>(
+        valueListenable: _whisperControlsRevision,
+        builder: (context, _, __) => _HomeControlsSheet(
+          selectedCaptureSource: selectedCaptureSource,
+          showWhispers: showGuardianSurfaces,
+          whispersEnabled: _whispersOn,
+          whispersVerified: _whispersVerified,
+          whispersReconnecting: _whisperReconnecting,
+          whispersUpdating: _updatingWhispers,
+          onWhispersChanged: (enabled) {
+            Navigator.of(sheetContext).pop();
+            unawaited(_setWhispers(enabled));
+          },
+          onWhispersHistory: () {
+            Navigator.of(sheetContext).pop();
+            Navigator.of(this.context).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage()));
+          },
+          onManageNecklace: () {
+            Navigator.of(sheetContext).pop();
+            Navigator.of(this.context).push(MaterialPageRoute(builder: (_) => const ConnectDevicePage()));
+          },
+          onReconnectNecklace: onReconnectNecklace,
+          onConfirmLegacyNecklace: () {
+            Navigator.of(sheetContext).pop();
+            onConfirmLegacyNecklace();
+          },
+        ),
       ),
     );
   }
