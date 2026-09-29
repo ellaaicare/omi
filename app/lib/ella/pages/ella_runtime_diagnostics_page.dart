@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
+import 'package:omi/pages/settings/device_diagnostics_page.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/services/connectivity_service.dart';
@@ -115,12 +116,60 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
                 value:
                     '${_transcriptionSocketState(capture.transcriptionSocketState)} · ${capture.wsSendRateKbps.toStringAsFixed(2)} kbps',
               ),
+              const SizedBox(height: 6),
+              _DeviceDiagnosticsEntryRow(
+                onTap: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const DeviceDiagnosticsPage()),
+                  );
+                },
+              ),
             ],
           );
         },
       ),
     );
   }
+}
+
+/// Always-available entry into [DeviceDiagnosticsPage], regardless of the
+/// ELLA_PUBLIC_BUILD flag — this screen is itself reached via a long-press
+/// on the Home greeting rather than the Developer-settings unlock, so it
+/// stays reachable on public builds where that unlock is disabled.
+class _DeviceDiagnosticsEntryRow extends StatelessWidget {
+  const _DeviceDiagnosticsEntryRow({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+        key: const Key('runtime-diagnostics-device-diagnostics-entry'),
+        onTap: onTap,
+        child: EllaCardSurface(
+          borderRadius: 14,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        context.l10n.deviceDiagnostics,
+                        style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w700),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(context.l10n.deviceDiagnosticsDescription, style: EllaTextStyles.caption),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.chevron_right, size: 20),
+              ],
+            ),
+          ),
+        ),
+      );
 }
 
 class _DiagnosticRow extends StatelessWidget {
