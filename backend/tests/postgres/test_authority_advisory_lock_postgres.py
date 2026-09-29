@@ -2360,6 +2360,176 @@ def test_v11_upgrade_decline_preserves_v10_authority_and_active_entitlement(monk
     asyncio.run(_run_with_database(scenario))
 
 
+def test_current_v11_decline_retains_v10_authority_without_runtime_quarantine(monkeypatch):
+    async def scenario(pool):
+        uid = "synthetic-current-v11-typesafe-withdrawal"
+        repository = ai_consent.InMemoryConsentRepository()
+        service = ai_consent.AiConsentService(repository)
+        monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", uid)
+        monkeypatch.setattr(ai_consent, "_repository", repository)
+        user_id = await pool.fetchval(
+            """
+            INSERT INTO users (omi_uid, email, profile_class)
+            VALUES ($1, $2, 'synthetic')
+            RETURNING id
+            """,
+            uid,
+            "current-v11-withdrawal@example.invalid",
+        )
+
+        await consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            verified_email="current-v11-withdrawal@example.invalid",
+            submission=ai_consent.ConsentSubmission(
+                decision="granted",
+                policy_version=ai_consent.LEGACY_POLICY_VERSION_V10,
+                processor_set_hash=ai_consent.LEGACY_V10_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+                request_id="synthetic-v10-before-current-v11-withdrawal",
+                app_version="1.0.0",
+                build_number="873",
+                locale="en-US",
+            ),
+            service=service,
+        )
+        assert await EllaProvisioningRepository(pool).seed_voice_entitlement_if_absent(uid=uid) is True
+        await pool.execute(
+            """
+            INSERT INTO ella_provisioning_jobs (
+                user_id, target_schema_version, request_payload_hash,
+                state, stage, retryable
+            ) VALUES ($1, 'hermes-user-v1', 'synthetic', 'ready', 'active', FALSE)
+            """,
+            user_id,
+        )
+        await pool.execute(
+            """
+            INSERT INTO ella_runtime_bindings (
+                user_id, account_user_id, profile_user_id,
+                role, provider, profile_name, agent_id,
+                template_version, model_policy_version, voice_policy_version,
+                health_state, health_receipt, runtime_target_mode,
+                status, active
+            ) VALUES (
+                $1, $1, $1,
+                'user', 'hermes', 'current-v11-profile', 'current-v11-agent',
+                'hermes-user-v1', 'model-policy-v1', 'voice-policy-v1',
+                'healthy', '{}'::jsonb, 'hermes-chat', 'active', TRUE
+            )
+            """,
+            user_id,
+        )
+        v11 = await consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            submission=ai_consent.ConsentSubmission(
+                decision="granted",
+                policy_version=ai_consent.CURRENT_POLICY_VERSION,
+                processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+                request_id="synthetic-current-v11-before-withdrawal",
+                app_version="1.0.0",
+                build_number="873",
+                locale="en-US",
+            ),
+            service=service,
+        )
+        before = await pool.fetchrow(
+            """
+            SELECT authority.authority_epoch,
+                   authority.revision AS authority_revision,
+                   authority.policy_version,
+                   entitlement.status AS entitlement_status,
+                   entitlement.revision AS entitlement_revision,
+                   entitlement.managed_consent_recoverable,
+                   binding.status AS binding_status, binding.active,
+                   binding.health_state, binding.quarantine_reason,
+                   binding.revision AS binding_revision,
+                   job.state AS job_state, job.stage AS job_stage,
+                   job.updated_at AS job_updated_at
+            FROM users account
+            JOIN ella_managed_cloud_consent_authority authority ON authority.user_id = account.id
+            JOIN voice_entitlements entitlement ON entitlement.uid = account.omi_uid
+            JOIN ella_runtime_bindings binding ON binding.user_id = account.id
+            JOIN ella_provisioning_jobs job ON job.user_id = account.id
+            WHERE account.omi_uid = $1
+            """,
+            uid,
+        )
+
+        declined = await consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            submission=ai_consent.ConsentSubmission(
+                decision="declined",
+                policy_version=ai_consent.CURRENT_POLICY_VERSION,
+                processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+                request_id="synthetic-current-v11-typesafe-withdrawal",
+                app_version="1.0.0",
+                build_number="873",
+                locale="en-US",
+            ),
+            service=service,
+        )
+        after = await pool.fetchrow(
+            """
+            SELECT authority.authority_epoch,
+                   authority.revision AS authority_revision,
+                   authority.decision,
+                   authority.consent_receipt_ref,
+                   authority.policy_version,
+                   entitlement.status AS entitlement_status,
+                   entitlement.revision AS entitlement_revision,
+                   entitlement.managed_consent_recoverable,
+                   binding.status AS binding_status, binding.active,
+                   binding.health_state, binding.quarantine_reason,
+                   binding.revision AS binding_revision,
+                   job.state AS job_state, job.stage AS job_stage,
+                   job.updated_at AS job_updated_at
+            FROM users account
+            JOIN ella_managed_cloud_consent_authority authority ON authority.user_id = account.id
+            JOIN voice_entitlements entitlement ON entitlement.uid = account.omi_uid
+            JOIN ella_runtime_bindings binding ON binding.user_id = account.id
+            JOIN ella_provisioning_jobs job ON job.user_id = account.id
+            WHERE account.omi_uid = $1
+            """,
+            uid,
+        )
+
+        assert before["policy_version"] == ai_consent.CURRENT_POLICY_VERSION
+        assert dict(after) == {
+            "authority_epoch": before["authority_epoch"],
+            "authority_revision": before["authority_revision"] + 1,
+            "decision": "granted",
+            "consent_receipt_ref": managed_cloud_consent.consent_receipt_ref(
+                uid,
+                declined["consent"]["receipt_id"],
+            ),
+            "policy_version": ai_consent.LEGACY_POLICY_VERSION_V10,
+            "entitlement_status": before["entitlement_status"],
+            "entitlement_revision": before["entitlement_revision"],
+            "managed_consent_recoverable": False,
+            "binding_status": before["binding_status"],
+            "active": before["active"],
+            "health_state": before["health_state"],
+            "quarantine_reason": before["quarantine_reason"],
+            "binding_revision": before["binding_revision"],
+            "job_state": before["job_state"],
+            "job_stage": before["job_stage"],
+            "job_updated_at": before["job_updated_at"],
+        }
+        assert declined["authorized"] is True
+        assert declined["consent"]["policy_version"] == ai_consent.LEGACY_POLICY_VERSION_V10
+        assert declined["consent"]["receipt_kind"] == "policy_upgrade_retained_v10"
+        assert declined["receipt"]["receipt_kind"] == "policy_upgrade_decline"
+        assert declined["consent"]["receipt_id"] != v11["receipt"]["receipt_id"]
+        assert ai_consent.resolve_ai_consent_egress_decision(uid).typesafe_egress_authorized is False
+
+    asyncio.run(_run_with_database(scenario))
+
+
 def test_v11_upgrade_decline_then_v11_grant_authorizes_typesafe(monkeypatch):
     async def scenario(_pool):
         uid = "synthetic-v11-upgrade-decline-then-grant"
@@ -2581,6 +2751,155 @@ def test_concurrent_v11_grant_supersedes_classified_upgrade_decline_without_deni
         assert declined["consent"]["receipt_id"] == v11["receipt"]["receipt_id"]
         assert declined["receipt"]["receipt_kind"] == "policy_upgrade_decline"
         assert v10["receipt"]["receipt_id"] != v11["receipt"]["receipt_id"]
+        assert ai_consent.resolve_ai_consent_egress_decision(uid).typesafe_egress_authorized is True
+        assert denial_calls == []
+        assert erasure_calls == []
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_concurrent_v11_grant_supersedes_current_v11_withdrawal(monkeypatch):
+    async def scenario(pool):
+        uid = "synthetic-concurrent-current-v11-withdrawal"
+        repository = ai_consent.InMemoryConsentRepository()
+        service = ai_consent.AiConsentService(repository)
+        monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", uid)
+        monkeypatch.setattr(ai_consent, "_repository", repository)
+        await pool.execute(
+            """
+            INSERT INTO users (omi_uid, email, profile_class)
+            VALUES ($1, $2, 'synthetic')
+            """,
+            uid,
+            "concurrent-current-v11@example.invalid",
+        )
+        await consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            verified_email="concurrent-current-v11@example.invalid",
+            submission=ai_consent.ConsentSubmission(
+                decision="granted",
+                policy_version=ai_consent.LEGACY_POLICY_VERSION_V10,
+                processor_set_hash=ai_consent.LEGACY_V10_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+                request_id="synthetic-v10-before-concurrent-current-v11",
+                app_version="1.0.0",
+                build_number="873",
+                locale="en-US",
+            ),
+            service=service,
+        )
+        first_v11 = await consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            submission=ai_consent.ConsentSubmission(
+                decision="granted",
+                policy_version=ai_consent.CURRENT_POLICY_VERSION,
+                processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+                request_id="synthetic-first-v11-before-concurrent-withdrawal",
+                app_version="1.0.0",
+                build_number="873",
+                locale="en-US",
+            ),
+            service=service,
+        )
+        before_epoch = await pool.fetchval(
+            """
+            SELECT authority.authority_epoch
+            FROM users account
+            JOIN ella_managed_cloud_consent_authority authority ON authority.user_id = account.id
+            WHERE account.omi_uid = $1
+            """,
+            uid,
+        )
+
+        original_exact_grant = managed_cloud_consent.run_with_exact_grant_current
+        withdrawal_classified = asyncio.Event()
+        release_withdrawal = asyncio.Event()
+        denial_calls = []
+        erasure_calls = []
+
+        async def pause_before_authority_lock(**kwargs):
+            assert kwargs["grant"].consent_receipt_id == first_v11["receipt"]["receipt_id"]
+            assert kwargs["allowed_successor_contracts"] == ()
+            withdrawal_classified.set()
+            await release_withdrawal.wait()
+            return await original_exact_grant(**kwargs)
+
+        async def record_denial(**kwargs):
+            denial_calls.append(kwargs)
+            return {"decision": kwargs["decision"]}
+
+        async def record_erasure(uid_to_erase):
+            erasure_calls.append(uid_to_erase)
+
+        monkeypatch.setattr(
+            consent_authority.managed_cloud_consent,
+            "run_with_exact_grant_current",
+            pause_before_authority_lock,
+        )
+        monkeypatch.setattr(consent_authority.managed_cloud_consent, "synchronize_denial", record_denial)
+        monkeypatch.setattr(consent_authority, "_erase_artwork_for_denial", record_erasure)
+
+        withdrawal = asyncio.create_task(
+            consent_authority.submit_with_managed_cloud_authority(
+                uid=uid,
+                submission=ai_consent.ConsentSubmission(
+                    decision="declined",
+                    policy_version=ai_consent.CURRENT_POLICY_VERSION,
+                    processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                    scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                    scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+                    request_id="synthetic-concurrent-current-v11-withdrawal",
+                    app_version="1.0.0",
+                    build_number="873",
+                    locale="en-US",
+                ),
+                service=service,
+            )
+        )
+        await withdrawal_classified.wait()
+        winning_v11 = await consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            submission=ai_consent.ConsentSubmission(
+                decision="granted",
+                policy_version=ai_consent.CURRENT_POLICY_VERSION,
+                processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+                request_id="synthetic-winning-v11-over-current-withdrawal",
+                app_version="1.0.0",
+                build_number="873",
+                locale="en-US",
+            ),
+            service=service,
+        )
+        release_withdrawal.set()
+        with pytest.raises(ai_consent.ConsentAuthorityUnavailable):
+            await withdrawal
+
+        state = await pool.fetchrow(
+            """
+            SELECT authority.authority_epoch, authority.decision,
+                   authority.consent_receipt_ref, authority.policy_version
+            FROM users account
+            JOIN ella_managed_cloud_consent_authority authority ON authority.user_id = account.id
+            WHERE account.omi_uid = $1
+            """,
+            uid,
+        )
+        assert dict(state) == {
+            "authority_epoch": before_epoch,
+            "decision": "granted",
+            "consent_receipt_ref": managed_cloud_consent.consent_receipt_ref(
+                uid,
+                winning_v11["receipt"]["receipt_id"],
+            ),
+            "policy_version": ai_consent.CURRENT_POLICY_VERSION,
+        }
+        status = service.status(uid)
+        assert status["consent"]["receipt_id"] == winning_v11["receipt"]["receipt_id"]
         assert ai_consent.resolve_ai_consent_egress_decision(uid).typesafe_egress_authorized is True
         assert denial_calls == []
         assert erasure_calls == []

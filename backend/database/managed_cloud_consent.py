@@ -509,6 +509,7 @@ async def synchronize_grant(
     bootstrap_email: str = "",
     grant_is_current: Optional[Callable[[], Awaitable[bool]]] = None,
     compatible_runtime_contracts: tuple[ConsentContract, ...] = (),
+    preserve_runtime_required: bool = False,
 ) -> dict[str, Any]:
     """Publish a Firestore grant into the PostgreSQL ordering authority.
 
@@ -566,6 +567,8 @@ async def synchronize_grant(
                     """,
                     user_id,
                 )
+                if row is None and preserve_runtime_required:
+                    raise ManagedCloudAuthorityDenied("managed_cloud_runtime_continuity_required")
                 if row is None:
                     row = await conn.fetchrow(
                         """
@@ -633,6 +636,8 @@ async def synchronize_grant(
                         grant.scope_version,
                         grant.scope_hash,
                     )
+                elif preserve_runtime_required:
+                    raise ManagedCloudAuthorityDenied("managed_cloud_runtime_continuity_required")
                 else:
                     row = await conn.fetchrow(
                         """
