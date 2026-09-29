@@ -205,7 +205,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
         await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const DeleteAccount()));
       },
     );
-    if (!mounted) return;
+    if (!mounted || accepted == null) return;
     final captureProvider = context.read<CaptureProvider>();
     if (accepted == true) {
       await captureProvider.streamDeviceRecording(device: context.read<DeviceProvider>().connectedDevice);
