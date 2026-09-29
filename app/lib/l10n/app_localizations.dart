@@ -18744,7 +18744,7 @@ abstract class AppLocalizations {
   /// Description shown at the top of the Experimental modes settings page
   ///
   /// In en, this message translates to:
-  /// **'Opt-in, memory-less modes that react to what Omi hears in real time. These do not change your default Home or Whispers experience.'**
+  /// **'Preview modes that will require server activation and rate-limit support before they can be enabled.'**
   String get experimentalModesDescription;
 
   /// Title for the Einstein experimental mode toggle

@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
-import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
@@ -28,11 +27,10 @@ String resolveCoreWhisperMode(List<String> features) =>
 
 /// Settings page presenting the single Whispers/experimental modes surface:
 /// the core Whispers mode picker (memory_support, active_support,
-/// emergency_only - memory_support is the default) plus the opt-in,
-/// memory-less experimental modes (einstein, cyborg) from the backend mode
-/// registry. Experimental modes are OFF by default; enabling one only opts
-/// the user into that mode's notifications - it never changes the default
-/// Home/Whispers behavior.
+/// emergency_only - memory_support is the default) plus unavailable previews
+/// for the experimental modes (einstein, cyborg) from the backend mode
+/// registry. Experimental modes cannot be enabled until authoritative server
+/// activation and rate-limit support exist.
 class ExperimentalModesSettingsPage extends StatefulWidget {
   const ExperimentalModesSettingsPage({super.key});
 
@@ -41,8 +39,6 @@ class ExperimentalModesSettingsPage extends StatefulWidget {
 }
 
 class _ExperimentalModesSettingsPageState extends State<ExperimentalModesSettingsPage> {
-  late Set<String> _enabledModeIds;
-
   final bool _coreModesAvailable = allowsGuardianCareSurface();
   bool _coreModeLoading = true;
   String _selectedCoreMode = defaultCoreWhisperMode;
@@ -51,7 +47,6 @@ class _ExperimentalModesSettingsPageState extends State<ExperimentalModesSetting
   @override
   void initState() {
     super.initState();
-    _enabledModeIds = SharedPreferencesUtil().enabledExperimentalModeIds.toSet();
     if (_coreModesAvailable) {
       _loadCoreMode();
     } else {
@@ -87,17 +82,6 @@ class _ExperimentalModesSettingsPageState extends State<ExperimentalModesSetting
     if (!result.isSuccess) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.anErrorOccurredTryAgain)));
     }
-  }
-
-  void _toggleExperimentalMode(String id, bool value) {
-    setState(() {
-      if (value) {
-        _enabledModeIds.add(id);
-      } else {
-        _enabledModeIds.remove(id);
-      }
-    });
-    SharedPreferencesUtil().enabledExperimentalModeIds = _enabledModeIds.toList();
   }
 
   IconData _iconFor(String id) {
@@ -194,11 +178,7 @@ class _ExperimentalModesSettingsPageState extends State<ExperimentalModesSetting
                         color: const Color(0xFF1C1C1E),
                         borderRadius: BorderRadius.circular(20),
                       ),
-                      child: Column(
-                        children: [
-                          for (final key in coreWhisperModeKeys) _buildCoreModeRow(key),
-                        ],
-                      ),
+                      child: Column(children: [for (final key in coreWhisperModeKeys) _buildCoreModeRow(key)]),
                     ),
               const SizedBox(height: 32),
             ],
@@ -211,10 +191,7 @@ class _ExperimentalModesSettingsPageState extends State<ExperimentalModesSetting
                 style: TextStyle(color: Colors.grey.shade400, fontSize: 14, height: 1.5),
               ),
             ),
-            for (final mode in ExperimentalMode.registry) ...[
-              _buildModeCard(mode),
-              const SizedBox(height: 12),
-            ],
+            for (final mode in ExperimentalMode.registry) ...[_buildModeCard(mode), const SizedBox(height: 12)],
           ],
         ),
       ),
@@ -282,19 +259,13 @@ class _ExperimentalModesSettingsPageState extends State<ExperimentalModesSetting
     return Container(
       key: Key('experimental_mode_card_${mode.id}'),
       padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
-        borderRadius: BorderRadius.circular(20),
-      ),
+      decoration: BoxDecoration(color: const Color(0xFF1C1C1E), borderRadius: BorderRadius.circular(20)),
       child: Row(
         children: [
           Container(
             width: 40,
             height: 40,
-            decoration: BoxDecoration(
-              color: const Color(0xFF2A2A2E),
-              borderRadius: BorderRadius.circular(10),
-            ),
+            decoration: BoxDecoration(color: const Color(0xFF2A2A2E), borderRadius: BorderRadius.circular(10)),
             child: Center(child: FaIcon(_iconFor(mode.id), color: Colors.grey.shade400, size: 16)),
           ),
           const SizedBox(width: 14),
@@ -304,28 +275,19 @@ class _ExperimentalModesSettingsPageState extends State<ExperimentalModesSetting
               children: [
                 Text(
                   _titleFor(context, mode.id),
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w500,
-                  ),
+                  style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500),
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  _descriptionFor(context, mode.id),
-                  style: TextStyle(
-                    color: Colors.grey.shade400,
-                    fontSize: 13,
-                  ),
+                  '${context.l10n.preview}, ${context.l10n.comingSoon}',
+                  style: const TextStyle(color: Color(0xFF9CA3AF), fontSize: 12, fontWeight: FontWeight.w600),
                 ),
+                const SizedBox(height: 4),
+                Text(_descriptionFor(context, mode.id), style: TextStyle(color: Colors.grey.shade400, fontSize: 13)),
               ],
             ),
           ),
-          Switch(
-            value: _enabledModeIds.contains(mode.id),
-            onChanged: (value) => _toggleExperimentalMode(mode.id, value),
-            activeColor: const Color(0xFF6366F1),
-          ),
+          const Switch(value: false, onChanged: null),
         ],
       ),
     );

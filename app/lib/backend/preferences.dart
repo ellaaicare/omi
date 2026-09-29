@@ -261,11 +261,6 @@ class SharedPreferencesUtil {
 
   bool get dailyReflectionEnabled => getBool('dailyReflectionEnabled', defaultValue: true);
 
-  // Opt-in experimental mode ids (e.g. "einstein", "cyborg") the user enabled - empty by default.
-  set enabledExperimentalModeIds(List<String> value) => saveStringList('enabledExperimentalModeIds', value);
-
-  List<String> get enabledExperimentalModeIds => getStringList('enabledExperimentalModeIds');
-
   set demoMode(bool value) => saveBool('demoMode', isPublicBuild ? false : value);
 
   bool get demoMode => !isPublicBuild && (isTodayDesignPreviewEnabled || getBool('demoMode', defaultValue: false));

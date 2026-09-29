@@ -1,19 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:omi/backend/preferences.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/models/experimental_mode.dart';
 import 'package:omi/pages/settings/experimental_modes_settings_page.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-
-  setUp(() async {
-    SharedPreferences.setMockInitialValues({});
-    await SharedPreferencesUtil.init();
-  });
 
   group('resolveCoreWhisperMode', () {
     test('defaults to MEMORY_SUPPORT (G4 product decision), not ACTIVE_SUPPORT', () {
@@ -43,16 +36,16 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(430, 1200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(
-      MaterialApp(
+      const MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: const ExperimentalModesSettingsPage(),
+        home: ExperimentalModesSettingsPage(),
       ),
     );
     await tester.pumpAndSettle();
   }
 
-  testWidgets('registry modes render and are OFF by default', (tester) async {
+  testWidgets('registry modes render as unavailable previews', (tester) async {
     await pumpPage(tester);
 
     expect(find.text('Whispers & Experimental Modes'), findsOneWidget);
@@ -63,11 +56,12 @@ void main() {
     final switches = tester.widgetList<Switch>(find.byType(Switch)).toList();
     expect(switches, hasLength(ExperimentalMode.registry.length));
     expect(switches.every((s) => s.value == false), isTrue);
-
-    expect(SharedPreferencesUtil().enabledExperimentalModeIds, isEmpty);
+    expect(switches.every((s) => s.onChanged == null), isTrue);
+    expect(find.text('Preview, Coming Soon'), findsNWidgets(ExperimentalMode.registry.length));
   });
 
-  testWidgets('this is one consolidated settings surface: core Whispers modes stay build-gated, '
+  testWidgets(
+      'this is one consolidated settings surface: core Whispers modes stay build-gated, '
       'experimental modes never are', (tester) async {
     await pumpPage(tester);
 
@@ -88,7 +82,7 @@ void main() {
     expect(find.byKey(const Key('experimental_mode_card_cyborg')), findsOneWidget);
   });
 
-  testWidgets('toggling a mode persists the opt-in selection', (tester) async {
+  testWidgets('tapping a preview cannot enable a mode', (tester) async {
     await pumpPage(tester);
 
     final einsteinCard = find.byKey(const Key('experimental_mode_card_einstein'));
@@ -97,17 +91,12 @@ void main() {
     await tester.tap(einsteinSwitch);
     await tester.pumpAndSettle();
 
-    expect(SharedPreferencesUtil().enabledExperimentalModeIds, ['einstein']);
-    expect(tester.widget<Switch>(einsteinSwitch).value, isTrue);
+    expect(tester.widget<Switch>(einsteinSwitch).value, isFalse);
+    expect(tester.widget<Switch>(einsteinSwitch).onChanged, isNull);
 
     final cyborgCard = find.byKey(const Key('experimental_mode_card_cyborg'));
     final cyborgSwitch = find.descendant(of: cyborgCard, matching: find.byType(Switch));
     expect(tester.widget<Switch>(cyborgSwitch).value, isFalse);
-
-    // Toggling back off removes it from the persisted selection.
-    await tester.tap(einsteinSwitch);
-    await tester.pumpAndSettle();
-
-    expect(SharedPreferencesUtil().enabledExperimentalModeIds, isEmpty);
+    expect(tester.widget<Switch>(cyborgSwitch).onChanged, isNull);
   });
 }

@@ -10141,12 +10141,13 @@ class AppLocalizationsLt extends AppLocalizations {
 
   @override
   String get noDiagnosticsYet => 'No diagnostics recorded yet. Run a device scan to populate this.';
+
   @override
   String get experimentalModes => 'Experimental modes';
 
   @override
   String get experimentalModesDescription =>
-      'Opt-in, memory-less modes that react to what Omi hears in real time. These do not change your default Home or Whispers experience.';
+      'Preview modes that will require server activation and rate-limit support before they can be enabled.';
 
   @override
   String get experimentalModeEinsteinTitle => 'Einstein';
@@ -10160,6 +10161,7 @@ class AppLocalizationsLt extends AppLocalizations {
 
   @override
   String get experimentalModeCyborgDescription => 'Reacts to everything it hears.';
+
   @override
   String get whispersAndExperimentalModesTitle => 'Whispers & Experimental Modes';
 

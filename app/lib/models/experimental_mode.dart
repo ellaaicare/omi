@@ -4,23 +4,19 @@ enum ExperimentalModeEngine { omiRealtimeTemplate, hermes }
 /// How an experimental mode's output reaches the user.
 enum ExperimentalModeOutputChannel { nativePushNotification, whisperAudio }
 
-/// A single opt-in experimental mode.
+/// Metadata for an experimental mode preview.
 ///
 /// This mirrors the id/engine/output_channel fields of the backend mode
-/// registry (companion PR, out of scope here). Both starter modes are
-/// memory-less, fast, and opt-in-only - never the default Home/Whispers behavior.
+/// registry (companion PR, out of scope here). These modes remain unavailable
+/// until the server provides authoritative activation and rate-limit support.
 class ExperimentalMode {
   final String id;
   final ExperimentalModeEngine engine;
   final ExperimentalModeOutputChannel outputChannel;
 
-  const ExperimentalMode({
-    required this.id,
-    required this.engine,
-    required this.outputChannel,
-  });
+  const ExperimentalMode({required this.id, required this.engine, required this.outputChannel});
 
-  /// Static starter list matching the backend registry ids.
+  /// Static preview list matching the backend registry ids.
   ///
   /// Known follow-up: fetch this from the backend mode registry API once it
   /// exists on this branch, instead of hardcoding it here.
