@@ -15,6 +15,30 @@ void main() {
     await SharedPreferencesUtil.init();
   });
 
+  group('resolveCoreWhisperMode', () {
+    test('defaults to MEMORY_SUPPORT (G4 product decision), not ACTIVE_SUPPORT', () {
+      expect(resolveCoreWhisperMode(const []), 'MEMORY_SUPPORT');
+      expect(defaultCoreWhisperMode, 'MEMORY_SUPPORT');
+    });
+
+    test('picks whichever core mode is present in the saved features', () {
+      expect(resolveCoreWhisperMode(const ['MEMORY_SUPPORT']), 'MEMORY_SUPPORT');
+      expect(resolveCoreWhisperMode(const ['ACTIVE_SUPPORT']), 'ACTIVE_SUPPORT');
+      expect(resolveCoreWhisperMode(const ['EMERGENCY_ONLY']), 'EMERGENCY_ONLY');
+    });
+
+    test('falls back to the default for an unrelated or absent feature set', () {
+      // Whispers off entirely.
+      expect(resolveCoreWhisperMode(const []), defaultCoreWhisperMode);
+      // A feature/override outside the core three (e.g. MAXIMUM_AWARENESS).
+      expect(resolveCoreWhisperMode(const ['MAXIMUM_AWARENESS']), defaultCoreWhisperMode);
+    });
+
+    test('core mode key order is memory_support, active_support, emergency_only', () {
+      expect(coreWhisperModeKeys, ['MEMORY_SUPPORT', 'ACTIVE_SUPPORT', 'EMERGENCY_ONLY']);
+    });
+  });
+
   Future<void> pumpPage(WidgetTester tester) async {
     await tester.binding.setSurfaceSize(const Size(430, 1200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -31,6 +55,8 @@ void main() {
   testWidgets('registry modes render and are OFF by default', (tester) async {
     await pumpPage(tester);
 
+    expect(find.text('Whispers & Experimental Modes'), findsOneWidget);
+    expect(find.text('Experimental modes'), findsOneWidget);
     expect(find.text('Einstein'), findsOneWidget);
     expect(find.text('Cyborg'), findsOneWidget);
 
@@ -39,6 +65,27 @@ void main() {
     expect(switches.every((s) => s.value == false), isTrue);
 
     expect(SharedPreferencesUtil().enabledExperimentalModeIds, isEmpty);
+  });
+
+  testWidgets('this is one consolidated settings surface: core Whispers modes stay build-gated, '
+      'experimental modes never are', (tester) async {
+    await pumpPage(tester);
+
+    // The core Whispers mode picker is gated by the same build/identity
+    // policy as the rest of the Guardian surface (allowsGuardianCareSurface),
+    // which is unavailable in the default test build (no ELLA_GUARDIAN_ENABLED,
+    // no authenticated guardian identity). It must not appear as a second,
+    // separate surface elsewhere - and it must not crash or block the
+    // experimental modes section when unavailable.
+    expect(find.text('Whispers mode'), findsNothing);
+    for (final key in coreWhisperModeKeys) {
+      expect(find.byKey(Key('core_whisper_mode_row_$key')), findsNothing);
+    }
+
+    // The opt-in experimental modes section is never gated by that policy.
+    expect(find.text('Experimental modes'), findsOneWidget);
+    expect(find.byKey(const Key('experimental_mode_card_einstein')), findsOneWidget);
+    expect(find.byKey(const Key('experimental_mode_card_cyborg')), findsOneWidget);
   });
 
   testWidgets('toggling a mode persists the opt-in selection', (tester) async {
