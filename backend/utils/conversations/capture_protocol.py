@@ -334,7 +334,7 @@ def _claim_reconnect_authority_transaction(
                 candidate_generation,
                 candidate_owner_token,
             )
-            and conversation.get('capture_state') == 'drained'
+            and conversation.get('capture_state') in {'drained', 'active'}
             and _strict_lease_expired(conversation, now, 'capture_lease_expires_at')
             and not conversation.get('capture_finalization_claim_token')
             and _optional_lease_absent_or_expired(
