@@ -19,6 +19,9 @@ final class OmiBleDiagnostics {
     private var didDiscoverCount: Int64 = 0
     private var flutterApiNilDropCount: Int64 = 0
     private var nameArrivedLate: Int64 = 0
+    private var retrievedConnectedCount: Int64 = 0
+    private var retrievedKnownCount: Int64 = 0
+    private var restoredCount: Int64 = 0
 
     private init() {}
 
@@ -63,6 +66,30 @@ final class OmiBleDiagnostics {
         nameArrivedLate += 1
     }
 
+    /// Records a peripheral surfaced via `retrieveConnectedPeripherals(withServices:)`.
+    /// ellaaicare/ella-ai#1287 RUN-018.
+    func recordRetrievedConnected() {
+        lock.lock()
+        defer { lock.unlock() }
+        retrievedConnectedCount += 1
+    }
+
+    /// Records a peripheral surfaced via `retrievePeripherals(withIdentifiers:)`
+    /// for a saved/paired device id. ellaaicare/ella-ai#1287 RUN-018.
+    func recordRetrievedKnown() {
+        lock.lock()
+        defer { lock.unlock() }
+        retrievedKnownCount += 1
+    }
+
+    /// Records a peripheral delivered via `centralManager(_:willRestoreState:)`.
+    /// ellaaicare/ella-ai#1287 RUN-018.
+    func recordRestored() {
+        lock.lock()
+        defer { lock.unlock() }
+        restoredCount += 1
+    }
+
     func snapshot() -> BleNativeDiscoveryDiagnostics {
         lock.lock()
         defer { lock.unlock() }
@@ -73,7 +100,10 @@ final class OmiBleDiagnostics {
             queuedScansFired: queuedScansFired,
             didDiscoverCount: didDiscoverCount,
             flutterApiNilDropCount: flutterApiNilDropCount,
-            nameArrivedLate: nameArrivedLate
+            nameArrivedLate: nameArrivedLate,
+            retrievedConnectedCount: retrievedConnectedCount,
+            retrievedKnownCount: retrievedKnownCount,
+            restoredCount: restoredCount
         )
     }
 }
@@ -247,6 +277,60 @@ final class OmiBleManager: NSObject {
                 self?.stopScan()
             }
         }
+    }
+
+    /// ellaaicare/ella-ai#1287 RUN-018: surface peripherals a fresh scan can never see because
+    /// they are already connected system-wide (source (a)) or already paired on this device
+    /// (source (b)) — a connected peripheral stops advertising, so `scanForPeripherals` never
+    /// reports it. Neither call involves an active scan, so neither carries an advertised name;
+    /// only whatever CoreBluetooth's cached `peripheral.name` happens to be.
+    func retrieveConnectedAndKnownPeripherals(
+        serviceUuids: [String],
+        knownDeviceIds: [String],
+        completion: @escaping (Result<[BlePeripheral], Error>) -> Void
+    ) {
+        let cbServiceUuids = serviceUuids.compactMap { CBUUID(string: $0) }
+        let connectedPeripherals = cbServiceUuids.isEmpty ? [] : centralManager.retrieveConnectedPeripherals(withServices: cbServiceUuids)
+
+        let cbKnownIds = knownDeviceIds.compactMap { UUID(uuidString: $0) }
+        let knownPeripherals = cbKnownIds.isEmpty ? [] : centralManager.retrievePeripherals(withIdentifiers: cbKnownIds)
+
+        let connectedInfos = connectedPeripherals.map(retrievalInfo)
+        let knownInfos = knownPeripherals.map(retrievalInfo)
+        let tagged = OmiBleRetrievalTagging.mergeTaggedCandidates(connected: connectedInfos, known: knownInfos)
+
+        var byUuid: [String: CBPeripheral] = [:]
+        for peripheral in connectedPeripherals { byUuid[peripheralUuidString(peripheral)] = peripheral }
+        for peripheral in knownPeripherals { byUuid[peripheralUuidString(peripheral)] = peripheral }
+
+        var result: [BlePeripheral] = []
+        for (info, source) in tagged {
+            if let peripheral = byUuid[info.uuid] {
+                peripheral.delegate = self
+                peripherals[info.uuid] = peripheral
+            }
+            switch source {
+            case .retrievedConnected:
+                OmiBleDiagnostics.shared.recordRetrievedConnected()
+            case .retrievedKnown:
+                OmiBleDiagnostics.shared.recordRetrievedKnown()
+            }
+            result.append(BlePeripheral(
+                uuid: info.uuid,
+                name: info.name ?? "",
+                rssi: 0,
+                serviceUuids: info.serviceUuids,
+                hasAdvertisedLocalName: false,
+                hasPeripheralName: info.name != nil,
+                source: source.rawValue
+            ))
+        }
+        completion(.success(result))
+    }
+
+    private func retrievalInfo(_ peripheral: CBPeripheral) -> OmiBleRetrievedPeripheralInfo {
+        let serviceUuids = (peripheral.services ?? []).map { fullUuidString($0.uuid) }
+        return OmiBleRetrievedPeripheralInfo(uuid: peripheralUuidString(peripheral), name: peripheral.name, serviceUuids: serviceUuids)
     }
 
     func stopScan() {
@@ -806,6 +890,23 @@ extension OmiBleManager: CBCentralManagerDelegate {
                 } else {
                     peripheral.discoverServices(nil)
                 }
+
+                // ellaaicare/ella-ai#1287 RUN-018: also surface this peripheral through the
+                // discovery pipeline, source-tagged "restored". State restoration never involves
+                // an active scan, so there is no advertised name here either — only whatever
+                // CoreBluetooth's cached peripheral.name happens to be.
+                OmiBleDiagnostics.shared.recordRestored()
+                let restoredServiceUuids = (peripheral.services ?? []).map { fullUuidString($0.uuid) }
+                let restoredPeripheral = BlePeripheral(
+                    uuid: uuid,
+                    name: peripheral.name ?? "",
+                    rssi: 0,
+                    serviceUuids: restoredServiceUuids,
+                    hasAdvertisedLocalName: false,
+                    hasPeripheralName: peripheral.name != nil,
+                    source: "restored"
+                )
+                flutterApi?.onPeripheralDiscovered(peripheral: restoredPeripheral) { _ in }
             }
             flutterApi?.onStateRestored(peripheralUuids: uuids) { _ in }
         }
@@ -860,7 +961,8 @@ extension OmiBleManager: CBCentralManagerDelegate {
             rssi: Int64(RSSI.intValue),
             serviceUuids: serviceUuids,
             hasAdvertisedLocalName: nameResult.hasAdvertisedLocalName,
-            hasPeripheralName: nameResult.hasPeripheralName
+            hasPeripheralName: nameResult.hasPeripheralName,
+            source: "scan"
         )
 
         flutterApi?.onPeripheralDiscovered(peripheral: blePeripheral) { _ in }
