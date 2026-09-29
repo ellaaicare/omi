@@ -384,8 +384,8 @@ class _UnavailableEntitlementTransport implements EllaEntitlementTransport {
 
   @override
   Future<EllaEntitlement> fetch() => Future.error(
-        const EllaEntitlementRequestException(EllaEntitlementFailureKind.unavailable, supportCode: 'ELLA-ACCESS-RETRY'),
-      );
+    const EllaEntitlementRequestException(EllaEntitlementFailureKind.unavailable, supportCode: 'ELLA-ACCESS-RETRY'),
+  );
 
   @override
   Future<EllaEntitlement> redeem(String code) => throw UnimplementedError();

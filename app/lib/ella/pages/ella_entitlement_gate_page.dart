@@ -230,7 +230,8 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
           );
         }
 
-        final showWaitlist = entitlement?.status == EllaEntitlementStatus.none &&
+        final showWaitlist =
+            entitlement?.status == EllaEntitlementStatus.none &&
             provider.inviteError != EllaInviteRedemptionError.invalid &&
             provider.inviteError != EllaInviteRedemptionError.expired &&
             provider.inviteError != EllaInviteRedemptionError.rateLimited &&
