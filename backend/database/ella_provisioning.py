@@ -223,7 +223,13 @@ async def invalidate_self_hosted_authority_on_connection(
             managed_consent_recoverable = $4,
             updated_at = CURRENT_TIMESTAMP
         WHERE entitlement.uid = $1
-          AND entitlement.status <> 'revoked'
+          AND (
+              entitlement.status <> 'revoked'
+              OR (
+                  $4 IS FALSE
+                  AND entitlement.managed_consent_recoverable IS TRUE
+              )
+          )
           AND ($3::uuid IS NULL OR entitlement.invitation_id = $3)
           AND EXISTS (
               SELECT 1
