@@ -670,6 +670,15 @@ class SharedPreferencesUtil {
 
   set permissionStoreRecordingsEnabled(bool value) => saveBool('permissionStoreRecordingsEnabled', value);
 
+  /// Set when the user explicitly stops necklace capture (tapping Stop), and
+  /// cleared the next time necklace capture actually starts. Survives a
+  /// force-quit/relaunch so a reconnect on the next launch does not silently
+  /// restart recording the user deliberately stopped, while a plain
+  /// force-quit while recording (this flag untouched) still auto-resumes.
+  bool get necklaceCaptureExplicitlyStopped => getBool('necklaceCaptureExplicitlyStopped');
+
+  set necklaceCaptureExplicitlyStopped(bool value) => saveBool('necklaceCaptureExplicitlyStopped', value);
+
   bool get unlimitedLocalStorageEnabled => getBool('unlimitedLocalStorageEnabled');
 
   set unlimitedLocalStorageEnabled(bool value) => saveBool('unlimitedLocalStorageEnabled', value);
