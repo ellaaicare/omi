@@ -1685,6 +1685,122 @@ void main() {
     expect(capture.recordingState, RecordingState.deviceRecord);
   });
 
+  test('a stale capture failure from an interrupted Process Now does not block the first resume after launch',
+      () async {
+    final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    // Simulates the capture state observed right after a cold relaunch that
+    // follows a force-quit shortly after "Process Now" — the necklace BLE
+    // connection is already back, but the last-known capture diagnostic is
+    // still the failure that requires a fresh session.
+    final capture = _RecordingCaptureProvider(
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.necklaceConnectionUnavailable,
+    )..updateRecordingState(RecordingState.error);
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      automaticallyReconnectOnReady: false,
+    )
+      ..setProviders(capture)
+      ..connectedDevice = necklace
+      ..pairedDevice = necklace
+      ..setIsConnected(true);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    await provider.resumeKnownDeviceConnection(reason: 'cold launch after interrupted Process Now');
+
+    // Auto-resumes instead of parking behind "needs attention".
+    expect(capture.deviceStarts, 1);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+
+    // The one-time launch grace does not turn into a permanent bypass: a
+    // second, later failure of the same kind still requires a fresh session
+    // as before.
+    capture.updateRecordingState(RecordingState.error);
+    await provider.resumeKnownDeviceConnection(reason: 'later failure in the same session');
+
+    expect(capture.deviceStarts, 1, reason: 'the fresh-session gate still applies after the launch grace is spent');
+  });
+
+  test('an unrelated gate failure must not consume the auto-resume grace', () async {
+    final boundNecklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    final unboundNecklace = BtDevice(name: 'Other', id: 'necklace-2', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(boundNecklace);
+    final capture = _RecordingCaptureProvider(
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.necklaceConnectionUnavailable,
+    )..updateRecordingState(RecordingState.error);
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      automaticallyReconnectOnReady: false,
+    )
+      ..setProviders(capture)
+      // Connected to a device that is not the current owner-bound necklace —
+      // an unrelated gate inside _resumeCaptureForConnectedDevice, distinct
+      // from the stale-capture-failure gate the launch grace exists for.
+      ..connectedDevice = unboundNecklace
+      ..pairedDevice = unboundNecklace
+      ..setIsConnected(true);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    await provider.resumeKnownDeviceConnection(reason: 'connected to an unbound device');
+
+    // Blocked by the unrelated owner-binding gate, not by (or using) the
+    // stale-capture-failure grace.
+    expect(capture.deviceStarts, 0);
+    expect(capture.recordingState, RecordingState.error);
+
+    // The same stale capture failure is still present, and the device is now
+    // the genuinely owner-bound necklace — this call is otherwise eligible
+    // and must still be able to spend the untouched launch grace.
+    provider
+      ..connectedDevice = boundNecklace
+      ..pairedDevice = boundNecklace;
+    await provider.resumeKnownDeviceConnection(reason: 'now connected to the owner-bound device');
+
+    expect(capture.deviceStarts, 1, reason: 'the launch grace must still be available for the eligible call');
+    expect(capture.recordingState, RecordingState.deviceRecord);
+  });
+
+  test(
+      'a BLE-ready event must not spend the launch grace, but resumeKnownDeviceConnection can still use it '
+      'on a failure genuinely inherited from a previous launch', () async {
+    final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(necklace);
+    // The capture failure is already present the moment this DeviceProvider
+    // instance starts checking it — standing in for a failure inherited from
+    // before this process existed (e.g. a Process Now interrupted by a
+    // force-quit on a previous launch), with no disconnect attempt made
+    // during this instance's own lifetime.
+    final capture = _RecordingCaptureProvider(
+      forcedDiagnosticFailure: CaptureDiagnosticFailure.physicalAudioUnavailable,
+    )..updateRecordingState(RecordingState.error);
+    final service = _FakeDeviceService(DeviceServiceStatus.init);
+    final provider = DeviceProvider(deviceService: service)
+      ..setProviders(capture)
+      ..connectedDevice = necklace
+      ..pairedDevice = necklace
+      ..setIsConnected(true);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+
+    // The native BLE stack becoming ready is not itself proof of a fresh app
+    // launch (it can also fire mid-session, e.g. after Bluetooth cycling) —
+    // it must not spend the one-shot grace.
+    service.publish(DeviceServiceStatus.ready);
+    await pumpEventQueue();
+    expect(capture.deviceStarts, 0, reason: 'a bare BLE-ready event must not use the launch grace');
+    expect(capture.recordingState, RecordingState.error);
+
+    // resumeKnownDeviceConnection — the app-resumed / cold-launch-retained-
+    // connection checkpoint — still has the untouched grace available and
+    // auto-resumes exactly once on the same, still-stale failure.
+    await provider.resumeKnownDeviceConnection(reason: 'app resumed');
+
+    expect(capture.deviceStarts, 1);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+  });
+
   test('foreground resume preserves explicit pause without transport or socket startup', () async {
     final necklace = BtDevice(name: 'Friend', id: 'necklace-1', type: DeviceType.omi, rssi: -30);
     await bindRememberedDeviceForCurrentTestAuthority(necklace);

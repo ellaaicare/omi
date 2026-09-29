@@ -8,6 +8,7 @@ import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_legal_links.dart';
 import 'package:omi/utils/ella_pilot_locale_policy.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/widgets/dialog.dart';
 
 class AiConsentSheet extends StatefulWidget {
   static final Uri privacyPolicyUri = EllaLegalLinks.privacy;
@@ -44,8 +45,8 @@ class AiConsentSheet extends StatefulWidget {
     }
     return showModalBottomSheet<bool>(
       context: context,
-      isDismissible: false,
-      enableDrag: false,
+      isDismissible: reviewMode,
+      enableDrag: reviewMode,
       isScrollControlled: true,
       useSafeArea: true,
       backgroundColor: EllaColors.paper,
@@ -155,6 +156,19 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
 
   Future<void> _requestDeletion() async {
     if (_isSubmitting || widget.onRequestDeletion == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => getDialog(
+        dialogContext,
+        () => Navigator.of(dialogContext).pop(false),
+        () => Navigator.of(dialogContext).pop(true),
+        context.l10n.areYouSure,
+        context.l10n.deleteAccountConfirm,
+        okButtonText: context.l10n.aiConsentDeleteDataAction,
+        cancelButtonText: context.l10n.ellaCancel,
+      ),
+    );
+    if (confirmed != true || !mounted) return;
     Navigator.of(context).pop(false);
     await widget.onRequestDeletion!.call();
   }
@@ -201,11 +215,21 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
   Widget build(BuildContext context) {
     final bodyStyle = Theme.of(context).textTheme.bodyLarge?.copyWith(color: EllaColors.textSecondary, height: 1.5);
     return PopScope(
-      canPop: false,
+      canPop: widget.reviewMode,
       child: Padding(
         padding: EdgeInsets.only(bottom: 12 + MediaQuery.paddingOf(context).bottom),
         child: Column(
           children: [
+            if (widget.reviewMode)
+              Align(
+                alignment: Alignment.topRight,
+                child: IconButton(
+                  key: const Key('ai-consent-review-close'),
+                  icon: const Icon(Icons.close, color: EllaColors.textSecondary),
+                  tooltip: MaterialLocalizations.of(context).closeButtonTooltip,
+                  onPressed: _isSubmitting ? null : () => Navigator.of(context).maybePop(),
+                ),
+              ),
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.fromLTRB(24, 16, 24, 12),
@@ -350,14 +374,19 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                       ),
                     ),
                   ),
-                  if (widget.reviewMode && widget.onRequestDeletion != null)
+                  if (widget.reviewMode && widget.onRequestDeletion != null) ...[
+                    const SizedBox(height: 16),
+                    const Divider(height: 1, color: EllaColors.cardEdge),
+                    const SizedBox(height: 8),
                     TextButton(
+                      key: const Key('ai-consent-delete-account'),
                       onPressed: _isSubmitting ? null : _requestDeletion,
                       child: Text(
                         context.l10n.aiConsentDeleteDataAction,
-                        style: const TextStyle(fontSize: 16, color: EllaColors.error),
+                        style: TextStyle(fontSize: 14, color: EllaColors.error.withValues(alpha: 0.85)),
                       ),
                     ),
+                  ],
                 ],
               ),
             ),

@@ -173,6 +173,13 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   ({String deviceId, String ownerBinding, int authorityGeneration})? _freshBleSessionRequirement;
   bool _disposed = false;
 
+  // Consumed at most once per app launch (this DeviceProvider instance).
+  // Guards against a capture failure left over from a session that was
+  // interrupted mid-finalization (e.g. Process Now cut short by a
+  // force-quit) permanently parking necklace auto-resume behind a "needs
+  // attention" state — see `_resumeCaptureForConnectedDevice`.
+  bool _hasGrantedLaunchCaptureResumeGrace = false;
+
   void Function(BtDevice device)? onDeviceConnected;
 
   bool _isDeviceOperationCurrent(int generation) =>
@@ -1220,7 +1227,13 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     if (capture?.isPaused == true || capture?.recordingState == RecordingState.pause) return;
     if (isConnected) {
       final device = connectedDevice;
-      if (device != null) await _resumeCaptureForConnectedDevice(device, _deviceOperationGeneration);
+      if (device != null) {
+        await _resumeCaptureForConnectedDevice(
+          device,
+          _deviceOperationGeneration,
+          allowLaunchCaptureResumeGrace: true,
+        );
+      }
       return;
     }
     final stored = _rememberedDeviceForCurrentAuthority();
@@ -1233,9 +1246,26 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     await periodicConnect(reason, boundDeviceOnly: true, operationGeneration: generation);
   }
 
-  Future<void> _resumeCaptureForConnectedDevice(BtDevice device, int operationGeneration) async {
+  Future<void> _resumeCaptureForConnectedDevice(
+    BtDevice device,
+    int operationGeneration, {
+    bool allowLaunchCaptureResumeGrace = false,
+  }) async {
     final capture = captureProvider;
     final captureFailure = capture?.captureDiagnostics.failure;
+    final staleCaptureFailureBlocksResume = capture?.recordingState == RecordingState.error &&
+        captureFailure != null &&
+        _requiresFreshBleSessionForCaptureFailure(captureFailure);
+    // The grace only ever applies to a failure that is already stale the
+    // very first time resumeKnownDeviceConnection (app-resumed/cold-launch
+    // retained connection) checks it — never to the opportunistic
+    // already-connected branch of periodicConnect's scan loop, which also
+    // fires for reasons unrelated to a fresh app launch (BLE readiness
+    // cycling, the recurring reconnection timer, post-disconnect retries).
+    // A failure surfacing there is far more likely to have been produced,
+    // or still be mid-recovery, within this same process's lifetime.
+    final usesLaunchCaptureResumeGrace =
+        allowLaunchCaptureResumeGrace && staleCaptureFailureBlocksResume && !_hasGrantedLaunchCaptureResumeGrace;
     if (!_isDeviceOperationCurrent(operationGeneration) ||
         !_isCurrentOwnerBoundDevice(device.id) ||
         _hasPendingFreshBleSessionRequirement() ||
@@ -1244,13 +1274,15 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         capture.recordingState == RecordingState.pause ||
         capture.phoneCaptureOwnsMobileAudio ||
         SharedPreferencesUtil().ellaCaptureSource == EllaCaptureSource.phone.name ||
-        (capture.recordingState == RecordingState.error &&
-            captureFailure != null &&
-            _requiresFreshBleSessionForCaptureFailure(captureFailure)) ||
+        (staleCaptureFailureBlocksResume && !usesLaunchCaptureResumeGrace) ||
         capture.recordingState == RecordingState.deviceRecord ||
         capture.recordingState == RecordingState.initialising) {
       return;
     }
+    // Every other gate has passed and resume is genuinely proceeding — only
+    // now is the one-shot launch grace actually spent, so a call blocked for
+    // an unrelated reason never burns it before a genuinely eligible call.
+    if (usesLaunchCaptureResumeGrace) _hasGrantedLaunchCaptureResumeGrace = true;
     final captureStarted = await _startDeviceCaptureWithRetry(device, operationGeneration);
     if (captureStarted) {
       _resetConnectedCaptureRecoveryBudget();

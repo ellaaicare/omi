@@ -1279,16 +1279,23 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     });
     final state = enabled ? const GuardianModeState(features: ['ACTIVE_SUPPORT']) : const GuardianModeState();
     var success = false;
-    try {
-      if (!enabled) {
+    if (!enabled) {
+      try {
         await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
-      }
+      } catch (_) {}
+    }
+    try {
       success = await _writeWhisperState(state);
-      if (success && enabled) {
-        await (widget.guardianNativeStart?.call() ?? guardian_native.GuardianModeService().start());
-      }
     } catch (_) {
       success = false;
+    }
+    if (success && enabled) {
+      // A confirmed 200 write is authoritative. A native start failure past
+      // this point must never be conflated with a write failure and trigger
+      // a compensating rollback PUT of a server state that already succeeded.
+      try {
+        await (widget.guardianNativeStart?.call() ?? guardian_native.GuardianModeService().start());
+      } catch (_) {}
     }
     if (!success && enabled) {
       try {

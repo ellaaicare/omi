@@ -567,4 +567,126 @@ void main() {
     expect(revokeCalled, isTrue);
     expect(preferences.aiConsentAccepted, isFalse);
   });
+
+  testWidgets('review mode opened with valid consent is dismissible via close without forcing a choice',
+      (tester) async {
+    bool? result = false;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () async {
+                result = await AiConsentSheet.show(
+                  context,
+                  reviewMode: true,
+                  onRequestDeletion: () async {},
+                );
+              },
+              child: const Text('Review consent'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Review consent'));
+    await tester.pumpAndSettle();
+
+    final closeButton = find.byKey(const Key('ai-consent-review-close'));
+    expect(closeButton, findsOneWidget);
+
+    await tester.tap(closeButton);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(AiConsentSheet), findsNothing);
+    expect(result, isNull);
+  });
+
+  testWidgets('first-consent flow stays non-dismissible and single screen', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(onPressed: () => AiConsentSheet.show(context), child: const Text('Show consent')),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Show consent'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('ai-consent-review-close')), findsNothing);
+    expect(find.byType(AiConsentSheet), findsOneWidget);
+
+    // Tapping outside (where a dismissible sheet's barrier would be) must not
+    // close the first-consent screen, and there is still only one screen.
+    await tester.tapAt(const Offset(20, 20));
+    await tester.pumpAndSettle();
+    expect(find.byType(AiConsentSheet), findsOneWidget);
+    expect(find.text('Allow and continue'), findsOneWidget);
+    expect(find.text('Not now'), findsOneWidget);
+  });
+
+  testWidgets('delete account is visually separated and requires confirmation before it takes effect',
+      (tester) async {
+    var deletionRequested = 0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () => AiConsentSheet.show(
+                context,
+                reviewMode: true,
+                onDecline: () async => true,
+                onRequestDeletion: () async => deletionRequested++,
+              ),
+              child: const Text('Review consent'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Review consent'));
+    await tester.pumpAndSettle();
+
+    final deleteButton = find.byKey(const Key('ai-consent-delete-account'));
+    expect(deleteButton, findsOneWidget);
+    expect(find.byType(Divider), findsOneWidget);
+    // The destructive action sits below the Divider that separates it from
+    // the primary Allow/Revoke choices.
+    expect(tester.getTopLeft(deleteButton).dy, greaterThan(tester.getTopLeft(find.byType(Divider)).dy));
+
+    await tester.tap(deleteButton);
+    await tester.pumpAndSettle();
+
+    // Tapping the destructive action must not take effect immediately — it
+    // opens a confirmation dialog first.
+    expect(deletionRequested, 0);
+    expect(find.byType(AiConsentSheet), findsOneWidget);
+    expect(find.text('Are you sure?'), findsOneWidget);
+
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(deletionRequested, 0);
+    expect(find.byType(AiConsentSheet), findsOneWidget);
+
+    await tester.tap(deleteButton);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete my account and data').hitTestable());
+    await tester.pumpAndSettle();
+
+    expect(deletionRequested, 1);
+  });
 }
