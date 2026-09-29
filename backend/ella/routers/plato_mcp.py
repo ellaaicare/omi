@@ -36,6 +36,8 @@ from ella.services import proposal_ingest
 from ella.services.mcp_identity import validate_mcp_session_token
 from ella.services.mcp_startup import build_startup_context
 from ella.services.mcp_surface_prompt import build_surface_prompt
+from ella.services.runtime_errors import ProvisioningError
+from ella.services.runtime_resolver import require_isolated_runtime
 from ella.utils.provision_authority import ProvisionAuthorityError, legacy_provision_authority
 from utils.ella.canonical_auth import canonical_event_service_headers
 from utils.ella.time_context import annotate_event_time, build_time_context, local_time_fields, timezone_name
@@ -46,9 +48,6 @@ router = APIRouter(prefix="/v1/ella/plato", tags=["Ella Plato MCP"])
 
 DEFAULT_PLATO_UID = "5aGC5YE9BnhcSoTxxtT4ar6ILQy2"
 DEFAULT_TIMELINE_URL = "https://api.ella-ai-care.com/v1/ella/timeline"
-DEFAULT_HERMES_GATEWAY_URL = "http://100.76.138.56:8642"
-DEFAULT_HERMES_AGENT_ID = "hermes"
-
 MAX_CONTEXT_LIMIT = 50
 MAX_WINDOW_CONTEXT_LIMIT = 500
 MAX_SEARCH_RESULTS = 20
@@ -993,11 +992,16 @@ async def _consult_plato(arguments: dict[str, Any]) -> dict[str, Any]:
             len(workspace_results),
         )
         context_block = f"{context_block}\n\nDeep Hermes workspace search:\n{workspace_context}"
-    token = _env("HERMES_API_SERVER_KEY", _env("API_SERVER_KEY", ""))
-    if not token:
-        raise ToolExecutionError("HERMES_API_SERVER_KEY is not configured", code=-32003)
-    gateway_url = _env("HERMES_GATEWAY_URL", DEFAULT_HERMES_GATEWAY_URL).rstrip("/")
-    agent_id = _env("HERMES_AGENT_ID", DEFAULT_HERMES_AGENT_ID)
+    try:
+        runtime = await require_isolated_runtime(
+            _plato_uid(),
+            target_mode="hermes-cloud-chat",
+        )
+    except ProvisioningError as exc:
+        raise ToolExecutionError(exc.code, code=-32003) from exc
+    token = runtime.gateway_token
+    gateway_url = runtime.gateway_url.rstrip("/")
+    agent_id = runtime.agent_id
     session_key = _env("ELLA_PLATO_MCP_HERMES_SESSION", f"grok-mcp:plato:{_plato_uid().lower()}")
     system = (
         "You are serving a read-only external MCP consult for Plato. "

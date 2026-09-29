@@ -96,6 +96,27 @@ async def _runtime_authority_enabled(_uid=None):
     return True
 
 
+def test_required_companion_runtime_fails_closed_without_owner_binding(monkeypatch):
+    async def missing_runtime(uid, repository=None, target_mode=None):
+        assert uid == "owner-without-binding"
+        assert repository is None
+        assert target_mode == "hermes-cloud-chat"
+        return None
+
+    monkeypatch.setattr(runtime_resolver, "resolve_isolated_runtime", missing_runtime)
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            runtime_resolver.require_isolated_runtime(
+                "owner-without-binding",
+                target_mode="hermes-cloud-chat",
+            )
+        )
+
+    assert error.value.code == "companion_runtime_binding_not_found"
+    assert error.value.retryable is False
+
+
 def test_chat_rejects_body_uid_that_differs_from_firebase_subject(monkeypatch):
     with pytest.raises(HTTPException) as error:
         asyncio.run(

@@ -82,6 +82,20 @@ class ConversationSummaryOutcomeUnknownError(RuntimeError):
     pass
 
 
+class TerminalEnrichmentStateConflictError(RuntimeError):
+    pass
+
+
+TERMINAL_ENRICHMENT_REASONS = frozenset(
+    {
+        'grounding_rejected',
+        'provider_rejected',
+        'reservation_exhausted',
+        'provider_replay_exhausted',
+    }
+)
+
+
 SUMMARY_WRITEBACK_RECEIPT_FIELD = 'summary_writeback_receipt'
 SUMMARY_WRITEBACK_PENDING = 'pending_reconciliation'
 SUMMARY_WRITEBACK_COMPLETED = 'completed'
@@ -103,6 +117,77 @@ class CanonicalSummaryOperationConflictError(RuntimeError):
 
 class _CanonicalSummaryRepairRetry(RuntimeError):
     pass
+
+
+async def write_terminal_enrichment_state(
+    *,
+    uid: str,
+    conversation_id: str,
+    reason: str,
+    idempotency_sha256: str,
+) -> dict[str, Any]:
+    """Record one permanent enrichment failure without replacing a successful writeback."""
+    if reason not in TERMINAL_ENRICHMENT_REASONS:
+        raise ValueError('unsupported_terminal_enrichment_reason')
+    updated_at = datetime.now(timezone.utc)
+
+    def build_update(conversation: dict[str, Any]):
+        current_state = dict(conversation.get('enrichment_state') or {})
+        if current_state.get('status') == 'writeback_applied':
+            return {}, {
+                'status': 'writeback_applied',
+                'terminal': False,
+                'idempotent_replay': True,
+            }
+        if current_state.get('status') == 'terminal':
+            if current_state.get('reason') != reason or current_state.get('idempotency_sha256') != idempotency_sha256:
+                raise TerminalEnrichmentStateConflictError('terminal_enrichment_state_conflict')
+            return {}, {
+                'status': 'terminal',
+                'terminal': True,
+                'idempotent_replay': True,
+            }
+        if current_state.get('status') not in {None, '', 'failed'}:
+            raise TerminalEnrichmentStateConflictError('terminal_enrichment_state_conflict')
+
+        terminal_state = {
+            key: current_state[key]
+            for key in (
+                'source',
+                'kind',
+                'trace_id',
+                'source_transcript_hash',
+                'source_active_summary_version_id',
+            )
+            if current_state.get(key) is not None
+        }
+        terminal_state.update(
+            {
+                'status': 'terminal',
+                'pending': False,
+                'reason': reason,
+                'idempotency_sha256': idempotency_sha256,
+                'updated_at': updated_at,
+            }
+        )
+        return {'enrichment_state': terminal_state}, {
+            'status': 'terminal',
+            'terminal': True,
+            'idempotent_replay': False,
+        }
+
+    result = await asyncio.to_thread(
+        conversations_db.update_conversation_with_builder,
+        uid,
+        conversation_id,
+        build_update,
+    )
+    if result is None:
+        raise ConversationSummaryNotFoundError('conversation_not_found')
+    return {
+        'conversation_id': conversation_id,
+        **result['result'],
+    }
 
 
 def _sha256_json(value: Any) -> str:

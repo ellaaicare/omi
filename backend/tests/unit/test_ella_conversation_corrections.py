@@ -165,6 +165,20 @@ async def _async_event_result(events, value, result):
     return result
 
 
+def _install_owner_summary_runtime(monkeypatch):
+    async def owner_runtime(uid, *, target_mode=None):
+        assert uid == "user-1"
+        assert target_mode == "hermes-cloud-transcript"
+        return SimpleNamespace(
+            provider="hermes",
+            gateway_url="https://owner-runtime.test",
+            gateway_token="owner-runtime-token",
+            agent_id="owner-runtime-agent",
+        )
+
+    monkeypatch.setattr(summary_recovery, "require_isolated_runtime", owner_runtime)
+
+
 def test_submit_correction_accepts_ios_payload_and_queues(monkeypatch):
     audits = []
     events = []
@@ -1290,9 +1304,18 @@ def test_generate_corrected_summary_uses_hermes_api_with_scoped_session(monkeypa
     calls = []
 
     monkeypatch.setattr(corrections, "CORRECTION_PROVIDER", "hermes-api")
-    monkeypatch.setattr(corrections, "HERMES_CORRECTION_API_URL", "https://hermes.test/v1/chat/completions")
-    monkeypatch.setattr(corrections, "HERMES_CORRECTION_MODEL", "profile-model")
-    monkeypatch.setenv("ELLA_CORRECTION_HERMES_API_KEY", "hermes-secret")
+
+    async def owner_runtime(uid, *, target_mode=None):
+        assert uid == "user/123"
+        assert target_mode == "hermes-cloud-transcript"
+        return SimpleNamespace(
+            provider="hermes",
+            gateway_url="https://owner-hermes.test",
+            gateway_token="owner-hermes-secret",
+            agent_id="owner-profile-model",
+        )
+
+    monkeypatch.setattr(summary_recovery, "require_isolated_runtime", owner_runtime)
 
     class FakeResponse:
         def raise_for_status(self):
@@ -1348,12 +1371,12 @@ def test_generate_corrected_summary_uses_hermes_api_with_scoped_session(monkeypa
     assert result["title"] == "Mei Xin Emails Teacher"
     assert "Mei Xin" in result["overview"]
     assert result["ella_tags"] == ["omi", "correction"]
-    assert calls[0]["url"] == "https://hermes.test/v1/chat/completions"
-    assert calls[0]["headers"]["Authorization"] == "Bearer hermes-secret"
+    assert calls[0]["url"] == "https://owner-hermes.test/v1/chat/completions"
+    assert calls[0]["headers"]["Authorization"] == "Bearer owner-hermes-secret"
     assert calls[0]["headers"]["X-Hermes-Session-Id"] == "correction:user-123:conv-123:corr-123"
     assert calls[0]["headers"]["X-Hermes-Session-Key"] == "ella:omi:user-123:canonical"
     assert calls[0]["headers"]["X-Trace-Id"] == "trace-123"
-    assert calls[0]["json"]["model"] == "profile-model"
+    assert calls[0]["json"]["model"] == "owner-profile-model"
     assert "Speaker 5" in calls[0]["json"]["messages"][0]["content"]
 
 
@@ -1451,6 +1474,34 @@ def test_retained_summary_config_preserves_exact_existing_binding(monkeypatch):
     assert selected.hermes_api_key == "retained-token"
     assert selected.legacy_api_key == ""
     assert selected.cloud_authority is None
+
+
+def test_hermes_summary_config_fails_closed_without_owner_binding(monkeypatch):
+    async def missing_runtime(_uid, *, target_mode=None):
+        assert target_mode == "hermes-cloud-transcript"
+        return None
+
+    async def require_missing_runtime(_uid, *, target_mode=None):
+        assert target_mode == "hermes-cloud-transcript"
+        raise ProvisioningError("companion_runtime_binding_not_found", retryable=False)
+
+    monkeypatch.setattr(summary_recovery, "resolve_isolated_runtime", missing_runtime)
+    monkeypatch.setattr(summary_recovery, "require_isolated_runtime", require_missing_runtime)
+    base = summary_recovery.SummaryProviderConfig(
+        provider="hermes-api",
+        hermes_url="http://shared-fallback.invalid/v1/chat/completions",
+        hermes_model="shared-model",
+        hermes_api_key="shared-secret",
+        legacy_url="",
+        legacy_model="",
+        legacy_api_key="",
+        timeout_seconds=45,
+    )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(summary_recovery.summary_provider_config_for_uid("unbound-user", base))
+
+    assert error.value.code == "companion_runtime_binding_not_found"
 
 
 @pytest.mark.parametrize(
@@ -1552,6 +1603,12 @@ def test_generate_corrected_summary_can_use_legacy_provider(monkeypatch):
     monkeypatch.setattr(corrections, "DIRECT_CORRECTION_API_URL", "https://legacy.test/v1/chat/completions")
     monkeypatch.setattr(corrections, "DIRECT_CORRECTION_MODEL", "grok-4.3")
     monkeypatch.setenv("ELLA_CORRECTION_API_KEY", "legacy-secret")
+
+    async def no_runtime(_uid, *, target_mode=None):
+        assert target_mode == "hermes-cloud-transcript"
+        return None
+
+    monkeypatch.setattr(summary_recovery, "resolve_isolated_runtime", no_runtime)
 
     class FakeResponse:
         def raise_for_status(self):
@@ -2288,6 +2345,7 @@ def test_hermes_recovery_uses_lossless_source_and_canonical_uid_session(monkeypa
 
 
 def test_summary_recovery_persists_generic_before_hermes_enrichment(monkeypatch):
+    _install_owner_summary_runtime(monkeypatch)
     request_id = "84eb13fa-31d9-40ba-a742-c4de4757dc10"
     conversation = _retry_conversation(request_id=request_id)
     generic = {
@@ -2491,6 +2549,7 @@ def test_summary_recovery_hermes_failure_retains_completed_generic_summary(monke
 
 
 def test_summary_recovery_resumes_hermes_after_generic_phase_completed(monkeypatch):
+    _install_owner_summary_runtime(monkeypatch)
     request_id = "84eb13fa-31d9-40ba-a742-c4de4757dc10"
     generic = {
         **_retry_conversation(status="completed", request_id=request_id),
@@ -2567,6 +2626,7 @@ def test_summary_recovery_resumes_hermes_after_generic_phase_completed(monkeypat
 
 
 def test_summary_recovery_enriches_legacy_generic_without_version_or_generic_rewrite(monkeypatch):
+    _install_owner_summary_runtime(monkeypatch)
     request_id = "84eb13fa-31d9-40ba-a742-c4de4757dc10"
     legacy = {
         **_retry_conversation(status="completed", request_id=request_id),

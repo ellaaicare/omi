@@ -31,6 +31,11 @@ ROUTE_GROUPS = (
         "staged_public",
         ("PATCH", "/v1/ella/conversation/{conversation_id}/summary", "update_conversation_summary"),
         (
+            "PATCH",
+            "/v1/ella/conversation/{conversation_id}/enrichment-state",
+            "update_conversation_enrichment_state",
+        ),
+        (
             "GET",
             "/v1/ella/conversations/enrichment/reconcile-candidates",
             "list_enrichment_reconcile_candidates",

@@ -664,6 +664,22 @@ async def resolve_isolated_runtime(
     return None
 
 
+async def require_isolated_runtime(
+    uid: str,
+    repository: Optional[EllaProvisioningRepository] = None,
+    target_mode: Optional[str] = None,
+) -> IsolatedRuntime:
+    """Resolve one owner's persisted companion runtime or fail closed."""
+    runtime = await resolve_isolated_runtime(
+        uid,
+        repository=repository,
+        target_mode=target_mode,
+    )
+    if runtime is None:
+        raise ProvisioningError("companion_runtime_binding_not_found", retryable=False)
+    return runtime
+
+
 async def revalidate_runtime_authority(
     identity: CloudRuntimeAuthorityIdentity,
     repository: Optional[EllaProvisioningRepository] = None,

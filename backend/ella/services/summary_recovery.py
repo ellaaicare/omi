@@ -18,6 +18,7 @@ from ella.services.memory_artwork_recovery import claim_memory_artwork_enrichmen
 from ella.services.runtime_resolver import (
     CloudRuntimeAuthorityIdentity,
     cloud_runtime_authority_identity,
+    require_isolated_runtime,
     revalidate_cloud_runtime_authority,
     resolve_isolated_runtime,
 )
@@ -160,20 +161,9 @@ class ConcurrentConversationRecoveryChangeError(RuntimeError):
 def default_summary_provider_config() -> SummaryProviderConfig:
     return SummaryProviderConfig(
         provider=os.getenv('ELLA_SUMMARY_RECOVERY_PROVIDER', 'hermes-api').strip().lower() or 'hermes-api',
-        hermes_url=os.getenv(
-            'ELLA_CORRECTION_HERMES_CHAT_URL',
-            os.getenv('HERMES_CHAT_COMPLETIONS_URL', 'http://100.76.138.56:8642/v1/chat/completions'),
-        ),
-        hermes_model=os.getenv(
-            'ELLA_CORRECTION_HERMES_MODEL',
-            os.getenv('HERMES_CORRECTION_MODEL', 'ella-plato-hermes-eval'),
-        ),
-        hermes_api_key=(
-            os.getenv('ELLA_CORRECTION_HERMES_API_KEY')
-            or os.getenv('API_SERVER_KEY')
-            or os.getenv('HERMES_API_KEY')
-            or ''
-        ),
+        hermes_url='',
+        hermes_model='',
+        hermes_api_key='',
         legacy_url=os.getenv('ELLA_CORRECTION_API_URL', 'https://api.x.ai/v1/chat/completions'),
         legacy_model=os.getenv('ELLA_CORRECTION_MODEL', 'grok-4.3'),
         legacy_api_key=(
@@ -189,9 +179,12 @@ async def summary_provider_config_for_uid(
 ) -> SummaryProviderConfig:
     """Bind Hermes summary work to the active isolated runtime when selected."""
     selected = config or default_summary_provider_config()
-    runtime = await resolve_isolated_runtime(uid, target_mode="hermes-cloud-transcript")
-    if runtime is None:
-        return selected
+    if selected.provider in {'hermes', 'hermes-api', 'hermes_chat', 'hermes_chat_completions'}:
+        runtime = await require_isolated_runtime(uid, target_mode="hermes-cloud-transcript")
+    else:
+        runtime = await resolve_isolated_runtime(uid, target_mode="hermes-cloud-transcript")
+        if runtime is None:
+            return selected
     if runtime.provider != 'hermes_cloud':
         return replace(
             selected,

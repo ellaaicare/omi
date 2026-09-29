@@ -18,6 +18,17 @@ from ella.services import correction_honcho_contract as contract
 def _current_ai_consent(monkeypatch):
     monkeypatch.setattr(contract, "assert_current_ai_consent", lambda uid: uid)
 
+    async def required_runtime(uid, *, target_mode=None):
+        assert uid == "user-123"
+        assert target_mode == "hermes-cloud-transcript"
+        return MagicMock(
+            gateway_url="https://owner-hermes.test",
+            gateway_token="owner-hermes-token",
+            agent_id="owner-hermes-agent",
+        )
+
+    monkeypatch.setattr(contract, "require_isolated_runtime", required_runtime)
+
 
 def _conversation(conversation_id="conv-1", uid="user-123", version="v1"):
     return {
@@ -106,6 +117,26 @@ def test_write_honcho_fact_candidate_defaults_to_no_durable_write(monkeypatch):
     assert decision.action == "skip"
     assert decision.reason == "durable_write_disabled"
     assert decision.session_key == "ella:omi:user-123:canonical"
+
+
+def test_write_honcho_fact_candidate_fails_closed_without_owner_runtime(monkeypatch):
+    candidate = _candidate(active_summary_version_id="v1")
+
+    async def missing_runtime(_uid, *, target_mode=None):
+        assert target_mode == "hermes-cloud-transcript"
+        raise contract.ProvisioningError("companion_runtime_binding_not_found", retryable=False)
+
+    monkeypatch.setattr(contract, "HONCHO_FACT_WRITE_ENABLED", True)
+    monkeypatch.setattr(contract, "require_isolated_runtime", missing_runtime)
+    decision = asyncio.run(
+        contract.write_honcho_fact_candidate(
+            candidate,
+            current_conversation=_conversation("related", uid="user-123", version="v1"),
+        )
+    )
+
+    assert decision.action == "error"
+    assert decision.reason == "companion_runtime_binding_not_found"
 
 
 def test_write_honcho_fact_candidate_rechecks_active_summary_version(monkeypatch):
@@ -209,10 +240,11 @@ def test_write_honcho_fact_candidate_uses_hermes_session_key_and_requires_confir
     assert decision.action == "written"
     assert decision.reason == "hermes_honcho_write_confirmed"
     assert decision.response_ref["memory_id"] == "honcho-memory-123"
-    assert calls[0]["url"] == "https://hermes.test/v1/chat/completions"
+    assert calls[0]["url"] == "https://owner-hermes.test/v1/chat/completions"
+    assert calls[0]["headers"]["Authorization"] == "Bearer owner-hermes-token"
     assert calls[0]["headers"]["X-Hermes-Session-Key"] == "ella:omi:user-123:canonical"
     assert calls[0]["headers"]["X-Idempotency-Key"] == candidate.idempotency_key
-    assert calls[0]["json"]["model"] == "test-model"
+    assert calls[0]["json"]["model"] == "owner-hermes-agent"
 
 
 def test_write_honcho_fact_candidate_treats_chatty_200_as_uncertain(monkeypatch):

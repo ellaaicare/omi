@@ -514,15 +514,7 @@ def test_observer_extractor_uses_isolated_runtime_for_hermes(monkeypatch):
         captured.update(kwargs)
         return extractor_module.ExtractionResult(metadata={"extractor": "hermes"})
 
-    async def authority_enabled(uid=None):
-        return uid == "uid-isolated"
-
-    monkeypatch.setattr(
-        extractor_module.runtime_resolver,
-        "runtime_authority_enabled",
-        authority_enabled,
-    )
-    monkeypatch.setattr(extractor_module.runtime_resolver, "resolve_isolated_runtime", fake_runtime)
+    monkeypatch.setattr(extractor_module.runtime_resolver, "require_isolated_runtime", fake_runtime)
     authority = extractor_module.runtime_resolver.CloudRuntimeAuthorityIdentity(
         uid="uid-isolated",
         target_mode="hermes-cloud-guardian",
@@ -562,8 +554,15 @@ def test_observer_consent_lookup_is_offloaded_before_hermes(monkeypatch):
         effects.append(("threadpool", function, args))
         return function(*args)
 
-    async def authority_disabled(_uid=None):
-        return False
+    async def required_runtime(uid, *, target_mode=None):
+        assert uid == "uid-a"
+        assert target_mode == "hermes-cloud-guardian"
+        return types.SimpleNamespace(
+            provider="hermes",
+            gateway_url="http://uid-a-runtime.test",
+            gateway_token="uid-a-token",
+            agent_id="uid-a-agent",
+        )
 
     async def fake_hermes(_events, **_kwargs):
         effects.append(("provider",))
@@ -571,11 +570,7 @@ def test_observer_consent_lookup_is_offloaded_before_hermes(monkeypatch):
 
     monkeypatch.setattr(extractor_module, "assert_current_ai_consent", consent)
     monkeypatch.setattr(extractor_module, "run_in_threadpool", run_in_threadpool)
-    monkeypatch.setattr(
-        extractor_module.runtime_resolver,
-        "runtime_authority_enabled",
-        authority_disabled,
-    )
+    monkeypatch.setattr(extractor_module.runtime_resolver, "require_isolated_runtime", required_runtime)
     monkeypatch.setattr(extractor_module, "hermes_candidate_extraction", fake_hermes)
 
     asyncio.run(
@@ -591,6 +586,30 @@ def test_observer_consent_lookup_is_offloaded_before_hermes(monkeypatch):
         ("consent", "uid-a"),
         ("provider",),
     ]
+
+
+def test_observer_without_owner_runtime_fails_before_provider(monkeypatch):
+    sys.modules.pop("ella.services.observer_extractor", None)
+    extractor_module = importlib.import_module("ella.services.observer_extractor")
+    provider_calls = 0
+
+    async def missing_runtime(_uid, *, target_mode=None):
+        assert target_mode == "hermes-cloud-guardian"
+        raise ProvisioningError("companion_runtime_binding_not_found", retryable=False)
+
+    async def fake_hermes(_events, **_kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        return extractor_module.ExtractionResult()
+
+    monkeypatch.setattr(extractor_module.runtime_resolver, "require_isolated_runtime", missing_runtime)
+    monkeypatch.setattr(extractor_module, "hermes_candidate_extraction", fake_hermes)
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(extractor_module.build_extraction_result([_event()], mode="hermes", uid="uid-missing"))
+
+    assert error.value.code == "companion_runtime_binding_not_found"
+    assert provider_calls == 0
 
 
 @pytest.mark.parametrize(
