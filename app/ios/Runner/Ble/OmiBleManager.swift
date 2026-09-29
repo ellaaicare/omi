@@ -18,6 +18,7 @@ final class OmiBleDiagnostics {
     private var queuedScansFired: Int64 = 0
     private var didDiscoverCount: Int64 = 0
     private var flutterApiNilDropCount: Int64 = 0
+    private var nameArrivedLate: Int64 = 0
 
     private init() {}
 
@@ -53,6 +54,15 @@ final class OmiBleDiagnostics {
         }
     }
 
+    /// Records a re-discovery within the same scan session that was forwarded
+    /// to Dart because a later advertisement packet added a name or service
+    /// UUID the first sighting lacked. See `OmiBleDiscoveryNaming.shouldForwardRediscovery`.
+    func recordNameArrivedLate() {
+        lock.lock()
+        defer { lock.unlock() }
+        nameArrivedLate += 1
+    }
+
     func snapshot() -> BleNativeDiscoveryDiagnostics {
         lock.lock()
         defer { lock.unlock() }
@@ -62,7 +72,8 @@ final class OmiBleDiagnostics {
             scansQueued: scansQueued,
             queuedScansFired: queuedScansFired,
             didDiscoverCount: didDiscoverCount,
-            flutterApiNilDropCount: flutterApiNilDropCount
+            flutterApiNilDropCount: flutterApiNilDropCount,
+            nameArrivedLate: nameArrivedLate
         )
     }
 }
@@ -144,6 +155,11 @@ final class OmiBleManager: NSObject {
     /// Queued scan request if Bluetooth wasn't ready when startScan was called.
     private var pendingScan: (timeout: Int, serviceUuids: [String])?
 
+    /// Per-scan-session record of whether each sighted peripheral's most recent
+    /// forwarded packet carried a name and/or service UUIDs. Reset whenever a
+    /// scan actually starts. See `OmiBleDiscoveryNaming.shouldForwardRediscovery`.
+    private var scanSightings: [String: (hasName: Bool, hasServiceUuids: Bool)] = [:]
+
     /// Last battery point written during this process, used to avoid rewriting
     /// the complete UserDefaults history for every notification.
     private var lastPersistedBatteryLevel: [String: Int] = [:]
@@ -212,11 +228,17 @@ final class OmiBleManager: NSObject {
 
         OmiBleDiagnostics.shared.recordStartScan(cbState: cbState, queued: false)
         pendingScan = nil
+        scanSightings.removeAll()
         let cbuuids: [CBUUID]? = serviceUuids.isEmpty ? nil : serviceUuids.map { CBUUID(string: $0) }
         isScanning = true
         NSLog("[OmiBle] Starting BLE scan with services=\(String(describing: cbuuids))")
+        // ellaaicare/ella-ai#1280 RUN-016: allow duplicate advertisement callbacks so a
+        // peripheral whose first packet lacks a name/service UUID (the primary
+        // advertisement) gets another chance once its scan-response packet arrives.
+        // `didDiscover` below only re-forwards a duplicate when it adds naming/UUID
+        // information the first sighting lacked, so this does not flood Dart.
         centralManager.scanForPeripherals(withServices: cbuuids, options: [
-            CBCentralManagerScanOptionAllowDuplicatesKey: false,
+            CBCentralManagerScanOptionAllowDuplicatesKey: true,
         ])
 
         scanTimer?.invalidate()
@@ -233,6 +255,7 @@ final class OmiBleManager: NSObject {
         isScanning = false
         scanTimer?.invalidate()
         scanTimer = nil
+        scanSightings.removeAll()
         centralManager.stopScan()
     }
 
@@ -809,6 +832,27 @@ extension OmiBleManager: CBCentralManagerDelegate {
             cachedName: peripheral.name,
             advertisementData: advertisementData
         )
+
+        // ellaaicare/ella-ai#1280 RUN-016: with AllowDuplicatesKey on (see startScan),
+        // CoreBluetooth can call back again for a peripheral already sighted this scan.
+        // Forward the first sighting always; forward a later one only if it adds naming/
+        // UUID information the first sighting lacked, so a peripheral that was bare on
+        // its first packet gets a second chance at admission without flooding Dart with
+        // identical re-advertisements every scan interval.
+        let hasName = !nameResult.name.isEmpty
+        let hasServiceUuids = !serviceUuids.isEmpty
+        if let previous = scanSightings[uuid] {
+            guard OmiBleDiscoveryNaming.shouldForwardRediscovery(
+                previousHasName: previous.hasName,
+                previousHasServiceUuids: previous.hasServiceUuids,
+                newHasName: hasName,
+                newHasServiceUuids: hasServiceUuids
+            ) else {
+                return
+            }
+            OmiBleDiagnostics.shared.recordNameArrivedLate()
+        }
+        scanSightings[uuid] = (hasName: hasName, hasServiceUuids: hasServiceUuids)
 
         let blePeripheral = BlePeripheral(
             uuid: uuid,
