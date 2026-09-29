@@ -1234,15 +1234,15 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     } catch (_) {
       // The server is the source of truth for guardian mode. A native
       // capture failure here must never trigger a compensating PUT, and it
-      // must never hide or disable the server-reported toggle — launch,
-      // resume, and reconcile paths only GET and adopt server state. Show
-      // the server value as-is and quietly retry the native start.
+      // must not publish a verified ON/OFF state when capture did not
+      // reconcile. Keep the server value, disable the control, and quietly
+      // retry the native start.
     }
     if (!mounted || generation != _whisperReconcileGeneration) return;
     final reconnecting = serverEnabled && !nativeStarted;
     setState(() {
       _whispersOn = serverEnabled;
-      _whispersVerified = true;
+      _whispersVerified = nativeStarted;
       _whisperReconnecting = reconnecting;
     });
     if (reconnecting) _scheduleWhisperNativeRetry(generation);
@@ -1275,7 +1275,12 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (!mounted || generation != _whisperReconcileGeneration) return;
     if (nativeStarted) {
       _whisperNativeRetryAttempt = 0;
-      if (_whisperReconnecting) setState(() => _whisperReconnecting = false);
+      if (_whisperReconnecting || !_whispersVerified) {
+        setState(() {
+          _whispersVerified = true;
+          _whisperReconnecting = false;
+        });
+      }
       return;
     }
     if (!_whisperReconnecting) setState(() => _whisperReconnecting = true);
