@@ -10193,4 +10193,23 @@ class AppLocalizationsEl extends AppLocalizations {
 
   @override
   String get noDiagnosticsYet => 'No diagnostics recorded yet. Run a device scan to populate this.';
+  @override
+  String get experimentalModes => 'Experimental modes';
+
+  @override
+  String get experimentalModesDescription =>
+      'Opt-in, memory-less modes that react to what Omi hears in real time. These do not change your default Home or Whispers experience.';
+
+  @override
+  String get experimentalModeEinsteinTitle => 'Einstein';
+
+  @override
+  String get experimentalModeEinsteinDescription =>
+      'Listens in, then answers, enhances, or fact-checks what it hears on the fly.';
+
+  @override
+  String get experimentalModeCyborgTitle => 'Cyborg';
+
+  @override
+  String get experimentalModeCyborgDescription => 'Reacts to everything it hears.';
 }

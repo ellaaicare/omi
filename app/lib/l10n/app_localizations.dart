@@ -18734,6 +18734,42 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'No diagnostics recorded yet. Run a device scan to populate this.'**
   String get noDiagnosticsYet;
+
+  /// Settings drawer item and section title for the experimental modes settings page
+  ///
+  /// In en, this message translates to:
+  /// **'Experimental modes'**
+  String get experimentalModes;
+
+  /// Description shown at the top of the Experimental modes settings page
+  ///
+  /// In en, this message translates to:
+  /// **'Opt-in, memory-less modes that react to what Omi hears in real time. These do not change your default Home or Whispers experience.'**
+  String get experimentalModesDescription;
+
+  /// Title for the Einstein experimental mode toggle
+  ///
+  /// In en, this message translates to:
+  /// **'Einstein'**
+  String get experimentalModeEinsteinTitle;
+
+  /// Description for the Einstein experimental mode toggle
+  ///
+  /// In en, this message translates to:
+  /// **'Listens in, then answers, enhances, or fact-checks what it hears on the fly.'**
+  String get experimentalModeEinsteinDescription;
+
+  /// Title for the Cyborg experimental mode toggle
+  ///
+  /// In en, this message translates to:
+  /// **'Cyborg'**
+  String get experimentalModeCyborgTitle;
+
+  /// Description for the Cyborg experimental mode toggle
+  ///
+  /// In en, this message translates to:
+  /// **'Reacts to everything it hears.'**
+  String get experimentalModeCyborgDescription;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {
