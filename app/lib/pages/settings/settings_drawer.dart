@@ -375,9 +375,8 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
                 ),
                 const Divider(height: 1, color: Color(0xFF3C3C43)),
                 _buildSettingsItem(
-                  title: context.l10n.experimentalModes,
+                  title: context.l10n.whispersAndExperimentalModesTitle,
                   icon: const FaIcon(FontAwesomeIcons.brain, color: Color(0xFF8E8E93), size: 20),
-                  showBetaTag: true,
                   onTap: () {
                     Navigator.of(context)
                         .push(MaterialPageRoute(builder: (context) => const ExperimentalModesSettingsPage()));
