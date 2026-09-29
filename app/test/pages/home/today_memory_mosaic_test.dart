@@ -3009,7 +3009,7 @@ void main() {
     // followed by a compensating OFF write, even though the native start
     // call above threw.
     expect(guardianModeWrites, 1);
-    expect(writtenGuardianState?.features, ['ACTIVE_SUPPORT']);
+    expect(writtenGuardianState?.features, ['MEMORY_SUPPORT']);
 
     await tester.tap(find.byKey(const Key('today-dock-status')));
     await tester.pump();

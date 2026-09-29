@@ -561,7 +561,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 200));
 
       expect(guardianModeWrites, 1);
-      expect(writtenGuardianState?.features, ['ACTIVE_SUPPORT']);
+      expect(writtenGuardianState?.features, ['MEMORY_SUPPORT']);
       expect(guardianNativeStarts, 1);
       await openHomeControls();
       expect(find.text('Whispers are on'), findsOneWidget);
