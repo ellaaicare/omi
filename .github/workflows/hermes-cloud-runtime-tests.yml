@@ -996,6 +996,7 @@ jobs:
             "tests/unit/test_ella_postprocess_cloud_routing.py::test_capture_conversation_ready_http_failure_is_not_acknowledged"
             "tests/unit/test_ella_postprocess_cloud_routing.py::test_legacy_delivery_preserves_best_effort_http_failure"
             "tests/unit/test_ella_runtime_route_isolation.py::test_cloud_chat_failure_still_emits_one_terminal_marker"
+            "tests/unit/test_ella_runtime_route_isolation.py::test_required_companion_runtime_fails_closed_without_owner_binding"
             "tests/unit/test_ella_runtime_route_isolation.py::test_isolated_hermes_chat_has_a_bounded_provider_timeout"
             "tests/unit/test_ella_runtime_route_isolation.py::test_legacy_history_unexpected_failure_logs_fixed_content_free_classification"
             "tests/unit/test_ella_runtime_route_isolation.py::test_self_hosted_voice_session_uses_exact_invitation_authority_without_legacy_registry"
@@ -1093,7 +1094,8 @@ jobs:
           # retry-after-commit/stale-lease regressions, rather than through this file's own
           # route-level fakes).
           # + 1 (retained-owner transcript listen regression, omi#623).
-          test "$collected" -eq 675
+          # + 1 (missing exact-owner companion binding fails closed before provider work).
+          test "$collected" -eq 676
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
