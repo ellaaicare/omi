@@ -15,8 +15,10 @@ import 'package:omi/utils/l10n_extensions.dart';
 /// Surfaces all three layers of the discovery pipeline together so a single
 /// copy/paste is enough to diagnose a one-run failure:
 ///  - native: CoreBluetooth state at the last startScan call, started-vs-
-///    queued outcome, the native didDiscover count, and the flutterApi-nil
-///    drop count (a nil flutterApi silently swallows a discovery);
+///    queued outcome, the native didDiscover count, the flutterApi-nil
+///    drop count (a nil flutterApi silently swallows a discovery), and the
+///    nameArrivedLate count (a re-discovery forwarded because a later
+///    advertisement packet added a name/UUID the first sighting lacked);
 ///  - bridge: when BleFlutterApi.setUp(BleBridge.instance) last ran;
 ///  - Dart: candidates seen/admitted/rejected-by-reason (as before).
 /// Never device names, UUIDs, or MAC addresses.
@@ -79,7 +81,7 @@ class _DeviceDiagnosticsPageState extends State<DeviceDiagnosticsPage> {
     return 'native: cbStateAtLastStartScan=${native.lastStartScanCbState} '
         'scansStartedImmediately=${native.scansStartedImmediately} scansQueued=${native.scansQueued} '
         'queuedScansFired=${native.queuedScansFired} didDiscoverCount=${native.didDiscoverCount} '
-        'flutterApiNilDropCount=${native.flutterApiNilDropCount}';
+        'flutterApiNilDropCount=${native.flutterApiNilDropCount} nameArrivedLate=${native.nameArrivedLate}';
   }
 
   String _bridgeSummaryText() {
