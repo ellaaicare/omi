@@ -1935,7 +1935,7 @@ def test_consent_bootstrap_creates_users_row_and_grant():
             "Synthetic User",
             "UTC",
             "ACTIVE",
-            "OFF",
+            None,
         )
         assert identities == {"omi_uid": uid, "email": "fresh-consent@example.invalid"}
         assert row["updated_at"] is not None
@@ -3075,7 +3075,7 @@ def test_unconsented_pending_user_cannot_enable_guardian():
             "SELECT status, guardian_mode FROM users WHERE omi_uid = $1",
             uid,
         )
-        assert tuple(row.values()) == ("PENDING", "OFF")
+        assert tuple(row.values()) == ("PENDING", None)
 
     asyncio.run(_run_with_database(scenario))
 
@@ -3124,9 +3124,119 @@ def test_guardian_reenable_fails_closed_after_consent_revocation():
     asyncio.run(_run_with_database(scenario))
 
 
-def test_runtime_activation_initializes_explicit_guardian_default():
+def test_guardian_mode_route_round_trips_on_off_on_under_production_constraint(monkeypatch):
+    async def scenario(pool):
+        uid = "synthetic-guardian-mode-round-trip"
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                ALTER TABLE users
+                ADD CONSTRAINT guardian_mode_check
+                CHECK (
+                    guardian_mode IS NULL OR guardian_mode IN (
+                        'EMERGENCY_ONLY', 'ACTIVE_SUPPORT', 'MAXIMUM_AWARENESS',
+                        'CUSTOM', 'CYBORG', 'CHATBOT', 'MEMORY_SUPPORT', 'DEMO'
+                    )
+                )
+                """
+            )
+        await managed_cloud_consent.synchronize_grant(
+            grant=_managed_cloud_grant(uid),
+            allow_fresh_uid_bootstrap=True,
+            bootstrap_email="guardian-round-trip@example.invalid",
+        )
+
+        def verify_token(token):
+            if token == "valid":
+                return {"uid": uid}
+            raise ValueError("invalid bearer")
+
+        monkeypatch.setattr(exact_firebase_auth.firebase_auth, "verify_id_token", verify_token)
+        previous_pool = guardian._pool
+        guardian._pool = pool
+        app = FastAPI()
+        app.include_router(guardian.router)
+        transport = httpx.ASGITransport(app=app)
+        headers = {"Authorization": "Bearer valid"}
+        try:
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                on_response = await client.put(
+                    "/v1/ella/guardian/mode",
+                    json={"features": ["active_support"]},
+                    headers=headers,
+                )
+                assert on_response.status_code == 200
+                assert on_response.json()["currentMode"] == "ACTIVE_SUPPORT"
+                assert (
+                    await pool.fetchval(
+                        "SELECT guardian_mode FROM users WHERE omi_uid = $1",
+                        uid,
+                    )
+                    == "ACTIVE_SUPPORT"
+                )
+
+                off_response = await client.put(
+                    "/v1/ella/guardian/mode",
+                    json={"features": []},
+                    headers=headers,
+                )
+                assert off_response.status_code == 200
+                off_body = off_response.json()
+
+                get_response = await client.get("/v1/ella/guardian/mode", headers=headers)
+                assert get_response.status_code == 200
+                assert get_response.json() == off_body
+                assert off_body == {
+                    "success": True,
+                    "currentMode": "OFF",
+                    "override": None,
+                    "features": [],
+                    "showDemo": False,
+                }
+                assert (
+                    await pool.fetchval(
+                        "SELECT guardian_mode FROM users WHERE omi_uid = $1",
+                        uid,
+                    )
+                    is None
+                )
+
+                on_again_response = await client.put(
+                    "/v1/ella/guardian/mode",
+                    json={"features": ["active_support"]},
+                    headers=headers,
+                )
+                assert on_again_response.status_code == 200
+                assert on_again_response.json()["currentMode"] == "ACTIVE_SUPPORT"
+                assert (
+                    await pool.fetchval(
+                        "SELECT guardian_mode FROM users WHERE omi_uid = $1",
+                        uid,
+                    )
+                    == "ACTIVE_SUPPORT"
+                )
+        finally:
+            guardian._pool = previous_pool
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_runtime_activation_leaves_null_guardian_mode_under_production_constraint():
     async def scenario(pool):
         uid = "synthetic-runtime-activation-default"
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                ALTER TABLE users
+                ADD CONSTRAINT guardian_mode_check
+                CHECK (
+                    guardian_mode IS NULL OR guardian_mode IN (
+                        'EMERGENCY_ONLY', 'ACTIVE_SUPPORT', 'MAXIMUM_AWARENESS',
+                        'CUSTOM', 'CYBORG', 'CHATBOT', 'MEMORY_SUPPORT', 'DEMO'
+                    )
+                )
+                """
+            )
         user_id = await pool.fetchval(
             """
             INSERT INTO users (omi_uid, email, status, guardian_mode, profile_class)
@@ -3143,7 +3253,7 @@ def test_runtime_activation_initializes_explicit_guardian_default():
             "SELECT id, status, guardian_mode FROM users WHERE omi_uid = $1",
             uid,
         )
-        assert tuple(row.values()) == (user_id, "ACTIVE", "OFF")
+        assert tuple(row.values()) == (user_id, "ACTIVE", None)
 
     asyncio.run(_run_with_database(scenario))
 
