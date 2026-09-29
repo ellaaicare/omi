@@ -177,6 +177,9 @@ Future<EllaNativeDiscoveryDiagnostics> loadNativeDiscoveryDiagnostics([BleHostAp
     didDiscoverCount: native.didDiscoverCount,
     flutterApiNilDropCount: native.flutterApiNilDropCount,
     nameArrivedLate: native.nameArrivedLate,
+    retrievedConnectedCount: native.retrievedConnectedCount,
+    retrievedKnownCount: native.retrievedKnownCount,
+    restoredCount: native.restoredCount,
   );
 }
 

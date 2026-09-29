@@ -99,6 +99,10 @@ final class BleHostApiImpl: BleHostApi {
         completion(.success(bleManager.getNativeDiscoveryDiagnostics()))
     }
 
+    func retrieveConnectedAndKnownPeripherals(serviceUuids: [String], knownDeviceIds: [String], completion: @escaping (Result<[BlePeripheral], Error>) -> Void) {
+        bleManager.retrieveConnectedAndKnownPeripherals(serviceUuids: serviceUuids, knownDeviceIds: knownDeviceIds, completion: completion)
+    }
+
     func getBatteryHistory(uuid: String, completion: @escaping (Result<[BleBatteryPoint], Error>) -> Void) {
         completion(.success(bleManager.getBatteryHistory(uuid: uuid)))
     }

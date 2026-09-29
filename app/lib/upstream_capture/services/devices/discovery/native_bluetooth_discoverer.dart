@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:omi/upstream_capture/backend/preferences.dart';
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/upstream_capture/gen/pigeon_communicator.g.dart';
 import 'package:omi/upstream_capture/services/bridges/ble_bridge.dart';
@@ -44,15 +45,17 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
 
     final previousCallback = BleBridge.instance.peripheralDiscoveredCallback;
 
-    BleBridge.instance.peripheralDiscoveredCallback = (BlePeripheral peripheral) {
+    void handleCandidate(BlePeripheral peripheral) {
       seenCount++;
       DebugLogManager.deviceCandidatesSeen++;
       DebugLogManager.recordDeviceDiagnostic(
         'NativeBluetoothDiscoverer: candidate hasAdvName=${peripheral.hasAdvertisedLocalName} '
         'hasPeripheralName=${peripheral.hasPeripheralName} uuidCount=${peripheral.serviceUuids.length} '
-        'rssiBucket=${_rssiBucket(peripheral.rssi)}',
+        'source=${peripheral.source} rssiBucket=${_rssiBucket(peripheral.rssi)}',
       );
-      if (peripheral.name.isEmpty) {
+      // ellaaicare/ella-ai#1287 RUN-018: a candidate with no name at all can still be
+      // admitted when its source is itself trustworthy evidence — see _isAdmittedBySource.
+      if (peripheral.name.isEmpty && !_isAdmittedBySource(peripheral)) {
         noNameCount++;
         DebugLogManager.recordCandidateRejected('no_name');
         return;
@@ -60,7 +63,9 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
       // Deduplicate by UUID
       results.removeWhere((p) => p.uuid == peripheral.uuid);
       results.add(peripheral);
-    };
+    }
+
+    BleBridge.instance.peripheralDiscoveredCallback = handleCandidate;
 
     var scanStarted = false;
     try {
@@ -77,6 +82,20 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
         DebugLogManager.recordDeviceDiagnostic(
           'NativeBluetoothDiscoverer: startScan btState=$btState serviceUuidFilterCount=0 timeoutSeconds=$timeout',
         );
+
+        // ellaaicare/ella-ai#1287 RUN-018: a necklace already connected at the CoreBluetooth
+        // level (or already paired on this device) stops advertising, so the scan above will
+        // never surface it. Ask natively for those two additional sources up front — they
+        // return immediately, no active scan involved.
+        try {
+          final retrieved = await _hostApi.retrieveConnectedAndKnownPeripherals([omiServiceUuid], _knownDeviceIds());
+          for (final peripheral in retrieved) {
+            handleCandidate(peripheral);
+          }
+        } catch (error, stackTrace) {
+          Logger.warning('NativeBluetoothDiscoverer: retrieveConnectedAndKnownPeripherals error: $error');
+          Logger.debug('$stackTrace');
+        }
 
         _timeoutTimer?.cancel();
         _timeoutTimer = Timer(Duration(seconds: timeout), () {
@@ -167,6 +186,9 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
   @visibleForTesting
   static BtDevice peripheralToDevice(BlePeripheral p) => _peripheralToDevice(p);
 
+  @visibleForTesting
+  static bool isAdmittedBySource(BlePeripheral p) => _isAdmittedBySource(p);
+
   static bool _isSupportedPeripheral(BlePeripheral p) {
     return _isBee(p) || _isPlaud(p) || _isFieldy(p) || _isFriendPendant(p) || _isLimitless(p) || _isOmi(p);
   }
@@ -200,12 +222,56 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
     // 'friend_'-prefixed names remain the distinct Friend Pendant product,
     // matched by _isFriendPendant above.
     final name = p.name.toLowerCase();
-    return name == 'friend' || name.startsWith('omi') || _hasService(p, omiServiceUuid);
+    return name == 'friend' || name.startsWith('omi') || _hasService(p, omiServiceUuid) || _isAdmittedBySource(p);
   }
 
   static bool _hasService(BlePeripheral p, String serviceUuid) {
     final target = serviceUuid.toLowerCase();
     return p.serviceUuids.any((uuid) => uuid.toLowerCase() == target);
+  }
+
+  /// ellaaicare/ella-ai#1287 RUN-018: none of the three capture-layer sources below
+  /// involve an active scan, so none of them carry an advertised name — the name/UUID
+  /// signature checks above never fire for them. Membership in a source that
+  /// CoreBluetooth itself already vetted (already connected exposing the Omi service,
+  /// or a saved/paired device id) stands in for the missing adv name.
+  static bool _isAdmittedBySource(BlePeripheral p) {
+    switch (p.source) {
+      case 'retrievedConnected':
+        // CoreBluetooth only returns this peripheral because it already exposes the
+        // requested (Omi) service — that is itself the admission evidence.
+        return true;
+      case 'retrievedKnown':
+        // CoreBluetooth only returns this peripheral because its id was passed in the
+        // saved/paired device id list — that is itself the admission evidence.
+        return true;
+      case 'restored':
+        // State restoration doesn't pre-filter by service the way retrievedConnected
+        // does, so evaluate a restored peripheral the same way (a)/(b) would: either it
+        // already exposes the Omi service, or its id is a saved/paired device.
+        return _hasService(p, omiServiceUuid) || _isKnownDeviceId(p.uuid);
+      default:
+        return false;
+    }
+  }
+
+  static bool _isKnownDeviceId(String uuid) {
+    if (uuid.isEmpty) return false;
+    if (SharedPreferencesUtil().btDevice.id == uuid) return true;
+    return SharedPreferencesUtil().btDevices.any((device) => device.id == uuid);
+  }
+
+  /// Saved/paired device ids from the same persisted store the legacy reconnect path
+  /// reads from (`SharedPreferencesUtil().btDevice` / `.btDevices`), passed to the
+  /// native `retrievePeripherals(withIdentifiers:)` retrieval (source (b)).
+  static List<String> _knownDeviceIds() {
+    final ids = <String>{};
+    final primaryId = SharedPreferencesUtil().btDevice.id;
+    if (primaryId.isNotEmpty) ids.add(primaryId);
+    for (final device in SharedPreferencesUtil().btDevices) {
+      if (device.id.isNotEmpty) ids.add(device.id);
+    }
+    return ids.toList();
   }
 
   static BtDevice _peripheralToDevice(BlePeripheral p) {

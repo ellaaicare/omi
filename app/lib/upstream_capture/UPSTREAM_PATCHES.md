@@ -389,6 +389,104 @@ scan semantics (more callback volume, traded for correctness on slow-to-respond 
 not upstreamable as a drop-in fix without upstream also wanting the added Pigeon field and
 diagnostics; recorded as a local patch only, as with patches **One** through **Three**.
 
+### Five: native discovery still admits nothing on build 879 (RUN-018) — the necklace was already connected/known, not late-advertising
+
+**Symptom** (ellaaicare/ella-ai#1287 RUN-018, build 879, flag ON): patch **Four**'s fix works —
+`didDiscoverCount` = 12 vs. Dart `candidatesSeen` = 6 in this run, confirming more raw
+CoreBluetooth callbacks are reaching the candidate pipeline than before. But the deeper bug is
+**not** fixed: `nameArrivedLate` = 0, and **every** candidate observed in this run has
+`hasAdvName == false` **and** `uuidCount == 0`. This rules out patch **Four**'s "scan-response
+arrives late" theory entirely — these candidates never carry a usable advertised name or
+service UUID at all, at any point in the scan.
+
+**Hypothesis**: the necklace is often already connected at the iOS/CoreBluetooth level when the
+app starts scanning (e.g. a prior app lifetime connected it seconds earlier, or CoreBluetooth
+state restoration reconnected it before the scan even starts). A peripheral already connected
+to the system stops advertising, so a fresh `scanForPeripherals` scan will never surface it as a
+discovery event — no name, no service UUIDs, nothing to admit on. This matches patch **Four**'s
+own investigation, which found `OmiBleManager` already uses state restoration
+(`restoreIdentifier: "com.omi.ble.restore"`) and that the legacy/known-device reconnect path
+finds its target via `retrievePeripherals(withIdentifiers:)`, not scanning — neither of which the
+discovery *candidate* path (as opposed to the reconnect path) ever consulted.
+
+**Fix**: in addition to the existing unfiltered scan, the discovery path now also surfaces
+peripherals through three additional CoreBluetooth sources, each forwarded to Dart as a
+discovery candidate (`BlePeripheral`, new `source` field) exactly like a scanned one:
+
+- `retrieveConnectedPeripherals(withServices:)`, filtered to the Omi service UUID Dart already
+  owns (`omiServiceUuid`) — peripherals already connected system-wide that expose it. Tagged
+  `source: "retrievedConnected"`.
+- `retrievePeripherals(withIdentifiers:)`, for the saved/paired device id(s) Dart already reads
+  from `SharedPreferencesUtil().btDevice` / `.btDevices` (the same store the legacy reconnect
+  path uses — no new store introduced). Tagged `source: "retrievedKnown"`.
+- `centralManager(_:willRestoreState:)` (the existing state-restoration delegate), which now also
+  forwards each restored peripheral through `onPeripheralDiscovered` alongside its existing
+  `onStateRestored` call. Tagged `source: "restored"`.
+
+A single new native method, `BleHostApi.retrieveConnectedAndKnownPeripherals(serviceUuids:,
+knownDeviceIds:)`, covers the first two (Dart calls it once per `discover()`, right after
+`startScan`, passing `[omiServiceUuid]` and the ids from the persisted device store); the third
+piggybacks on the existing restoration delegate. A new pure-logic file,
+`OmiBleRetrievalTagging.swift`, merges and deduplicates the two retrieval results (a peripheral
+present in both keeps the stronger `retrievedConnected` tag rather than double-counting).
+
+None of these three sources involve an active scan, so none of them ever carry an advertised
+name — only whatever `CBPeripheral.name` (the OS's cached GAP name) happens to already be. The
+Dart admission classifier (`NativeBluetoothDiscoverer._isAdmittedBySource`) now admits a nameless
+candidate on source evidence alone: `retrievedConnected`/`retrievedKnown` are admitted
+unconditionally (CoreBluetooth itself already vetted them against the service filter or the known
+id list); a `restored` candidate is evaluated the same way — Omi service present, or its id is a
+saved/paired device — since state restoration doesn't pre-filter by service the way (a) does.
+
+**Diagnostics**: three new counters — `retrievedConnectedCount`, `retrievedKnownCount`,
+`restoredCount` — added to `OmiBleDiagnostics` / `BleNativeDiscoveryDiagnostics` /
+`EllaNativeDiscoveryDiagnostics`, wired through the same three-layer plumbing patch **Three**
+built, and surfaced on `DeviceDiagnosticsPage` alongside `didDiscoverCount` / `candidatesSeen` /
+`nameArrivedLate`.
+
+**Feature flag**: this patch only adds a new capture-layer path behind the existing
+`ELLA_UPSTREAM_CAPTURE_ENABLED` flag (default `NO`, unchanged) — no default is flipped by this
+patch.
+
+| File | Manifest kind | Pin blob (unchanged upstream) | Approved local blob |
+| --- | --- | --- | --- |
+| `app/ios/Runner/Ble/BleHostApiImpl.swift` | `patched` | `415903a72829adfc83ca4c1321158db3b1ee059c` | `0965ab69aadaa375b6be7dd03bb62f28801907cb` |
+| `app/ios/Runner/Ble/OmiBleManager.swift` | `patched` | `889d135a5a3fe1cbfccbb5baf88d980003df5c77` | `3cfc843cd51b5b43e913a247c3fef5ebc6be0431` |
+| `app/ios/Runner/PigeonCommunicator.g.swift` | `patched` | `b774502d0c755cecdab9efefbb7db7d7606c287a` | `de1bba67938c468d07ae766360634036649d6b0b` |
+| `app/lib/gen/pigeon_communicator.g.dart` | `patched` | `25034c9152ceac9b4a4cc9a264027697b372a539` | `8a1c25790b78a3f0b650005b15f19e4a38db887b` |
+| `app/lib/services/devices/discovery/native_bluetooth_discoverer.dart` | `patched` | `0a7aec27f031d61972599823158d8f77731dc2b4` | `5136dde20405c645d0f3dc1d86231e674a401a77` |
+
+(`OmiBleDiscoveryNaming.swift` is unchanged by this patch; its row in patch **Four**'s table above
+still carries the current approved blob. `OmiBleRetrievalTagging.swift` is a brand-new,
+Ella-only file with no upstream counterpart — it is not listed in `UPSTREAM_OWNED.txt`, same as
+any other fork-owned file that happens to live alongside vendored native sources.)
+
+**Confirmed identical upstream (before this patch)**: all five touched files carried patches
+**Two** through **Four**'s local fixes only, otherwise unchanged from the pin
+(`f16699aea7fe9ba089baceb628922f2882c51153`). Upstream's own discovery path has no
+`retrieveConnectedPeripherals`/`retrievePeripherals(withIdentifiers:)` usage in its candidate
+pipeline either (confirmed by patch **Four**'s investigation into item (a)/(c), left unimplemented
+there); there is no upstream fix to re-vendor.
+
+**Upstream base SHA**: same pin, `f16699aea7fe9ba089baceb628922f2882c51153`. **No upstream PR** —
+this is recorded as a local, Ella-side-only capture-layer addition, same as patches **One**
+through **Four**.
+
+**Tests**: `app/test/ella/upstream_capture/upstream_capture_discovery_admission_test.dart` gained
+a group covering admission of each of the three new sources (`retrievedConnected`,
+`retrievedKnown`, `restored`) with no advertised name present. `app/ios/Tests/OmiBleRetrievalTaggingTests.swift`
+(new, `swiftc`-executable, following the existing `OmiBleDiscoveryNamingTests.swift` /
+`GuardianNativePolicyTests.swift` pattern — no XCTest target exists for this native code) covers
+`OmiBleRetrievalTagging.mergeTaggedCandidates` directly, wired into
+`.github/workflows/ella-ios-source-ci.yml`. `upstream_capture_byte_identity_test.dart`'s hardcoded
+blob expectations were updated for the four re-patched files plus
+`native_bluetooth_discoverer.dart`.
+
+**Upstreamability**: the two new retrieval sources and the restoration forward are additive (a new
+Pigeon method, a new field on an existing struct, three new counters, one new pure-logic file)
+with no fork-specific dependencies in the touched upstream-owned files; recorded as a local patch
+only, as with patches **One** through **Four**.
+
 ## Fork-side changes that are NOT upstream patches
 
 These touch fork (non-upstream-owned) files so the vendored files can stay byte-identical:

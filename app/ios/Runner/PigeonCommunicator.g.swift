@@ -146,6 +146,13 @@ struct BlePeripheral: Hashable {
   /// Whether `CBPeripheral.name` (the OS's cached GAP name) was present.
   /// Redacted discovery diagnostic; never paired with the name/UUID values themselves.
   var hasPeripheralName: Bool
+  /// How this candidate reached the capture layer: "scan" (an active
+  /// `didDiscover` callback), "retrievedConnected" (already connected
+  /// system-wide, found via `retrieveConnectedPeripherals(withServices:)`),
+  /// "retrievedKnown" (a saved/paired device id, found via
+  /// `retrievePeripherals(withIdentifiers:)`), or "restored" (delivered via
+  /// `centralManager(_:willRestoreState:)`). ellaaicare/ella-ai#1287 RUN-018.
+  var source: String
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -156,6 +163,7 @@ struct BlePeripheral: Hashable {
     let serviceUuids = pigeonVar_list[3] as! [String]
     let hasAdvertisedLocalName = pigeonVar_list[4] as! Bool
     let hasPeripheralName = pigeonVar_list[5] as! Bool
+    let source = pigeonVar_list.count > 6 ? (pigeonVar_list[6] as? String) ?? "scan" : "scan"
 
     return BlePeripheral(
       uuid: uuid,
@@ -163,7 +171,8 @@ struct BlePeripheral: Hashable {
       rssi: rssi,
       serviceUuids: serviceUuids,
       hasAdvertisedLocalName: hasAdvertisedLocalName,
-      hasPeripheralName: hasPeripheralName
+      hasPeripheralName: hasPeripheralName,
+      source: source
     )
   }
   func toList() -> [Any?] {
@@ -174,6 +183,7 @@ struct BlePeripheral: Hashable {
       serviceUuids,
       hasAdvertisedLocalName,
       hasPeripheralName,
+      source,
     ]
   }
   static func == (lhs: BlePeripheral, rhs: BlePeripheral) -> Bool {
@@ -390,6 +400,15 @@ struct BleNativeDiscoveryDiagnostics: Hashable {
   /// Count of re-discoveries forwarded because a later advertisement packet
   /// added a name or service UUID the first sighting lacked.
   var nameArrivedLate: Int64
+  /// Count of peripherals surfaced via `retrieveConnectedPeripherals(withServices:)`.
+  /// ellaaicare/ella-ai#1287 RUN-018.
+  var retrievedConnectedCount: Int64
+  /// Count of peripherals surfaced via `retrievePeripherals(withIdentifiers:)`
+  /// for a saved/paired device id. ellaaicare/ella-ai#1287 RUN-018.
+  var retrievedKnownCount: Int64
+  /// Count of peripherals surfaced via `centralManager(_:willRestoreState:)`.
+  /// ellaaicare/ella-ai#1287 RUN-018.
+  var restoredCount: Int64
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -401,6 +420,9 @@ struct BleNativeDiscoveryDiagnostics: Hashable {
     let didDiscoverCount = pigeonVar_list[4] as! Int64
     let flutterApiNilDropCount = pigeonVar_list[5] as! Int64
     let nameArrivedLate = pigeonVar_list[6] as! Int64
+    let retrievedConnectedCount = pigeonVar_list.count > 7 ? (pigeonVar_list[7] as? Int64) ?? 0 : 0
+    let retrievedKnownCount = pigeonVar_list.count > 8 ? (pigeonVar_list[8] as? Int64) ?? 0 : 0
+    let restoredCount = pigeonVar_list.count > 9 ? (pigeonVar_list[9] as? Int64) ?? 0 : 0
 
     return BleNativeDiscoveryDiagnostics(
       lastStartScanCbState: lastStartScanCbState,
@@ -409,7 +431,10 @@ struct BleNativeDiscoveryDiagnostics: Hashable {
       queuedScansFired: queuedScansFired,
       didDiscoverCount: didDiscoverCount,
       flutterApiNilDropCount: flutterApiNilDropCount,
-      nameArrivedLate: nameArrivedLate
+      nameArrivedLate: nameArrivedLate,
+      retrievedConnectedCount: retrievedConnectedCount,
+      retrievedKnownCount: retrievedKnownCount,
+      restoredCount: restoredCount
     )
   }
   func toList() -> [Any?] {
@@ -421,6 +446,9 @@ struct BleNativeDiscoveryDiagnostics: Hashable {
       didDiscoverCount,
       flutterApiNilDropCount,
       nameArrivedLate,
+      retrievedConnectedCount,
+      retrievedKnownCount,
+      restoredCount,
     ]
   }
   static func == (lhs: BleNativeDiscoveryDiagnostics, rhs: BleNativeDiscoveryDiagnostics) -> Bool {
@@ -984,6 +1012,10 @@ protocol BleHostApi {
   /// Cross-layer discovery diagnostics recorded natively (CoreBluetooth state,
   /// started-vs-queued, didDiscover count, flutterApi-nil drop count).
   func getNativeDiscoveryDiagnostics(completion: @escaping (Result<BleNativeDiscoveryDiagnostics, Error>) -> Void)
+  /// ellaaicare/ella-ai#1287 RUN-018: surface peripherals that a fresh scan can never see
+  /// because they are already connected system-wide or already paired — source-tagged
+  /// `retrievedConnected` / `retrievedKnown` (see `BlePeripheral.source`).
+  func retrieveConnectedAndKnownPeripherals(serviceUuids: [String], knownDeviceIds: [String], completion: @escaping (Result<[BlePeripheral], Error>) -> Void)
   /// (Android only) Check if any CompanionDeviceManager association exists.
   func hasCompanionDeviceAssociation() throws -> Bool
   /// (Android only) Initiate CompanionDeviceManager association for a device.
@@ -1271,6 +1303,27 @@ class BleHostApiSetup {
       }
     } else {
       getNativeDiscoveryDiagnosticsChannel.setMessageHandler(nil)
+    }
+    /// ellaaicare/ella-ai#1287 RUN-018: surface peripherals that a fresh scan can never see
+    /// because they are already connected system-wide or already paired — source-tagged
+    /// `retrievedConnected` / `retrievedKnown` (see `BlePeripheral.source`).
+    let retrieveConnectedAndKnownPeripheralsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.omi_pigeon.BleHostApi.retrieveConnectedAndKnownPeripherals\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      retrieveConnectedAndKnownPeripheralsChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let serviceUuidsArg = args[0] as! [String]
+        let knownDeviceIdsArg = args[1] as! [String]
+        api.retrieveConnectedAndKnownPeripherals(serviceUuids: serviceUuidsArg, knownDeviceIds: knownDeviceIdsArg) { result in
+          switch result {
+          case .success(let res):
+            reply(wrapResult(res))
+          case .failure(let error):
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      retrieveConnectedAndKnownPeripheralsChannel.setMessageHandler(nil)
     }
     /// (Android only) Check if any CompanionDeviceManager association exists.
     let hasCompanionDeviceAssociationChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.omi_pigeon.BleHostApi.hasCompanionDeviceAssociation\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)

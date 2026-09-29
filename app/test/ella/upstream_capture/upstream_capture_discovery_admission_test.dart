@@ -12,6 +12,8 @@ import 'dart:async';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:omi/upstream_capture/backend/preferences.dart';
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/upstream_capture/gen/pigeon_communicator.g.dart';
 import 'package:omi/upstream_capture/services/bridges/ble_bridge.dart';
@@ -171,6 +173,110 @@ void main() {
       final device = NativeBluetoothDiscoverer.peripheralToDevice(peripheral);
       expect(device.type, DeviceType.omi);
       expect(device.name, 'Friend');
+    });
+  });
+
+  // ellaaicare/ella-ai#1287 RUN-018: RUN-018 (necklace already connected/known at the
+  // CoreBluetooth level) showed nameArrivedLate=0 and hasAdvName=false/uuidCount=0 on
+  // every candidate — ruling out the "scan-response arrives late" theory (patch Four /
+  // RUN-016 above) entirely. `OmiBleManager` now also surfaces peripherals via
+  // `retrieveConnectedPeripherals(withServices:)`, `retrievePeripherals(withIdentifiers:)`,
+  // and `centralManager(_:willRestoreState:)`, none of which involve an active scan and so
+  // none of which ever carry an advertised name. This group covers the admission classifier
+  // accepting each of those three sources on evidence other than the name.
+  group('NativeBluetoothDiscoverer admission without an advertised name (ellaaicare/ella-ai#1287 RUN-018)', () {
+    setUpAll(() {
+      TestWidgetsFlutterBinding.ensureInitialized();
+    });
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      await SharedPreferencesUtil.init();
+    });
+
+    test('admits a retrievedConnected candidate with no advertised name', () {
+      final peripheral = BlePeripheral(
+        uuid: '0000-eeee-0001',
+        name: '',
+        rssi: -50,
+        serviceUuids: [],
+        source: 'retrievedConnected',
+      );
+
+      expect(NativeBluetoothDiscoverer.isAdmittedBySource(peripheral), isTrue);
+      expect(NativeBluetoothDiscoverer.isOmi(peripheral), isTrue);
+      expect(NativeBluetoothDiscoverer.isSupportedPeripheral(peripheral), isTrue);
+    });
+
+    test('admits a retrievedKnown candidate with no advertised name', () {
+      final peripheral = BlePeripheral(
+        uuid: '0000-eeee-0002',
+        name: '',
+        rssi: -55,
+        serviceUuids: [],
+        source: 'retrievedKnown',
+      );
+
+      expect(NativeBluetoothDiscoverer.isAdmittedBySource(peripheral), isTrue);
+      expect(NativeBluetoothDiscoverer.isOmi(peripheral), isTrue);
+      expect(NativeBluetoothDiscoverer.isSupportedPeripheral(peripheral), isTrue);
+    });
+
+    test('admits a restored candidate with no advertised name when it exposes the Omi service', () {
+      final peripheral = BlePeripheral(
+        uuid: '0000-eeee-0003',
+        name: '',
+        rssi: -60,
+        serviceUuids: [omiServiceUuid],
+        source: 'restored',
+      );
+
+      expect(NativeBluetoothDiscoverer.isAdmittedBySource(peripheral), isTrue);
+      expect(NativeBluetoothDiscoverer.isOmi(peripheral), isTrue);
+    });
+
+    test('admits a restored candidate with no advertised name when its id is a saved/paired device', () async {
+      // Fake, non-hardware placeholder id — never a real device UUID (public repo).
+      const fakePairedDeviceId = '0000-eeee-0004';
+      await SharedPreferencesUtil().btDeviceSet(
+        BtDevice(id: fakePairedDeviceId, name: 'Friend', type: DeviceType.omi, rssi: -60),
+      );
+
+      final peripheral = BlePeripheral(
+        uuid: fakePairedDeviceId,
+        name: '',
+        rssi: -60,
+        serviceUuids: [],
+        source: 'restored',
+      );
+
+      expect(NativeBluetoothDiscoverer.isAdmittedBySource(peripheral), isTrue);
+      expect(NativeBluetoothDiscoverer.isOmi(peripheral), isTrue);
+    });
+
+    test('rejects a restored candidate with no advertised name and no known-id/service evidence', () {
+      final peripheral = BlePeripheral(
+        uuid: '0000-eeee-0005',
+        name: '',
+        rssi: -70,
+        serviceUuids: [],
+        source: 'restored',
+      );
+
+      expect(NativeBluetoothDiscoverer.isAdmittedBySource(peripheral), isFalse);
+      expect(NativeBluetoothDiscoverer.isOmi(peripheral), isFalse);
+    });
+
+    test('does not admit a nameless plain-scan candidate on source evidence alone', () {
+      final peripheral = BlePeripheral(
+        uuid: '0000-eeee-0006',
+        name: '',
+        rssi: -70,
+        serviceUuids: [],
+        source: 'scan',
+      );
+
+      expect(NativeBluetoothDiscoverer.isAdmittedBySource(peripheral), isFalse);
     });
   });
 
