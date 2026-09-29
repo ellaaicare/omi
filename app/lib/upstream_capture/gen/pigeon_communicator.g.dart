@@ -386,6 +386,7 @@ class BleNativeDiscoveryDiagnostics {
     required this.queuedScansFired,
     required this.didDiscoverCount,
     required this.flutterApiNilDropCount,
+    this.nameArrivedLate = 0,
   });
 
   /// CoreBluetooth state observed at the most recent startScan call.
@@ -403,6 +404,10 @@ class BleNativeDiscoveryDiagnostics {
   /// Count of didDiscover callbacks dropped because flutterApi was nil.
   int flutterApiNilDropCount;
 
+  /// Count of re-discoveries forwarded because a later advertisement packet
+  /// added a name or service UUID the first sighting lacked.
+  int nameArrivedLate;
+
   List<Object?> _toList() {
     return <Object?>[
       lastStartScanCbState,
@@ -411,6 +416,7 @@ class BleNativeDiscoveryDiagnostics {
       queuedScansFired,
       didDiscoverCount,
       flutterApiNilDropCount,
+      nameArrivedLate,
     ];
   }
 
@@ -427,6 +433,7 @@ class BleNativeDiscoveryDiagnostics {
       queuedScansFired: result[3]! as int,
       didDiscoverCount: result[4]! as int,
       flutterApiNilDropCount: result[5]! as int,
+      nameArrivedLate: result.length > 6 ? (result[6] as int?) ?? 0 : 0,
     );
   }
 

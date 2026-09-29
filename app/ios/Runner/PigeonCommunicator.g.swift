@@ -387,6 +387,9 @@ struct BleNativeDiscoveryDiagnostics: Hashable {
   var didDiscoverCount: Int64
   /// Count of didDiscover callbacks dropped because flutterApi was nil.
   var flutterApiNilDropCount: Int64
+  /// Count of re-discoveries forwarded because a later advertisement packet
+  /// added a name or service UUID the first sighting lacked.
+  var nameArrivedLate: Int64
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -397,6 +400,7 @@ struct BleNativeDiscoveryDiagnostics: Hashable {
     let queuedScansFired = pigeonVar_list[3] as! Int64
     let didDiscoverCount = pigeonVar_list[4] as! Int64
     let flutterApiNilDropCount = pigeonVar_list[5] as! Int64
+    let nameArrivedLate = pigeonVar_list[6] as! Int64
 
     return BleNativeDiscoveryDiagnostics(
       lastStartScanCbState: lastStartScanCbState,
@@ -404,7 +408,8 @@ struct BleNativeDiscoveryDiagnostics: Hashable {
       scansQueued: scansQueued,
       queuedScansFired: queuedScansFired,
       didDiscoverCount: didDiscoverCount,
-      flutterApiNilDropCount: flutterApiNilDropCount
+      flutterApiNilDropCount: flutterApiNilDropCount,
+      nameArrivedLate: nameArrivedLate
     )
   }
   func toList() -> [Any?] {
@@ -415,6 +420,7 @@ struct BleNativeDiscoveryDiagnostics: Hashable {
       queuedScansFired,
       didDiscoverCount,
       flutterApiNilDropCount,
+      nameArrivedLate,
     ]
   }
   static func == (lhs: BleNativeDiscoveryDiagnostics, rhs: BleNativeDiscoveryDiagnostics) -> Bool {
