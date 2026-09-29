@@ -1227,7 +1227,13 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     if (capture?.isPaused == true || capture?.recordingState == RecordingState.pause) return;
     if (isConnected) {
       final device = connectedDevice;
-      if (device != null) await _resumeCaptureForConnectedDevice(device, _deviceOperationGeneration);
+      if (device != null) {
+        await _resumeCaptureForConnectedDevice(
+          device,
+          _deviceOperationGeneration,
+          allowLaunchCaptureResumeGrace: true,
+        );
+      }
       return;
     }
     final stored = _rememberedDeviceForCurrentAuthority();
@@ -1240,13 +1246,26 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     await periodicConnect(reason, boundDeviceOnly: true, operationGeneration: generation);
   }
 
-  Future<void> _resumeCaptureForConnectedDevice(BtDevice device, int operationGeneration) async {
+  Future<void> _resumeCaptureForConnectedDevice(
+    BtDevice device,
+    int operationGeneration, {
+    bool allowLaunchCaptureResumeGrace = false,
+  }) async {
     final capture = captureProvider;
     final captureFailure = capture?.captureDiagnostics.failure;
     final staleCaptureFailureBlocksResume = capture?.recordingState == RecordingState.error &&
         captureFailure != null &&
         _requiresFreshBleSessionForCaptureFailure(captureFailure);
-    final usesLaunchCaptureResumeGrace = staleCaptureFailureBlocksResume && !_hasGrantedLaunchCaptureResumeGrace;
+    // The grace only ever applies to a failure that is already stale the
+    // very first time resumeKnownDeviceConnection (app-resumed/cold-launch
+    // retained connection) checks it — never to the opportunistic
+    // already-connected branch of periodicConnect's scan loop, which also
+    // fires for reasons unrelated to a fresh app launch (BLE readiness
+    // cycling, the recurring reconnection timer, post-disconnect retries).
+    // A failure surfacing there is far more likely to have been produced,
+    // or still be mid-recovery, within this same process's lifetime.
+    final usesLaunchCaptureResumeGrace =
+        allowLaunchCaptureResumeGrace && staleCaptureFailureBlocksResume && !_hasGrantedLaunchCaptureResumeGrace;
     if (!_isDeviceOperationCurrent(operationGeneration) ||
         !_isCurrentOwnerBoundDevice(device.id) ||
         _hasPendingFreshBleSessionRequirement() ||
