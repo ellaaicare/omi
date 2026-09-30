@@ -586,11 +586,13 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
                     : (state == RecordingState.record || state == RecordingState.deviceRecord || initializing)
                         ? context.l10n.upstreamCaptureConnectingTranscription
                         : _message);
-        final detail = live && provider.segments.isEmpty && !_protocolMessageActive
-            ? context.l10n.upstreamCaptureWaitingForSpeech
-            : live && _message != null && !_protocolMessageActive
-                ? _message
-                : null;
+        final detail = operationLabel != null
+            ? null
+            : live && provider.segments.isEmpty && !_protocolMessageActive
+                ? context.l10n.upstreamCaptureWaitingForSpeech
+                : live && _message != null && !_protocolMessageActive
+                    ? _message
+                    : null;
 
         return _DockSurface(
           child: Column(
@@ -601,7 +603,9 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
               if (status != null && status.isNotEmpty) ...[
                 _DockStatus(
                   label: status,
-                  visualLabel: MediaQuery.textScalerOf(context).scale(1) >= 3 && !_protocolMessageActive
+                  visualLabel: MediaQuery.textScalerOf(context).scale(1) >= 3 &&
+                          !_protocolMessageActive &&
+                          operationLabel == null
                       ? (necklaceLive
                           ? context.l10n.todayNecklace
                           : phoneLive

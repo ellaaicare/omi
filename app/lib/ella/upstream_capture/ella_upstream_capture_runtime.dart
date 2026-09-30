@@ -477,20 +477,28 @@ class EllaUpstreamCaptureRuntime {
 
   /// Binds the capture session to [uid] (fresh consent lease + generation) and
   /// releases upstream's capture-policy latch if a previous revocation set it.
-  Future<bool> bindAccount(String uid) async {
+  Future<int?> _bindAccountEpoch(String uid) async {
     final bound = authority.bind(uid);
-    if (!bound) return false;
+    if (!bound) return null;
+    final boundEpoch = authority.bindingEpoch;
+    bool originIsCurrent() =>
+        authority.bindingEpoch == boundEpoch &&
+        authority.isCurrentOwner(uid) &&
+        authority.boundUid == uid &&
+        authority.hasCurrentAuthority;
     try {
       final preferences = upstream.SharedPreferencesUtil();
       if (preferences.capturePolicy.muted && _mutedByRevocation) {
         await preferences.setCaptureMuted(false);
       }
-      _mutedByRevocation = false;
+      if (originIsCurrent()) _mutedByRevocation = false;
     } catch (error) {
       Logger.debug('[EllaUpstreamCapture] capture policy unmute failed: ${error.runtimeType}');
     }
-    return authority.hasCurrentAuthority;
+    return originIsCurrent() ? boundEpoch : null;
   }
+
+  Future<bool> bindAccount(String uid) async => await _bindAccountEpoch(uid) != null;
 
   bool _mutedByRevocation = false;
   Future<void> _teardown = Future<void>.value();
@@ -579,12 +587,12 @@ class EllaUpstreamCaptureRuntime {
     if (!authority.isCurrentOwner(uid) || authority.bindingEpoch != originEpoch) {
       return EllaCaptureStartOutcome.unavailable;
     }
-    if (!await bindAccount(uid)) {
-      return authority.isCurrentOwner(uid)
+    final boundEpoch = await _bindAccountEpoch(uid);
+    if (boundEpoch == null) {
+      return authority.bindingEpoch == originEpoch && authority.isCurrentOwner(uid)
           ? EllaCaptureStartOutcome.consentRequired
           : EllaCaptureStartOutcome.unavailable;
     }
-    final boundEpoch = authority.bindingEpoch;
     bool originIsCurrent() =>
         authority.bindingEpoch == boundEpoch &&
         authority.isCurrentOwner(uid) &&
@@ -634,12 +642,12 @@ class EllaUpstreamCaptureRuntime {
     if (!authority.isCurrentOwner(uid) || authority.bindingEpoch != originEpoch) {
       return EllaCaptureStartOutcome.unavailable;
     }
-    if (!await bindAccount(uid)) {
-      return authority.isCurrentOwner(uid)
+    final boundEpoch = await _bindAccountEpoch(uid);
+    if (boundEpoch == null) {
+      return authority.bindingEpoch == originEpoch && authority.isCurrentOwner(uid)
           ? EllaCaptureStartOutcome.consentRequired
           : EllaCaptureStartOutcome.unavailable;
     }
-    final boundEpoch = authority.bindingEpoch;
     bool originIsCurrent() =>
         authority.bindingEpoch == boundEpoch &&
         authority.isCurrentOwner(uid) &&

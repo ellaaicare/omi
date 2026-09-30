@@ -16,6 +16,9 @@ import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/capture_host/ella_capture_host.dart';
+import 'package:omi/ella/upstream_capture/ella_capture_authority.dart';
+import 'package:omi/ella/upstream_capture/ella_upstream_capture_dock.dart';
+import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
@@ -32,6 +35,11 @@ import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
+import 'package:omi/upstream_capture/backend/preferences.dart' as upstream;
+import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart' as upstream_device;
+import 'package:omi/upstream_capture/providers/capture_provider.dart' as upstream_capture;
+import 'package:omi/upstream_capture/services/capture/capture_seams.dart' as upstream_capture;
+import 'package:omi/upstream_capture/utils/enums.dart' as upstream_capture;
 import 'package:omi/utils/enums.dart';
 import 'package:omi/widgets/bottom_nav_bar.dart';
 import 'package:omi/widgets/transcript.dart';
@@ -3011,6 +3019,97 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('legacy Back to recent stays reachable after scrolling at 320 width and 3x text', (tester) async {
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.withMemories(photoBase64: ''),
+      viewport: const Size(320, 568),
+      textScaler: const TextScaler.linear(3),
+    );
+    addTearDown(harness.dispose);
+
+    final homeScroll = tester.state<ScrollableState>(
+      find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
+    );
+    expect(homeScroll.position.maxScrollExtent, greaterThan(640));
+    homeScroll.position.jumpTo(700);
+    await tester.pump();
+
+    final backToRecent = find.byKey(const Key('home-back-to-recent'));
+    expect(backToRecent, findsOneWidget);
+    expect(tester.getTopLeft(backToRecent).dy, greaterThanOrEqualTo(47));
+    expect(tester.getBottomLeft(backToRecent).dy, lessThan(568 - EllaSizes.navBarHeight - 34));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('real Home, upstream dock and nav keep phone and necklace controls reachable', (tester) async {
+    await upstream.SharedPreferencesUtil.init();
+    final connectivity = StreamController<bool>.broadcast();
+    final capture = upstream_capture.CaptureProvider(
+      connectivity: upstream_capture.CaptureConnectivityBoundary(
+        initiallyConnected: true,
+        changes: connectivity.stream,
+        isConnected: () => true,
+      ),
+      bleListeners: const _IntegratedHomeDockBleListeners(),
+      preferences: upstream.SharedPreferencesUtil(),
+    );
+    final authority = EllaCaptureAuthority(authenticatedUid: () => 'test-user', sessionStartAllowed: (_) => false);
+    final runtime = _IntegratedHomeDockRuntime(authority: authority, capture: capture);
+    EllaCaptureHost.installForTesting(
+      homeCaptureDockBuilder: (_) => EllaUpstreamCaptureDock(
+        runtime: runtime,
+        authenticatedUid: () => 'test-user',
+        guardianAvailability: () => true,
+        guardianModeLoader: () async => const GuardianModeInfo(
+          currentMode: GuardianModeKey.custom,
+          twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
+        ),
+      ),
+    );
+    addTearDown(() async {
+      EllaCaptureHost.resetForTesting();
+      await tester.pumpWidget(const SizedBox.shrink());
+      capture.dispose();
+      authority.dispose();
+      await connectivity.close();
+    });
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.withMemories(photoBase64: ''),
+      viewport: const Size(320, 568),
+      textScaler: const TextScaler.linear(2),
+      includeBottomNav: true,
+    );
+    addTearDown(harness.dispose);
+
+    Future<void> expectReachable(String key) async {
+      final control = find.byKey(Key(key));
+      expect(control, findsOneWidget);
+      await tester.ensureVisible(control);
+      await tester.pump();
+      expect(control.hitTestable(), findsOneWidget, reason: '$key must accept a tap inside the real Home shell');
+    }
+
+    capture.updateRecordingState(upstream_capture.RecordingState.record);
+    capture.onConnected();
+    await tester.pump();
+    await expectReachable('upstream-capture-stop-phone');
+    await expectReachable('upstream-capture-view-transcript');
+    await expectReachable('upstream-capture-whispers-switch');
+
+    capture.updateRecordingDevice(
+      upstream_device.BtDevice(id: 'test-pendant', name: 'Compass', type: upstream_device.DeviceType.omi, rssi: -40),
+    );
+    capture.updateRecordingState(upstream_capture.RecordingState.deviceRecord);
+    capture.onConnected();
+    await tester.pump();
+    await expectReachable('upstream-capture-disconnect-necklace');
+    await expectReachable('upstream-capture-finish');
+    expect(find.byType(BottomNavBar), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('a successful 200 ON write is never rolled back by a native start failure', (tester) async {
     var guardianModeWrites = 0;
     GuardianModeState? writtenGuardianState;
@@ -3259,6 +3358,25 @@ class _HomeHarness {
     home.dispose();
     authorityChanges.dispose();
   }
+}
+
+class _IntegratedHomeDockRuntime extends EllaUpstreamCaptureRuntime {
+  _IntegratedHomeDockRuntime({required super.authority, required this.capture});
+
+  final upstream_capture.CaptureProvider capture;
+
+  @override
+  Future<upstream_capture.CaptureProvider> ensureBooted() async => capture;
+}
+
+class _IntegratedHomeDockBleListeners implements upstream_capture.CaptureBleListeners {
+  const _IntegratedHomeDockBleListeners();
+
+  @override
+  void addBatchRecordingFinalizedListener(void Function(String) callback) {}
+
+  @override
+  void removeBatchRecordingFinalizedListener(void Function(String) callback) {}
 }
 
 class _ReconnectTrackingDeviceProvider extends DeviceProvider {

@@ -57,21 +57,17 @@ void main() {
     }
   });
 
-  test('Home dock clearance grows with safe area and Dynamic Type', () {
+  test('legacy Home clearance and Back-to-Recent offset retain the flag-OFF geometry', () {
     final baseline = todayDockScrollClearance(textScale: 1, safeBottom: 0);
     expect(todayDockScrollClearance(textScale: 1, safeBottom: 34), baseline + 34);
     expect(todayDockScrollClearance(textScale: 2, safeBottom: 0), greaterThan(baseline));
     expect(
-      todayDockScrollClearance(textScale: 3, safeBottom: 0),
-      greaterThan(todayDockScrollClearance(textScale: 2, safeBottom: 0)),
-    );
+        todayDockScrollClearance(textScale: 3, safeBottom: 0), todayDockScrollClearance(textScale: 2, safeBottom: 0));
+    expect(todayBackToRecentBottomOffset(textScale: 1, safeBottom: 0), EllaSizes.navBarHeight + 166);
+    expect(todayBackToRecentBottomOffset(textScale: 3, safeBottom: 34), EllaSizes.navBarHeight + 34 + 166);
     expect(
-      todayBackToRecentBottomOffset(textScale: 1, safeBottom: 0),
-      greaterThan(EllaSizes.navBarHeight + 166),
-    );
-    expect(
-      todayBackToRecentBottomOffset(textScale: 2, safeBottom: 34),
-      greaterThan(todayBackToRecentBottomOffset(textScale: 1, safeBottom: 34)),
+      todayBackToRecentBottomOffset(textScale: 3, safeBottom: 34, viewportHeight: 568),
+      lessThan(568),
     );
   });
 

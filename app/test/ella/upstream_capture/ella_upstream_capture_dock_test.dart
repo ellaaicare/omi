@@ -545,6 +545,24 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('3x text shows the pending Finish operation instead of idle necklace status', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final finish = Completer<void>();
+    fixture.runtime.finishOverride = () => finish.future;
+    await fixture.pump(tester, textScale: 3);
+    fixture.makeNecklaceLive();
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('upstream-capture-finish')));
+    await tester.pump();
+    expect(tester.widget<Text>(find.byKey(const Key('upstream-capture-status'))).data, 'Finishing and saving…');
+    expect(find.text('Waiting for speech…'), findsNothing);
+
+    finish.complete();
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('Whispers distinguishes saved configuration from failed native playback', (tester) async {
     final fixture = await _DockFixture.create(tester);
     GuardianModeState? savedState;
@@ -848,13 +866,15 @@ void main() {
     await tester.pump();
 
     final dockHeight = tester.getSize(find.byKey(const Key('upstream-capture-dock'))).height;
-    expect(todayDockReservedHeight(scale), greaterThanOrEqualTo(dockHeight));
+    expect(todayDockReservedHeight(scale, viewportHeight: screen.height), greaterThanOrEqualTo(dockHeight));
     final dockTop = screen.height - (EllaSizes.navBarHeight + safeBottom + 16) - dockHeight;
-    final scrollContentBottom = screen.height - todayDockScrollClearance(textScale: scale, safeBottom: safeBottom);
+    final scrollContentBottom = screen.height -
+        todayDockScrollClearance(textScale: scale, safeBottom: safeBottom, viewportHeight: screen.height);
     final backToRecentBottom = screen.height -
         todayBackToRecentBottomOffset(
           textScale: scale,
           safeBottom: safeBottom,
+          viewportHeight: screen.height,
         );
     expect(scrollContentBottom, lessThanOrEqualTo(dockTop));
     expect(backToRecentBottom, lessThan(dockTop));

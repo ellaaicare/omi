@@ -2403,9 +2403,10 @@ class _AuthenticatedMemoryPresentationAuthority implements ExactAccountAuthority
 }
 
 double todayDockReservedHeight(double textScale, {double? viewportHeight}) {
+  if (viewportHeight == null) return 190 * textScale.clamp(1.0, 2.0);
   final effectiveScale = textScale.clamp(1.0, 3.0);
   final estimatedHeight = 190 + 245 * (effectiveScale - 1);
-  return viewportHeight == null ? estimatedHeight : estimatedHeight.clamp(0.0, viewportHeight * 0.52);
+  return estimatedHeight.clamp(0.0, viewportHeight * 0.52);
 }
 
 double todayDockScrollClearance({required double textScale, required double safeBottom, double? viewportHeight}) =>
@@ -2414,8 +2415,7 @@ double todayDockScrollClearance({required double textScale, required double safe
 double todayBackToRecentBottomOffset({required double textScale, required double safeBottom, double? viewportHeight}) =>
     EllaSizes.navBarHeight +
     safeBottom +
-    todayDockReservedHeight(textScale, viewportHeight: viewportHeight) +
-    (viewportHeight == null ? 16 : 32);
+    (viewportHeight == null ? 166 : todayDockReservedHeight(textScale, viewportHeight: viewportHeight) + 32);
 
 class TodayCaptureDockViewport extends StatefulWidget {
   const TodayCaptureDockViewport({super.key, required this.maxHeight, required this.child});

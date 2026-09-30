@@ -136,6 +136,7 @@ class EllaUpstreamCaptureHarness {
   bool connected = true;
   bool protocolV2 = false;
   int processCalls = 0;
+  int connectionAttempts = 0;
   final List<({String conversationId, int protocolVersion, String generation, String ownerToken})>
       protocolFinalizations = [];
 
@@ -211,6 +212,11 @@ class EllaUpstreamCaptureHarness {
     );
     runtime = EllaUpstreamCaptureRuntime(
       authority: authority,
+      bootForTesting: () async => provider,
+      connectDeviceForTesting: (_) async {
+        connectionAttempts++;
+        return deviceConnection;
+      },
       activeProtocolSocket: () => sockets.isEmpty ? null : sockets.last.service as EllaCaptureProtocolSocket,
       finalizationRequest: ({
         required conversationId,

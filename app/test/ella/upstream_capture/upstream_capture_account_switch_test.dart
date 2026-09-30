@@ -73,6 +73,44 @@ void main() {
     expect(h.provider.recordingState, isNot(RecordingState.deviceRecord));
   });
 
+  for (final source in ['phone', 'necklace']) {
+    test('$source start cannot adopt a same-UID lease replaced during policy unmute', () async {
+      expect(await h.bind(accountA), isTrue);
+      await h.runtime.releaseAccount();
+      expect(upstream.SharedPreferencesUtil().capturePolicy.muted, isTrue);
+
+      final unmuteStarted = Completer<void>();
+      final finishUnmute = Completer<void>();
+      upstream.SharedPreferencesUtil.capturePolicyBridgeForTesting = (method, arguments) async {
+        if (method == 'setMuted' && arguments['muted'] == false) {
+          unmuteStarted.complete();
+          await finishUnmute.future;
+        }
+        return null;
+      };
+      try {
+        final pending = source == 'phone'
+            ? h.runtime.startPhoneCapture(accountA)
+            : h.runtime.connectNecklace(accountA, EllaUpstreamCaptureHarness.pendant);
+        await unmuteStarted.future;
+        final retiredEpoch = h.authority.bindingEpoch;
+        h.authority.release();
+        expect(h.authority.bind(accountA), isTrue);
+        expect(h.authority.bindingEpoch, isNot(retiredEpoch));
+        finishUnmute.complete();
+
+        expect(await pending, EllaCaptureStartOutcome.unavailable);
+        expect(h.hostApi.nativeRecording, isFalse);
+        expect(h.connectionAttempts, 0);
+        expect(upstream.SharedPreferencesUtil().btDevice.id, isNot(EllaUpstreamCaptureHarness.pendant.id));
+        await h.runtime.pendingTeardown;
+      } finally {
+        if (!finishUnmute.isCompleted) finishUnmute.complete();
+        upstream.SharedPreferencesUtil.capturePolicyBridgeForTesting = null;
+      }
+    });
+  }
+
   test('real runtime retries a rejected boot while concurrent callers share each attempt', () async {
     var attempts = 0;
     final runtime = EllaUpstreamCaptureRuntime(
