@@ -136,7 +136,7 @@ Future _init() async {
   FlutterForegroundTask.initCommunicationPort();
 
   // Service manager
-  await ServiceManager.init();
+  await ServiceManager.init(deviceService: EllaCaptureHost.deviceService);
 
   // Firebase
   try {
@@ -203,6 +203,10 @@ Future _init() async {
   // (see lib/main_upstream_capture.dart); the legacy ones stay unstarted.
   if (!EllaCaptureHost.legacyCaptureSuppressed) {
     await ServiceManager.instance().start();
+  } else {
+    // The injected adapter only marks the shared upstream authority ready; it
+    // does not start a second BLE/WAL/capture stack.
+    ServiceManager.instance().device.start();
   }
   return;
 }

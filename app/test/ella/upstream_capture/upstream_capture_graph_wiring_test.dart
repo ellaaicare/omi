@@ -107,6 +107,7 @@ void main() {
         'lib/ella/capture_host/ella_capture_host.dart',
         'lib/ella/upstream_capture/ella_upstream_capture_runtime.dart',
         'lib/ella/upstream_capture/ella_upstream_capture_dock.dart',
+        'lib/ella/upstream_capture/ella_upstream_device_service_adapter.dart',
         'lib/ella/upstream_capture/ella_gated_capture_seams.dart',
         'lib/ella/upstream_capture/ella_gated_device_connection.dart',
         'lib/ella/upstream_capture/ella_capture_authority.dart',
@@ -131,6 +132,7 @@ void main() {
       }
       final entry = _read('lib/main_upstream_capture.dart');
       expect(entry, contains('EllaCaptureHost.installUpstreamCapture('));
+      expect(entry, contains('EllaUpstreamDeviceServiceAdapter.production(runtime)'));
       expect(entry, contains('EllaAccountIsolationService.registerCaptureProducer('));
       expect(entry, contains('legacy.main()'));
     });
@@ -155,6 +157,11 @@ void main() {
       expect(_read('lib/providers/device_provider.dart'),
           contains('if (EllaCaptureHost.legacyCaptureSuppressed) return;'));
       expect(_read('lib/main.dart'), contains('if (!EllaCaptureHost.legacyCaptureSuppressed) {'));
+      expect(
+        _read('lib/main.dart'),
+        contains('ServiceManager.init(deviceService: EllaCaptureHost.deviceService)'),
+      );
+      expect(_read('lib/main.dart'), contains('ServiceManager.instance().device.start()'));
     });
   });
 

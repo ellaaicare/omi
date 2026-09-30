@@ -2,6 +2,7 @@ import 'package:omi/ella/capture_host/ella_capture_host.dart';
 import 'package:omi/ella/services/ella_account_isolation_service.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_dock.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
+import 'package:omi/ella/upstream_capture/ella_upstream_device_service_adapter.dart';
 import 'package:omi/main.dart' as legacy;
 
 /// Flag-ON entry point (ellaaicare/ella-ai#1280).
@@ -14,9 +15,11 @@ import 'package:omi/main.dart' as legacy;
 /// `lib/main.dart` (flag OFF) never imports this file or anything under
 /// `lib/upstream_capture/` / `lib/ella/upstream_capture/`.
 void main() {
+  final runtime = EllaUpstreamCaptureRuntime.instance;
   // Refuses unless the Dart define generated from the xcconfig is true.
   EllaCaptureHost.installUpstreamCapture(
     homeCaptureDockBuilder: (context) => const EllaUpstreamCaptureDock(),
+    deviceService: EllaUpstreamDeviceServiceAdapter.production(runtime),
   );
   // Device Diagnostics reads native BLE discovery diagnostics through this
   // seam instead of importing lib/upstream_capture/ directly, so the flag-OFF
@@ -24,6 +27,6 @@ void main() {
   EllaCaptureHost.installNativeDiscoveryDiagnosticsLoader(loadNativeDiscoveryDiagnostics);
   // Account transitions (sign-out / switch) revoke the bound capture session
   // through the existing Ella account-isolation hook before the next account.
-  EllaAccountIsolationService.registerCaptureProducer(() => EllaUpstreamCaptureRuntime.instance.releaseAccount());
+  EllaAccountIsolationService.registerCaptureProducer(runtime.releaseAccount);
   legacy.main();
 }
