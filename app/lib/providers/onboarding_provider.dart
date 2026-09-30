@@ -601,6 +601,9 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
       SharedPreferencesUtil().deviceName = connectedDevice.name;
       foundDevicesMap.clear();
       deviceList.clear();
+      // Successful selection transfers connection ownership out of picker cleanup.
+      _pickerOwner = null;
+      _pickerService = null;
       if (isFromOnboarding) {
         goNext!();
       } else {

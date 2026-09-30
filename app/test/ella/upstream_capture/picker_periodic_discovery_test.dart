@@ -14,9 +14,13 @@ import 'package:omi/pages/capture/connect.dart';
 import 'package:omi/pages/onboarding/ella/ella_connect.dart';
 import 'package:omi/pages/onboarding/find_device/page.dart';
 import 'package:omi/providers/device_provider.dart';
+import 'package:omi/providers/home_provider.dart';
 import 'package:omi/providers/onboarding_provider.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/devices/device_connection.dart';
+import 'package:omi/services/devices/discovery/device_discoverer.dart';
+import 'package:omi/services/devices/omi_connection.dart';
+import 'package:omi/services/devices/transports/device_transport.dart';
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart' as upstream;
 import 'package:omi/upstream_capture/services/devices.dart' as upstream_service;
 import 'package:omi/upstream_capture/services/devices/connectors/device_connection.dart' as upstream_connection;
@@ -129,9 +133,82 @@ class _PermissionProvider extends OnboardingProvider {
   }
 }
 
+class _PickerTransport implements DeviceTransport {
+  _PickerTransport(this.deviceId);
+  @override
+  final String deviceId;
+  final states = StreamController<DeviceTransportState>.broadcast(sync: true);
+  bool connected = false;
+  int disconnects = 0;
+  @override
+  Stream<DeviceTransportState> get connectionStateStream => states.stream;
+  @override
+  Future<void> connect() async {
+    connected = true;
+    states.add(DeviceTransportState.connected);
+  }
+
+  @override
+  Future<void> disconnect() async {
+    disconnects++;
+    connected = false;
+    states.add(DeviceTransportState.disconnected);
+  }
+
+  @override
+  Future<bool> isConnected() async => connected;
+  @override
+  Future<bool> ping() async => connected;
+  @override
+  Stream<List<int>> getCharacteristicStream(String serviceUuid, String characteristicUuid) => const Stream.empty();
+  @override
+  Future<Stream<List<int>>?> getReadyCharacteristicStream(String serviceUuid, String characteristicUuid) async =>
+      getCharacteristicStream(serviceUuid, characteristicUuid);
+  @override
+  Future<List<int>> readCharacteristic(String serviceUuid, String characteristicUuid) async => const [];
+  @override
+  Future<void> writeCharacteristic(String serviceUuid, String characteristicUuid, List<int> data) async {}
+  @override
+  Future<void> dispose() => states.close();
+}
+
+class _ImmediatePickerDiscoverer extends DeviceDiscoverer {
+  @override
+  bool get isSupported => true;
+  @override
+  String get name => 'picker-fixture';
+  @override
+  Future<DeviceDiscoveryResult> discover({int timeout = 5}) async => DeviceDiscoveryResult(devices: [_friend]);
+  @override
+  Future<void> stop() async {}
+}
+
+class _SuccessfulPickerDeviceProvider extends _PickerDeviceProvider {
+  _SuccessfulPickerDeviceProvider(this.service) : super(service);
+  final IDeviceService service;
+  @override
+  Future<bool> connectDeviceForCurrentUser(legacy.BtDevice device, {bool requireFreshSession = false}) async {
+    connects++;
+    final authoritative = service;
+    final selected = authoritative is IAuthoritativeDeviceService
+        ? (await (authoritative as IAuthoritativeDeviceService).connectForCurrentUser('owner-test', device))?.device
+        : (await service.ensureConnection(device.id, force: true))?.device;
+    if (selected == null) return false;
+    connectedDevice = selected;
+    pairedDevice = selected;
+    setIsConnected(true);
+    return true;
+  }
+}
+
+class _PickerHomeProvider extends HomeProvider {
+  @override
+  Future<void> setupHasSpeakerProfile() async {}
+}
+
 class _Harness {
-  _Harness(this.service, {OnboardingProvider? provider}) {
-    device = _PickerDeviceProvider(service);
+  _Harness(this.service, {OnboardingProvider? provider, _PickerDeviceProvider? deviceProvider}) {
+    device = deviceProvider ?? _PickerDeviceProvider(service);
     onboarding = (provider ?? OnboardingProvider(deviceService: service))..setDeviceProvider(device);
     if (provider == null) onboarding.hasBluetoothPermission = true;
   }
@@ -141,9 +218,16 @@ class _Harness {
   final navigator = GlobalKey<NavigatorState>();
 
   Future<void> mount(WidgetTester tester,
-      {bool connectPage = false, bool legacyConnect = false, bool Function()? canScan}) async {
-    await tester.pumpWidget(ChangeNotifierProvider<OnboardingProvider>.value(
-      value: onboarding,
+      {bool connectPage = false,
+      bool legacyConnect = false,
+      bool isFromOnboarding = false,
+      VoidCallback? goNext,
+      bool Function()? canScan}) async {
+    await tester.pumpWidget(MultiProvider(
+      providers: [
+        ChangeNotifierProvider<OnboardingProvider>.value(value: onboarding),
+        ChangeNotifierProvider<HomeProvider>(create: (_) => _PickerHomeProvider()),
+      ],
       child: MaterialApp(
         navigatorKey: navigator,
         theme: ellaThemeData(),
@@ -155,7 +239,12 @@ class _Harness {
                 ? const ConnectDevicePage(originUid: 'owner-test', authenticatedUid: _testUid)
                 : Scaffold(
                     body: SingleChildScrollView(
-                      child: FindDevicesPage(goNext: () {}, includeSkip: false, canConnect: canScan),
+                      child: FindDevicesPage(
+                        goNext: goNext ?? () {},
+                        includeSkip: false,
+                        isFromOnboarding: isFromOnboarding,
+                        canConnect: canScan,
+                      ),
                     ),
                   ),
       ),
@@ -210,6 +299,88 @@ void main() {
   setUp(() async {
     SharedPreferences.setMockInitialValues({'uid': 'owner-test', 'btDeviceOwnerBinding': 'owner-test'});
     await SharedPreferencesUtil.init();
+  });
+
+  for (final upstreamEnabled in [false, true]) {
+    testWidgets('successful ${upstreamEnabled ? 'upstream' : 'legacy'} selection survives goNext route disposal',
+        (tester) async {
+      final transport = _PickerTransport(_friend.id);
+      final legacyService = DeviceService(
+        discoverers: [_ImmediatePickerDiscoverer()],
+        connectionCreator: (device) => OmiDeviceConnection(device, transport),
+      )..start();
+      final upstreamService = _UpstreamPasses();
+      var upstreamConnected = false;
+      var disconnects = 0;
+      final adapter = EllaUpstreamDeviceServiceAdapter(
+        serviceLoader: () async => upstreamService,
+        connect: (_, __) async => upstreamConnected = true,
+        disconnect: (_) async {
+          disconnects++;
+          upstreamConnected = false;
+        },
+      )..start();
+      final IDeviceService service = upstreamEnabled ? adapter : legacyService;
+      final harness = _Harness(service, deviceProvider: _SuccessfulPickerDeviceProvider(service));
+      var advanced = false;
+      await harness.mount(tester, isFromOnboarding: true, goNext: () {
+        advanced = true;
+        harness.navigator.currentState!.pushReplacement(MaterialPageRoute<void>(builder: (_) => const Scaffold()));
+      });
+      if (upstreamEnabled) {
+        await tester.pump(const Duration(seconds: 5));
+        await tester.pump();
+      }
+      await tester.ensureVisible(find.text('Friend'));
+      await tester.tap(find.text('Friend'));
+      await tester.pump();
+      expect(harness.device.presentationIsConnected, isTrue);
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump();
+      expect(advanced, isTrue);
+      expect(find.byType(FindDevicesPage), findsNothing);
+      expect(harness.device.presentationIsConnected, isTrue);
+      if (upstreamEnabled) {
+        expect(upstreamConnected, isTrue);
+        expect(disconnects, 0);
+        expect(adapter.ownerBindingForConnection(_friend.id), 'owner-test');
+      } else {
+        expect(transport.connected, isTrue);
+        expect(transport.disconnects, 0);
+        expect(await legacyService.ensureConnection(_friend.id), isNotNull);
+      }
+      expect(tester.takeException(), isNull);
+      await harness.leave(tester);
+      harness.onboarding.dispose();
+      if (!upstreamEnabled) {
+        expect(transport.connected, isTrue, reason: 'provider disposal no longer owns this connection');
+      }
+      harness.device.dispose();
+      await adapter.stop();
+      await legacyService.disconnectDevice();
+      await transport.dispose();
+    });
+  }
+
+  testWidgets('abandoned legacy selection still cancels its connection before successful handoff', (tester) async {
+    final transport = _PickerTransport(_friend.id);
+    final service = DeviceService(
+      discoverers: [_ImmediatePickerDiscoverer()],
+      connectionCreator: (device) => OmiDeviceConnection(device, transport),
+    )..start();
+    final harness = _Harness(service, deviceProvider: _SuccessfulPickerDeviceProvider(service));
+    await harness.mount(tester);
+    final selection = harness.onboarding.handleTap(device: _friend, isFromOnboarding: true, goNext: () {});
+    await tester.pump();
+    expect(transport.connected, isTrue);
+    await harness.leave(tester);
+    expect(transport.connected, isFalse);
+    expect(transport.disconnects, 1);
+    await tester.pump(const Duration(seconds: 2));
+    expect(await selection, DeviceSelectionOutcome.cancelled);
+    harness.dispose();
+    await transport.dispose();
   });
 
   testWidgets('covered EllaConnect cannot auto-select candidates owned by production FindDevices', (tester) async {
