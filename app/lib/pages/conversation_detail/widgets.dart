@@ -752,7 +752,7 @@ class AppResultDetailWidget extends StatelessWidget {
             // keeps its post-session receipt-discovery wiring (#327/#329).
             MemoryTalkButton(conversation: conversation),
             const SizedBox(height: 12),
-            _TypeCorrectionLink(conversation: conversation, appSummary: content),
+            MemoryTypeCorrectionButton(conversation: conversation, appSummary: content),
           ],
         ],
       ),
@@ -1013,57 +1013,185 @@ class _MemoryTalkButtonState extends State<MemoryTalkButton> {
   }
 }
 
-class _TypeCorrectionLink extends StatelessWidget {
+class MemoryTypeCorrectionButton extends StatefulWidget {
   final ServerConversation conversation;
   final String appSummary;
+  final CorrectionSubmitter submitter;
+  final CorrectionReceiptPoller receiptPoller;
+  final ExactAccountAuthorityVerifier? Function() authorityProvider;
+  final Future<ConversationCorrectionReceipt?> Function({
+    required String conversationId,
+    required String correctionId,
+    String? expectedAuthenticatedUid,
+    ExactAccountAuthorityVerifier? exactAuthority,
+  }) undoCorrection;
 
-  const _TypeCorrectionLink({required this.conversation, required this.appSummary});
+  const MemoryTypeCorrectionButton({
+    required this.conversation,
+    required this.appSummary,
+    this.submitter = submitConversationCorrectionResult,
+    this.receiptPoller = pollConversationCorrectionReceipt,
+    this.authorityProvider = WalOwnerAuthority.operationEntry,
+    this.undoCorrection = undoConversationCorrection,
+    super.key,
+  });
+
+  @override
+  State<MemoryTypeCorrectionButton> createState() => _MemoryTypeCorrectionButtonState();
+}
+
+class _MemoryTypeCorrectionButtonState extends State<MemoryTypeCorrectionButton> {
+  ConversationCorrectionReceipt? _receipt;
+  ExactAccountAuthorityVerifier? _receiptAuthority;
+  int _generation = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    SharedPreferencesUtil.aiConsentAuthorityChanges.addListener(_invalidate);
+  }
+
+  void _invalidate() {
+    _generation++;
+    if (!mounted) return;
+    setState(() {
+      _receipt = null;
+      _receiptAuthority = null;
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant MemoryTypeCorrectionButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.conversation.id != widget.conversation.id) _invalidate();
+  }
+
+  @override
+  void dispose() {
+    _generation++;
+    SharedPreferencesUtil.aiConsentAuthorityChanges.removeListener(_invalidate);
+    super.dispose();
+  }
+
+  bool _isCurrent(String id, int generation, ExactAccountAuthorityVerifier authority) =>
+      mounted && widget.conversation.id == id && _generation == generation && authority.isExactCurrent();
+
+  Future<ConversationCorrectionReceipt?> _undo(
+    ConversationCorrectionReceipt receipt,
+    ExactAccountAuthorityVerifier authority,
+    int generation,
+  ) async {
+    if (!receipt.isApplied ||
+        _receipt?.correctionId != receipt.correctionId ||
+        !_isCurrent(receipt.conversationId, generation, authority)) {
+      return null;
+    }
+    final detail = context.read<ConversationDetailProvider>();
+    final updated = await widget.undoCorrection(
+      conversationId: receipt.conversationId,
+      correctionId: receipt.correctionId,
+      expectedAuthenticatedUid: authority.uid,
+      exactAuthority: authority,
+    );
+    if (!_isCurrent(receipt.conversationId, generation, authority) ||
+        updated == null ||
+        !updated.isUndone ||
+        updated.conversationId != receipt.conversationId ||
+        updated.correctionId != receipt.correctionId ||
+        _receipt?.correctionId != receipt.correctionId) {
+      return null;
+    }
+    setState(() => _receipt = updated);
+    await detail.refreshConversation(expectedConversationId: receipt.conversationId, exactAuthority: authority);
+    return _isCurrent(receipt.conversationId, generation, authority) ? updated : null;
+  }
+
+  void _review() {
+    final receipt = _receipt;
+    final authority = _receiptAuthority;
+    if (receipt == null ||
+        !receipt.isApplied ||
+        authority == null ||
+        !_isCurrent(receipt.conversationId, _generation, authority)) {
+      return;
+    }
+    final generation = _generation;
+    showMemoryCorrectionReceiptSheet(context, receipt: receipt, onUndo: () => _undo(receipt, authority, generation));
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: () {
-          HapticFeedback.lightImpact();
-          final messenger = ScaffoldMessenger.of(context);
-          final acceptedMessage = context.l10n.memoryCorrectionPending;
-          showModalBottomSheet(
-            context: context,
-            isScrollControlled: true,
-            backgroundColor: Colors.transparent,
-            builder: (context) => CorrectSummarySheet(
-              conversation: conversation,
-              appSummary: appSummary,
-              onAccepted: () async {
-                messenger.showSnackBar(
-                  SnackBar(
-                    key: const ValueKey('type-correction-accepted'),
-                    content: Text(acceptedMessage),
-                  ),
-                );
-              },
-              onApplied: context.read<ConversationDetailProvider>().refreshConversation,
-            ),
-          );
-        },
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const FaIcon(FontAwesomeIcons.penToSquare, size: 13, color: EllaColors.tealDeep),
-              const SizedBox(width: 6),
-              Text(
-                context.l10n.memoryTypeCorrection,
-                style: const TextStyle(color: EllaColors.tealDeep, fontSize: 14, fontWeight: FontWeight.w700),
+    return Column(mainAxisSize: MainAxisSize.min, children: [
+      Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: () {
+            HapticFeedback.lightImpact();
+            final authority = widget.authorityProvider();
+            final originConversation = widget.conversation;
+            final originSummary = widget.appSummary;
+            final originId = originConversation.id;
+            final generation = ++_generation;
+            final detail = context.read<ConversationDetailProvider>();
+            final messenger = ScaffoldMessenger.of(context);
+            final acceptedMessage = context.l10n.memoryCorrectionPending;
+            showModalBottomSheet(
+              context: context,
+              isScrollControlled: true,
+              backgroundColor: Colors.transparent,
+              builder: (context) => CorrectSummarySheet(
+                conversation: originConversation,
+                appSummary: originSummary,
+                submitter: widget.submitter,
+                receiptPoller: widget.receiptPoller,
+                authorityProvider: () =>
+                    authority != null && _isCurrent(originId, generation, authority) ? authority : null,
+                onAccepted: () async {
+                  if (authority == null || !_isCurrent(originId, generation, authority)) return;
+                  messenger.showSnackBar(
+                    SnackBar(
+                      key: const ValueKey('type-correction-accepted'),
+                      content: Text(acceptedMessage),
+                    ),
+                  );
+                },
+                onReceipt: (receipt, receiptAuthority) async {
+                  if (!_isCurrent(originId, generation, receiptAuthority)) return;
+                  setState(() {
+                    _receipt = receipt;
+                    _receiptAuthority = receiptAuthority;
+                  });
+                  if (receipt.isApplied) {
+                    await detail.refreshConversation(
+                        expectedConversationId: originId, exactAuthority: receiptAuthority);
+                  }
+                },
               ),
-            ],
-          ),
+            );
+          },
+          child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 48),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const FaIcon(FontAwesomeIcons.penToSquare, size: 13, color: EllaColors.tealDeep),
+                    const SizedBox(width: 6),
+                    Flexible(
+                        child: Text(
+                      context.l10n.memoryTypeCorrection,
+                      style: const TextStyle(color: EllaColors.tealDeep, fontSize: 14, fontWeight: FontWeight.w700),
+                    )),
+                  ],
+                ),
+              )),
         ),
       ),
-    );
+      if (_receipt != null && _receiptAuthority?.isExactCurrent() == true)
+        MemoryCorrectionReceiptChip(receipt: _receipt!, onReview: _review),
+    ]);
   }
 }
 
@@ -1094,6 +1222,7 @@ Future<void> _observeAcceptedCorrection({
   required CorrectionReceiptPoller receiptPoller,
   required PendingConversationCorrectionIdentityStore identityStore,
   required Future<void> Function()? onApplied,
+  required Future<void> Function(ConversationCorrectionReceipt, ExactAccountAuthorityVerifier)? onReceipt,
 }) async {
   try {
     final receipt = await receiptPoller(
@@ -1103,12 +1232,20 @@ Future<void> _observeAcceptedCorrection({
       exactAuthority: authority,
       pollBudget: pollBudget,
     ).timeout(pollBudget);
-    if (receipt == null || receipt.isPending || !authority.isExactCurrent()) return;
+    if (receipt == null ||
+        receipt.isPending ||
+        !authority.isExactCurrent() ||
+        receipt.conversationId != submission.conversationId ||
+        receipt.correctionId != submission.correctionId) {
+      return;
+    }
     await identityStore.clearIfTerminal(
       uid: authority.uid,
       conversationId: submission.conversationId,
       correctionId: submission.correctionId,
     );
+    if (!authority.isExactCurrent()) return;
+    await onReceipt?.call(receipt, authority);
     if (receipt.isApplied && onApplied != null && authority.isExactCurrent()) {
       await onApplied();
     }
@@ -1126,6 +1263,7 @@ class CorrectSummarySheet extends StatefulWidget {
   final ExactAccountAuthorityVerifier? Function() authorityProvider;
   final Future<void> Function()? onAccepted;
   final Future<void> Function()? onApplied;
+  final Future<void> Function(ConversationCorrectionReceipt, ExactAccountAuthorityVerifier)? onReceipt;
 
   const CorrectSummarySheet({
     required this.conversation,
@@ -1136,6 +1274,7 @@ class CorrectSummarySheet extends StatefulWidget {
     this.authorityProvider = WalOwnerAuthority.operationEntry,
     this.onAccepted,
     this.onApplied,
+    this.onReceipt,
     super.key,
   });
 
@@ -1203,6 +1342,9 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
                 status: 'delivery_uncertain',
                 queued: true,
               );
+          if (submission.conversationId != widget.conversation.id || submission.correctionId != correctionId) {
+            throw StateError('Correction submission identity mismatch');
+          }
           if (!authority.isExactCurrent()) {
             if (mounted) Navigator.of(context).pop();
             return;
@@ -1212,6 +1354,7 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
           final receiptPoller = widget.receiptPoller;
           final identityStore = widget.correctionIdentityStore;
           final onApplied = widget.onApplied;
+          final onReceipt = widget.onReceipt;
           unawaited(
             _observeAcceptedCorrection(
               submission: submission,
@@ -1220,6 +1363,7 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
               receiptPoller: receiptPoller,
               identityStore: identityStore,
               onApplied: onApplied,
+              onReceipt: onReceipt,
             ),
           );
 
@@ -1257,7 +1401,8 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
         padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
         child: SafeArea(
           top: false,
-          child: Column(
+          child: SingleChildScrollView(
+              child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -1322,7 +1467,8 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
                   onPressed: _isSubmitting ? null : _submit,
                   style: FilledButton.styleFrom(
                     backgroundColor: EllaColors.primary,
-                    foregroundColor: Colors.white,
+                    foregroundColor: EllaColors.textPrimary,
+                    minimumSize: const Size(48, 48),
                     disabledBackgroundColor: EllaColors.bgTertiary,
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -1331,13 +1477,14 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
                       ? const SizedBox(
                           width: 18,
                           height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                          child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.textPrimary),
                         )
-                      : const Text('Submit Correction'),
+                      : const Text('Submit Correction',
+                          textAlign: TextAlign.center, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
                 ),
               ),
             ],
-          ),
+          )),
         ),
       ),
     );
