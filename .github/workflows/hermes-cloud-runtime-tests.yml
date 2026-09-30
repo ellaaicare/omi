@@ -84,6 +84,9 @@ on:
       - "backend/ella/services/memory_reinterpretation.py"
       - "backend/ella/services/mcp_identity.py"
       - "backend/ella/services/summary_tool_registry.py"
+      - "backend/ella/services/summary_runtime.py"
+      - "backend/ella/routers/mcp_well_known.py"
+      - "backend/tests/unit/test_ella_summary_runtime.py"
       - "backend/ella/services/observer_extractor.py"
       - "backend/ella/services/hermes_cloud_photon.py"
       - "backend/ella/services/hermes_cloud_runtime.py"
@@ -274,6 +277,9 @@ on:
       - "backend/ella/services/memory_reinterpretation.py"
       - "backend/ella/services/mcp_identity.py"
       - "backend/ella/services/summary_tool_registry.py"
+      - "backend/ella/services/summary_runtime.py"
+      - "backend/ella/routers/mcp_well_known.py"
+      - "backend/tests/unit/test_ella_summary_runtime.py"
       - "backend/ella/services/observer_extractor.py"
       - "backend/ella/services/hermes_cloud_photon.py"
       - "backend/ella/services/hermes_cloud_runtime.py"
@@ -526,6 +532,9 @@ jobs:
           ella/services/memory_reinterpretation.py
           ella/services/mcp_identity.py
           ella/services/summary_tool_registry.py
+          ella/services/summary_runtime.py
+          ella/routers/mcp_well_known.py
+          tests/unit/test_ella_summary_runtime.py
           ella/services/observer_extractor.py
           ella/services/hermes_cloud_runtime.py
           ella/routers/photon.py
@@ -609,6 +618,9 @@ jobs:
           ella/services/memory_reinterpretation.py
           ella/services/mcp_identity.py
           ella/services/summary_tool_registry.py
+          ella/services/summary_runtime.py
+          ella/routers/mcp_well_known.py
+          tests/unit/test_ella_summary_runtime.py
           ella/services/observer_extractor.py
           ella/services/provisioning.py ella/services/runtime_resolver.py
           ella/services/summary_recovery.py
@@ -701,10 +713,11 @@ jobs:
             tests/unit/test_ella_conversation_corrections.py
             tests/unit/test_ella_plato_mcp.py
             tests/unit/test_ella_mcp_identity.py
+            tests/unit/test_ella_summary_runtime.py
           )
           summary_contract_ids="$(pytest --collect-only -q "${summary_contract_suites[@]}")"
-          # 23 explicit-operation + 114 legacy correction + 41 MCP + 16 identity.
-          test "$(grep -c '::' <<<"$summary_contract_ids")" -eq 194
+          # Preserve all 194 prior contracts plus 20 composed strict Hermes lane cases.
+          test "$(grep -c '::' <<<"$summary_contract_ids")" -eq 214
           required_summary_contract_ids=(
             "tests/unit/test_ella_main_chat_summary_tools.py::test_exact_success_receipt_and_undo_preserve_transcript_history[True]"
             "tests/unit/test_ella_main_chat_summary_tools.py::test_exact_success_receipt_and_undo_preserve_transcript_history[False]"
@@ -728,6 +741,14 @@ jobs:
             "tests/unit/test_ella_plato_mcp.py::test_summary_tools_discovery_requires_runtime_registration"
             "tests/unit/test_ella_plato_mcp.py::test_summary_tool_dispatch_uses_session_owner_and_rejects_model_uid"
             "tests/unit/test_ella_plato_mcp.py::test_signed_summary_lane_never_lists_or_dispatches_global_legacy_tools"
+            "tests/unit/test_ella_summary_runtime.py::test_real_runtime_lane_signed_discovery_and_write[False]"
+            "tests/unit/test_ella_summary_runtime.py::test_real_runtime_lane_signed_discovery_and_write[True]"
+            "tests/unit/test_ella_summary_runtime.py::test_real_runtime_lane_rejects_wrong_observed_authority[runtime_target_mode-hermes-voice]"
+            "tests/unit/test_ella_summary_runtime.py::test_real_runtime_lane_rejects_wrong_observed_authority[provider-hermes_cloud]"
+            "tests/unit/test_ella_summary_runtime.py::test_real_runtime_consent_revoked_during_resolution_is_rejected"
+            "tests/unit/test_ella_summary_runtime.py::test_real_runtime_authority_change_during_provider_blocks_publication[binding]"
+            "tests/unit/test_ella_summary_runtime.py::test_real_runtime_writer_rejects_binding_replacement_without_mcp"
+            "tests/unit/test_ella_summary_runtime.py::test_real_cloud_authority_is_not_a_summary_lane"
           )
           for required_id in "${required_summary_contract_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$summary_contract_ids"

@@ -18,11 +18,22 @@ router (`ella/__init__.py`). Corrections explicitly registers its writer through
   canonical Hermes OMI session. It does not assert that a factual change was requested.
 
 Writes require `summaries:write`; no default role or static bearer gains it.
+The signed MCP transport also requires `tools:read`; the read operation requires
+`memory:read`. Advertising a scope does not issue it or grant a tool.
 UID comes only from authenticated session claims, never tool arguments.
 Signed claims and the current durable self grant must authorize the exact tool.
 Grant metadata must bind `runtime_binding_id` and `profile_user_id` to the resolved
-transcript runtime. The runtime must also register the tool in `allowed_tools`.
+Hermes chat runtime. The runtime must also register the tool in `allowed_tools`.
 Consent, grant, rollout, and exact runtime authority are rechecked across awaited work.
+
+This summary lane accepts only an authenticated owner's healthy persisted
+`provider=hermes`, observed `runtime_target_mode=hermes-chat` binding, with exact
+account/profile/binding coordinates. Retained Mini Hermes is the intended lane;
+invitation-managed Hermes is accepted only through the same authoritative chat
+contract, including its existing target/consent/Honcho proof. Missing or different
+observed modes are rejected even though the shared capture resolver deliberately
+supports retained compatibility aliases. Capture/listen resolution is unchanged.
+HermesCloud summary generation is not supported by these operations.
 
 Both writes use the canonical summary-only writer with atomic active-version and
 transcript CAS, retained previous versions, request identity stored atomically in
@@ -51,7 +62,10 @@ supplying both optional version/key fields opts into strict synchronous CAS.
 
 ## Separate deployment and registration gate
 
-This source does **not** attach an MCP binding to a live HermesCloud profile.
+This source does **not** attach an MCP server to a live retained Hermes profile.
+The feature remains **unusable / rollout held** until signed credential renewal,
+profile-local MCP registration and the remaining gates below are implemented and
+separately authorized. There is no new token broker or renewal implementation here.
 Do not describe the feature as usable from main chat until the following is
 separately authorized and verified for the exact account/profile:
 
@@ -59,16 +73,22 @@ separately authorized and verified for the exact account/profile:
 2. Preserve default OFF. Enable only an approved exact UID with
    `ELLA_MCP_SUMMARY_TOOLS_ENABLED=true` and `ELLA_MCP_SUMMARY_TOOLS_UIDS=<exact UID>`.
    Wildcards do not enable profiles.
-3. Provision an explicit durable self-profile grant with the required scopes,
-   exact tool names, and the transcript binding/profile metadata above. Issue a
+3. Provision an explicit durable self-profile grant with `tools:read` plus
+   `memory:read` for reads and `summaries:write` for writes,
+   exact tool names, and the Hermes chat binding/profile metadata above. Issue a
    short-lived signed MCP session token using the existing MCP identity system.
    Do not use the legacy static Plato bearer for these operations.
-4. Attach the first-party endpoint and profile-scoped credentials through the
-   actual HermesCloud `mcp_binding`/tool registry. That registry is not configured
-   by this repository; this step needs its owner. Do not place credentials in docs.
-5. Update only the approved profile's runtime tool policy and attestation.
-   `HermesCloudClient.preflight()` requires observed tools to exactly equal
-   `allowed_tools`; adding code alone neither publishes tools nor updates policy.
+4. Attach the first-party endpoint through that exact retained Hermes profile's
+   `mcp_servers` configuration and profile-local signed credential storage. That
+   registry is not configured by this repository; this step needs its owner.
+   Do not place credentials in docs or reuse the legacy shared Plato bearer.
+   Signed tokens expire: the current first-party token endpoint issues no refresh
+   token and accepts no refresh grant. Hermes OAuth refresh support alone cannot
+   renew them. A separately reviewed identity-bound renewal contract is required;
+   renewal must rebuild the token-bound MCP transport session, not reuse its ID.
+5. Update only the approved profile's persisted runtime `allowed_tools` policy
+   and required authority evidence. Adding code alone neither publishes tools
+   nor updates that policy. Do not infer registration from a requested mode.
    Do not bypass a disabled account-admission/binding gate.
 6. Perform read-only discovery for that signed profile: tools must remain absent
    with a missing handler, disabled rollout, missing runtime registration,

@@ -24,6 +24,7 @@ _RELOADED_IMPORT_MODULES = (
     "ella.config",
     "ella.services.provisioning",
     "ella.services.runtime_resolver",
+    "ella.services.summary_runtime",
     "ella.services.summary_recovery",
     "ella.services.summary_writeback",
 )

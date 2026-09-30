@@ -141,11 +141,11 @@ def operation(monkeypatch):
         )
 
     monkeypatch.setattr(corrections, "assert_current_ai_consent", lambda uid: uid)
-    monkeypatch.setattr(corrections, "require_isolated_runtime", resolve)
+    monkeypatch.setattr(corrections, "require_summary_runtime", resolve)
     monkeypatch.setattr(
         corrections, "runtime_authority_identity", lambda value: SimpleNamespace(uid=value.uid, digest="binding")
     )
-    monkeypatch.setattr(corrections, "revalidate_runtime_authority", revalidate)
+    monkeypatch.setattr(corrections, "revalidate_summary_runtime_authority", revalidate)
     monkeypatch.setattr(corrections, "generate_summary_from_prompt", generate)
     monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
     monkeypatch.setattr(corrections, "apply_summary_update", apply)

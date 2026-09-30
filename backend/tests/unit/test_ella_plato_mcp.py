@@ -1304,7 +1304,12 @@ def _summary_test_session(monkeypatch):
         assert uid == "granted-owner"
         return runtime
 
-    monkeypatch.setattr(module, "require_isolated_runtime", resolve)
+    monkeypatch.setattr(module, "require_summary_runtime", resolve)
+    monkeypatch.setattr(
+        module,
+        "runtime_authority_identity",
+        lambda value: types.SimpleNamespace(digest=f"{value.uid}:{value.binding_id}:{value.profile_user_id}"),
+    )
 
     async def handler(**kwargs):
         await kwargs["revalidate_tool_grant"]()

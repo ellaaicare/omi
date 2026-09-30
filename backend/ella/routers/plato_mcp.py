@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -44,7 +45,8 @@ from ella.services.ai_consent import assert_current_ai_consent
 from ella.services.mcp_startup import build_startup_context
 from ella.services.mcp_surface_prompt import build_surface_prompt
 from ella.services.runtime_errors import ProvisioningError
-from ella.services.runtime_resolver import require_isolated_runtime
+from ella.services.runtime_resolver import require_isolated_runtime, runtime_authority_identity
+from ella.services.summary_runtime import require_summary_runtime
 from ella.utils.provision_authority import ProvisionAuthorityError, legacy_provision_authority
 from utils.ella.canonical_auth import canonical_event_service_headers
 from utils.ella.time_context import annotate_event_time, build_time_context, local_time_fields, timezone_name
@@ -196,7 +198,7 @@ def _fingerprint(token: str) -> str:
 
 _WWW_AUTHENTICATE = (
     'Bearer resource_metadata="https://api.ella-ai-care.com/.well-known/oauth-protected-resource",'
-    ' scope="context:read memory:read observations:write profile:read startup:read timeline:read tools:read"'
+    ' scope="context:read memory:read summaries:write observations:write profile:read startup:read timeline:read tools:read"'
 )
 
 
@@ -1445,7 +1447,7 @@ def _summary_tool_enabled(auth_context: MCPAuthContext | None, tool_name: str) -
 async def _require_summary_tool_runtime(auth_context: MCPAuthContext, tool_name: str):
     uid = require_summary_tool_grant(auth_context.session_claims, tool_name)
     assert_current_ai_consent(uid)
-    runtime = await require_isolated_runtime(uid, target_mode="hermes-cloud-transcript")
+    runtime = await require_summary_runtime(uid)
     if (
         runtime.uid != uid
         or not runtime.binding_id
@@ -1493,14 +1495,21 @@ async def _companion_summary_operation(
             "Only exact conversation, expected version, idempotency key and intent fields are accepted", code=-32602
         )
     uid = require_summary_tool_grant(auth_context.session_claims, tool_name)
+    initial_authority = None
 
     async def revalidate_grant() -> None:
+        nonlocal initial_authority
         if (
             not _summary_tool_enabled(auth_context, tool_name)
             or require_summary_tool_grant(auth_context.session_claims, tool_name) != uid
         ):
             raise ToolExecutionError("summary_tool_grant_revoked", code=-32003)
-        await _require_summary_tool_runtime(auth_context, tool_name)
+        runtime = await _require_summary_tool_runtime(auth_context, tool_name)
+        current_authority = runtime_authority_identity(runtime)
+        if initial_authority is None:
+            initial_authority = current_authority
+        elif not hmac.compare_digest(current_authority.digest, initial_authority.digest):
+            raise ToolExecutionError("summary_tool_runtime_authority_changed", code=-32003)
 
     try:
         await revalidate_grant()

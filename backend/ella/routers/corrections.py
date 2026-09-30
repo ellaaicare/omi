@@ -29,11 +29,8 @@ from ella.services.summary_tool_registry import register_summary_operation_handl
 from ella.services.correction_propagation import propagation_run_to_dict, run_correction_propagation
 from ella.services.hermes_session import canonical_omi_session_key, safe_session_component
 from ella.services.ai_consent import assert_current_ai_consent, require_current_ai_consent
-from ella.services.runtime_resolver import (
-    require_isolated_runtime,
-    revalidate_runtime_authority,
-    runtime_authority_identity,
-)
+from ella.services.runtime_resolver import runtime_authority_identity
+from ella.services.summary_runtime import require_summary_runtime, revalidate_summary_runtime_authority
 from ella.services.summary_recovery import (
     SummaryProviderConfig,
     apply_summary_update,
@@ -641,7 +638,7 @@ async def run_explicit_summary_operation(
     assert_current_ai_consent(uid)
     if revalidate_tool_grant is not None:
         await revalidate_tool_grant()
-    runtime = await require_isolated_runtime(uid, target_mode="hermes-cloud-transcript")
+    runtime = await require_summary_runtime(uid)
     if runtime.uid != uid or not runtime.binding_id or not runtime.account_user_id or not runtime.profile_user_id:
         raise HTTPException(status_code=403, detail="Exact owner runtime binding is required")
     authority = runtime_authority_identity(runtime)
@@ -650,7 +647,7 @@ async def run_explicit_summary_operation(
         assert_current_ai_consent(uid)
         if revalidate_tool_grant is not None:
             await revalidate_tool_grant()
-        await revalidate_runtime_authority(authority)
+        await revalidate_summary_runtime_authority(authority)
 
     is_correction = isinstance(request, ConversationCorrectionRequest)
     intent = "correction" if is_correction else "resummary"
@@ -782,16 +779,14 @@ Immutable transcript JSON (sha256 {transcript_sha256}):
 """
     config = SummaryProviderConfig(
         provider="hermes-api",
-        hermes_url=(
-            f"{runtime.gateway_url.rstrip('/')}/v1/chat/completions" if runtime.provider != "hermes_cloud" else ""
-        ),
-        hermes_model=runtime.agent_id if runtime.provider != "hermes_cloud" else "",
-        hermes_api_key=runtime.gateway_token if runtime.provider != "hermes_cloud" else "",
+        hermes_url=f"{runtime.gateway_url.rstrip('/')}/v1/chat/completions",
+        hermes_model=runtime.agent_id,
+        hermes_api_key=runtime.gateway_token,
         legacy_url="",
         legacy_model="",
         legacy_api_key="",
         timeout_seconds=DIRECT_CORRECTION_TIMEOUT_SECONDS,
-        cloud_authority=authority if runtime.provider == "hermes_cloud" else None,
+        cloud_authority=None,
     )
     await revalidate()
     summary = await generate_summary_from_prompt(
