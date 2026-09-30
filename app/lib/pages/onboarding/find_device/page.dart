@@ -6,6 +6,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/providers/onboarding_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
@@ -94,15 +95,20 @@ class _FindDevicesPageState extends State<FindDevicesPage> {
           mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            FoundDevices(
-              goNext: widget.goNext,
-              isFromOnboarding: widget.isFromOnboarding,
-              canConnect: widget.canConnect,
-              consentRequester: widget.consentRequester,
-            ),
+            if (!_scanError || provider.deviceList.isNotEmpty)
+              FoundDevices(
+                goNext: widget.goNext,
+                isFromOnboarding: widget.isFromOnboarding,
+                canConnect: widget.canConnect,
+                consentRequester: widget.consentRequester,
+              ),
             if (provider.deviceList.isEmpty && _scanError) Text(context.l10n.upstreamCaptureSearchFailed),
             if (provider.deviceList.isEmpty && (_scanError || provider.enableInstructions))
               TextButton.icon(
+                style: TextButton.styleFrom(
+                  foregroundColor: EllaColors.tealDeep,
+                  minimumSize: const Size(EllaSizes.minTouchTarget, EllaSizes.minTouchTarget),
+                ),
                 onPressed: widget.canConnect != null && !widget.canConnect!() ? null : _scanDevices,
                 icon: const Icon(Icons.refresh_rounded),
                 label: Text(context.l10n.tryAgain),

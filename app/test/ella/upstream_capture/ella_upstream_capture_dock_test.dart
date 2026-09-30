@@ -622,6 +622,12 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(find.text('Ella could not search for necklaces. Try again.'), findsOneWidget);
+    expect(find.text('Searching for devices...'), findsNothing);
+    final retry =
+        tester.widget<TextButton>(find.ancestor(of: find.text('Try Again'), matching: find.byType(TextButton)));
+    expect(retry.style!.foregroundColor!.resolve({}), EllaColors.tealDeep);
+    expect(tester.getSize(find.ancestor(of: find.text('Try Again'), matching: find.byType(TextButton))).height,
+        greaterThanOrEqualTo(EllaSizes.minTouchTarget));
     picker.service.failDiscovery = false;
     await tester.tap(find.text('Try Again'));
     await tester.pump();
