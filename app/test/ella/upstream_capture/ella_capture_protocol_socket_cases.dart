@@ -288,8 +288,19 @@ void registerEllaCaptureProtocolSocketCases() {
   test('custom-STT final tail reaches backend before exact drain, with no audio after stop begins', () async {
     final primary = _Transport();
     final backend = _Transport();
-    final composite = EllaCaptureCompositeSocket(primarySocket: primary, secondarySocket: backend);
-    final socket = EllaCaptureProtocolSocket.withTransport(16000, BleAudioCodec.pcm16, 'multi', composite);
+    var current = true;
+    final composite = EllaCaptureCompositeSocket(
+      primarySocket: primary,
+      secondarySocket: backend,
+      hasOriginAuthority: () => current,
+    );
+    final socket = EllaCaptureProtocolSocket.withTransport(
+      16000,
+      BleAudioCodec.pcm16,
+      'multi',
+      composite,
+      hasOriginAuthority: () => current,
+    );
     final start = socket.start();
     await _tick();
     backend.serverStatus('capture_protocol_ready', fields: _authority);
@@ -309,6 +320,71 @@ void registerEllaCaptureProtocolSocketCases() {
     await Future.wait([firstStop, joinedStop]);
     expect(socket.drainAcknowledged, isTrue);
     expect(primary.stopCalls, 1);
+  });
+
+  test('retired origin drops a pending-stop custom-STT tail before backend drain', () async {
+    final primary = _Transport();
+    final backend = _Transport();
+    var current = true;
+    final composite = EllaCaptureCompositeSocket(
+      primarySocket: primary,
+      secondarySocket: backend,
+      hasOriginAuthority: () => current,
+    );
+    final socket = EllaCaptureProtocolSocket.withTransport(
+      16000,
+      BleAudioCodec.pcm16,
+      'multi',
+      composite,
+      hasOriginAuthority: () => current,
+    );
+    final start = socket.start();
+    await _tick();
+    backend.serverStatus('capture_protocol_ready', fields: _authority);
+    await start;
+    primary.onStop = () async {
+      current = false;
+      primary.onMessage('[{"text":"retired provider tail"}]');
+      primary.onClosed();
+    };
+
+    await socket.stop();
+
+    final control = backend.sent.whereType<String>().map((raw) => jsonDecode(raw) as Map<String, dynamic>).toList();
+    expect(control.map((entry) => entry['type']), isNot(contains('suggested_transcript')));
+    expect(control.map((entry) => entry['type']), isNot(contains('capture_drain')));
+    expect(socket.drainAcknowledged, isFalse);
+    expect(primary.stopCalls, 1);
+  });
+
+  test('retired origin drops a delayed custom-STT provider response', () async {
+    final primary = _Transport();
+    final backend = _Transport();
+    var current = true;
+    final composite = EllaCaptureCompositeSocket(
+      primarySocket: primary,
+      secondarySocket: backend,
+      hasOriginAuthority: () => current,
+    );
+    final socket = EllaCaptureProtocolSocket.withTransport(
+      16000,
+      BleAudioCodec.pcm16,
+      'multi',
+      composite,
+      hasOriginAuthority: () => current,
+    );
+    final start = socket.start();
+    await _tick();
+    backend.serverStatus('capture_protocol_ready', fields: _authority);
+    await start;
+
+    current = false;
+    primary.onMessage('[{"text":"late retired response"}]');
+    await _tick();
+
+    final control = backend.sent.whereType<String>().map((raw) => jsonDecode(raw) as Map<String, dynamic>).toList();
+    expect(control.map((entry) => entry['type']), isNot(contains('suggested_transcript')));
+    await socket.stop();
   });
 
   test('production finalization drains and POSTs the exact ready tuple once', () async {

@@ -275,9 +275,10 @@ class EllaCaptureCompositeSocket extends CompositeTranscriptionSocket {
     String? sttProvider,
     String? suggestedTranscriptType = 'suggested_transcript',
     bool forwardRawAudioToSecondary = true,
+    bool Function()? hasOriginAuthority,
   }) =>
       EllaCaptureCompositeSocket._(
-        _DrainablePrimarySocket(primarySocket),
+        _DrainablePrimarySocket(primarySocket, hasOriginAuthority: hasOriginAuthority),
         secondarySocket: secondarySocket,
         sttProvider: sttProvider,
         suggestedTranscriptType: suggestedTranscriptType,
@@ -299,11 +300,13 @@ class EllaCaptureCompositeSocket extends CompositeTranscriptionSocket {
 }
 
 class _DrainablePrimarySocket implements IPureSocket, IPureSocketListener {
-  _DrainablePrimarySocket(this._inner) {
+  _DrainablePrimarySocket(this._inner, {bool Function()? hasOriginAuthority})
+      : _hasOriginAuthority = hasOriginAuthority ?? EllaCaptureProtocolSocket._alwaysCurrent {
     _inner.setListener(this);
   }
 
   final IPureSocket _inner;
+  final bool Function() _hasOriginAuthority;
   IPureSocketListener? _listener;
   Future<void>? _stopFuture;
   bool _draining = false;
@@ -334,7 +337,9 @@ class _DrainablePrimarySocket implements IPureSocket, IPureSocketListener {
   void setListener(IPureSocketListener listener) => _listener = listener;
 
   @override
-  void onMessage(dynamic message) => _listener?.onMessage(message);
+  void onMessage(dynamic message) {
+    if (_hasOriginAuthority()) _listener?.onMessage(message);
+  }
 
   @override
   void onConnected() => _listener?.onConnected();
@@ -365,6 +370,7 @@ EllaCaptureProtocolSocket createEllaCaptureProtocolSocket({
   void Function(String reason, int? closeCode)? onAdmissionFailure,
   bool Function()? hasOriginAuthority,
 }) {
+  final originAuthority = hasOriginAuthority ?? EllaCaptureProtocolSocket._alwaysCurrent;
   final template = customSttConfig != null && customSttConfig.isEnabled
       ? TranscriptSocketServiceFactory.createFromCustomConfig(
           sampleRate,
@@ -402,6 +408,7 @@ EllaCaptureProtocolSocket createEllaCaptureProtocolSocket({
       sttProvider: original.sttProvider,
       suggestedTranscriptType: original.suggestedTranscriptType,
       forwardRawAudioToSecondary: original.forwardRawAudioToSecondary,
+      hasOriginAuthority: originAuthority,
     );
   } else {
     throw StateError('Unsupported upstream conversation transport for capture protocol v2');
@@ -418,6 +425,6 @@ EllaCaptureProtocolSocket createEllaCaptureProtocolSocket({
     sttConfigId: template.sttConfigId,
     geolocation: geolocation,
     onAdmissionFailure: onAdmissionFailure,
-    hasOriginAuthority: hasOriginAuthority,
+    hasOriginAuthority: originAuthority,
   );
 }
