@@ -1409,13 +1409,17 @@ async def _confirm_canonical_if_result_is_active(
     confirmed_state: dict[str, Any],
     canonical_writer: Callable[..., dict],
     canonical_retry_recorder: Optional[Callable[[str], Awaitable[bool]]] = None,
+    confirmed_correction_state: Optional[dict[str, Any]] = None,
 ) -> None:
     confirmed = conversations_db.update_conversation_if_summary_authority(
         uid,
         conversation_id,
         expected_result_version_id,
         expected_state,
-        {'enrichment_state': confirmed_state},
+        {
+            'enrichment_state': confirmed_state,
+            **({'correction_state': confirmed_correction_state} if confirmed_correction_state is not None else {}),
+        },
     )
     if confirmed:
         return
@@ -1761,6 +1765,11 @@ async def write_conversation_summary(
             confirmed_state=confirmed_state,
             canonical_writer=canonical_writer,
             canonical_retry_recorder=canonical_retry_recorder,
+            confirmed_correction_state=(
+                {**(conversation.get('correction_state') or {}), 'status': 'applied', 'pending': False}
+                if active_version.get('summary_operation')
+                else None
+            ),
         )
         return {
             'status': 'ok',
@@ -1944,8 +1953,8 @@ async def write_conversation_summary(
         existing_state = conversation.get('correction_state') or {}
         update_data['correction_state'] = {
             'correction_id': correction_id,
-            'status': 'applied',
-            'pending': False,
+            'status': 'pending' if summary_operation and require_canonical else 'applied',
+            'pending': bool(summary_operation and require_canonical),
             'source': existing_state.get('source'),
             'submitted_at': existing_state.get('submitted_at'),
             'updated_at': state_updated_at,
@@ -2068,6 +2077,11 @@ async def write_conversation_summary(
             confirmed_state=confirmed_state,
             canonical_writer=canonical_writer,
             canonical_retry_recorder=canonical_retry_recorder,
+            confirmed_correction_state=(
+                {**update_data['correction_state'], 'status': 'applied', 'pending': False}
+                if summary_operation
+                else None
+            ),
         )
 
     if correction_id and correction_audit_updater:

@@ -585,12 +585,31 @@ def _correction_receipt(
         if corrected_id
         else None
     )
+    strict_operation = bool(corrected and corrected.get("summary_operation"))
+    if strict_operation:
+        enrichment = conversation.get("enrichment_state") or {}
+        active_id = str(conversation.get("active_summary_version_id") or "")
+        undo_id = str(undo_version.get("id") or "") if undo_version else ""
+        active_operation_id = undo_id if active_id == undo_id else corrected_id
+        active_confirmed = (
+            active_id == active_operation_id
+            and enrichment.get("result_summary_version_id") == active_operation_id
+            and enrichment.get("canonical_status") == "completed"
+        )
+        if active_id in {corrected_id, undo_id} and not active_confirmed:
+            status_value = "pending"
+        elif undo_id and active_id == undo_id and active_confirmed:
+            status_value = "undone"
+        elif status_value != "undone":
+            # Audit confirmation survives later versions; a CAS-local state alone
+            # is not evidence that this operation reached the canonical ledger.
+            status_value = "applied" if active_confirmed or audit.get("status") == "applied" else "pending"
     return ConversationCorrectionReceiptResponse(
         correction_id=correction_id,
         conversation_id=conversation_id,
         status=status_value,
-        applied_at=audit.get("applied_at"),
-        undone_at=audit.get("undone_at"),
+        applied_at=audit.get("applied_at") if not strict_operation or status_value != "pending" else None,
+        undone_at=audit.get("undone_at") if not strict_operation or status_value == "undone" else None,
         before_version_id=(str(before.get("id") or "") or None) if before else None,
         after_version_id=corrected_id or None,
         active_version_id=str(conversation.get("active_summary_version_id") or "") or None,
@@ -691,6 +710,22 @@ async def run_explicit_summary_operation(
                 replay_request_fingerprint_input=state.get("request_fingerprint_input"),
             )
             conversation = conversations_db.get_conversation(uid, conversation_id) or conversation
+        state = conversation.get("enrichment_state") or {}
+        if (
+            conversation.get("active_summary_version_id") == existing.get("id")
+            and state.get("result_summary_version_id") == existing.get("id")
+            and state.get("canonical_status") == "completed"
+        ):
+            snapshot = _audit_ref(uid, conversation_id, correction_id).get()
+            audit = snapshot.to_dict() if getattr(snapshot, "exists", False) else {}
+            if audit.get("status") not in {"applied", "undone"}:
+                confirmed_at = _now_iso()
+                _persist_correction_audit(
+                    uid,
+                    conversation_id,
+                    correction_id,
+                    {"status": "applied", "applied_at": confirmed_at, "updated_at": confirmed_at},
+                )
         receipt = _correction_receipt(
             uid=uid, conversation_id=conversation_id, correction_id=correction_id, conversation=conversation
         ).model_dump(mode="json")
@@ -2507,6 +2542,15 @@ async def undo_conversation_correction(
     if active_version_id != corrected_version_id and not source_already_reverted:
         raise HTTPException(status_code=409, detail="A newer memory update must be undone first")
 
+    strict_canonical_undo = bool(corrected.get("summary_operation"))
+    enrichment_state = conversation.get("enrichment_state") or {}
+    if strict_canonical_undo and not source_already_reverted:
+        receipt = _correction_receipt(
+            uid=uid, conversation_id=conversation_id, correction_id=correction_id, conversation=conversation
+        )
+        if receipt.status != "applied":
+            raise HTTPException(status_code=409, detail="Canonical correction confirmation is required before Undo")
+
     rollback_plan = _prepare_applied_propagation_rollbacks(uid, conversation_id, correction_id)
     trace_id = f"correction-undo:{conversation_id}:{correction_id}"
     prepared_at = _now_iso()
@@ -2546,7 +2590,13 @@ async def undo_conversation_correction(
             "updated_at": propagation_reverted_at,
         },
     )
-    if not source_already_reverted:
+    if not source_already_reverted or (
+        strict_canonical_undo
+        and (
+            enrichment_state.get("canonical_status") != "completed"
+            or enrichment_state.get("result_summary_version_id") != undo_version_id
+        )
+    ):
         try:
             apply_result = await apply_summary_update(
                 uid=uid,
@@ -2562,7 +2612,13 @@ async def undo_conversation_correction(
                 summary_kind="correction_undo",
                 summary_source="ios",
                 require_based_on_match=True,
+                require_canonical=strict_canonical_undo,
                 preserve_generated_results=True,
+                replay_request_fingerprint_input=(
+                    enrichment_state.get("request_fingerprint_input")
+                    if strict_canonical_undo and source_already_reverted
+                    else None
+                ),
             )
         except ConcurrentConversationSummaryChangeError as exc:
             raise HTTPException(status_code=409, detail="A newer memory update must be undone first") from exc

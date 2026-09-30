@@ -31,6 +31,17 @@ propagation proposals nor uses failed-processing retry. Provider failures and
 missing generated title/overview create no summary version or correction receipt.
 Canonical-ledger failure after CAS leaves the existing engine's pending receipt;
 replay repairs publication without regenerating or adding another version.
+The receipt GET remains `pending` during that failure window, and the exact
+summary read refuses unconfirmed versions. Undo cannot begin before publication
+is confirmed. Undo of these new versions also requires canonical confirmation;
+a failed Undo remains `pending` and an Undo replay repairs the same version
+before reporting `undone`. Legacy correction/Undo behavior remains unchanged.
+
+Signed per-user sessions expose only the three summary tools above, restricted
+by their current grant and runtime registration. The global legacy Plato helpers
+(including startup, search, scanner rules, and observation writes) are neither
+listed nor callable through this lane, even if a token names them. Static legacy
+bearers retain their existing surface and cannot access the new summary tools.
 
 Concurrent duplicate calls can execute the provider twice. They commit one
 summary version; this is not an exactly-once provider-cost guarantee. A reused
@@ -63,6 +74,9 @@ separately authorized and verified for the exact account/profile:
    with a missing handler, disabled rollout, missing runtime registration,
    revoked consent/grant, or mismatched runtime/profile. Confirm the exact read
    tool supplies the chosen conversation's active version.
+   The binding must expect only the explicitly granted summary tools, not the
+   global legacy Plato startup/read helpers. Choose the conversation explicitly
+   through the existing first-party application; this lane does not list memories.
 7. Only after a separate functional-canary authorization, correct/re-summarize
    one approved explicit test conversation, check receipt and raw-transcript
    invariance, then exercise Undo. No such live canary is part of this source work.

@@ -237,19 +237,99 @@ def test_idempotency_payload_change_rejected(operation):
     assert len(operation.writes) == 1
 
 
-def test_canonical_failure_replay_repairs_receipt_without_provider_or_new_version(operation):
+@pytest.mark.parametrize("correction", [True, False])
+def test_canonical_failure_replay_repairs_receipt_without_provider_or_new_version(operation, correction):
     operation.publication["fail"] = True
     with pytest.raises(summary_writeback.CanonicalSummaryWriteUnconfirmedError):
-        asyncio.run(run(request()))
+        asyncio.run(run(request(correction)))
     assert len(operation.state["summary_versions"]) == 2
     assert len(operation.provider_calls) == 1
+    correction_id = operation.state["summary_versions"][-1]["correction_id"]
+    assert operation.state["correction_state"]["status"] == "pending"
+    assert operation.audits == {}
+    receipt = corrections.get_conversation_correction_receipt("chosen-memory", correction_id, uid="owner")
+    assert receipt.status == "pending"
+    assert receipt.applied_at is None
+    assert receipt.undone_at is None
+    assert receipt.after_version_id == "version-2"
+    with pytest.raises(HTTPException, match="Canonical correction confirmation"):
+        asyncio.run(corrections.undo_conversation_correction("chosen-memory", correction_id, uid="owner"))
+    assert len(operation.state["summary_versions"]) == 2
     operation.publication["fail"] = False
-    result = asyncio.run(run(request()))
+    result = asyncio.run(run(request(correction)))
     assert result["idempotent_replay"] is True
+    assert result["receipt"]["status"] == "applied"
     assert result["receipt"]["after_version_id"] == "version-2"
     assert operation.state["enrichment_state"]["canonical_status"] == "completed"
+    assert operation.state["correction_state"]["status"] == "applied"
+    assert operation.audits[correction_id]["status"] == "applied"
     assert len(operation.state["summary_versions"]) == 2
     assert len(operation.provider_calls) == 1
+
+
+@pytest.mark.parametrize("correction", [True, False])
+def test_strict_undo_canonical_failure_is_pending_and_replay_repairs_same_version(operation, correction):
+    result = asyncio.run(run(request(correction)))
+    correction_id = result["correction_id"]
+    operation.publication["fail"] = True
+    with pytest.raises(summary_writeback.CanonicalSummaryWriteUnconfirmedError):
+        asyncio.run(corrections.undo_conversation_correction("chosen-memory", correction_id, uid="owner"))
+    receipt = corrections.get_conversation_correction_receipt("chosen-memory", correction_id, uid="owner")
+    assert receipt.status == "pending"
+    assert receipt.undone_at is None
+    assert receipt.undo_version_id == "version-3"
+    assert operation.audits[correction_id]["status"] == "applied"
+    assert len(operation.state["summary_versions"]) == 3
+    assert operation.state["transcript_segments"] == operation.original["transcript_segments"]
+    assert asyncio.run(run(request(correction)))["receipt"]["status"] == "pending"
+    assert len(operation.provider_calls) == 1
+    operation.publication["fail"] = False
+    undone = asyncio.run(corrections.undo_conversation_correction("chosen-memory", correction_id, uid="owner"))
+    assert undone.status == "undone"
+    assert operation.state["enrichment_state"]["canonical_status"] == "completed"
+    assert operation.audits[correction_id]["status"] == "undone"
+    assert operation.state["structured"] == operation.original["structured"]
+    assert len(operation.state["summary_versions"]) == 3
+    assert len(operation.provider_calls) == 1
+    assert (
+        asyncio.run(corrections.undo_conversation_correction("chosen-memory", correction_id, uid="owner")).status
+        == "undone"
+    )
+    assert asyncio.run(run(request(correction)))["receipt"]["status"] == "undone"
+    assert len(operation.state["summary_versions"]) == 3
+
+
+def test_confirmed_previous_operation_receipt_survives_newer_pending_version(operation):
+    first = asyncio.run(run(request()))
+    operation.publication["fail"] = True
+    with pytest.raises(summary_writeback.CanonicalSummaryWriteUnconfirmedError):
+        asyncio.run(run(request(expected_active_summary_version_id="version-2", idempotency_key="invocation-2")))
+    receipt = corrections.get_conversation_correction_receipt("chosen-memory", first["correction_id"], uid="owner")
+    assert receipt.status == "applied"
+    assert receipt.after_version_id == "version-2"
+    assert receipt.active_version_id == "version-3"
+    assert receipt.applied_at is not None
+    with pytest.raises(HTTPException, match="newer memory update"):
+        asyncio.run(corrections.undo_conversation_correction("chosen-memory", first["correction_id"], uid="owner"))
+    assert len(operation.state["summary_versions"]) == 3
+
+
+def test_confirmed_replay_preserves_receipt_applied_timestamp(operation):
+    first = asyncio.run(run(request()))
+    replay = asyncio.run(run(request()))
+    assert replay["receipt"]["applied_at"] == first["receipt"]["applied_at"]
+    assert len(operation.provider_calls) == 1
+
+
+def test_legacy_undo_retains_compatibility_when_canonical_unconfirmed(operation):
+    result = asyncio.run(run(request()))
+    del operation.state["summary_versions"][-1]["summary_operation"]
+    operation.publication["fail"] = True
+    receipt = asyncio.run(
+        corrections.undo_conversation_correction("chosen-memory", result["correction_id"], uid="owner")
+    )
+    assert receipt.status == "undone"
+    assert len(operation.state["summary_versions"]) == 3
 
 
 @pytest.mark.parametrize(

@@ -1515,6 +1515,9 @@ async def _companion_summary_operation(
                 raise ToolExecutionError("Conversation locked", code=-32003)
             if not conversation.get("active_summary_version_id"):
                 raise ToolExecutionError("Active summary version is unavailable", code=-32009)
+            enrichment = conversation.get("enrichment_state") or {}
+            if enrichment.get("canonical_status") in {"pending", "failed"} or enrichment.get("pending"):
+                raise ToolExecutionError("Canonical summary confirmation is pending", code=-32009)
             return {
                 "conversation_id": conversation_id,
                 "active_summary_version_id": conversation["active_summary_version_id"],
@@ -1536,6 +1539,10 @@ async def _companion_summary_operation(
 
 
 def _visible_tools(auth_context: MCPAuthContext | None = None) -> list[dict[str, Any]]:
+    if auth_context is not None and not auth_context.trusted_static_token:
+        # Legacy handlers bind the configured Plato profile, not signed callers.
+        # Per-user sessions must never inherit their discovery or dispatch surface.
+        return [tool for tool in MCP_TOOLS if _summary_tool_enabled(auth_context, tool["name"])]
     allowed = set(_legacy_plato_onboarding()["session_claims"].get("allowed_tools") or [])
     return [
         tool
