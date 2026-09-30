@@ -185,6 +185,8 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   int? _imageRetryBudgetRefreshEpoch;
   String? _imageRetryBudgetMemoryId;
   bool _manualGenerationInFlight = false;
+  bool _displayReadRetryAvailable = false;
+  bool _readOnlyDisplayRequest = false;
   double _physicalTargetWidth = 1536;
   String? _pendingResponsiveVariantCacheKey;
   Timer? _responsiveVariantRetryTimer;
@@ -225,6 +227,8 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
 
   void _refreshRequest() {
     _manualGenerationInFlight = false;
+    _displayReadRetryAvailable = false;
+    _readOnlyDisplayRequest = false;
     _resetResponsiveVariantPublication();
     _resetAuthorityRetryBudgetIfNeeded();
     _resetTransientRetryBudgetIfNeeded();
@@ -427,7 +431,9 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     bool loadCachedFile = true,
     bool enqueueIfMissing = false,
     MemoryArtworkResult? suppliedResult,
+    bool readOnly = false,
   }) async {
+    readOnly = readOnly || _readOnlyDisplayRequest;
     MemoryArtworkResult result;
     var usedDayBatch = false;
     try {
@@ -457,6 +463,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
             );
       }
       if (!api.supportsDayArtworkBatch &&
+          !readOnly &&
           suppliedResult == null &&
           !enqueueIfMissing &&
           widget.enqueueIfMissing &&
@@ -498,13 +505,14 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     } catch (_) {
       if (!mounted || generation != _requestGeneration) return;
       setState(() {
+        _displayReadRetryAvailable = usedDayBatch;
         _remoteResult = const MemoryArtworkResult(
           status: MemoryArtworkResultStatus.unavailable,
           failureCode: 'memory_artwork_transport_unavailable',
         );
       });
       if (!usedDayBatch) {
-        _scheduleRetry(api, artwork, generation, transientTransportFailure: true);
+        _scheduleRetry(api, artwork, generation, transientTransportFailure: true, readOnly: readOnly);
       }
       return;
     }
@@ -512,6 +520,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     result = result.forPhysicalWidth(_physicalTargetWidth);
     if (!result.isAuthorityCurrent) {
       setState(() {
+        _displayReadRetryAvailable = false;
         _remoteResult = const MemoryArtworkResult(
           status: MemoryArtworkResultStatus.unavailable,
           failureCode: 'memory_artwork_authority_changed',
@@ -527,12 +536,13 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       }..removeWhere((cacheKey) => cacheKey.isEmpty);
       MemoryArtworkCache.suppressDisplayCacheKeys(suppressedCacheKeys);
       setState(() {
+        _displayReadRetryAvailable = false;
         _remoteResult = result;
         _cachedFile = null;
         _cacheKey = _displayCacheKey;
       });
       unawaited(_evictSuppressedCachedArtwork(suppressedCacheKeys));
-      if (_shouldRetry(result)) _scheduleRetry(api, artwork, generation, result: result);
+      if (_shouldRetry(result)) _scheduleRetry(api, artwork, generation, result: result, readOnly: readOnly);
       return;
     }
     final readyCacheKey = result.isReady ? result.cacheKey : '';
@@ -557,7 +567,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
           );
           _cachedFile = null;
         });
-        _scheduleRetry(api, artwork, generation, transientTransportFailure: true);
+        _scheduleRetry(api, artwork, generation, transientTransportFailure: true, readOnly: readOnly);
         return;
       }
       publishedReadyCacheKey = rememberedCacheKey;
@@ -566,6 +576,8 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       if (!mounted || generation != _requestGeneration || !result.isAuthorityCurrent) return;
     }
     setState(() {
+      _displayReadRetryAvailable =
+          usedDayBatch && (_isTransportUnavailable(result) || (readOnly && _shouldRetry(result)));
       _remoteResult = result;
       if (publishedReadyCacheKey.isNotEmpty && publishedReadyCacheKey != _cacheKey) {
         _cacheKey = publishedReadyCacheKey;
@@ -577,7 +589,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       unawaited(_loadCachedFile(publishedReadyCacheKey, generation));
     }
     if (!usedDayBatch && _shouldRetry(result)) {
-      _scheduleRetry(api, artwork, generation, result: result);
+      _scheduleRetry(api, artwork, generation, result: result, readOnly: readOnly);
     }
   }
 
@@ -846,6 +858,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
 
   Future<void> _generateArtwork() async {
     if (_manualGenerationInFlight || !_canManuallyGenerate(_remoteResult)) return;
+    _readOnlyDisplayRequest = false;
     _retryTimer?.cancel();
     _retryTimer = null;
     _transientRetries = 0;
@@ -864,6 +877,25 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         setState(() => _manualGenerationInFlight = false);
       }
     }
+  }
+
+  void _retryDisplayRead() {
+    final api = widget.api ?? MemoryArtworkApi();
+    if (!_displayReadRetryAvailable || !api.isDisplayAuthorityCurrent()) return;
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    _resetResponsiveVariantPublication();
+    _transientRetries = 0;
+    _visibleEnrichmentRetries = 0;
+    final generation = ++_requestGeneration;
+    setState(() {
+      _displayReadRetryAvailable = false;
+      _readOnlyDisplayRequest = true;
+      _remoteResult = null;
+    });
+    // Reload progress only: this action and its bounded follow-up reads must
+    // never reserve or regenerate artwork, even on automatic-generation cards.
+    unawaited(_loadRemoteResult(api, widget.conversation.artwork, generation, readOnly: true));
   }
 
   Future<void> _evictSuppressedCachedArtwork(Set<String> cacheKeys) async {
@@ -979,6 +1011,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     int generation, {
     MemoryArtworkResult? result,
     bool transientTransportFailure = false,
+    bool readOnly = false,
   }) {
     if (!mounted || generation != _requestGeneration || _retryTimer?.isActive == true) return;
     if (_isAuthorityUnavailable(result)) {
@@ -988,13 +1021,19 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       }
       _authorityUnavailableRetries++;
     } else if (_isVisibleEnrichmentPending(result)) {
-      if (_visibleEnrichmentRetries >= widget.maxVisibleEnrichmentRetries) return;
+      if (_visibleEnrichmentRetries >= widget.maxVisibleEnrichmentRetries) {
+        setState(() => _displayReadRetryAvailable = true);
+        return;
+      }
       _visibleEnrichmentRetries++;
     } else if (transientTransportFailure ||
         _isTransportUnavailable(result) ||
         result?.refreshPending == true ||
         result?.status == MemoryArtworkResultStatus.generating) {
-      if (_transientRetries >= widget.maxTransientRetries) return;
+      if (_transientRetries >= widget.maxTransientRetries) {
+        setState(() => _displayReadRetryAvailable = true);
+        return;
+      }
       _transientRetries++;
     } else {
       return;
@@ -1002,7 +1041,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     _retryTimer = Timer(widget.retryDelay, () {
       _retryTimer = null;
       if (!mounted || generation != _requestGeneration) return;
-      unawaited(_loadRemoteResult(api, artwork, generation));
+      unawaited(_loadRemoteResult(api, artwork, generation, readOnly: readOnly));
     });
   }
 
@@ -1035,20 +1074,50 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       return _fallback(context, kind: _MemoryArtworkFallbackKind.unavailable);
     }
     if (result?.isReady == true) {
-      return Semantics(
-        image: true,
-        label: context.l10n.memoryGeneratedArtworkLabel,
-        child: KeyedSubtree(
-          key: Key('memory-generated-artwork-${widget.conversation.id}'),
-          child: _readyNetworkArtwork(context, result!),
-        ),
-      );
+      return _withDisplayReadRetry(
+          context,
+          Semantics(
+            image: true,
+            label: context.l10n.memoryGeneratedArtworkLabel,
+            child: KeyedSubtree(
+              key: Key('memory-generated-artwork-${widget.conversation.id}'),
+              child: _readyNetworkArtwork(context, result!),
+            ),
+          ));
     }
-    final fallbackKind =
-        result == null || result.status == MemoryArtworkResultStatus.generating || result.refreshPending
-            ? _MemoryArtworkFallbackKind.preparing
-            : _MemoryArtworkFallbackKind.unavailable;
-    return _cachedArtworkOrFallback(context, kind: fallbackKind);
+    final fallbackKind = !_displayReadRetryAvailable &&
+            (result == null || result.status == MemoryArtworkResultStatus.generating || result.refreshPending)
+        ? _MemoryArtworkFallbackKind.preparing
+        : _MemoryArtworkFallbackKind.unavailable;
+    return _withDisplayReadRetry(context, _cachedArtworkOrFallback(context, kind: fallbackKind));
+  }
+
+  Widget _withDisplayReadRetry(BuildContext context, Widget image) {
+    if (!_displayReadRetryAvailable) return image;
+    return Semantics(
+      container: true,
+      label: context.l10n.memoryArtworkQueueUnavailable,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          image,
+          Positioned(
+            right: 8,
+            bottom: 8,
+            child: Material(
+              color: const Color(0xF2F8F2E8),
+              shape: const CircleBorder(),
+              child: IconButton(
+                key: Key('memory-artwork-read-retry-${widget.conversation.id}'),
+                tooltip: context.l10n.memoryArtworkQueueRetryStatus,
+                onPressed: _retryDisplayRead,
+                icon: const Icon(Icons.refresh_rounded, color: Color(0xFF3A776A)),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _readyNetworkArtwork(BuildContext context, MemoryArtworkResult result) {
@@ -1109,7 +1178,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   }
 
   bool _canManuallyGenerate(MemoryArtworkResult? result) {
-    return widget.allowManualGeneration && result?.canRequestGeneration == true;
+    return !_displayReadRetryAvailable && widget.allowManualGeneration && result?.canRequestGeneration == true;
   }
 
   Widget _cachedArtworkOrFallback(BuildContext context, {required _MemoryArtworkFallbackKind kind}) {
