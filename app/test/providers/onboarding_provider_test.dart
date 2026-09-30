@@ -155,4 +155,35 @@ void main() {
 
     expect(calls, ['prepare', 'discover']);
   });
+
+  test('remembered pairing cannot leave a stale success screen after authoritative disconnect', () async {
+    final remembered = BtDevice(name: 'Friend', id: 'remembered-friend', type: DeviceType.friendPendant, rssi: -30);
+    final compass = BtDevice(name: 'Compass', id: 'compass-1', type: DeviceType.omi, rssi: -32);
+    SharedPreferences.setMockInitialValues({'btDevice': jsonEncode(remembered.toJson())});
+    await SharedPreferencesUtil.init();
+    final calls = <String>[];
+    final service = _NoopDeviceService(discoveredDevices: [compass], calls: calls);
+    final device = _OrderedScanDeviceProvider(service, calls)
+      ..connectedDevice = remembered
+      ..pairedDevice = remembered
+      ..setIsConnected(true);
+    final onboarding = OnboardingProvider(deviceService: service)
+      ..setDeviceProvider(device)
+      ..hasBluetoothPermission = true;
+    addTearDown(device.dispose);
+    addTearDown(onboarding.dispose);
+
+    expect(onboarding.isConnected, isTrue);
+    expect(onboarding.deviceName, 'Friend');
+
+    device.setIsConnected(false);
+    await onboarding.scanDevices(onShowDialog: () {});
+
+    expect(onboarding.isConnected, isFalse);
+    expect(onboarding.deviceName, isEmpty);
+    expect(onboarding.batteryPercentage, -1);
+    expect(onboarding.deviceList.map((device) => device.name), ['Compass']);
+    expect(SharedPreferencesUtil().btDevice.id, remembered.id);
+    expect(calls, ['prepare', 'discover']);
+  });
 }

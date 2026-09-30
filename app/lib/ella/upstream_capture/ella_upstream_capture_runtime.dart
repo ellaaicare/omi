@@ -36,6 +36,12 @@ import 'package:omi/utils/audio/foreground.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
 
+enum EllaCaptureStartOutcome {
+  started,
+  consentRequired,
+  unavailable,
+}
+
 /// Upstream [upstream_env.EnvFields] backed by the fork's already-initialized
 /// Ella [ella_env.Env], so the vendored stack talks to the Ella backend with the
 /// Ella flavor's configuration (no second source of endpoints or keys).
@@ -518,11 +524,11 @@ class EllaUpstreamCaptureRuntime {
   // capture/device API, gated only by [bindAccount]. No capture state lives here.
 
   /// Phone mic: binds the signed-in account, then upstream `streamRecording()`.
-  Future<bool> startPhoneCapture(String uid) async {
+  Future<EllaCaptureStartOutcome> startPhoneCapture(String uid) async {
     final provider = await ensureBooted();
-    if (!await bindAccount(uid)) return false;
+    if (!await bindAccount(uid)) return EllaCaptureStartOutcome.consentRequired;
     await provider.streamRecording();
-    return true;
+    return EllaCaptureStartOutcome.started;
   }
 
   Future<void> stopPhoneCapture() async {
@@ -556,15 +562,15 @@ class EllaUpstreamCaptureRuntime {
   /// DeviceProvider does on connect: force-connect through DeviceService,
   /// remember the device, hand it to capture, and start device recording.
   /// There is intentionally no Ella auto-connect / reconnect loop.
-  Future<bool> connectNecklace(String uid, BtDevice device) async {
+  Future<EllaCaptureStartOutcome> connectNecklace(String uid, BtDevice device) async {
     final provider = await ensureBooted();
-    if (!await bindAccount(uid)) return false;
+    if (!await bindAccount(uid)) return EllaCaptureStartOutcome.consentRequired;
     final connection = await ServiceManager.instance().device.ensureConnection(device.id, force: true);
-    if (connection == null) return false;
+    if (connection == null) return EllaCaptureStartOutcome.unavailable;
     upstream.SharedPreferencesUtil().btDevice = device;
     provider.updateRecordingDevice(device);
     await provider.streamDeviceRecording(device: device);
-    return true;
+    return EllaCaptureStartOutcome.started;
   }
 
   Future<void> disconnectNecklace({String? deviceId}) async {

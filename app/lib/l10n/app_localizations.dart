@@ -18824,6 +18824,126 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Critical alerts only - fall detection, medical emergencies, and similar emergencies.'**
   String get coreModeEmergencyOnlyDescription;
+
+  /// Status while the upstream capture controls boot
+  ///
+  /// In en, this message translates to:
+  /// **'Preparing recording controls…'**
+  String get upstreamCapturePreparing;
+
+  /// Status while starting phone capture or connecting a necklace
+  ///
+  /// In en, this message translates to:
+  /// **'Connecting…'**
+  String get upstreamCaptureConnecting;
+
+  /// Status while capture has started but transcription is not ready
+  ///
+  /// In en, this message translates to:
+  /// **'Connecting to transcription…'**
+  String get upstreamCaptureConnectingTranscription;
+
+  /// Status when live capture is ready and has no transcript segments yet
+  ///
+  /// In en, this message translates to:
+  /// **'Ready. Waiting for speech…'**
+  String get upstreamCaptureWaitingForSpeech;
+
+  /// Status while phone recording stops
+  ///
+  /// In en, this message translates to:
+  /// **'Stopping recording…'**
+  String get upstreamCaptureStopping;
+
+  /// Status while the necklace disconnects
+  ///
+  /// In en, this message translates to:
+  /// **'Disconnecting necklace…'**
+  String get upstreamCaptureDisconnecting;
+
+  /// Status while the active conversation is finalized
+  ///
+  /// In en, this message translates to:
+  /// **'Finishing and saving…'**
+  String get upstreamCaptureFinishing;
+
+  /// Recoverable necklace connection error
+  ///
+  /// In en, this message translates to:
+  /// **'Ella could not connect to that necklace. Try again.'**
+  String get upstreamCaptureConnectionFailed;
+
+  /// Recoverable necklace discovery error
+  ///
+  /// In en, this message translates to:
+  /// **'Ella could not search for necklaces. Try again.'**
+  String get upstreamCaptureSearchFailed;
+
+  /// Recoverable phone recording start error
+  ///
+  /// In en, this message translates to:
+  /// **'Phone recording could not start. Try again.'**
+  String get upstreamCapturePhoneStartFailed;
+
+  /// Status after capture consent is granted
+  ///
+  /// In en, this message translates to:
+  /// **'Permission updated. Try recording again.'**
+  String get upstreamCapturePermissionUpdated;
+
+  /// Accessible necklace picker heading
+  ///
+  /// In en, this message translates to:
+  /// **'Choose a necklace'**
+  String get upstreamCaptureChooseNecklace;
+
+  /// Heading for the live transcript sheet
+  ///
+  /// In en, this message translates to:
+  /// **'Live transcript'**
+  String get upstreamCaptureTranscriptTitle;
+
+  /// Empty live transcript state after capture is ready
+  ///
+  /// In en, this message translates to:
+  /// **'Listening for speech…'**
+  String get upstreamCaptureTranscriptEmpty;
+
+  /// Status while saving the Whispers setting
+  ///
+  /// In en, this message translates to:
+  /// **'Saving Whispers…'**
+  String get upstreamCaptureSavingWhispers;
+
+  /// Recoverable Whispers setting save error
+  ///
+  /// In en, this message translates to:
+  /// **'Whispers could not be updated. Try again.'**
+  String get upstreamCaptureWhispersSaveFailed;
+
+  /// Whispers configuration is on while native spoken playback is unavailable
+  ///
+  /// In en, this message translates to:
+  /// **'Whispers are on, but spoken playback is not available right now.'**
+  String get upstreamCaptureWhispersPlaybackUnavailable;
+
+  /// Whispers configuration is off without claiming capture is active
+  ///
+  /// In en, this message translates to:
+  /// **'Whispers are off. Spoken responses are paused.'**
+  String get upstreamCaptureWhispersOffDescription;
+
+  /// Whispers native playback start error
+  ///
+  /// In en, this message translates to:
+  /// **'Whispers was saved, but spoken playback could not start. Try again.'**
+  String get upstreamCaptureWhispersPlaybackFailed;
+
+  /// Whispers native playback stop error
+  ///
+  /// In en, this message translates to:
+  /// **'Whispers was saved off, but spoken playback could not stop. Try again.'**
+  String get upstreamCaptureWhispersPlaybackStopFailed;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

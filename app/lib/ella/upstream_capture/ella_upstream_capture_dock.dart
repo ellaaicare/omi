@@ -9,16 +9,9 @@ import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
 import 'package:omi/ella/services/guardian_mode_service.dart' as guardian_native;
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
-// Reuses today_page's own Whispers status text and testing seams instead of
-// reimplementing them — see UPSTREAM_PATCHES.md patch Six.
+import 'package:omi/ella/widgets/ella_breathing_dot.dart';
 import 'package:omi/pages/home/today_page.dart'
-    show
-        whisperStatusLead,
-        whisperStatusDetail,
-        GuardianAvailability,
-        GuardianModeLoader,
-        GuardianModeSetter,
-        GuardianNativeLifecycle;
+    show GuardianAvailability, GuardianModeLoader, GuardianModeSetter, GuardianNativeLifecycle;
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/upstream_capture/backend/schema/transcript_segment.dart';
@@ -26,31 +19,46 @@ import 'package:omi/upstream_capture/providers/capture_provider.dart';
 import 'package:omi/upstream_capture/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
+typedef EllaCaptureConsentRequester = Future<bool> Function(BuildContext context);
+typedef GuardianNativeStateReader = guardian_native.GuardianModeState Function();
+
+enum _DockOperation {
+  idle,
+  booting,
+  searching,
+  connecting,
+  stopping,
+  disconnecting,
+  finishing,
+}
+
+enum _WhisperPlaybackState { unknown, ready, unavailable, error }
+
 /// Flag-ON home capture dock: a thin view over upstream's CaptureProvider.
-/// Every button is one call into [EllaUpstreamCaptureRuntime], which forwards
-/// to upstream's public capture/device API after the consent bind.
+/// Every capture action remains one call into [EllaUpstreamCaptureRuntime].
 class EllaUpstreamCaptureDock extends StatefulWidget {
   const EllaUpstreamCaptureDock({
     super.key,
     EllaUpstreamCaptureRuntime? runtime,
     this.authenticatedUid,
+    this.consentRequester,
     this.guardianAvailability,
     this.guardianModeLoader,
     this.guardianModeSetter,
     this.guardianNativeStart,
     this.guardianNativeStop,
+    this.guardianNativeState,
   }) : _runtime = runtime;
 
   final EllaUpstreamCaptureRuntime? _runtime;
   final String Function()? authenticatedUid;
-
-  // Same injectable seams `today_page.dart`'s dock uses for Whispers, reused
-  // here rather than reimplemented — see UPSTREAM_PATCHES.md patch Six.
+  final EllaCaptureConsentRequester? consentRequester;
   final GuardianAvailability? guardianAvailability;
   final GuardianModeLoader? guardianModeLoader;
   final GuardianModeSetter? guardianModeSetter;
   final GuardianNativeLifecycle? guardianNativeStart;
   final GuardianNativeLifecycle? guardianNativeStop;
+  final GuardianNativeStateReader? guardianNativeState;
 
   @override
   State<EllaUpstreamCaptureDock> createState() => _EllaUpstreamCaptureDockState();
@@ -58,44 +66,75 @@ class EllaUpstreamCaptureDock extends StatefulWidget {
 
 class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   late final EllaUpstreamCaptureRuntime _runtime = widget._runtime ?? EllaUpstreamCaptureRuntime.instance;
+  final FocusNode _connectFocusNode = FocusNode(debugLabel: 'Connect necklace');
+  final FocusNode _transcriptFocusNode = FocusNode(debugLabel: 'Open transcript');
   CaptureProvider? _provider;
-  bool _busy = false;
+  _DockOperation _operation = _DockOperation.booting;
   String? _message;
-  bool _showTranscript = false;
-  bool _whispersAvailable = false;
+  bool _protocolMessageActive = false;
+  bool _necklaceRetryAvailable = false;
+  bool _whispersVerified = false;
   bool _whispersOn = false;
   bool _whispersBusy = false;
+  _WhisperPlaybackState _whisperPlayback = _WhisperPlaybackState.unknown;
+  String? _whisperError;
 
   String get _uid => widget.authenticatedUid?.call() ?? WalOwnerAuthority.authenticatedUid;
+  bool get _busy => _operation != _DockOperation.idle;
+  bool get _guardianAvailable => widget.guardianAvailability?.call() ?? allowsGuardianSurface();
 
   @override
   void initState() {
     super.initState();
     _runtime.protocolUnavailable.addListener(_onProtocolStatus);
-    unawaited(
-      _runtime.ensureBooted().then((provider) {
-        if (!mounted) return;
-        setState(() => _provider = provider);
-      }).catchError((Object error) {
-        if (!mounted) return;
-        setState(() => _message = context.l10n.upstreamCaptureUnavailable);
-      }),
-    );
+    unawaited(_boot());
     unawaited(_loadWhispersState());
+  }
+
+  Future<void> _boot() async {
+    if (mounted) {
+      setState(() {
+        _operation = _DockOperation.booting;
+        _message = null;
+      });
+    }
+    try {
+      final provider = await _runtime.ensureBooted();
+      if (!mounted) return;
+      setState(() {
+        _provider = provider;
+        _operation = _DockOperation.idle;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _operation = _DockOperation.idle;
+        _message = context.l10n.upstreamCaptureUnavailable;
+      });
+    }
   }
 
   void _onProtocolStatus() {
     if (!mounted) return;
-    setState(() => _message = _runtime.protocolUnavailable.value ? context.l10n.todayTranscriptionUnavailable : null);
+    final unavailable = _runtime.protocolUnavailable.value;
+    setState(() {
+      if (unavailable) {
+        _protocolMessageActive = true;
+        _message = context.l10n.todayTranscriptionUnavailable;
+      } else if (_protocolMessageActive) {
+        _protocolMessageActive = false;
+        _message = null;
+      }
+    });
   }
 
   @override
   void dispose() {
     _runtime.protocolUnavailable.removeListener(_onProtocolStatus);
+    _connectFocusNode.dispose();
+    _transcriptFocusNode.dispose();
     super.dispose();
   }
-
-  bool get _guardianAvailable => widget.guardianAvailability?.call() ?? allowsGuardianSurface();
 
   Future<GuardianModeInfo?> _readWhisperState() async {
     final loader = widget.guardianModeLoader;
@@ -116,119 +155,369 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   Future<void> _stopWhisperNative() =>
       widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop();
 
+  guardian_native.GuardianModeState _nativeWhisperState() =>
+      widget.guardianNativeState?.call() ?? guardian_native.GuardianModeService().currentState;
+
+  _WhisperPlaybackState _playbackStateFor(bool enabled) {
+    if (!enabled) return _WhisperPlaybackState.unavailable;
+    return switch (_nativeWhisperState()) {
+      guardian_native.GuardianModeState.active => _WhisperPlaybackState.ready,
+      guardian_native.GuardianModeState.error => _WhisperPlaybackState.error,
+      guardian_native.GuardianModeState.idle => _WhisperPlaybackState.unavailable,
+    };
+  }
+
   Future<void> _loadWhispersState() async {
     if (!_guardianAvailable) return;
     try {
       final info = await _readWhisperState();
-      if (!mounted || info == null) return;
+      if (!mounted) return;
+      if (info == null) {
+        setState(() {
+          _whispersVerified = false;
+          _whisperError = context.l10n.todayWhispersUnavailable;
+        });
+        return;
+      }
+      final enabled = !(info.twoTierState?.isOff ?? info.currentMode == GuardianModeKey.off);
       setState(() {
-        _whispersAvailable = true;
-        _whispersOn = !(info.twoTierState?.isOff ?? info.currentMode == GuardianModeKey.off);
+        _whispersVerified = true;
+        _whispersOn = enabled;
+        _whisperPlayback = _playbackStateFor(enabled);
+        _whisperError = null;
       });
     } catch (_) {
-      // Leave whispers hidden; _whispersAvailable stays false.
+      if (!mounted) return;
+      setState(() {
+        _whispersVerified = false;
+        _whisperError = context.l10n.todayWhispersUnavailable;
+      });
     }
   }
 
   Future<void> _setWhispers(bool enabled) async {
-    if (_whispersBusy || !_whispersAvailable) return;
+    if (_whispersBusy || !_whispersVerified) return;
+    final previousEnabled = _whispersOn;
+    final previousPlayback = _whisperPlayback;
+    final saveFailedMessage = context.l10n.upstreamCaptureWhispersSaveFailed;
+    final playbackFailedMessage = context.l10n.upstreamCaptureWhispersPlaybackFailed;
+    final playbackStopFailedMessage = context.l10n.upstreamCaptureWhispersPlaybackStopFailed;
     setState(() {
-      _whispersOn = enabled;
       _whispersBusy = true;
+      _whisperError = null;
     });
-    final state = enabled ? const GuardianModeState(features: ['ACTIVE_SUPPORT']) : const GuardianModeState();
+
+    var nativeStopFailed = false;
     if (!enabled) {
       try {
         await _stopWhisperNative();
-      } catch (_) {}
+      } catch (_) {
+        nativeStopFailed = true;
+      }
     }
-    var success = false;
+
+    var saved = false;
     try {
-      success = await _writeWhisperState(state);
+      saved = await _writeWhisperState(
+        enabled ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
+      );
     } catch (_) {
-      success = false;
+      saved = false;
     }
-    if (enabled) {
-      try {
-        if (success) {
+
+    var playback = _WhisperPlaybackState.unavailable;
+    String? error;
+    if (!saved) {
+      playback = previousPlayback;
+      error = saveFailedMessage;
+      if (previousEnabled && !enabled) {
+        try {
           await _startWhisperNative();
-        } else {
-          await _stopWhisperNative();
-          await _writeWhisperState(const GuardianModeState());
+          playback = _WhisperPlaybackState.ready;
+        } catch (_) {
+          playback = _WhisperPlaybackState.error;
         }
-      } catch (_) {}
+      }
+    } else if (enabled) {
+      try {
+        await _startWhisperNative();
+        playback = _WhisperPlaybackState.ready;
+      } catch (_) {
+        playback = _WhisperPlaybackState.error;
+        error = playbackFailedMessage;
+      }
+    } else if (nativeStopFailed) {
+      playback = _WhisperPlaybackState.error;
+      error = playbackStopFailedMessage;
     }
+
     if (!mounted) return;
     setState(() {
       _whispersBusy = false;
-      if (!success) _whispersOn = !enabled;
+      _whispersOn = saved ? enabled : previousEnabled;
+      _whisperPlayback = playback;
+      _whisperError = error;
     });
   }
 
-  Future<void> _run(Future<void> Function() action) async {
+  Future<void> _retryWhispers() async {
+    if (_whispersBusy) return;
+    if (!_whispersVerified) {
+      setState(() => _whispersBusy = true);
+      await _loadWhispersState();
+      if (mounted) setState(() => _whispersBusy = false);
+      return;
+    }
+    final playbackFailedMessage = context.l10n.upstreamCaptureWhispersPlaybackFailed;
+    final playbackStopFailedMessage = context.l10n.upstreamCaptureWhispersPlaybackStopFailed;
+    setState(() {
+      _whispersBusy = true;
+      _whisperError = null;
+    });
+    try {
+      if (_whispersOn) {
+        await _startWhisperNative();
+      } else {
+        await _stopWhisperNative();
+      }
+      if (!mounted) return;
+      setState(() {
+        _whisperPlayback = _whispersOn ? _WhisperPlaybackState.ready : _WhisperPlaybackState.unavailable;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _whisperPlayback = _WhisperPlaybackState.error;
+        _whisperError = _whispersOn ? playbackFailedMessage : playbackStopFailedMessage;
+      });
+    } finally {
+      if (mounted) setState(() => _whispersBusy = false);
+    }
+  }
+
+  Future<void> _run(
+    _DockOperation operation,
+    Future<void> Function() action, {
+    required String failureMessage,
+  }) async {
     if (_busy) return;
     setState(() {
-      _busy = true;
+      _operation = operation;
       _message = null;
     });
     try {
       await action();
     } catch (_) {
-      if (mounted) setState(() => _message = context.l10n.upstreamCaptureUnavailable);
+      if (mounted) setState(() => _message = failureMessage);
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) setState(() => _operation = _DockOperation.idle);
     }
   }
 
-  Future<void> _startPhone() => _run(() async {
-        final started = await _runtime.startPhoneCapture(_uid);
-        if (!started && mounted) await _consentRequired();
-      });
-
-  Future<void> _connectNecklace() => _run(() async {
-        setState(() => _message = context.l10n.upstreamCaptureSearching);
-        final devices = await _runtime.discoverNecklaces();
-        if (!mounted) return;
-        if (devices.isEmpty) {
-          setState(() => _message = context.l10n.upstreamCaptureNoNecklaceFound);
-          return;
+  Future<void> _handleStartOutcome(EllaCaptureStartOutcome outcome, {required bool necklace}) async {
+    switch (outcome) {
+      case EllaCaptureStartOutcome.started:
+        if (mounted) {
+          setState(() {
+            _message = null;
+            _necklaceRetryAvailable = false;
+          });
         }
-        final device = devices.length == 1 ? devices.first : await _pickDevice(devices);
-        if (device == null || !mounted) return;
-        setState(() => _message = null);
-        final connected = await _runtime.connectNecklace(_uid, device);
-        if (!connected && mounted) await _consentRequired();
-      });
-
-  Future<void> _consentRequired() async {
-    setState(() => _message = context.l10n.upstreamCaptureConsentRequired);
-    await AiConsentCoordinator.ensure(context);
+        return;
+      case EllaCaptureStartOutcome.unavailable:
+        if (mounted) {
+          setState(() {
+            _message =
+                necklace ? context.l10n.upstreamCaptureConnectionFailed : context.l10n.upstreamCapturePhoneStartFailed;
+            _necklaceRetryAvailable = necklace;
+          });
+        }
+        return;
+      case EllaCaptureStartOutcome.consentRequired:
+        if (!mounted) return;
+        setState(() => _message = context.l10n.upstreamCaptureConsentRequired);
+        final accepted = await (widget.consentRequester?.call(context) ?? AiConsentCoordinator.ensure(context));
+        if (!mounted) return;
+        setState(() {
+          _message =
+              accepted ? context.l10n.upstreamCapturePermissionUpdated : context.l10n.upstreamCaptureConsentRequired;
+        });
+        return;
+    }
   }
 
-  Future<BtDevice?> _pickDevice(List<BtDevice> devices) {
-    return showModalBottomSheet<BtDevice>(
+  Future<void> _startPhone() => _run(
+        _DockOperation.connecting,
+        () async => _handleStartOutcome(await _runtime.startPhoneCapture(_uid), necklace: false),
+        failureMessage: context.l10n.upstreamCapturePhoneStartFailed,
+      );
+
+  Future<void> _connectNecklace() async {
+    if (_busy) return;
+    setState(() {
+      _operation = _DockOperation.searching;
+      _message = null;
+      _necklaceRetryAvailable = false;
+    });
+    try {
+      final devices = await _runtime.discoverNecklaces();
+      if (!mounted) return;
+      if (devices.isEmpty) {
+        setState(() {
+          _message = context.l10n.upstreamCaptureNoNecklaceFound;
+          _necklaceRetryAvailable = true;
+        });
+        return;
+      }
+      final device = await _pickDevice(devices);
+      if (device == null || !mounted) return;
+      setState(() => _operation = _DockOperation.connecting);
+      await _handleStartOutcome(await _runtime.connectNecklace(_uid, device), necklace: true);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _message = _operation == _DockOperation.searching
+            ? context.l10n.upstreamCaptureSearchFailed
+            : context.l10n.upstreamCaptureConnectionFailed;
+        _necklaceRetryAvailable = true;
+      });
+    } finally {
+      if (mounted) setState(() => _operation = _DockOperation.idle);
+    }
+  }
+
+  Future<BtDevice?> _pickDevice(List<BtDevice> devices) async {
+    final selected = await showModalBottomSheet<BtDevice>(
       context: context,
+      isScrollControlled: true,
+      backgroundColor: EllaColors.paper,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(EllaSizes.cardRadius)),
+      ),
       builder: (context) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          children: [
-            for (final device in devices)
-              ListTile(
-                key: Key('upstream-capture-device-${device.id}'),
-                title: Text(device.name),
-                onTap: () => Navigator.of(context).pop(device),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * 0.72),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 20, 8, 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Semantics(
+                        header: true,
+                        child: Text(
+                          context.l10n.upstreamCaptureChooseNecklace,
+                          style: Theme.of(context).textTheme.titleLarge,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      key: const Key('upstream-capture-picker-close'),
+                      tooltip: context.l10n.close,
+                      constraints: const BoxConstraints.tightFor(
+                        width: EllaSizes.minTouchTarget,
+                        height: EllaSizes.minTouchTarget,
+                      ),
+                      onPressed: () => Navigator.of(context).pop(),
+                      icon: const Icon(Icons.close_rounded, color: EllaColors.tealDeep),
+                    ),
+                  ],
+                ),
               ),
-          ],
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 20),
+                  children: [
+                    for (final device in devices)
+                      ListTile(
+                        key: Key('upstream-capture-device-${device.id}'),
+                        minVerticalPadding: 12,
+                        leading: const Icon(Icons.bluetooth_rounded, color: EllaColors.tealDeep),
+                        title: Text(device.name),
+                        trailing: const Icon(Icons.chevron_right_rounded, color: EllaColors.inkSoft),
+                        onTap: () => Navigator.of(context).pop(device),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
+    if (mounted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _connectFocusNode.requestFocus();
+      });
+    }
+    return selected;
   }
+
+  Future<void> _openTranscript(CaptureProvider provider, {required bool necklace}) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: EllaColors.paper,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(EllaSizes.cardRadius)),
+      ),
+      builder: (context) => _TranscriptSheet(
+        provider: provider,
+        sourceLabel: necklace ? context.l10n.todayDockTranscriptNecklace : context.l10n.todayDockTranscriptPhone,
+      ),
+    );
+    if (mounted) _transcriptFocusNode.requestFocus();
+  }
+
+  String? _operationLabel(BuildContext context) => switch (_operation) {
+        _DockOperation.idle => null,
+        _DockOperation.booting => context.l10n.upstreamCapturePreparing,
+        _DockOperation.searching => context.l10n.upstreamCaptureSearching,
+        _DockOperation.connecting => context.l10n.upstreamCaptureConnecting,
+        _DockOperation.stopping => context.l10n.upstreamCaptureStopping,
+        _DockOperation.disconnecting => context.l10n.upstreamCaptureDisconnecting,
+        _DockOperation.finishing => context.l10n.upstreamCaptureFinishing,
+      };
+
+  Widget _actionLabel(BuildContext context, String label, {required String compactLabel}) => Text(
+        MediaQuery.textScalerOf(context).scale(1) >= 2 ? compactLabel : label,
+        semanticsLabel: label,
+        textAlign: TextAlign.center,
+      );
 
   @override
   Widget build(BuildContext context) {
     final provider = _provider;
     if (provider == null) {
-      return _DockSurface(child: Text(_message ?? context.l10n.upstreamCaptureStarting));
+      final bootFailed = _operation == _DockOperation.idle;
+      return _DockSurface(
+        child: Column(
+          key: const Key('upstream-capture-dock'),
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _DockStatus(
+              label: _operationLabel(context) ?? _message ?? context.l10n.upstreamCaptureUnavailable,
+              active: !bootFailed,
+              error: bootFailed,
+            ),
+            if (bootFailed) ...[
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                key: const Key('upstream-capture-retry-boot'),
+                style: _DockButtonStyles.primary(context),
+                onPressed: _boot,
+                icon: const Icon(Icons.refresh_rounded),
+                label: Text(context.l10n.retry),
+              ),
+            ],
+          ],
+        ),
+      );
     }
     return AnimatedBuilder(
       animation: provider,
@@ -239,82 +528,148 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
         final phoneLive =
             (state == RecordingState.record && provider.transcriptServiceReady) || provider.isPhoneMicBatchRecording;
         final necklaceLive = state == RecordingState.deviceRecord && provider.transcriptServiceReady;
-        final starting = _busy || state == RecordingState.initialising;
-        final status = starting
-            ? context.l10n.upstreamCaptureStarting
-            : phoneLive
+        final live = phoneLive || necklaceLive;
+        final initializing = state == RecordingState.initialising;
+        final operationLabel = _operationLabel(context);
+        final status = operationLabel ??
+            (phoneLive
                 ? context.l10n.upstreamCaptureRecordingPhone
                 : necklaceLive
                     ? context.l10n.upstreamCaptureRecordingNecklace
-                    : (state == RecordingState.record || state == RecordingState.deviceRecord)
-                        ? (_message ?? context.l10n.todayRecordingUnavailable)
-                        : (_message ?? '');
+                    : (state == RecordingState.record || state == RecordingState.deviceRecord || initializing)
+                        ? context.l10n.upstreamCaptureConnectingTranscription
+                        : _message);
+        final detail = live && provider.segments.isEmpty
+            ? context.l10n.upstreamCaptureWaitingForSpeech
+            : live && _message != null
+                ? _message
+                : null;
+
         return _DockSurface(
           child: Column(
             key: const Key('upstream-capture-dock'),
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (status.isNotEmpty) Text(status, style: const TextStyle(fontSize: 18, color: EllaColors.ink)),
-              if (_message != null && (phoneLive || necklaceLive || starting))
-                Text(_message!, style: const TextStyle(fontSize: 16, color: EllaColors.inkSoft)),
-              if (status.isNotEmpty) const SizedBox(height: 10),
-              Row(
-                children: [
-                  Expanded(
-                    child: phoneActive
-                        ? FilledButton(
-                            key: const Key('upstream-capture-stop-phone'),
-                            onPressed: starting ? null : () => _run(_runtime.stopPhoneCapture),
-                            child: Text(context.l10n.upstreamCaptureStop),
-                          )
-                        : FilledButton(
-                            key: const Key('upstream-capture-record-phone'),
-                            onPressed: starting ? null : _startPhone,
-                            child: Text(context.l10n.upstreamCaptureRecordPhone),
-                          ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: necklaceBound
-                        ? OutlinedButton(
-                            key: const Key('upstream-capture-disconnect-necklace'),
-                            onPressed: starting ? null : () => _run(_runtime.disconnectNecklace),
-                            child: Text(context.l10n.upstreamCaptureDisconnectNecklace),
-                          )
-                        : OutlinedButton(
-                            key: const Key('upstream-capture-connect-necklace'),
-                            onPressed: starting ? null : _connectNecklace,
-                            child: Text(context.l10n.upstreamCaptureConnectNecklace),
-                          ),
-                  ),
-                ],
+              if (status != null && status.isNotEmpty) ...[
+                _DockStatus(
+                  label: status,
+                  detail: detail,
+                  active: live || _busy || initializing,
+                  live: live,
+                  error: !_busy && !live && _message != null,
+                ),
+                const SizedBox(height: 12),
+              ],
+              _AdaptiveActionPair(
+                first: phoneActive
+                    ? FilledButton.icon(
+                        key: const Key('upstream-capture-stop-phone'),
+                        style: _DockButtonStyles.primary(context),
+                        onPressed: _busy
+                            ? null
+                            : () => _run(
+                                  _DockOperation.stopping,
+                                  _runtime.stopPhoneCapture,
+                                  failureMessage: context.l10n.upstreamCaptureUnavailable,
+                                ),
+                        icon: const Icon(Icons.stop_circle_outlined),
+                        label: _actionLabel(
+                          context,
+                          context.l10n.upstreamCaptureStop,
+                          compactLabel: context.l10n.todayDockStop,
+                        ),
+                      )
+                    : FilledButton.icon(
+                        key: const Key('upstream-capture-record-phone'),
+                        style: _DockButtonStyles.primary(context),
+                        onPressed: _busy ? null : _startPhone,
+                        icon: const Icon(Icons.mic_none_rounded),
+                        label: _actionLabel(
+                          context,
+                          context.l10n.upstreamCaptureRecordPhone,
+                          compactLabel: context.l10n.phone,
+                        ),
+                      ),
+                second: necklaceBound
+                    ? OutlinedButton.icon(
+                        key: const Key('upstream-capture-disconnect-necklace'),
+                        focusNode: _connectFocusNode,
+                        style: _DockButtonStyles.secondary(context),
+                        onPressed: _busy
+                            ? null
+                            : () => _run(
+                                  _DockOperation.disconnecting,
+                                  _runtime.disconnectNecklace,
+                                  failureMessage: context.l10n.upstreamCaptureConnectionFailed,
+                                ),
+                        icon: const Icon(Icons.bluetooth_disabled_rounded),
+                        label: _actionLabel(
+                          context,
+                          context.l10n.upstreamCaptureDisconnectNecklace,
+                          compactLabel: context.l10n.disconnect,
+                        ),
+                      )
+                    : OutlinedButton.icon(
+                        key: const Key('upstream-capture-connect-necklace'),
+                        focusNode: _connectFocusNode,
+                        style: _DockButtonStyles.secondary(context),
+                        onPressed: _busy ? null : _connectNecklace,
+                        icon: Icon(_necklaceRetryAvailable ? Icons.refresh_rounded : Icons.bluetooth_rounded),
+                        label: _actionLabel(
+                          context,
+                          _necklaceRetryAvailable ? context.l10n.retry : context.l10n.upstreamCaptureConnectNecklace,
+                          compactLabel: _necklaceRetryAvailable ? context.l10n.retry : context.l10n.connect,
+                        ),
+                      ),
               ),
-              if (phoneLive || necklaceLive) ...[
-                const SizedBox(height: 6),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton(
+              if (live) ...[
+                const SizedBox(height: 8),
+                _AdaptiveActionPair(
+                  first: OutlinedButton.icon(
                     key: const Key('upstream-capture-view-transcript'),
-                    onPressed: () => setState(() => _showTranscript = !_showTranscript),
-                    child: Text(
+                    focusNode: _transcriptFocusNode,
+                    style: _DockButtonStyles.secondary(context),
+                    onPressed: () => _openTranscript(provider, necklace: necklaceLive),
+                    icon: const Icon(Icons.subject_rounded),
+                    label: _actionLabel(
+                      context,
                       necklaceLive ? context.l10n.todayDockTranscriptNecklace : context.l10n.todayDockTranscriptPhone,
+                      compactLabel: context.l10n.transcript,
+                    ),
+                  ),
+                  second: FilledButton.icon(
+                    key: const Key('upstream-capture-finish'),
+                    style: _DockButtonStyles.primary(context),
+                    onPressed: _busy
+                        ? null
+                        : () => _run(
+                              _DockOperation.finishing,
+                              _runtime.finishConversation,
+                              failureMessage: context.l10n.upstreamCaptureUnavailable,
+                            ),
+                    icon: const Icon(Icons.check_circle_outline_rounded),
+                    label: _actionLabel(
+                      context,
+                      context.l10n.upstreamCaptureFinish,
+                      compactLabel: context.l10n.todayDockFinish,
                     ),
                   ),
                 ),
-                if (_showTranscript) _TranscriptPanel(segments: provider.segments),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: TextButton(
-                    key: const Key('upstream-capture-finish'),
-                    onPressed: starting ? null : () => _run(_runtime.finishConversation),
-                    child: Text(context.l10n.upstreamCaptureFinish),
-                  ),
-                ),
               ],
-              if (_whispersAvailable) ...[
+              if (_guardianAvailable) ...[
                 const SizedBox(height: 10),
-                _WhispersRow(enabled: _whispersOn, busy: _whispersBusy, onChanged: _setWhispers),
+                const Divider(height: 1, color: EllaColors.cardDeep),
+                const SizedBox(height: 8),
+                _WhispersRow(
+                  verified: _whispersVerified,
+                  enabled: _whispersOn,
+                  busy: _whispersBusy,
+                  playback: _whisperPlayback,
+                  error: _whisperError,
+                  onChanged: _setWhispers,
+                  onRetry: _retryWhispers,
+                ),
               ],
             ],
           ),
@@ -324,73 +679,354 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   }
 }
 
-class _TranscriptPanel extends StatelessWidget {
-  const _TranscriptPanel({required this.segments});
+class _DockStatus extends StatelessWidget {
+  const _DockStatus({required this.label, required this.active, required this.error, this.detail, this.live = false});
 
-  final List<TranscriptSegment> segments;
+  final String label;
+  final String? detail;
+  final bool active;
+  final bool live;
+  final bool error;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      key: const Key('upstream-capture-transcript-panel'),
-      constraints: const BoxConstraints(maxHeight: 220),
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(color: EllaColors.cardDeep, borderRadius: BorderRadius.circular(16)),
-      child: segments.isEmpty
-          ? Text(context.l10n.upstreamCaptureStarting, style: const TextStyle(color: EllaColors.inkSoft))
-          : ListView.builder(
-              shrinkWrap: true,
-              itemCount: segments.length,
-              itemBuilder: (context, index) {
-                final segment = segments[index];
-                return Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 4),
-                  child: Text(segment.text, style: const TextStyle(color: EllaColors.ink)),
-                );
-              },
+    return Semantics(
+      container: true,
+      liveRegion: true,
+      label: detail == null ? label : '$label. $detail',
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 7),
+            child: error
+                ? const Icon(Icons.error_outline_rounded, size: 18, color: EllaColors.error)
+                : EllaBreathingDot(
+                    key: const Key('upstream-capture-status-indicator'),
+                    active: active,
+                    live: live,
+                    size: 12,
+                  ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  label,
+                  key: const Key('upstream-capture-status'),
+                  style: EllaTextStyles.body.copyWith(
+                    color: error ? EllaColors.error : EllaColors.ink,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                if (detail != null) ...[
+                  const SizedBox(height: 2),
+                  Text(detail!, style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft)),
+                ],
+              ],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AdaptiveActionPair extends StatelessWidget {
+  const _AdaptiveActionPair({required this.first, required this.second});
+
+  final Widget first;
+  final Widget second;
+
+  @override
+  Widget build(BuildContext context) {
+    final textScale = MediaQuery.textScalerOf(context).scale(1);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < 300 || textScale >= 2) {
+          return Column(
+            key: const Key('upstream-capture-actions-stacked'),
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [first, const SizedBox(height: 8), second],
+          );
+        }
+        return Row(
+          key: const Key('upstream-capture-actions-inline'),
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Expanded(child: first),
+            const SizedBox(width: 10),
+            Expanded(child: second),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _TranscriptSheet extends StatelessWidget {
+  const _TranscriptSheet({required this.provider, required this.sourceLabel});
+
+  final CaptureProvider provider;
+  final String sourceLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: FractionallySizedBox(
+        heightFactor: 0.72,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 18, 12, 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Semantics(
+                          header: true,
+                          child: Text(
+                            context.l10n.upstreamCaptureTranscriptTitle,
+                            key: const Key('upstream-capture-transcript-title'),
+                            style: Theme.of(context).textTheme.titleLarge,
+                          ),
+                        ),
+                        Text(sourceLabel, style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft)),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    key: const Key('upstream-capture-transcript-close'),
+                    tooltip: context.l10n.close,
+                    constraints: const BoxConstraints.tightFor(
+                      width: EllaSizes.minTouchTarget,
+                      height: EllaSizes.minTouchTarget,
+                    ),
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.close_rounded, color: EllaColors.tealDeep),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Expanded(
+                child: AnimatedBuilder(
+                  animation: provider,
+                  builder: (context, _) {
+                    final segments = provider.segments;
+                    if (segments.isEmpty) {
+                      return Semantics(
+                        liveRegion: true,
+                        child: Center(
+                          child: Text(
+                            context.l10n.upstreamCaptureTranscriptEmpty,
+                            key: const Key('upstream-capture-transcript-empty'),
+                            textAlign: TextAlign.center,
+                            style: EllaTextStyles.body.copyWith(color: EllaColors.inkSoft),
+                          ),
+                        ),
+                      );
+                    }
+                    return ListView.separated(
+                      key: const Key('upstream-capture-transcript-list'),
+                      padding: const EdgeInsets.only(right: 8, bottom: 20),
+                      itemCount: segments.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      itemBuilder: (context, index) => _TranscriptSegmentCard(segment: segments[index]),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TranscriptSegmentCard extends StatelessWidget {
+  const _TranscriptSegmentCard({required this.segment});
+
+  final TranscriptSegment segment;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(color: EllaColors.card, borderRadius: BorderRadius.circular(14)),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Text(segment.text, style: EllaTextStyles.body.copyWith(color: EllaColors.ink)),
+      ),
     );
   }
 }
 
 class _WhispersRow extends StatelessWidget {
-  const _WhispersRow({required this.enabled, required this.busy, required this.onChanged});
+  const _WhispersRow({
+    required this.verified,
+    required this.enabled,
+    required this.busy,
+    required this.playback,
+    required this.error,
+    required this.onChanged,
+    required this.onRetry,
+  });
 
+  final bool verified;
   final bool enabled;
   final bool busy;
+  final _WhisperPlaybackState playback;
+  final String? error;
   final ValueChanged<bool> onChanged;
+  final VoidCallback onRetry;
+
+  String _description(BuildContext context) {
+    if (busy) return context.l10n.upstreamCaptureSavingWhispers;
+    if (!verified) return context.l10n.todayWhispersUnavailable;
+    if (!enabled) return context.l10n.upstreamCaptureWhispersOffDescription;
+    return playback == _WhisperPlaybackState.ready
+        ? context.l10n.todayWhispersOnDescription
+        : context.l10n.upstreamCaptureWhispersPlaybackUnavailable;
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      key: const Key('upstream-capture-whispers-row'),
-      children: [
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                whisperStatusLead(enabled),
-                key: const Key('upstream-capture-whispers-status'),
-                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: EllaColors.ink),
+    final canRetry = !verified || playback == _WhisperPlaybackState.error;
+    final textScale = MediaQuery.textScalerOf(context).scale(1);
+    final control = busy
+        ? Semantics(
+            label: context.l10n.upstreamCaptureSavingWhispers,
+            child: const SizedBox(
+              width: EllaSizes.minTouchTarget,
+              height: EllaSizes.minTouchTarget,
+              child: Center(
+                child: SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                ),
               ),
-              Text(whisperStatusDetail(enabled), style: const TextStyle(fontSize: 12, color: EllaColors.inkSoft)),
-            ],
-          ),
-        ),
-        if (busy)
-          const SizedBox(
-            width: 20,
-            height: 20,
-            child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+            ),
           )
-        else
-          Switch(key: const Key('upstream-capture-whispers-switch'), value: enabled, onChanged: onChanged),
+        : canRetry
+            ? TextButton.icon(
+                key: const Key('upstream-capture-whispers-retry'),
+                style: _DockButtonStyles.text(context),
+                onPressed: onRetry,
+                icon: const Icon(Icons.refresh_rounded),
+                label: Text(context.l10n.retry),
+              )
+            : Semantics(
+                label: context.l10n.todayWhispersTitle,
+                toggled: enabled,
+                child: Switch(
+                  key: const Key('upstream-capture-whispers-switch'),
+                  value: enabled,
+                  onChanged: onChanged,
+                  activeTrackColor: EllaColors.tealDeep,
+                  activeThumbColor: EllaColors.paper,
+                ),
+              );
+    final copy = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          context.l10n.todayWhispersTitle,
+          key: const Key('upstream-capture-whispers-status'),
+          style: EllaTextStyles.secondary.copyWith(fontWeight: FontWeight.w700, color: EllaColors.ink),
+        ),
+        const SizedBox(height: 2),
+        Text(_description(context), style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft)),
+        if (error != null) ...[
+          const SizedBox(height: 4),
+          Text(
+            error!,
+            key: const Key('upstream-capture-whispers-error'),
+            style: EllaTextStyles.caption.copyWith(color: EllaColors.error, fontWeight: FontWeight.w600),
+          ),
+        ],
       ],
     );
+    return Semantics(
+      container: true,
+      label: '${context.l10n.todayWhispersTitle}. ${_description(context)}${error == null ? '' : '. $error'}',
+      child: textScale >= 2
+          ? Column(
+              key: const Key('upstream-capture-whispers-stacked'),
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [copy, const SizedBox(height: 6), Align(alignment: Alignment.centerRight, child: control)],
+            )
+          : Row(
+              key: const Key('upstream-capture-whispers-row'),
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [Expanded(child: copy), const SizedBox(width: 8), control],
+            ),
+    );
   }
+}
+
+class _DockButtonStyles {
+  const _DockButtonStyles._();
+
+  static ButtonStyle primary(BuildContext context) => ButtonStyle(
+        minimumSize: const WidgetStatePropertyAll(Size(0, 52)),
+        padding: const WidgetStatePropertyAll(EdgeInsets.symmetric(horizontal: 14, vertical: 10)),
+        foregroundColor: WidgetStateProperty.resolveWith(
+          (states) => states.contains(WidgetState.disabled) ? EllaColors.inkSoft : EllaColors.paper,
+        ),
+        backgroundColor: WidgetStateProperty.resolveWith(
+          (states) => states.contains(WidgetState.disabled) ? EllaColors.cardDeep : EllaColors.tealDeep,
+        ),
+        overlayColor: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.pressed)) return EllaColors.paper.withValues(alpha: 0.18);
+          if (states.contains(WidgetState.focused)) return EllaColors.paper.withValues(alpha: 0.12);
+          return null;
+        }),
+        textStyle: WidgetStatePropertyAll(
+          Theme.of(context).textTheme.labelLarge?.copyWith(fontSize: 16, fontWeight: FontWeight.w700),
+        ),
+        shape: WidgetStatePropertyAll(RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
+      );
+
+  static ButtonStyle secondary(BuildContext context) => ButtonStyle(
+        minimumSize: const WidgetStatePropertyAll(Size(0, 52)),
+        padding: const WidgetStatePropertyAll(EdgeInsets.symmetric(horizontal: 14, vertical: 10)),
+        foregroundColor: WidgetStateProperty.resolveWith(
+          (states) => states.contains(WidgetState.disabled) ? EllaColors.inkSoft : EllaColors.tealDeep,
+        ),
+        backgroundColor: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.disabled)) return EllaColors.card;
+          if (states.contains(WidgetState.pressed) || states.contains(WidgetState.focused)) {
+            return EllaColors.cardDeep;
+          }
+          return EllaColors.elevatedCard;
+        }),
+        side: WidgetStateProperty.resolveWith(
+          (states) => BorderSide(
+            color: states.contains(WidgetState.disabled)
+                ? EllaColors.cardEdge.withValues(alpha: 0.55)
+                : EllaColors.tealDeep,
+            width: states.contains(WidgetState.focused) ? 2.5 : 1.5,
+          ),
+        ),
+        textStyle: WidgetStatePropertyAll(
+          Theme.of(context).textTheme.labelLarge?.copyWith(fontSize: 16, fontWeight: FontWeight.w700),
+        ),
+        shape: WidgetStatePropertyAll(RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
+      );
+
+  static ButtonStyle text(BuildContext context) => TextButton.styleFrom(
+        foregroundColor: EllaColors.tealDeep,
+        minimumSize: const Size(0, EllaSizes.minTouchTarget),
+        textStyle: Theme.of(context).textTheme.labelLarge?.copyWith(fontSize: 15, fontWeight: FontWeight.w700),
+      );
 }
 
 class _DockSurface extends StatelessWidget {
@@ -403,6 +1039,7 @@ class _DockSurface extends StatelessWidget {
     return Material(
       color: EllaColors.elevatedCard,
       elevation: 6,
+      shadowColor: EllaColors.ink.withValues(alpha: 0.16),
       borderRadius: BorderRadius.circular(24),
       child: Padding(padding: const EdgeInsets.all(16), child: child),
     );

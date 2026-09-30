@@ -11178,5 +11178,85 @@
   "coreModeEmergencyOnlyDescription": "Critical alerts only - fall detection, medical emergencies, and similar emergencies.",
   "@coreModeEmergencyOnlyDescription": {
     "description": "Description for the Emergency Only core Whispers mode option"
+  },
+  "upstreamCapturePreparing": "Preparing recording controls…",
+  "@upstreamCapturePreparing": {
+    "description": "Status while the upstream capture controls boot"
+  },
+  "upstreamCaptureConnecting": "Connecting…",
+  "@upstreamCaptureConnecting": {
+    "description": "Status while starting phone capture or connecting a necklace"
+  },
+  "upstreamCaptureConnectingTranscription": "Connecting to transcription…",
+  "@upstreamCaptureConnectingTranscription": {
+    "description": "Status while capture has started but transcription is not ready"
+  },
+  "upstreamCaptureWaitingForSpeech": "Ready. Waiting for speech…",
+  "@upstreamCaptureWaitingForSpeech": {
+    "description": "Status when live capture is ready and has no transcript segments yet"
+  },
+  "upstreamCaptureStopping": "Stopping recording…",
+  "@upstreamCaptureStopping": {
+    "description": "Status while phone recording stops"
+  },
+  "upstreamCaptureDisconnecting": "Disconnecting necklace…",
+  "@upstreamCaptureDisconnecting": {
+    "description": "Status while the necklace disconnects"
+  },
+  "upstreamCaptureFinishing": "Finishing and saving…",
+  "@upstreamCaptureFinishing": {
+    "description": "Status while the active conversation is finalized"
+  },
+  "upstreamCaptureConnectionFailed": "Ella could not connect to that necklace. Try again.",
+  "@upstreamCaptureConnectionFailed": {
+    "description": "Recoverable necklace connection error"
+  },
+  "upstreamCaptureSearchFailed": "Ella could not search for necklaces. Try again.",
+  "@upstreamCaptureSearchFailed": {
+    "description": "Recoverable necklace discovery error"
+  },
+  "upstreamCapturePhoneStartFailed": "Phone recording could not start. Try again.",
+  "@upstreamCapturePhoneStartFailed": {
+    "description": "Recoverable phone recording start error"
+  },
+  "upstreamCapturePermissionUpdated": "Permission updated. Try recording again.",
+  "@upstreamCapturePermissionUpdated": {
+    "description": "Status after capture consent is granted"
+  },
+  "upstreamCaptureChooseNecklace": "Choose a necklace",
+  "@upstreamCaptureChooseNecklace": {
+    "description": "Accessible necklace picker heading"
+  },
+  "upstreamCaptureTranscriptTitle": "Live transcript",
+  "@upstreamCaptureTranscriptTitle": {
+    "description": "Heading for the live transcript sheet"
+  },
+  "upstreamCaptureTranscriptEmpty": "Listening for speech…",
+  "@upstreamCaptureTranscriptEmpty": {
+    "description": "Empty live transcript state after capture is ready"
+  },
+  "upstreamCaptureSavingWhispers": "Saving Whispers…",
+  "@upstreamCaptureSavingWhispers": {
+    "description": "Status while saving the Whispers setting"
+  },
+  "upstreamCaptureWhispersSaveFailed": "Whispers could not be updated. Try again.",
+  "@upstreamCaptureWhispersSaveFailed": {
+    "description": "Recoverable Whispers setting save error"
+  },
+  "upstreamCaptureWhispersPlaybackUnavailable": "Whispers are on, but spoken playback is not available right now.",
+  "@upstreamCaptureWhispersPlaybackUnavailable": {
+    "description": "Whispers configuration is on while native spoken playback is unavailable"
+  },
+  "upstreamCaptureWhispersOffDescription": "Whispers are off. Spoken responses are paused.",
+  "@upstreamCaptureWhispersOffDescription": {
+    "description": "Whispers configuration is off without claiming capture is active"
+  },
+  "upstreamCaptureWhispersPlaybackFailed": "Whispers was saved, but spoken playback could not start. Try again.",
+  "@upstreamCaptureWhispersPlaybackFailed": {
+    "description": "Whispers native playback start error"
+  },
+  "upstreamCaptureWhispersPlaybackStopFailed": "Whispers was saved off, but spoken playback could not stop. Try again.",
+  "@upstreamCaptureWhispersPlaybackStopFailed": {
+    "description": "Whispers native playback stop error"
   }
 }

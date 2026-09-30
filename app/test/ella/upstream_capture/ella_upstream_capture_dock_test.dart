@@ -1,15 +1,27 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart' as fork;
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
+import 'package:omi/ella/services/guardian_mode_service.dart' as guardian_native;
 import 'package:omi/ella/upstream_capture/ella_capture_authority.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_dock.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
 import 'package:omi/l10n/app_localizations.dart';
+import 'package:omi/pages/home/today_page.dart'
+    show
+        GuardianModeLoader,
+        GuardianModeSetter,
+        GuardianNativeLifecycle,
+        todayBackToRecentBottomOffset,
+        todayDockReservedHeight,
+        todayDockScrollClearance;
 import 'package:omi/upstream_capture/backend/preferences.dart' as upstream;
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/upstream_capture/backend/schema/transcript_segment.dart';
@@ -21,6 +33,7 @@ import 'ella_capture_protocol_socket_cases.dart';
 import 'upstream_capture_protocol_v2_cases.dart';
 
 const _uid = 'uid-a';
+final _testNecklace = BtDevice(id: 'necklace-a', name: 'Compass', type: DeviceType.omi, rssi: -40);
 
 class _NoBleListeners implements CaptureBleListeners {
   @override
@@ -31,37 +44,56 @@ class _NoBleListeners implements CaptureBleListeners {
 }
 
 class _DockRuntime extends EllaUpstreamCaptureRuntime {
-  _DockRuntime({
-    required super.authority,
-    required this.capture,
-    this.connectNecklaceOverride,
-  });
+  _DockRuntime({required super.authority, required this.capture});
 
   final CaptureProvider capture;
-  final Future<bool> Function(String uid, BtDevice device)? connectNecklaceOverride;
+  Future<CaptureProvider> Function()? bootOverride;
+  Future<List<BtDevice>> Function()? discoverOverride;
+  Future<EllaCaptureStartOutcome> Function(String uid)? startPhoneOverride;
+  Future<EllaCaptureStartOutcome> Function(String uid, BtDevice device)? connectNecklaceOverride;
+  Future<void> Function()? stopPhoneOverride;
+  Future<void> Function()? disconnectNecklaceOverride;
+  Future<void> Function()? finishOverride;
 
   @override
-  Future<CaptureProvider> ensureBooted() async => capture;
+  Future<CaptureProvider> ensureBooted() => bootOverride?.call() ?? Future.value(capture);
 
   @override
-  Future<List<BtDevice>> discoverNecklaces({int timeoutSeconds = 5}) async => [_testNecklace];
+  Future<List<BtDevice>> discoverNecklaces({int timeoutSeconds = 5}) =>
+      discoverOverride?.call() ?? Future.value([_testNecklace]);
 
   @override
-  Future<bool> connectNecklace(String uid, BtDevice device) {
-    final override = connectNecklaceOverride;
-    if (override != null) return override(uid, device);
-    return super.connectNecklace(uid, device);
-  }
+  Future<EllaCaptureStartOutcome> startPhoneCapture(String uid) =>
+      startPhoneOverride?.call(uid) ?? Future.value(EllaCaptureStartOutcome.started);
+
+  @override
+  Future<EllaCaptureStartOutcome> connectNecklace(String uid, BtDevice device) =>
+      connectNecklaceOverride?.call(uid, device) ?? Future.value(EllaCaptureStartOutcome.started);
+
+  @override
+  Future<void> stopPhoneCapture() => stopPhoneOverride?.call() ?? Future.value();
+
+  @override
+  Future<void> disconnectNecklace({String? deviceId}) => disconnectNecklaceOverride?.call() ?? Future.value();
+
+  @override
+  Future<void> finishConversation() => finishOverride?.call() ?? Future.value();
 }
 
-final _testNecklace = BtDevice(id: 'necklace-under-test', name: 'Test Necklace', type: DeviceType.omi, rssi: -40);
+class _DockFixture {
+  _DockFixture({
+    required this.connectivity,
+    required this.provider,
+    required this.authority,
+    required this.runtime,
+  });
 
-void main() {
-  TestWidgetsFlutterBinding.ensureInitialized();
-  registerEllaCaptureProtocolSocketCases();
-  registerUpstreamCaptureProtocolV2Cases();
+  final StreamController<bool> connectivity;
+  final CaptureProvider provider;
+  final EllaCaptureAuthority authority;
+  final _DockRuntime runtime;
 
-  testWidgets('verified v10 authority renders the idle flag-on dock as one compact row', (tester) async {
+  static Future<_DockFixture> create(WidgetTester tester) async {
     SharedPreferences.setMockInitialValues({});
     await fork.SharedPreferencesUtil.init();
     await upstream.SharedPreferencesUtil.init();
@@ -76,6 +108,13 @@ void main() {
       preferences: upstream.SharedPreferencesUtil(),
     );
     final authority = EllaCaptureAuthority(authenticatedUid: () => _uid, sessionStartAllowed: (_) => false);
+    final runtime = _DockRuntime(authority: authority, capture: provider);
+    final fixture = _DockFixture(
+      connectivity: connectivity,
+      provider: provider,
+      authority: authority,
+      runtime: runtime,
+    );
     addTearDown(() async {
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
@@ -84,37 +123,34 @@ void main() {
       await connectivity.close();
       tester.view.resetPhysicalSize();
       tester.view.resetDevicePixelRatio();
-      tester.platformDispatcher.clearTextScaleFactorTestValue();
     });
+    return fixture;
+  }
 
-    final preferences = fork.SharedPreferencesUtil()..uid = _uid;
-    const receiptId = '${fork.SharedPreferencesUtil.currentAiConsentReceiptPrefix}v10-receipt';
-    preferences.acceptAiConsent(
-      receiptId: receiptId,
-      uid: _uid,
-      profileBindingId: 'profile-binding-v10',
-      serverDecidedAt: '2026-07-27T00:00:00Z',
-      policyVersion: fork.SharedPreferencesUtil.legacyAiConsentContractVersionV10,
-      processorSetHash: fork.SharedPreferencesUtil.legacyAiConsentProcessorSetHashV10,
-    );
-    preferences.markAiConsentServerVerified(
-      uid: _uid,
-      receiptId: receiptId,
-      policyVersion: fork.SharedPreferencesUtil.legacyAiConsentContractVersionV10,
-      processorSetHash: fork.SharedPreferencesUtil.legacyAiConsentProcessorSetHashV10,
-      profileBindingId: 'profile-binding-v10',
-      scopeVersion: fork.SharedPreferencesUtil.currentAiConsentScopeVersion,
-      scopeHash: fork.SharedPreferencesUtil.currentAiConsentScopeHash,
-    );
-    tester.view.physicalSize = const Size(1320, 2868);
-    tester.view.devicePixelRatio = 3;
-    tester.platformDispatcher.textScaleFactorTestValue = 1.5;
-    final runtime = _DockRuntime(authority: authority, capture: provider);
-
+  Future<void> pump(
+    WidgetTester tester, {
+    Size size = const Size(390, 844),
+    double textScale = 1,
+    bool guardianAvailable = false,
+    GuardianModeLoader? guardianModeLoader,
+    GuardianModeSetter? guardianModeSetter,
+    GuardianNativeLifecycle? guardianNativeStart,
+    GuardianNativeLifecycle? guardianNativeStop,
+    GuardianNativeStateReader? guardianNativeState,
+    EllaCaptureConsentRequester? consentRequester,
+  }) async {
+    tester.view.physicalSize = size;
+    tester.view.devicePixelRatio = 1;
     await tester.pumpWidget(
       MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: ellaThemeData(),
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(textScaler: TextScaler.linear(textScale)),
+          child: child!,
+        ),
         home: Scaffold(
           body: Align(
             alignment: Alignment.bottomCenter,
@@ -123,6 +159,13 @@ void main() {
               child: EllaUpstreamCaptureDock(
                 runtime: runtime,
                 authenticatedUid: () => _uid,
+                consentRequester: consentRequester,
+                guardianAvailability: () => guardianAvailable,
+                guardianModeLoader: guardianModeLoader,
+                guardianModeSetter: guardianModeSetter,
+                guardianNativeStart: guardianNativeStart,
+                guardianNativeStop: guardianNativeStop,
+                guardianNativeState: guardianNativeState,
               ),
             ),
           ),
@@ -131,194 +174,454 @@ void main() {
     );
     await tester.pump();
     await tester.pump();
+  }
 
-    final phone = find.byKey(const Key('upstream-capture-record-phone'));
-    final necklace = find.byKey(const Key('upstream-capture-connect-necklace'));
-    expect(phone.hitTestable(), findsOneWidget);
-    expect(necklace.hitTestable(), findsOneWidget);
-    final phoneRect = tester.getRect(phone);
-    final necklaceRect = tester.getRect(necklace);
-    expect(phoneRect.right, lessThan(necklaceRect.left));
-    expect(phoneRect.center.dy, closeTo(necklaceRect.center.dy, 8));
-    expect(tester.getSize(find.byKey(const Key('upstream-capture-dock'))).height, lessThan(120));
-    expect(preferences.aiConsentAccepted, isTrue);
-    expect(preferences.aiConsentContractVersion, fork.SharedPreferencesUtil.legacyAiConsentContractVersionV10);
-    runtime.protocolUnavailable.value = true;
-    await tester.pump();
-    expect(find.text("Ella couldn't connect to transcription, so recording didn't start."), findsOneWidget);
-    expect(tester.takeException(), isNull);
-  });
+  void makeNecklaceLive({List<TranscriptSegment> segments = const []}) {
+    provider.updateRecordingDevice(_testNecklace);
+    provider.updateRecordingState(RecordingState.deviceRecord);
+    provider.segments.addAll(segments);
+    provider.onConnected();
+  }
 
-  // ellaaicare/ella-ai#1287 RUN-020 bug #3: minimal parity with today_page.dart's Home
-  // dock (live Transcript view + Whispers on/off) once a necklace session is genuinely
-  // active, and the Finish button reflects that real state rather than "device selected".
-  testWidgets('a genuinely live necklace session shows Transcript and Whispers, with Finish enabled', (tester) async {
-    SharedPreferences.setMockInitialValues({});
-    await fork.SharedPreferencesUtil.init();
-    await upstream.SharedPreferencesUtil.init();
-    final connectivity = StreamController<bool>.broadcast();
-    final provider = CaptureProvider(
-      connectivity: CaptureConnectivityBoundary(
-        initiallyConnected: true,
-        changes: connectivity.stream,
-        isConnected: () => true,
-      ),
-      bleListeners: _NoBleListeners(),
-      preferences: upstream.SharedPreferencesUtil(),
-    );
-    final authority = EllaCaptureAuthority(authenticatedUid: () => _uid, sessionStartAllowed: (_) => false);
-    addTearDown(() async {
-      await tester.pumpWidget(const SizedBox.shrink());
-      await tester.pump();
-      provider.dispose();
-      authority.dispose();
-      await connectivity.close();
-    });
+  void makePhoneLive() {
+    provider.updateRecordingState(RecordingState.record);
+    provider.onConnected();
+  }
+}
 
-    await tester.pumpWidget(
-      MaterialApp(
-        localizationsDelegates: AppLocalizations.localizationsDelegates,
-        supportedLocales: AppLocalizations.supportedLocales,
-        home: Scaffold(
-          body: EllaUpstreamCaptureDock(
-            runtime: _DockRuntime(authority: authority, capture: provider),
-            authenticatedUid: () => _uid,
-            guardianAvailability: () => true,
-            guardianModeLoader: () async => const GuardianModeInfo(
-              currentMode: GuardianModeKey.off,
-              twoTierState: GuardianModeState(),
-            ),
-            guardianModeSetter: (_) async => true,
-            guardianNativeStart: () async {},
-            guardianNativeStop: () async {},
-          ),
-        ),
-      ),
-    );
-    await tester.pump();
-    await tester.pump();
-
-    // Before any session: no Finish/Transcript, and Whispers reflects the loaded (off) state.
-    expect(find.byKey(const Key('upstream-capture-finish')), findsNothing);
-    expect(find.byKey(const Key('upstream-capture-view-transcript')), findsNothing);
-    final whispersSwitchBefore = tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch')));
-    expect(whispersSwitchBefore.value, isFalse);
-
-    // Simulate a genuinely live necklace session (native GATT connected, service
-    // discovery done, upstream device-recording state machine active) rather than
-    // just a selected/admitted device — this is what fix #1 (native connectPeripheral)
-    // makes real instead of hanging.
-    provider.segments.add(TranscriptSegment(
-      id: 'seg-1',
-      text: 'hello from the necklace',
+TranscriptSegment _segment(String id, String text) => TranscriptSegment(
+      id: id,
+      text: text,
       speaker: 'SPEAKER_0',
       isUser: false,
       personId: null,
       start: 0,
       end: 1,
       translations: const [],
-    ));
-    provider.updateRecordingDevice(_testNecklace);
-    provider.updateRecordingState(RecordingState.deviceRecord);
-    await tester.pump();
+    );
 
-    expect(find.text('Recording with your necklace'), findsNothing);
-    expect(find.text("Recording isn't available right now."), findsOneWidget);
-    expect(find.byKey(const Key('upstream-capture-finish')), findsNothing);
-    provider.onConnected();
-    await tester.pump();
-    await tester.pump();
+double _contrastRatio(Color foreground, Color background) {
+  final a = foreground.computeLuminance();
+  final b = background.computeLuminance();
+  final lighter = a > b ? a : b;
+  final darker = a > b ? b : a;
+  return (lighter + 0.05) / (darker + 0.05);
+}
 
-    final finish = find.byKey(const Key('upstream-capture-finish'));
-    expect(finish, findsOneWidget);
-    expect(tester.widget<TextButton>(finish).onPressed, isNotNull, reason: 'Finish must be tappable once live');
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  registerEllaCaptureProtocolSocketCases();
+  registerUpstreamCaptureProtocolV2Cases();
 
-    final transcriptToggle = find.byKey(const Key('upstream-capture-view-transcript'));
-    expect(transcriptToggle, findsOneWidget);
-    expect(find.byKey(const Key('upstream-capture-transcript-panel')), findsNothing);
-    await tester.tap(transcriptToggle);
-    await tester.pump();
-    expect(find.byKey(const Key('upstream-capture-transcript-panel')), findsOneWidget);
-    expect(find.text('hello from the necklace'), findsOneWidget);
+  setUpAll(() async {
+    await (FontLoader('Manrope')
+          ..addFont(rootBundle.load('assets/fonts/Manrope-400.ttf'))
+          ..addFont(rootBundle.load('assets/fonts/Manrope-600.ttf'))
+          ..addFont(rootBundle.load('assets/fonts/Manrope-700.ttf')))
+        .load();
+    var flutterCache = File(Platform.resolvedExecutable).parent;
+    while (!File('${flutterCache.path}/artifacts/material_fonts/MaterialIcons-Regular.otf').existsSync()) {
+      flutterCache = flutterCache.parent;
+    }
+    final materialIcons = File('${flutterCache.path}/artifacts/material_fonts/MaterialIcons-Regular.otf');
+    await (FontLoader('MaterialIcons')
+          ..addFont(materialIcons.readAsBytes().then((bytes) => ByteData.sublistView(Uint8List.fromList(bytes)))))
+        .load();
+  });
 
-    expect(find.byKey(const Key('upstream-capture-whispers-switch')), findsOneWidget);
+  testWidgets('actual Ella theme gives every idle action an AA palette and a 48 point target', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    await fixture.pump(tester);
+
+    final primaryFinder = find.byKey(const Key('upstream-capture-record-phone'));
+    final secondaryFinder = find.byKey(const Key('upstream-capture-connect-necklace'));
+    final primary = tester.widget<FilledButton>(primaryFinder);
+    final secondary = tester.widget<OutlinedButton>(secondaryFinder);
+    final primaryForeground = primary.style!.foregroundColor!.resolve({})!;
+    final primaryBackground = primary.style!.backgroundColor!.resolve({})!;
+    final secondaryForeground = secondary.style!.foregroundColor!.resolve({})!;
+    final secondaryBackground = secondary.style!.backgroundColor!.resolve({})!;
+
+    expect(_contrastRatio(primaryForeground, primaryBackground), greaterThanOrEqualTo(4.5));
+    expect(_contrastRatio(secondaryForeground, secondaryBackground), greaterThanOrEqualTo(4.5));
+    expect(tester.getSize(primaryFinder).height, greaterThanOrEqualTo(EllaSizes.minTouchTarget));
+    expect(tester.getSize(secondaryFinder).height, greaterThanOrEqualTo(EllaSizes.minTouchTarget));
+    expect(
+      secondary.style!.backgroundColor!.resolve({WidgetState.pressed}),
+      isNot(secondaryBackground),
+    );
+    expect(
+      secondary.style!.side!.resolve({WidgetState.focused})!.width,
+      greaterThan(secondary.style!.side!.resolve({})!.width),
+    );
+    expect(primary.style!.backgroundColor!.resolve({WidgetState.disabled}), isNot(primaryBackground));
     expect(tester.takeException(), isNull);
   });
 
-  // ellaaicare/ella-ai#1287 RUN-020 bug #1/#3: before this fix, native connectPeripheral
-  // could leave the Dart connect() future pending indefinitely for a retrieved/known
-  // candidate, so `starting` (and therefore the greyed-out Finish button) never cleared.
-  // This proves the dock's own truthfulness once connectNecklace resolves promptly.
-  testWidgets('Finish stays disabled while connect is in flight and becomes enabled once it resolves', (tester) async {
-    SharedPreferences.setMockInitialValues({});
-    await fork.SharedPreferencesUtil.init();
-    await upstream.SharedPreferencesUtil.init();
-    final connectivity = StreamController<bool>.broadcast();
-    final provider = CaptureProvider(
-      connectivity: CaptureConnectivityBoundary(
-        initiallyConnected: true,
-        changes: connectivity.stream,
-        isConnected: () => true,
-      ),
-      bleListeners: _NoBleListeners(),
-      preferences: upstream.SharedPreferencesUtil(),
-    );
-    final authority = EllaCaptureAuthority(authenticatedUid: () => _uid, sessionStartAllowed: (_) => false);
-    addTearDown(() async {
-      await tester.pumpWidget(const SizedBox.shrink());
-      await tester.pump();
-      provider.dispose();
-      authority.dispose();
-      await connectivity.close();
-    });
+  const renderSizes = <String, Size>{
+    '320x568': Size(320, 568),
+    '390x844': Size(390, 844),
+    '430x932': Size(430, 932),
+  };
+  const renderScales = [1.0, 1.5, 2.0, 3.0];
+  for (final sizeEntry in renderSizes.entries) {
+    for (final scale in renderScales) {
+      final scaleName = scale.toString().replaceAll('.', '_');
+      testWidgets('idle render is stable at ${sizeEntry.key} and ${scale}x text', (tester) async {
+        final fixture = await _DockFixture.create(tester);
+        await fixture.pump(tester, size: sizeEntry.value, textScale: scale);
 
-    final connectCompleter = Completer<bool>();
-    await tester.pumpWidget(
-      MaterialApp(
-        localizationsDelegates: AppLocalizations.localizationsDelegates,
-        supportedLocales: AppLocalizations.supportedLocales,
-        home: Scaffold(
-          body: EllaUpstreamCaptureDock(
-            runtime: _DockRuntime(
-              authority: authority,
-              capture: provider,
-              connectNecklaceOverride: (uid, device) async {
-                final connected = await connectCompleter.future;
-                if (connected) {
-                  provider.updateRecordingDevice(device);
-                  provider.updateRecordingState(RecordingState.deviceRecord);
-                  provider.onConnected();
-                }
-                return connected;
-              },
-            ),
-            authenticatedUid: () => _uid,
-          ),
-        ),
-      ),
+        expect(find.byKey(const Key('upstream-capture-record-phone')).hitTestable(), findsOneWidget);
+        expect(find.byKey(const Key('upstream-capture-connect-necklace')).hitTestable(), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await expectLater(
+          find.byType(MaterialApp),
+          matchesGoldenFile('goldens/ella_upstream_capture_dock_after_${sizeEntry.key}_scale_$scaleName.png'),
+        );
+      });
+    }
+  }
+
+  testWidgets('search and delayed connection have distinct truthful status before ready', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final discovery = Completer<List<BtDevice>>();
+    final connection = Completer<EllaCaptureStartOutcome>();
+    fixture.runtime.discoverOverride = () => discovery.future;
+    fixture.runtime.connectNecklaceOverride = (uid, device) async {
+      final outcome = await connection.future;
+      if (outcome == EllaCaptureStartOutcome.started) fixture.makeNecklaceLive();
+      return outcome;
+    };
+    await fixture.pump(tester);
+
+    await tester.tap(find.byKey(const Key('upstream-capture-connect-necklace')));
+    await tester.pump();
+    expect(find.text('Looking for your necklace…'), findsOneWidget);
+
+    discovery.complete([_testNecklace]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Choose a necklace'), findsOneWidget);
+    await tester.tap(find.byKey(Key('upstream-capture-device-${_testNecklace.id}')));
+    await tester.pump();
+    expect(find.text('Connecting…'), findsOneWidget);
+    expect(find.text('Starting…'), findsNothing);
+
+    connection.complete(EllaCaptureStartOutcome.started);
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Recording with your necklace'), findsOneWidget);
+    expect(find.text('Ready. Waiting for speech…'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('BLE failure offers Retry without invoking AI consent', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    var consentCalls = 0;
+    fixture.runtime.connectNecklaceOverride = (_, __) async => EllaCaptureStartOutcome.unavailable;
+    await fixture.pump(
+      tester,
+      consentRequester: (_) async {
+        consentCalls++;
+        return true;
+      },
     );
+
+    await tester.tap(find.byKey(const Key('upstream-capture-connect-necklace')));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.byKey(Key('upstream-capture-device-${_testNecklace.id}')));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(consentCalls, 0);
+    expect(find.text('Ella could not connect to that necklace. Try again.'), findsOneWidget);
+    expect(find.text('Retry'), findsOneWidget);
+    expect(find.text('Review AI permission before recording.'), findsNothing);
+  });
+
+  testWidgets('only an authority failure requests AI consent', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    var consentCalls = 0;
+    fixture.runtime.connectNecklaceOverride = (_, __) async => EllaCaptureStartOutcome.consentRequired;
+    await fixture.pump(
+      tester,
+      consentRequester: (_) async {
+        consentCalls++;
+        return true;
+      },
+    );
+
+    await tester.tap(find.byKey(const Key('upstream-capture-connect-necklace')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.byKey(Key('upstream-capture-device-${_testNecklace.id}')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(consentCalls, 1);
+    expect(find.text('Permission updated. Try recording again.'), findsOneWidget);
+  });
+
+  testWidgets('search and protocol failures are distinct and recoverable', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    fixture.runtime.discoverOverride = () async => throw StateError('bluetooth unavailable');
+    await fixture.pump(tester);
 
     await tester.tap(find.byKey(const Key('upstream-capture-connect-necklace')));
     await tester.pump();
     await tester.pump();
+    expect(find.text('Ella could not search for necklaces. Try again.'), findsOneWidget);
+    expect(find.text('Retry'), findsOneWidget);
 
-    // Mid-connect: neither Finish nor the necklace button is tappable yet.
-    expect(find.byKey(const Key('upstream-capture-finish')), findsNothing);
-    final necklaceMidConnect = find.byKey(const Key('upstream-capture-connect-necklace'));
-    if (necklaceMidConnect.evaluate().isNotEmpty) {
-      expect(tester.widget<OutlinedButton>(necklaceMidConnect).onPressed, isNull);
-    }
+    fixture.runtime.protocolUnavailable.value = true;
+    await tester.pump();
+    expect(find.text("Ella couldn't connect to transcription, so recording didn't start."), findsOneWidget);
+  });
 
-    connectCompleter.complete(true);
+  testWidgets('boot failure is visible and recoverable', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    var attempts = 0;
+    fixture.runtime.bootOverride = () async {
+      attempts++;
+      if (attempts == 1) throw StateError('boot failed');
+      return fixture.provider;
+    };
+    await fixture.pump(tester);
+
+    expect(find.byKey(const Key('upstream-capture-retry-boot')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('upstream-capture-retry-boot')));
+    await tester.pump();
+    await tester.pump();
+    expect(find.byKey(const Key('upstream-capture-record-phone')), findsOneWidget);
+    expect(attempts, 2);
+  });
+
+  testWidgets('a single discovered device still requires selection and cancel restores Connect focus', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    var connectCalls = 0;
+    fixture.runtime.discoverOverride = () async => [_testNecklace];
+    fixture.runtime.connectNecklaceOverride = (_, __) async {
+      connectCalls++;
+      return EllaCaptureStartOutcome.started;
+    };
+    await fixture.pump(tester);
+
+    await tester.tap(find.byKey(const Key('upstream-capture-connect-necklace')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Choose a necklace'), findsOneWidget);
+    expect(find.text('Compass'), findsOneWidget);
+    expect(
+      tester.getSize(find.byKey(const Key('upstream-capture-picker-close'))).height,
+      greaterThanOrEqualTo(EllaSizes.minTouchTarget),
+    );
+    await tester.tap(find.byKey(const Key('upstream-capture-picker-close')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(connectCalls, 0);
+    final connect = tester.widget<OutlinedButton>(find.byKey(const Key('upstream-capture-connect-necklace')));
+    expect(connect.focusNode!.hasFocus, isTrue);
+  });
+
+  testWidgets('transcript uses a scrollable sheet and restores focus without growing the dock', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    await fixture.pump(tester);
+    fixture.makeNecklaceLive();
+    await tester.pump();
+    await tester.pump();
+    final dockHeight = tester.getSize(find.byKey(const Key('upstream-capture-dock'))).height;
+
+    await tester.tap(find.byKey(const Key('upstream-capture-view-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byKey(const Key('upstream-capture-transcript-title')), findsOneWidget);
+    expect(find.byKey(const Key('upstream-capture-transcript-empty')), findsOneWidget);
+    expect(find.text('Starting…'), findsNothing);
+    expect(tester.getSize(find.byKey(const Key('upstream-capture-dock'))).height, dockHeight);
+    expect(
+      tester.getSize(find.byKey(const Key('upstream-capture-transcript-close'))).height,
+      greaterThanOrEqualTo(EllaSizes.minTouchTarget),
+    );
+
+    fixture.provider.segments.add(_segment('seg-1', 'hello from the necklace'));
+    fixture.provider.onConnected();
+    await tester.pump();
+    await tester.pump();
+    expect(find.byKey(const Key('upstream-capture-transcript-list')), findsOneWidget);
+    expect(find.text('hello from the necklace'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('upstream-capture-transcript-close')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(tester.getSize(find.byKey(const Key('upstream-capture-dock'))).height, lessThanOrEqualTo(dockHeight));
+    final transcript = tester.widget<OutlinedButton>(find.byKey(const Key('upstream-capture-view-transcript')));
+    expect(transcript.focusNode!.hasFocus, isTrue);
+  });
+
+  testWidgets('Stop and Disconnect report their own in-progress states', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final stop = Completer<void>();
+    fixture.runtime.stopPhoneOverride = () => stop.future;
+    await fixture.pump(tester);
+    fixture.makePhoneLive();
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('upstream-capture-stop-phone')));
+    await tester.pump();
+    expect(find.text('Stopping recording…'), findsOneWidget);
+    expect(find.text('Starting…'), findsNothing);
+    stop.complete();
     await tester.pump();
     await tester.pump();
 
-    final finish = find.byKey(const Key('upstream-capture-finish'));
-    expect(finish, findsOneWidget);
-    expect(tester.widget<TextButton>(finish).onPressed, isNotNull,
-        reason: 'Finish must become tappable once connectNecklace resolves, not stay stuck greyed out');
+    fixture.provider.updateRecordingState(RecordingState.deviceRecord);
+    fixture.provider.updateRecordingDevice(_testNecklace);
+    fixture.provider.onConnected();
+    final disconnect = Completer<void>();
+    fixture.runtime.disconnectNecklaceOverride = () => disconnect.future;
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('upstream-capture-disconnect-necklace')));
+    await tester.pump();
+    expect(find.text('Disconnecting necklace…'), findsOneWidget);
+    expect(find.text('Starting…'), findsNothing);
+    disconnect.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Finish reports draining state instead of generic Starting', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final finish = Completer<void>();
+    fixture.runtime.finishOverride = () => finish.future;
+    await fixture.pump(tester);
+    fixture.makeNecklaceLive(segments: [_segment('seg-1', 'ready')]);
+    await tester.pump();
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('upstream-capture-finish')));
+    await tester.pump();
+    expect(find.text('Finishing and saving…'), findsOneWidget);
+    expect(find.text('Starting…'), findsNothing);
+
+    finish.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Whispers distinguishes saved configuration from failed native playback', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    GuardianModeState? savedState;
+    final save = Completer<bool>();
+    await fixture.pump(
+      tester,
+      guardianAvailable: true,
+      guardianModeLoader: () async => const GuardianModeInfo(
+        currentMode: GuardianModeKey.off,
+        twoTierState: GuardianModeState(),
+      ),
+      guardianModeSetter: (state) async {
+        savedState = state;
+        return save.future;
+      },
+      guardianNativeStart: () async => throw StateError('native unavailable'),
+      guardianNativeStop: () async {},
+      guardianNativeState: () => guardian_native.GuardianModeState.idle,
+    );
+
+    expect(find.text('Whispers are off. Spoken responses are paused.'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+    await tester.pump();
+    expect(find.text('Saving Whispers…'), findsOneWidget);
+    save.complete(true);
+    await tester.pump();
+    await tester.pump();
+
+    expect(savedState?.features, ['MEMORY_SUPPORT']);
+    expect(find.text('Whispers was saved, but spoken playback could not start. Try again.'), findsOneWidget);
+    expect(find.text('Whispers are on, but spoken playback is not available right now.'), findsOneWidget);
+    expect(find.byKey(const Key('upstream-capture-whispers-retry')), findsOneWidget);
+  });
+
+  testWidgets('Whispers save failure keeps the verified prior state', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    await fixture.pump(
+      tester,
+      guardianAvailable: true,
+      guardianModeLoader: () async => const GuardianModeInfo(
+        currentMode: GuardianModeKey.off,
+        twoTierState: GuardianModeState(),
+      ),
+      guardianModeSetter: (_) async => false,
+      guardianNativeStart: () async {},
+      guardianNativeStop: () async {},
+      guardianNativeState: () => guardian_native.GuardianModeState.idle,
+    );
+
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Whispers could not be updated. Try again.'), findsOneWidget);
+    final toggle = tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch')));
+    expect(toggle.value, isFalse);
+  });
+
+  testWidgets('Whispers stop failure stays truthful and Retry stops native playback', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    var stopShouldFail = true;
+    await fixture.pump(
+      tester,
+      guardianAvailable: true,
+      guardianModeLoader: () async => const GuardianModeInfo(
+        currentMode: GuardianModeKey.custom,
+        twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
+      ),
+      guardianModeSetter: (_) async => true,
+      guardianNativeStart: () async {},
+      guardianNativeStop: () async {
+        if (stopShouldFail) throw StateError('native stop failed');
+      },
+      guardianNativeState: () => guardian_native.GuardianModeState.active,
+    );
+
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Whispers are off. Spoken responses are paused.'), findsOneWidget);
+    expect(find.text('Whispers was saved off, but spoken playback could not stop. Try again.'), findsOneWidget);
+
+    stopShouldFail = false;
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-retry')));
+    await tester.pump();
+    await tester.pump();
+    expect(find.byKey(const Key('upstream-capture-whispers-error')), findsNothing);
+  });
+
+  testWidgets('production Home coordinates reserve the rendered dock and navigation at large text', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    const screen = Size(430, 932);
+    const scale = 2.0;
+    const safeBottom = 34.0;
+    await fixture.pump(tester, size: screen, textScale: scale);
+    fixture.makeNecklaceLive();
+    await tester.pump();
+    await tester.pump();
+
+    final dockHeight = tester.getSize(find.byKey(const Key('upstream-capture-dock'))).height;
+    expect(todayDockReservedHeight(scale), greaterThanOrEqualTo(dockHeight));
+    final dockTop = screen.height - (EllaSizes.navBarHeight + safeBottom + 16) - dockHeight;
+    final scrollContentBottom = screen.height - todayDockScrollClearance(textScale: scale, safeBottom: safeBottom);
+    final backToRecentBottom = screen.height -
+        todayBackToRecentBottomOffset(
+          textScale: scale,
+          safeBottom: safeBottom,
+        );
+    expect(scrollContentBottom, lessThanOrEqualTo(dockTop));
+    expect(backToRecentBottom, lessThan(dockTop));
     expect(tester.takeException(), isNull);
   });
 }

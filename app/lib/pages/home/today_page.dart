@@ -2199,7 +2199,10 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
           if (_showBackToRecent)
             Positioned(
               right: 22,
-              bottom: EllaSizes.navBarHeight + MediaQuery.paddingOf(context).bottom + 166,
+              bottom: todayBackToRecentBottomOffset(
+                textScale: MediaQuery.textScalerOf(context).scale(1),
+                safeBottom: MediaQuery.paddingOf(context).bottom,
+              ),
               child: FloatingActionButton.small(
                 key: const Key('home-back-to-recent'),
                 onPressed: _scrollHomeBackToRecent,
@@ -2390,8 +2393,16 @@ class _AuthenticatedMemoryPresentationAuthority implements ExactAccountAuthority
   bool isExactCurrent() => uid.isNotEmpty && preferences.uid == uid && WalOwnerAuthority.authenticatedUid == uid;
 }
 
+double todayDockReservedHeight(double textScale) {
+  final effectiveScale = textScale.clamp(1.0, 3.0);
+  return 190 + 245 * (effectiveScale - 1);
+}
+
 double todayDockScrollClearance({required double textScale, required double safeBottom}) =>
-    EllaSizes.navBarHeight + safeBottom + 190 * textScale.clamp(1.0, 2.0) + 24;
+    EllaSizes.navBarHeight + safeBottom + todayDockReservedHeight(textScale) + 24;
+
+double todayBackToRecentBottomOffset({required double textScale, required double safeBottom}) =>
+    EllaSizes.navBarHeight + safeBottom + todayDockReservedHeight(textScale) + 16;
 
 class _DemoTodayCardRepository implements TodayCardRepository {
   const _DemoTodayCardRepository();
