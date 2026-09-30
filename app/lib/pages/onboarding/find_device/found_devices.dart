@@ -298,6 +298,8 @@ class _FoundDevicesState extends State<FoundDevices> {
                     return;
                   }
                   if (device.type == DeviceType.appleWatch) {
+                    await provider.pauseDeviceDiscovery();
+                    if (!mounted || (widget.canConnect != null && !widget.canConnect!())) return;
                     await _handleAppleWatchOnboarding(device, provider);
                   } else {
                     // Handle other devices

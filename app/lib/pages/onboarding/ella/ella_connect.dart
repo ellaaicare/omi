@@ -26,6 +26,24 @@ class _EllaConnectState extends State<EllaConnect> with SingleTickerProviderStat
   bool _deviceFound = false;
   bool _showTrouble = false;
   Timer? _troubleTimer;
+  OnboardingProvider? _provider;
+  bool _routeCurrent = true;
+  bool _resumeAfterCover = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final current = ModalRoute.isCurrentOf(context) ?? true;
+    if (current == _routeCurrent) return;
+    _routeCurrent = current;
+    if (!current) {
+      _resumeAfterCover = _provider?.isDiscoveringFor(this) ?? false;
+      unawaited(_provider?.cancelDeviceDiscovery(owner: this));
+    } else if (_resumeAfterCover && !_deviceFound) {
+      _resumeAfterCover = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _startScanning());
+    }
+  }
 
   @override
   void initState() {
@@ -50,12 +68,14 @@ class _EllaConnectState extends State<EllaConnect> with SingleTickerProviderStat
   }
 
   void _startScanning() {
-    final provider = context.read<OnboardingProvider>();
-    provider.scanDevices(onShowDialog: () {});
+    if (!mounted || !_routeCurrent) return;
+    final provider = _provider = context.read<OnboardingProvider>();
+    unawaited(provider.scanDevices(onShowDialog: () {}, owner: this, canScan: () => mounted && _routeCurrent));
   }
 
   @override
   void dispose() {
+    unawaited(_provider?.cancelDeviceDiscovery(owner: this));
     _pulseController.dispose();
     _troubleTimer?.cancel();
     super.dispose();

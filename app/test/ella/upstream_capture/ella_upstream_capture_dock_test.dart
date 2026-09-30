@@ -506,7 +506,7 @@ void main() {
         await press.cancel();
         await tester.pumpAndSettle();
       }
-      expect(picker.service.discovers, 1);
+      expect(picker.service.discovers, 2);
       expect(picker.provider.connects, 0);
       expect(tester.takeException(), isNull);
     });
