@@ -21,6 +21,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:omi/ella/capture_host/ella_capture_host.dart';
+import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
 
 final _app = Directory.current.path; // flutter test runs in app/
 final _import = RegExp(r'''^\s*(?:import|export|part)\s+['"]([^'"]+)['"]([^;]*);''', multiLine: true);
@@ -68,6 +69,48 @@ List<String> _vendoredNativeSources() => _read('lib/upstream_capture/UPSTREAM_OW
     .toList();
 
 void main() {
+  group('production service bootstrap retry', () {
+    test('recovers a partial singleton initialization after connectivity failure', () async {
+      var singletonInstalled = false;
+      var managerAttempts = 0;
+      var connectivityAttempts = 0;
+      final bootstrap = EllaUpstreamServicesBootstrap(
+        initializeManager: () async {
+          managerAttempts++;
+          if (!singletonInstalled) {
+            singletonInstalled = true;
+            throw StateError('connectivity initialization failed after singleton install');
+          }
+          throw StateError('Service manager is initiated');
+        },
+        managerExists: () => singletonInstalled,
+        initializeConnectivity: () async {
+          connectivityAttempts++;
+          if (connectivityAttempts == 1) throw StateError('connectivity still unavailable');
+        },
+      );
+
+      await expectLater(bootstrap.ensureInitialized(), throwsStateError);
+      await bootstrap.ensureInitialized();
+      await bootstrap.ensureInitialized();
+      expect(managerAttempts, 2);
+      expect(connectivityAttempts, 2);
+    });
+
+    test('does not mask initialization failure before the singleton exists', () async {
+      var connectivityAttempts = 0;
+      final bootstrap = EllaUpstreamServicesBootstrap(
+        initializeManager: () async => throw StateError('manager construction failed'),
+        managerExists: () => false,
+        initializeConnectivity: () async {
+          connectivityAttempts++;
+        },
+      );
+      await expectLater(bootstrap.ensureInitialized(), throwsStateError);
+      expect(connectivityAttempts, 0);
+    });
+  });
+
   group('Dart graph (flag OFF / ON)', () {
     test('lib/main.dart (flag OFF entry point) reaches no upstream-capture code', () {
       final reachable = _reachable('lib/main.dart');
