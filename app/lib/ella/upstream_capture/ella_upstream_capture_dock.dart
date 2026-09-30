@@ -71,6 +71,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   @override
   void initState() {
     super.initState();
+    _runtime.protocolUnavailable.addListener(_onProtocolStatus);
     unawaited(
       _runtime.ensureBooted().then((provider) {
         if (!mounted) return;
@@ -81,6 +82,17 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
       }),
     );
     unawaited(_loadWhispersState());
+  }
+
+  void _onProtocolStatus() {
+    if (!mounted) return;
+    setState(() => _message = _runtime.protocolUnavailable.value ? context.l10n.todayTranscriptionUnavailable : null);
+  }
+
+  @override
+  void dispose() {
+    _runtime.protocolUnavailable.removeListener(_onProtocolStatus);
+    super.dispose();
   }
 
   bool get _guardianAvailable => widget.guardianAvailability?.call() ?? allowsGuardianSurface();
@@ -222,8 +234,11 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
       animation: provider,
       builder: (context, _) {
         final state = provider.recordingState;
-        final phoneLive = state == RecordingState.record || provider.isPhoneMicBatchRecording;
-        final necklaceLive = state == RecordingState.deviceRecord || provider.havingRecordingDevice;
+        final phoneActive = state == RecordingState.record || provider.isPhoneMicBatchRecording;
+        final necklaceBound = state == RecordingState.deviceRecord || provider.havingRecordingDevice;
+        final phoneLive =
+            (state == RecordingState.record && provider.transcriptServiceReady) || provider.isPhoneMicBatchRecording;
+        final necklaceLive = state == RecordingState.deviceRecord && provider.transcriptServiceReady;
         final starting = _busy || state == RecordingState.initialising;
         final status = starting
             ? context.l10n.upstreamCaptureStarting
@@ -231,7 +246,9 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
                 ? context.l10n.upstreamCaptureRecordingPhone
                 : necklaceLive
                     ? context.l10n.upstreamCaptureRecordingNecklace
-                    : (_message ?? '');
+                    : (state == RecordingState.record || state == RecordingState.deviceRecord)
+                        ? (_message ?? context.l10n.todayRecordingUnavailable)
+                        : (_message ?? '');
         return _DockSurface(
           child: Column(
             key: const Key('upstream-capture-dock'),
@@ -245,7 +262,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
               Row(
                 children: [
                   Expanded(
-                    child: phoneLive
+                    child: phoneActive
                         ? FilledButton(
                             key: const Key('upstream-capture-stop-phone'),
                             onPressed: starting ? null : () => _run(_runtime.stopPhoneCapture),
@@ -259,7 +276,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
                   ),
                   const SizedBox(width: 10),
                   Expanded(
-                    child: necklaceLive
+                    child: necklaceBound
                         ? OutlinedButton(
                             key: const Key('upstream-capture-disconnect-necklace'),
                             onPressed: starting ? null : () => _run(_runtime.disconnectNecklace),

@@ -7,9 +7,12 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'package:omi/ella/capture_host/ella_capture_host.dart';
 import 'package:omi/ella/upstream_capture/ella_capture_authority.dart';
+import 'package:omi/ella/upstream_capture/ella_capture_protocol_socket.dart';
+import 'package:omi/ella/upstream_capture/ella_capture_protocol_finalization.dart';
 import 'package:omi/ella/upstream_capture/ella_gated_capture_seams.dart';
 import 'package:omi/ella/upstream_capture/ella_gated_device_connection.dart';
 import 'package:omi/env/env.dart' as ella_env;
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/services/connectivity_service.dart';
 import 'package:omi/upstream_capture/backend/http/api/conversations.dart' as upstream_api;
 import 'package:omi/upstream_capture/backend/preferences.dart' as upstream;
@@ -26,6 +29,7 @@ import 'package:omi/upstream_capture/services/capture/local_segment_store.dart';
 import 'package:omi/upstream_capture/services/capture/recording_lifecycle_telemetry.dart';
 import 'package:omi/upstream_capture/services/devices/connectors/device_connection.dart';
 import 'package:omi/upstream_capture/services/services.dart';
+import 'package:omi/upstream_capture/services/sockets/transcription_service.dart';
 import 'package:omi/upstream_capture/services/wals.dart';
 import 'package:omi/utils/audio/foreground.dart';
 import 'package:omi/utils/debug_log_manager.dart';
@@ -203,9 +207,13 @@ class EllaUpstreamCaptureRuntime {
 
   final EllaCaptureAuthority authority;
   CaptureProvider? _provider;
+  EllaCaptureProtocolSocket? _protocolSocket;
+  EllaCaptureProtocolSocket? _finalizationSocket;
+  int _socketOpenGeneration = 0;
   Future<CaptureProvider>? _boot;
   StreamSubscription<EllaCaptureRevocation>? _revocationSubscription;
   final ValueNotifier<EllaCaptureRevocation?> lastRevocation = ValueNotifier<EllaCaptureRevocation?>(null);
+  final ValueNotifier<bool> protocolUnavailable = ValueNotifier<bool>(false);
 
   CaptureProvider? get provider => _provider;
   String? get boundOwnerId => authority.boundUid;
@@ -252,17 +260,48 @@ class EllaUpstreamCaptureRuntime {
           String? clientConversationId,
           customSttConfig,
           geolocation,
-        }) =>
-            services.socket.conversation(
-          codec: codec,
-          sampleRate: sampleRate,
-          language: language,
-          force: force,
-          source: source,
-          clientConversationId: clientConversationId,
-          customSttConfig: customSttConfig,
-          geolocation: geolocation,
-        ),
+        }) async {
+          if (_finalizationSocket != null) return null;
+          final openGeneration = ++_socketOpenGeneration;
+          final previous = _protocolSocket;
+          if (previous != null) {
+            if (previous.state == SocketServiceState.connected &&
+                !force &&
+                previous.codec == codec &&
+                previous.sampleRate == sampleRate &&
+                previous.clientConversationId == clientConversationId) {
+              return previous;
+            }
+            await previous.stop(reason: 'capture socket replaced');
+            if (openGeneration != _socketOpenGeneration) return null;
+          }
+          final originUid = authority.boundUid;
+          final originEpoch = authority.bindingEpoch;
+          protocolUnavailable.value = false;
+          late final EllaCaptureProtocolSocket socket;
+          bool isCurrent() =>
+              originUid != null &&
+              authority.boundUid == originUid &&
+              authority.bindingEpoch == originEpoch &&
+              authority.hasCurrentAuthority &&
+              identical(_protocolSocket, socket);
+          socket = createEllaCaptureProtocolSocket(
+            codec: codec,
+            sampleRate: sampleRate,
+            language: language,
+            source: source,
+            clientConversationId: clientConversationId,
+            customSttConfig: customSttConfig,
+            geolocation: geolocation,
+            hasOriginAuthority: isCurrent,
+            onAdmissionFailure: (reason, closeCode) => _onCaptureProtocolFailure(socket, reason, closeCode),
+          );
+          _protocolSocket = socket;
+          await socket.start();
+          return openGeneration == _socketOpenGeneration && socket.state == SocketServiceState.connected
+              ? socket
+              : null;
+        },
         ensureDeviceConnection: (deviceId) => services.device.ensureConnection(deviceId),
         owner: CaptureSessionOwner(
           coordinator: RecordingTransferCoordinator.instance,
@@ -274,9 +313,44 @@ class EllaUpstreamCaptureRuntime {
           stopForeground: ForegroundUtil.stopForegroundTask,
         ),
         localSegments: LocalSegmentStore.appSupport(),
+        processInProgressConversation: _processCaptureProtocolConversation,
       ),
     );
     return provider;
+  }
+
+  void _onCaptureProtocolFailure(EllaCaptureProtocolSocket socket, String reason, int? closeCode) {
+    if (!identical(_protocolSocket, socket) || !socket.hasOriginAuthority) return;
+    final provider = _provider;
+    if (provider == null) return;
+    protocolUnavailable.value = true;
+    // A policy rejection must not churn the upstream retry loop. Network and
+    // server failures remain under upstream's normal recovery ownership.
+    if (!captureProtocolRejectionIsPermanent(reason, closeCode)) return;
+    unawaited(() async {
+      try {
+        if (!identical(_protocolSocket, socket) || !socket.hasOriginAuthority) return;
+        if (socket.source == ConversationSource.phone.name) {
+          await provider.stopStreamRecording(
+            reason: 'capture_protocol_unavailable',
+            resumeHandedOffPendant: false,
+          );
+        } else {
+          await provider.stopStreamDeviceRecording();
+        }
+      } catch (error) {
+        Logger.debug('[EllaUpstreamCapture] protocol failure teardown: ${error.runtimeType}');
+      }
+    }());
+  }
+
+  Future<CreateConversationResponse?> _processCaptureProtocolConversation() async {
+    final socket = _finalizationSocket;
+    if (socket == null) return null;
+    return finalizeEllaCaptureProtocolConversation(
+      socket: socket,
+      exactAuthority: _CaptureProtocolAccountAuthority(socket, authority),
+    );
   }
 
   /// Builds upstream's CaptureProvider through its own constructor seams with
@@ -446,7 +520,13 @@ class EllaUpstreamCaptureRuntime {
   Future<void> finishConversation() async {
     final provider = _provider;
     if (provider == null) return;
-    await provider.finishCapture();
+    final finishing = _protocolSocket;
+    _finalizationSocket = finishing;
+    try {
+      await provider.finishCapture();
+    } finally {
+      if (identical(_finalizationSocket, finishing)) _finalizationSocket = null;
+    }
   }
 
   /// Manual necklace discovery through upstream's DeviceService.
@@ -490,4 +570,27 @@ class EllaUpstreamCaptureRuntime {
   static void resetForTesting() {
     _instance = null;
   }
+}
+
+bool captureProtocolRejectionIsPermanent(String reason, int? closeCode) =>
+    closeCode == 1008 || reason == 'invalid_capture_protocol_ready';
+
+class _CaptureProtocolAccountAuthority implements ExactAccountAuthorityVerifier {
+  _CaptureProtocolAccountAuthority(this._socket, this._capture)
+      : uid = _capture.boundUid ?? '',
+        _bindingEpoch = _capture.bindingEpoch;
+
+  @override
+  final String uid;
+  final int _bindingEpoch;
+  final EllaCaptureProtocolSocket _socket;
+  final EllaCaptureAuthority _capture;
+
+  @override
+  bool isExactCurrent() =>
+      uid.isNotEmpty &&
+      _socket.hasOriginAuthority &&
+      _capture.boundUid == uid &&
+      _capture.bindingEpoch == _bindingEpoch &&
+      _capture.hasCurrentAuthority;
 }

@@ -11,6 +11,7 @@ import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/upstream_capture/ella_capture_authority.dart';
+import 'package:omi/ella/upstream_capture/ella_capture_protocol_socket.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
 import 'package:omi/upstream_capture/backend/preferences.dart' as upstream;
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart';
@@ -132,6 +133,7 @@ class EllaUpstreamCaptureHarness {
   ScriptedDeviceConnection? deviceConnection;
   String authenticatedUid = accountA;
   bool connected = true;
+  bool protocolV2 = false;
   int processCalls = 0;
 
   static final BtDevice pendant = BtDevice(id: 'pendant-1', name: 'Omi', type: DeviceType.omi, rssi: -40);
@@ -140,10 +142,12 @@ class EllaUpstreamCaptureHarness {
     required Directory tempDir,
     bool initiallyConnected = true,
     bool grantConsent = true,
+    bool protocolV2 = false,
   }) async {
     TestWidgetsFlutterBinding.ensureInitialized();
     final harness = EllaUpstreamCaptureHarness._(tempDir);
     harness.connected = initiallyConnected;
+    harness.protocolV2 = protocolV2;
     await harness._boot(grantConsent: grantConsent);
     return harness;
   }
@@ -268,14 +272,24 @@ class EllaUpstreamCaptureHarness {
   }) async {
     final transport = ScriptedPureSocket();
     transport.connectAllowed = () => connected;
-    final service = TranscriptSegmentSocketService.withSocket(
-      sampleRate,
-      codec,
-      language,
-      transport,
-      source: source,
-      clientConversationId: clientConversationId,
-    );
+    final service = protocolV2
+        ? EllaCaptureProtocolSocket.withTransport(
+            sampleRate,
+            codec,
+            language,
+            transport,
+            source: source,
+            clientConversationId: clientConversationId,
+            hasOriginAuthority: () => authority.hasCurrentAuthority,
+          )
+        : TranscriptSegmentSocketService.withSocket(
+            sampleRate,
+            codec,
+            language,
+            transport,
+            source: source,
+            clientConversationId: clientConversationId,
+          );
     sockets.add((source: source, transport: transport, service: service));
     await service.start();
     if (service.state != SocketServiceState.connected) return null;
