@@ -1031,7 +1031,129 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('Whispers save failure keeps the verified prior state', (tester) async {
+  for (final initialOn in [false, true]) {
+    testWidgets('ambiguous dock write reads committed ${!initialOn} before native reconciliation', (tester) async {
+      final fixture = await _DockFixture.create(tester);
+      var serverOn = initialOn;
+      var nativeOn = initialOn;
+      var reads = 0;
+      var writes = 0;
+      await fixture.pump(
+        tester,
+        guardianAvailable: true,
+        guardianModeLoader: () async {
+          reads++;
+          return GuardianModeInfo(
+            currentMode: serverOn ? GuardianModeKey.custom : GuardianModeKey.off,
+            twoTierState: serverOn ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
+          );
+        },
+        guardianModeSetter: (state) async {
+          writes++;
+          serverOn = !state.isOff;
+          throw StateError('response lost after commit');
+        },
+        guardianNativeStart: () async => nativeOn = true,
+        guardianNativeStop: () async => nativeOn = false,
+        guardianNativeState: () =>
+            nativeOn ? guardian_native.GuardianModeState.active : guardian_native.GuardianModeState.idle,
+      );
+      await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+      await tester.pump();
+      await tester.pump();
+      expect(reads, 2);
+      expect(writes, 1);
+      expect(nativeOn, !initialOn);
+      final snapshot = guardian_native.GuardianModeService.whisperStateFence.snapshot!;
+      expect(snapshot.enabled, !initialOn);
+      expect(snapshot.modeVerified, isTrue);
+      expect(snapshot.nativeReconciled, isTrue);
+      expect(tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch'))).value, !initialOn);
+    });
+  }
+
+  testWidgets('ambiguous dock write with failed readback remains unknown and Retry reads current mode', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    var reads = 0;
+    var starts = 0;
+    await fixture.pump(
+      tester,
+      guardianAvailable: true,
+      guardianModeLoader: () async {
+        reads++;
+        if (reads == 2) throw StateError('readback unavailable');
+        return GuardianModeInfo(
+          currentMode: reads == 1 ? GuardianModeKey.off : GuardianModeKey.custom,
+          twoTierState: reads == 1 ? const GuardianModeState() : const GuardianModeState(features: ['MEMORY_SUPPORT']),
+        );
+      },
+      guardianModeSetter: (_) async => false,
+      guardianNativeStart: () async => starts++,
+      guardianNativeStop: () async {},
+      guardianNativeState: () => guardian_native.GuardianModeState.idle,
+    );
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+    await tester.pump();
+    await tester.pump();
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot!.modeVerified, isFalse);
+    expect(starts, 0);
+    expect(find.text('Whispers are off. Spoken responses are paused.'), findsNothing);
+    expect(find.byKey(const Key('upstream-capture-whispers-retry')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-retry')));
+    await tester.pump();
+    await tester.pump();
+    expect(reads, 3);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot!.enabled, isTrue);
+  });
+
+  for (final supersededBy in ['newer_choice', 'authority_replacement']) {
+    testWidgets('ambiguous dock readback cannot reconcile after $supersededBy', (tester) async {
+      final fixture = await _DockFixture.create(tester);
+      final readback = Completer<GuardianModeInfo?>();
+      var reads = 0;
+      var starts = 0;
+      var epoch = 0;
+      ExactAccountAuthorityVerifier authority() {
+        final captured = epoch;
+        return _WhisperTestAuthority(_uid, () => epoch == captured);
+      }
+
+      await fixture.pump(
+        tester,
+        guardianAvailable: true,
+        guardianAuthorityProvider: authority,
+        guardianModeLoader: () => ++reads == 1
+            ? Future.value(const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState()))
+            : readback.future,
+        guardianModeSetter: (_) async => false,
+        guardianNativeStart: () async => starts++,
+        guardianNativeStop: () async {},
+        guardianNativeState: () => guardian_native.GuardianModeState.idle,
+      );
+      await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+      await tester.pump();
+      expect(reads, 2);
+      final fence = guardian_native.GuardianModeService.whisperStateFence;
+      if (supersededBy == 'authority_replacement') {
+        epoch++;
+        fence.invalidate();
+      }
+      final newer = fence.choose(authority, false)!;
+      fence.publish(newer, (enabled: false, modeVerified: true, nativeReconciled: true));
+      readback.complete(const GuardianModeInfo(
+        currentMode: GuardianModeKey.custom,
+        twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
+      ));
+      await tester.pump();
+      await tester.pump();
+      expect(starts, 0);
+      expect(fence.snapshot!.enabled, isFalse);
+      expect(fence.snapshot!.modeVerified, isTrue);
+      expect(fence.choicePending, isFalse);
+    });
+  }
+
+  testWidgets('Whispers save failure reads and keeps the verified prior state', (tester) async {
     final fixture = await _DockFixture.create(tester);
     await fixture.pump(
       tester,

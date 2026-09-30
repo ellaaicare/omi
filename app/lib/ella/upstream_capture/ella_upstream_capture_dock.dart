@@ -260,7 +260,6 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   Future<void> _setWhispers(bool enabled) async {
     if (_whispersBusy || !_whispersVerified) return;
     final previousEnabled = _whispersOn;
-    final previousPlayback = _whisperPlayback;
     final operation = _whisperFence.choose(widget.guardianAuthorityProvider ?? WalOwnerAuthority.active, enabled);
     if (operation == null) return;
     _pendingWhisperChoice = operation;
@@ -275,6 +274,8 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
 
       var nativeStopFailed = false;
       var saved = false;
+      var resolvedEnabled = enabled;
+      var modeVerified = false;
       var playback = _WhisperPlaybackState.unavailable;
       String? error;
       await _whisperFence.serialize<void>(operation, () async {
@@ -295,15 +296,27 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
         } catch (_) {}
         if (!_isWhisperOperationCurrent(operation)) return;
         if (!saved) {
-          playback = previousPlayback;
           error = saveFailedMessage;
-          if (previousEnabled && !enabled) {
-            try {
+          // A lost response does not establish whether the server committed.
+          // Reconcile only current readback, never a speculative prior ON.
+          GuardianModeInfo? authoritative;
+          try {
+            authoritative = await _readWhisperState(operation.authority);
+          } catch (_) {}
+          if (!_isWhisperOperationCurrent(operation)) return;
+          modeVerified = authoritative != null;
+          resolvedEnabled = authoritative == null
+              ? previousEnabled
+              : !(authoritative.twoTierState?.isOff ?? authoritative.currentMode == GuardianModeKey.off);
+          try {
+            if (modeVerified && resolvedEnabled) {
               await _startWhisperNative();
               playback = _WhisperPlaybackState.ready;
-            } catch (_) {
-              playback = _WhisperPlaybackState.error;
+            } else {
+              await _stopWhisperNative();
             }
+          } catch (_) {
+            playback = _WhisperPlaybackState.error;
           }
         } else if (enabled) {
           try {
@@ -317,19 +330,21 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
           playback = _WhisperPlaybackState.error;
           error = playbackStopFailedMessage;
         }
+        if (saved) modeVerified = true;
       });
       if (!_isWhisperOperationCurrent(operation)) return;
       _whisperFence.publish(
         operation,
         (
-          enabled: saved ? enabled : previousEnabled,
-          modeVerified: true,
-          nativeReconciled: playback != _WhisperPlaybackState.error
+          enabled: resolvedEnabled,
+          modeVerified: modeVerified,
+          nativeReconciled: modeVerified && playback != _WhisperPlaybackState.error
         ),
       );
       setState(() {
         _whispersBusy = false;
-        _whispersOn = saved ? enabled : previousEnabled;
+        _whispersOn = resolvedEnabled;
+        _whispersVerified = modeVerified;
         _whisperPlayback = playback;
         _whisperError = error;
       });
