@@ -237,6 +237,20 @@ enum DeviceType {
   limitless,
 }
 
+// The shared preference is written as an index by legacy capture and as a
+// stable enum name by the upstream-capture runtime.
+DeviceType? _deviceTypeFromJson(Object? raw) {
+  if (raw is int) {
+    return raw >= 0 && raw < DeviceType.values.length ? DeviceType.values[raw] : null;
+  }
+  if (raw is String) {
+    for (final type in DeviceType.values) {
+      if (type.name == raw) return type;
+    }
+  }
+  return null;
+}
+
 Map<String, DeviceType> cachedDevicesMap = {};
 
 class BtDevice {
@@ -819,18 +833,37 @@ class BtDevice {
   }
 
   // from json
-  static fromJson(Map<String, dynamic> json) {
+  static BtDevice fromJson(Map<String, dynamic> json) {
+    final type = _deviceTypeFromJson(json['type']);
+    final name = json['name'];
+    final id = json['id'];
+    if (type == null || name is! String || id is! String) return BtDevice.empty();
+
+    final rawRssi = json['rssi'];
+    final rssi = rawRssi is int ? rawRssi : (rawRssi is num ? rawRssi.toInt() : int.tryParse('$rawRssi') ?? 0);
+
+    DeviceLocator? locator;
+    final rawLocator = json['locator'];
+    if (rawLocator != null) {
+      if (rawLocator is! Map<String, dynamic>) return BtDevice.empty();
+      try {
+        locator = DeviceLocator.fromJson(rawLocator);
+      } catch (_) {
+        return BtDevice.empty();
+      }
+    }
+
     return BtDevice(
-      name: json['name'],
-      id: json['id'],
-      type: DeviceType.values[json['type']],
-      rssi: json['rssi'],
-      locator: json['locator'] != null ? DeviceLocator.fromJson(json['locator']) : null,
-      modelNumber: json['modelNumber'],
-      firmwareRevision: json['firmwareRevision'],
-      hardwareRevision: json['hardwareRevision'],
-      manufacturerName: json['manufacturerName'],
-      serialNumber: json['serialNumber'],
+      name: name,
+      id: id,
+      type: type,
+      rssi: rssi,
+      locator: locator,
+      modelNumber: json['modelNumber'] is String ? json['modelNumber'] : null,
+      firmwareRevision: json['firmwareRevision'] is String ? json['firmwareRevision'] : null,
+      hardwareRevision: json['hardwareRevision'] is String ? json['hardwareRevision'] : null,
+      manufacturerName: json['manufacturerName'] is String ? json['manufacturerName'] : null,
+      serialNumber: json['serialNumber'] is String ? json['serialNumber'] : null,
     );
   }
 
