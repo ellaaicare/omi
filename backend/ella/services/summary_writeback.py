@@ -1534,6 +1534,7 @@ async def write_conversation_summary(
     today_card_grounding_evidence: Optional[dict[str, Any]] = None,
     replay_request_fingerprint_input: Optional[dict[str, Any]] = None,
     canonical_retry_recorder: Optional[Callable[[str], Awaitable[bool]]] = None,
+    summary_operation: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     submitted_structured = {
         'title': title,
@@ -1812,6 +1813,14 @@ async def write_conversation_summary(
         based_on_version_id=based_on_version_id,
         activate=set_active,
     )
+    if summary_operation is not None:
+        if not correction_id or not require_based_on_match or not require_source_match:
+            raise ValueError('summary_operation_requires_scoped_cas')
+        # Persist invocation identity with the version in the same transcript/version CAS.
+        new_version = version_update['summary_versions'][-1]
+        new_version['summary_operation'] = copy.deepcopy(summary_operation)
+        new_version['ella_tags'] = _normalized_tags(ella_tags)
+        new_version['ella_signal'] = copy.deepcopy(ella_signal or {})
     if today_card_grounding is not None and today_card_grounding_evidence is not None:
         raise ValueError('today_card_grounding_inputs_conflict')
     grounding_bound_from_evidence = False

@@ -1281,3 +1281,94 @@ def test_argument_summary_redacts_observation_text(monkeypatch):
     assert summary["title"] == {"chars": len("Private title")}
     assert summary["text"] == {"chars": len("Private memory text that should not appear in logs.")}
     assert summary["idempotency_key"] == {"chars": len("private-key")}
+
+
+def _summary_test_session(monkeypatch):
+    module = _load_module(monkeypatch)
+    monkeypatch.setenv("ELLA_MCP_SUMMARY_TOOLS_ENABLED", "true")
+    monkeypatch.setenv("ELLA_MCP_SUMMARY_TOOLS_UIDS", "granted-owner")
+    claims = {"profile_uid": "granted-owner"}
+    auth = module.MCPAuthContext("signed-token", False, claims)
+    monkeypatch.setattr(module, "require_summary_tool_grant", lambda claims, tool, **kw: claims["profile_uid"])
+    monkeypatch.setattr(module, "assert_current_ai_consent", lambda uid: uid)
+    runtime = types.SimpleNamespace(
+        uid="granted-owner",
+        binding_id="granted-binding",
+        profile_user_id="granted-profile",
+        account_user_id="granted-account",
+        allowed_tools=tuple(module.SUMMARY_OPERATION_TOOLS),
+    )
+
+    async def resolve(uid, **kwargs):
+        assert uid == "granted-owner"
+        return runtime
+
+    monkeypatch.setattr(module, "require_isolated_runtime", resolve)
+
+    async def handler(**kwargs):
+        await kwargs["revalidate_tool_grant"]()
+        return {"status": "applied", "owner": kwargs["uid"], "intent": kwargs["tool_name"]}
+
+    monkeypatch.setattr(module.summary_tool_registry, "_handler", handler)
+    return module, auth, runtime
+
+
+def test_summary_tools_discovery_requires_runtime_registration(monkeypatch):
+    module, auth, runtime = _summary_test_session(monkeypatch)
+    assert module.SUMMARY_OPERATION_TOOLS.issubset(
+        {tool["name"] for tool in asyncio.run(module._discovered_tools(auth))}
+    )
+    runtime.allowed_tools = ()
+    assert module.SUMMARY_OPERATION_TOOLS.isdisjoint(
+        {tool["name"] for tool in asyncio.run(module._discovered_tools(auth))}
+    )
+    runtime.allowed_tools = tuple(module.SUMMARY_OPERATION_TOOLS)
+    runtime.uid = "different-owner"
+    assert module.SUMMARY_OPERATION_TOOLS.isdisjoint(
+        {tool["name"] for tool in asyncio.run(module._discovered_tools(auth))}
+    )
+
+
+def test_summary_tools_static_defaultoff_and_missing_handler_are_hidden(monkeypatch):
+    module, auth, runtime = _summary_test_session(monkeypatch)
+    static = module.MCPAuthContext("static", True, auth.session_claims)
+    assert module.SUMMARY_OPERATION_TOOLS.isdisjoint({tool["name"] for tool in module._visible_tools(static)})
+    monkeypatch.setenv("ELLA_MCP_SUMMARY_TOOLS_ENABLED", "false")
+    assert module.SUMMARY_OPERATION_TOOLS.isdisjoint({tool["name"] for tool in module._visible_tools(auth)})
+    monkeypatch.setenv("ELLA_MCP_SUMMARY_TOOLS_ENABLED", "true")
+    monkeypatch.setattr(module.summary_tool_registry, "_handler", None)
+    assert module.SUMMARY_OPERATION_TOOLS.isdisjoint({tool["name"] for tool in module._visible_tools(auth)})
+
+
+def test_summary_tool_dispatch_uses_session_owner_and_rejects_model_uid(monkeypatch):
+    module, auth, runtime = _summary_test_session(monkeypatch)
+    args = {
+        "conversation_id": "chosen-memory",
+        "expected_active_summary_version_id": "v1",
+        "idempotency_key": "invoke-123",
+    }
+    message = _rpc("tools/call", params={"name": "companion_resummarize_conversation", "arguments": args})
+    response, _ = asyncio.run(module._handle_mcp_message(auth, message))
+    result = json.loads(response["result"]["content"][0]["text"])
+    assert result["owner"] == "granted-owner"
+    message["params"]["arguments"]["uid"] = "other-owner"
+    response, _ = asyncio.run(module._handle_mcp_message(auth, message))
+    assert response["error"]["code"] == -32602
+
+
+def test_explicit_summary_read_exposes_chosen_owner_version(monkeypatch):
+    module, auth, runtime = _summary_test_session(monkeypatch)
+    seen = []
+
+    def get(uid, cid):
+        seen.append((uid, cid))
+        return {"active_summary_version_id": "chosen-v7", "structured": {"title": "chosen"}}
+
+    monkeypatch.setattr(module.conversations_db, "get_conversation", get, raising=False)
+    result = asyncio.run(
+        module._companion_summary_operation(
+            module.SUMMARY_READ_TOOL, {"conversation_id": "chosen-memory"}, auth_context=auth
+        )
+    )
+    assert result["active_summary_version_id"] == "chosen-v7"
+    assert seen == [("granted-owner", "chosen-memory")]
