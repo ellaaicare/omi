@@ -751,6 +751,8 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
 
   bool isDiscoveringFor(Object owner) => _discoveryActive && identical(owner, _pickerOwner);
 
+  Object? discoveryLeaseFor(Object owner) => isDiscoveringFor(owner) ? _scanSubscription : null;
+
   Future<void> cancelDeviceDiscovery({Object? owner}) {
     if (owner != null && !identical(owner, _pickerOwner)) return Future.value();
     return _stopPickerDiscovery(releaseOwner: true);

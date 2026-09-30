@@ -11,6 +11,7 @@ import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_device_service_adapter.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/pages/capture/connect.dart';
+import 'package:omi/pages/onboarding/ella/ella_connect.dart';
 import 'package:omi/pages/onboarding/find_device/page.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/onboarding_provider.dart';
@@ -139,7 +140,8 @@ class _Harness {
   late final OnboardingProvider onboarding;
   final navigator = GlobalKey<NavigatorState>();
 
-  Future<void> mount(WidgetTester tester, {bool connectPage = false, bool Function()? canScan}) async {
+  Future<void> mount(WidgetTester tester,
+      {bool connectPage = false, bool legacyConnect = false, bool Function()? canScan}) async {
     await tester.pumpWidget(ChangeNotifierProvider<OnboardingProvider>.value(
       value: onboarding,
       child: MaterialApp(
@@ -147,13 +149,15 @@ class _Harness {
         theme: ellaThemeData(),
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: connectPage
-            ? const ConnectDevicePage(originUid: 'owner-test', authenticatedUid: _testUid)
-            : Scaffold(
-                body: SingleChildScrollView(
-                  child: FindDevicesPage(goNext: () {}, includeSkip: false, canConnect: canScan),
-                ),
-              ),
+        home: legacyConnect
+            ? EllaConnect(onNext: () {}, onSkip: () {}, onBack: () {})
+            : connectPage
+                ? const ConnectDevicePage(originUid: 'owner-test', authenticatedUid: _testUid)
+                : Scaffold(
+                    body: SingleChildScrollView(
+                      child: FindDevicesPage(goNext: () {}, includeSkip: false, canConnect: canScan),
+                    ),
+                  ),
       ),
     ));
     await tester.pump();
@@ -206,6 +210,117 @@ void main() {
   setUp(() async {
     SharedPreferences.setMockInitialValues({'uid': 'owner-test', 'btDeviceOwnerBinding': 'owner-test'});
     await SharedPreferencesUtil.init();
+  });
+
+  testWidgets('covered EllaConnect cannot auto-select candidates owned by production FindDevices', (tester) async {
+    final service = _ScriptedService();
+    final harness = _Harness(service);
+    await harness.mount(tester, legacyConnect: true);
+    service.nextChunks = [
+      [_friend]
+    ];
+    harness.navigator.currentState!.push(MaterialPageRoute<void>(
+      builder: (_) => Scaffold(body: SingleChildScrollView(child: FindDevicesPage(goNext: () {}, includeSkip: false))),
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump();
+    expect(find.text('Friend'), findsOneWidget);
+    expect(harness.device.connects, 0);
+    expect(service.discovers, 2);
+    final cancels = service.cancels;
+    await tester.pump(const Duration(seconds: 10));
+    await tester.pump();
+    expect(service.discovers, 3);
+    expect(service.cancels, cancels);
+    expect(harness.device.connects, 0);
+    await harness.leave(tester);
+    harness.dispose();
+  });
+
+  testWidgets('queued EllaConnect candidate rejects a route covered earlier in the same frame', (tester) async {
+    final service = _ScriptedService();
+    final harness = _Harness(service);
+    await harness.mount(tester, legacyConnect: true);
+    service.nextChunks = [
+      [_friend]
+    ];
+    final owner = tester.state(find.byType(EllaConnect));
+    await harness.onboarding.scanDevices(onShowDialog: () {}, owner: owner);
+    tester.binding.addPostFrameCallback((_) {
+      harness.navigator.currentState!.push(MaterialPageRoute<void>(builder: (_) => const Scaffold()));
+    });
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(harness.device.connects, 0);
+    expect(harness.onboarding.discoveryLeaseFor(owner), isNull);
+    expect(tester.takeException(), isNull);
+    await harness.leave(tester);
+    harness.dispose();
+  });
+
+  testWidgets('queued EllaConnect candidate rejects route removal and disposal', (tester) async {
+    final service = _ScriptedService();
+    final harness = _Harness(service);
+    await harness.mount(tester);
+    final route = MaterialPageRoute<void>(builder: (_) => EllaConnect(onNext: () {}, onSkip: () {}, onBack: () {}));
+    harness.navigator.currentState!.push(route);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    final owner = tester.state(find.byType(EllaConnect));
+    service.nextChunks = [
+      [_friend]
+    ];
+    await harness.onboarding.scanDevices(onShowDialog: () {}, owner: owner);
+    tester.binding.addPostFrameCallback((_) => harness.navigator.currentState!.removeRoute(route));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump();
+    expect(find.byType(EllaConnect), findsNothing);
+    expect(harness.onboarding.discoveryLeaseFor(owner), isNull);
+    expect(harness.device.connects, 0);
+    expect(tester.takeException(), isNull);
+    await harness.leave(tester);
+    harness.dispose();
+  });
+
+  testWidgets('queued EllaConnect candidate cannot adopt a replacement lease for the same owner', (tester) async {
+    final service = _ScriptedService();
+    final harness = _Harness(service);
+    await harness.mount(tester, legacyConnect: true);
+    final owner = tester.state(find.byType(EllaConnect));
+    service.nextChunks = [
+      [_friend]
+    ];
+    await harness.onboarding.scanDevices(onShowDialog: () {}, owner: owner);
+    tester.binding.addPostFrameCallback((_) {
+      service.nextChunks = [];
+      unawaited(harness.onboarding.cancelDeviceDiscovery(owner: owner));
+      unawaited(harness.onboarding.scanDevices(onShowDialog: () {}, owner: owner));
+    });
+    await tester.pump();
+    await tester.pump();
+    expect(harness.device.connects, 0);
+    expect(harness.onboarding.deviceList, isEmpty);
+    await harness.leave(tester);
+    harness.dispose();
+  });
+
+  testWidgets('active EllaConnect retains inherited first-candidate selection and stops its scan', (tester) async {
+    final service = _ScriptedService()
+      ..nextChunks = [
+        [_friend]
+      ];
+    final harness = _Harness(service);
+    await harness.mount(tester, legacyConnect: true);
+    await tester.pump();
+    await tester.pump();
+    expect(harness.device.connects, 1);
+    await tester.pump(const Duration(seconds: 30));
+    expect(service.discovers, 1);
+    expect(harness.device.connects, 1);
+    await harness.leave(tester);
+    harness.dispose();
   });
 
   testWidgets('failed pass stops searching; explicit retry performs one read-only pass and recovers', (tester) async {
