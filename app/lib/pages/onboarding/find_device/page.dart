@@ -38,6 +38,25 @@ class FindDevicesPage extends StatefulWidget {
 class _FindDevicesPageState extends State<FindDevicesPage> {
   OnboardingProvider? _provider;
   bool _scanError = false;
+  bool _routeCurrent = true;
+  bool _resumeAfterCover = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final current = ModalRoute.isCurrentOf(context) ?? true;
+    if (current == _routeCurrent) return;
+    _routeCurrent = current;
+    if (!current) {
+      _resumeAfterCover = _provider?.isDiscoveringFor(this) ?? false;
+      unawaited(_provider?.cancelDeviceDiscovery(owner: this));
+    } else if (_resumeAfterCover) {
+      _resumeAfterCover = false;
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _routeCurrent) _scanDevices();
+      });
+    }
+  }
 
   @override
   void initState() {
@@ -45,6 +64,7 @@ class _FindDevicesPageState extends State<FindDevicesPage> {
     _provider = Provider.of<OnboardingProvider>(context, listen: false);
 
     SchedulerBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       if (widget.isFromOnboarding) {
         context.read<HomeProvider>().setupHasSpeakerProfile();
       }
@@ -54,16 +74,19 @@ class _FindDevicesPageState extends State<FindDevicesPage> {
 
   @override
   dispose() {
+    unawaited(_provider?.cancelDeviceDiscovery(owner: this));
     _provider = null;
 
     super.dispose();
   }
 
   Future<void> _scanDevices() async {
-    if (!mounted || (widget.canConnect != null && !widget.canConnect!())) return;
+    if (!mounted || !_routeCurrent || (widget.canConnect != null && !widget.canConnect!())) return;
     setState(() => _scanError = false);
     try {
       await _provider?.scanDevices(
+        owner: this,
+        canScan: () => mounted && _routeCurrent && (widget.canConnect?.call() ?? true),
         onShowDialog: () {
           if (mounted) {
             showDialog(
@@ -91,19 +114,20 @@ class _FindDevicesPageState extends State<FindDevicesPage> {
   Widget build(BuildContext context) {
     return Consumer<OnboardingProvider>(
       builder: (context, provider, child) {
+        final scanError = _scanError || provider.discoveryFailed;
         return Column(
           mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            if (!_scanError || provider.deviceList.isNotEmpty)
+            if (!scanError || provider.deviceList.isNotEmpty)
               FoundDevices(
                 goNext: widget.goNext,
                 isFromOnboarding: widget.isFromOnboarding,
                 canConnect: widget.canConnect,
                 consentRequester: widget.consentRequester,
               ),
-            if (provider.deviceList.isEmpty && _scanError) Text(context.l10n.upstreamCaptureSearchFailed),
-            if (provider.deviceList.isEmpty && (_scanError || provider.enableInstructions))
+            if (provider.deviceList.isEmpty && scanError) Text(context.l10n.upstreamCaptureSearchFailed),
+            if (provider.deviceList.isEmpty && (scanError || provider.enableInstructions))
               TextButton.icon(
                 style: TextButton.styleFrom(
                   foregroundColor: EllaColors.tealDeep,

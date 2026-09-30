@@ -58,6 +58,7 @@ class MemoryArtworkImage extends StatefulWidget {
     this.prefetchedResult,
     this.deferRemoteFetch = false,
     this.prefetchResolved = false,
+    this.compactPlaceholder = false,
   });
 
   final ServerConversation conversation;
@@ -114,6 +115,9 @@ class MemoryArtworkImage extends StatefulWidget {
   /// Distinguishes a successful day response that omitted this memory from a
   /// day request that has not completed yet.
   final bool prefetchResolved;
+
+  /// List thumbnails use a small category symbol rather than an empty illustration frame.
+  final bool compactPlaceholder;
 
   static const _automaticGenerationBudgetCapacity = 256;
   static const _automaticPreEgressAttemptLimit = 3;
@@ -1329,6 +1333,37 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   Widget _placeholder(_MemoryArtworkFallbackKind kind) {
     final isPreparing = kind == _MemoryArtworkFallbackKind.preparing;
     final canGenerate = !isPreparing && !_manualGenerationInFlight && _canManuallyGenerate(_remoteResult);
+    if (widget.compactPlaceholder) {
+      final icon = switch (widget.conversation.structured.category.toLowerCase()) {
+        'family' || 'friends' || 'relationships' => Icons.people_outline_rounded,
+        'health' || 'health_fitness' => Icons.favorite_border_rounded,
+        'work' || 'business' => Icons.work_outline_rounded,
+        'travel' => Icons.explore_outlined,
+        'food' || 'food_drink' => Icons.restaurant_outlined,
+        _ => Icons.auto_stories_outlined,
+      };
+      return Semantics(
+        label: canGenerate
+            ? context.l10n.memoryArtworkRetry
+            : isPreparing
+                ? context.l10n.memoryArtworkPreparingLabel
+                : context.l10n.memoryArtworkUnavailableLabel,
+        button: canGenerate,
+        onTap: canGenerate ? _generateArtwork : null,
+        excludeSemantics: true,
+        child: Material(
+          key: Key('memory-artwork-placeholder-${widget.conversation.id}'),
+          color: Colors.transparent,
+          child: canGenerate
+              ? IconButton(
+                  tooltip: context.l10n.memoryArtworkRetry,
+                  onPressed: _generateArtwork,
+                  icon: const Icon(Icons.add_photo_alternate_outlined, color: Color(0xFF38695E), size: 24),
+                )
+              : ExcludeSemantics(child: Icon(icon, color: const Color(0xFF665F56), size: 24)),
+        ),
+      );
+    }
     final useCompactLayout = MediaQuery.textScalerOf(context).scale(12) > 18;
     final category = widget.conversation.structured.category.trim();
     final emoji = parseEllaDisplayValue(widget.conversation.structured.emoji).text.trim();

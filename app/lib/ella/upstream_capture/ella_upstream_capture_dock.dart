@@ -980,14 +980,25 @@ class _WhispersRow extends StatelessWidget {
           : context.l10n.upstreamCaptureWhispersOffDescription;
     }
     return playback == _WhisperPlaybackState.ready
-        ? context.l10n.todayWhispersOnDescription
-        : context.l10n.upstreamCaptureWhispersPlaybackUnavailable;
+        ? error == null
+            ? context.l10n.todayWhispersOnDescription
+            : context.l10n.upstreamCaptureWhispersSaveFailed
+        : playback == _WhisperPlaybackState.error
+            ? context.l10n.upstreamCaptureWhispersPlaybackFailed
+            : context.l10n.upstreamCaptureWhispersPlaybackUnavailable;
   }
 
   @override
   Widget build(BuildContext context) {
-    final canRetry = !verified || playback == _WhisperPlaybackState.error;
+    final canRetry = !verified ||
+        playback == _WhisperPlaybackState.error ||
+        (enabled && playback == _WhisperPlaybackState.unavailable);
     final textScale = MediaQuery.textScalerOf(context).scale(1);
+    final title = Text(
+      context.l10n.todayWhispersTitle,
+      key: const Key('upstream-capture-whispers-status'),
+      style: EllaTextStyles.secondary.copyWith(fontWeight: FontWeight.w700, color: EllaColors.ink),
+    );
     final control = busy
         ? Semantics(
             label: context.l10n.upstreamCaptureSavingWhispers,
@@ -1003,67 +1014,54 @@ class _WhispersRow extends StatelessWidget {
               ),
             ),
           )
-        : Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (canRetry)
-                TextButton.icon(
-                  key: const Key('upstream-capture-whispers-retry'),
-                  style: _DockButtonStyles.text(context),
-                  onPressed: onRetry,
-                  icon: const Icon(Icons.refresh_rounded),
-                  label: Text(context.l10n.retry),
+        : verified
+            ? Semantics(
+                label: context.l10n.todayWhispersTitle,
+                toggled: enabled,
+                child: Switch(
+                  key: const Key('upstream-capture-whispers-switch'),
+                  value: enabled,
+                  onChanged: onChanged,
+                  activeTrackColor: EllaColors.tealDeep,
+                  activeThumbColor: EllaColors.paper,
                 ),
-              if (verified)
-                Semantics(
-                  label: context.l10n.todayWhispersTitle,
-                  toggled: enabled,
-                  child: Switch(
-                    key: const Key('upstream-capture-whispers-switch'),
-                    value: enabled,
-                    onChanged: onChanged,
-                    activeTrackColor: EllaColors.tealDeep,
-                    activeThumbColor: EllaColors.paper,
-                  ),
-                ),
-            ],
-          );
-    final copy = Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(
-          context.l10n.todayWhispersTitle,
-          key: const Key('upstream-capture-whispers-status'),
-          style: EllaTextStyles.secondary.copyWith(fontWeight: FontWeight.w700, color: EllaColors.ink),
-        ),
-        const SizedBox(height: 2),
-        Text(_description(context), style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft)),
-        if (error != null && error != _description(context)) ...[
-          const SizedBox(height: 4),
-          Text(
-            error!,
-            key: const Key('upstream-capture-whispers-error'),
-            style: EllaTextStyles.caption.copyWith(color: EllaColors.error, fontWeight: FontWeight.w600),
-          ),
-        ],
-      ],
-    );
+              )
+            : const SizedBox.shrink();
     return Semantics(
       container: true,
-      label:
-          '${context.l10n.todayWhispersTitle}. ${_description(context)}${error == null || error == _description(context) ? '' : '. $error'}',
-      child: textScale >= 2
-          ? Column(
-              key: const Key('upstream-capture-whispers-stacked'),
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [copy, const SizedBox(height: 6), Align(alignment: Alignment.centerRight, child: control)],
-            )
-          : Row(
-              key: const Key('upstream-capture-whispers-row'),
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [Expanded(child: copy), const SizedBox(width: 8), control],
+      liveRegion: true,
+      child: Column(
+        key: textScale >= 2
+            ? const Key('upstream-capture-whispers-stacked')
+            : const Key('upstream-capture-whispers-row'),
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (textScale >= 2) ...[
+            title,
+            Align(alignment: AlignmentDirectional.centerEnd, child: control),
+          ] else
+            Row(
+              children: [
+                Expanded(child: title),
+                control,
+              ],
             ),
+          const SizedBox(height: 2),
+          Text(_description(context), style: EllaTextStyles.secondary),
+          if (canRetry && !busy)
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: TextButton.icon(
+                key: const Key('upstream-capture-whispers-retry'),
+                style: _DockButtonStyles.text(context),
+                onPressed: onRetry,
+                icon: const Icon(Icons.refresh_rounded),
+                label: Text(context.l10n.tryAgain),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }
@@ -1088,7 +1086,7 @@ class _DockButtonStyles {
         textStyle: WidgetStatePropertyAll(
           Theme.of(context).textTheme.labelLarge?.copyWith(fontSize: 16, fontWeight: FontWeight.w700),
         ),
-        shape: WidgetStatePropertyAll(RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
+        shape: WidgetStatePropertyAll(RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
       );
 
   static ButtonStyle secondary(BuildContext context) => ButtonStyle(
@@ -1115,7 +1113,7 @@ class _DockButtonStyles {
         textStyle: WidgetStatePropertyAll(
           Theme.of(context).textTheme.labelLarge?.copyWith(fontSize: 16, fontWeight: FontWeight.w700),
         ),
-        shape: WidgetStatePropertyAll(RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
+        shape: WidgetStatePropertyAll(RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
       );
 
   static ButtonStyle text(BuildContext context) => TextButton.styleFrom(
@@ -1134,12 +1132,10 @@ class _DockSurface extends StatelessWidget {
   Widget build(BuildContext context) {
     return Material(
       color: EllaColors.elevatedCard,
-      elevation: 6,
-      shadowColor: EllaColors.ink.withValues(alpha: 0.16),
-      borderRadius: BorderRadius.circular(24),
+      elevation: 0,
       child: Padding(
-        padding: EdgeInsets.symmetric(
-          horizontal: MediaQuery.textScalerOf(context).scale(1) >= 3 ? 8 : 16,
+        padding: const EdgeInsets.symmetric(
+          horizontal: 12,
           vertical: 16,
         ),
         child: child,

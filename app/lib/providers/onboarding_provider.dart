@@ -27,7 +27,9 @@ import 'package:omi/utils/platform/platform_service.dart';
 enum DeviceSelectionOutcome { connected, consentRequired, unavailable, cancelled }
 
 class OnboardingProvider extends BaseProvider with MessageNotifierMixin implements IDeviceServiceSubsciption {
-  OnboardingProvider({IDeviceService? deviceService}) : _deviceServiceOverride = deviceService;
+  OnboardingProvider({IDeviceService? deviceService}) : _deviceServiceOverride = deviceService {
+    SharedPreferencesUtil.aiConsentAuthorityChanges.addListener(_cancelDiscoveryForAuthorityChange);
+  }
 
   final IDeviceService? _deviceServiceOverride;
   IDeviceService get _deviceService => _deviceServiceOverride ?? ServiceManager.instance().device;
@@ -44,6 +46,24 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   Timer? _didNotMakeItTimer;
   bool enableInstructions = false;
   Map<String, BtDevice> foundDevicesMap = {};
+  Timer? _discoveryTimer;
+  Object? _pickerOwner;
+  int _scanEpoch = 0;
+  bool _disposed = false;
+  bool _discoveryActive = false;
+  bool discoveryFailed = false;
+  String _scanUid = '';
+  int _scanAuthorityGeneration = 0;
+  bool Function()? _canScan;
+  IDeviceService? _scanService;
+  IDeviceService? _pickerService;
+  _PickerDiscoverySubscription? _scanSubscription;
+  DeviceServiceStatus _scanServiceStatus = DeviceServiceStatus.init;
+  Future<void>? _initialScan;
+  Future<void>? _scanInFlight;
+  Future<void>? _scanCleanup;
+  Future<void>? _permissionRequest;
+  Map<String, BtDevice>? _passDevices;
 
   //----------------- Onboarding Permissions -----------------
   bool hasBluetoothPermission = false;
@@ -120,6 +140,7 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   }
 
   void updateBluetoothPermission(bool value) {
+    if (_disposed) return;
     hasBluetoothPermission = value;
     notifyListeners();
   }
@@ -226,7 +247,7 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
       // PermissionStatus locationStatus = await Permission.location.request();
       updateBluetoothPermission(bleConnectStatus.isGranted && bleScanStatus.isGranted);
     }
-    notifyListeners();
+    if (!_disposed) notifyListeners();
   }
 
   Future askForNotificationPermissions() async {
@@ -537,13 +558,24 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   // Method to handle taps on devices
   Future<DeviceSelectionOutcome> handleTap(
       {required BtDevice device, required bool isFromOnboarding, VoidCallback? goNext}) async {
+    if (_disposed || isClicked) return DeviceSelectionOutcome.cancelled;
+    final uid = SharedPreferencesUtil().uid;
+    final authorityGeneration = SharedPreferencesUtil().aiConsentAuthorityGeneration;
+    final pause = pauseDeviceDiscovery();
+    final selectionEpoch = _scanEpoch;
+    bool isCurrentSelection() =>
+        !_disposed &&
+        selectionEpoch == _scanEpoch &&
+        uid == SharedPreferencesUtil().uid &&
+        authorityGeneration == SharedPreferencesUtil().aiConsentAuthorityGeneration;
     try {
-      if (isClicked) return DeviceSelectionOutcome.cancelled;
       isClicked = true;
-
       connectingToDeviceId = device.id;
       notifyListeners();
+      await pause;
+      if (!isCurrentSelection()) return DeviceSelectionOutcome.cancelled;
       final connected = await deviceProvider!.connectDeviceForCurrentUser(device);
+      if (!isCurrentSelection()) return DeviceSelectionOutcome.cancelled;
       if (!connected) {
         if (deviceProvider!.lastConnectionConsentRequired) {
           isClicked = false;
@@ -564,10 +596,14 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
       connectingToDeviceId = null; // Reset the connecting device
       notifyListeners();
       await Future.delayed(const Duration(seconds: 2));
+      if (!isCurrentSelection()) return DeviceSelectionOutcome.cancelled;
       if (!isConnected || connectedDevice == null) throw StateError('Connected device was unavailable after pairing');
       SharedPreferencesUtil().deviceName = connectedDevice.name;
       foundDevicesMap.clear();
       deviceList.clear();
+      // Successful selection transfers connection ownership out of picker cleanup.
+      _pickerOwner = null;
+      _pickerService = null;
       if (isFromOnboarding) {
         goNext!();
       } else {
@@ -575,6 +611,7 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
       }
       return DeviceSelectionOutcome.connected;
     } catch (e) {
+      if (!isCurrentSelection()) return DeviceSelectionOutcome.cancelled;
       Logger.debug('Error connecting to device: $e');
       isClicked = false; // Allow clicks again after finishing the operation
       connectingToDeviceId = null; // Reset the connecting device
@@ -602,39 +639,178 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
     notifyListeners();
   }
 
-  Future<void> scanDevices({required VoidCallback onShowDialog}) async {
-    await deviceProvider?.prepareForExplicitDeviceSelection();
-
-    if (SharedPreferencesUtil().btDevice.id.isEmpty) {
-      // it means the device has been unpaired
-      deviceAlreadyUnpaired();
+  Future<void> scanDevices({required VoidCallback onShowDialog, Object? owner, bool Function()? canScan}) {
+    if (_disposed) return Future.value();
+    final pickerOwner = owner ?? this;
+    if (_discoveryActive && identical(_pickerOwner, pickerOwner)) {
+      return _scanService == null ? (_initialScan ?? Future.value()) : _runDiscoveryPass(_scanEpoch);
     }
-
-    // check if bluetooth is enabled on both platforms
-    if (!hasBluetoothPermission) {
-      await askForBluetoothPermissions();
-      if (!hasBluetoothPermission) {
-        onShowDialog();
-      }
-    }
-
-    _didNotMakeItTimer?.cancel();
+    final cleanup = cancelDeviceDiscovery();
+    _pickerOwner = pickerOwner;
+    _discoveryActive = true;
+    _scanUid = SharedPreferencesUtil().uid;
+    _scanAuthorityGeneration = SharedPreferencesUtil().aiConsentAuthorityGeneration;
+    _canScan = canScan;
+    final epoch = _scanEpoch;
+    foundDevicesMap.clear();
+    deviceList = [];
     enableInstructions = false;
-    _didNotMakeItTimer = Timer(const Duration(seconds: 10), () {
-      enableInstructions = true;
-      notifyListeners();
-    });
+    discoveryFailed = false;
+    notifyListeners();
+    return _initialScan = _startPickerDiscovery(epoch, cleanup, onShowDialog);
+  }
 
-    _deviceService.subscribe(this, this);
-    await _deviceService.discover();
+  bool _isScanCurrent(int epoch) =>
+      !_disposed &&
+      _discoveryActive &&
+      epoch == _scanEpoch &&
+      _scanUid == SharedPreferencesUtil().uid &&
+      _scanAuthorityGeneration == SharedPreferencesUtil().aiConsentAuthorityGeneration &&
+      (_canScan?.call() ?? true);
+
+  Future<void> _startPickerDiscovery(int epoch, Future<void> cleanup, VoidCallback onShowDialog) async {
+    try {
+      await cleanup;
+      await _scanInFlight;
+      if (!_isScanCurrent(epoch)) return;
+      await deviceProvider?.prepareForExplicitDeviceSelection();
+      if (!_isScanCurrent(epoch)) return;
+      if (SharedPreferencesUtil().btDevice.id.isEmpty) deviceAlreadyUnpaired();
+      if (!hasBluetoothPermission) {
+        final request = _permissionRequest ??= askForBluetoothPermissions().then<void>((_) {});
+        try {
+          await request;
+        } finally {
+          if (identical(_permissionRequest, request)) _permissionRequest = null;
+        }
+        if (!_isScanCurrent(epoch)) return;
+        if (!hasBluetoothPermission) {
+          unawaited(pauseDeviceDiscovery());
+          discoveryFailed = true;
+          enableInstructions = true;
+          notifyListeners();
+          onShowDialog();
+          return;
+        }
+      }
+      if (!_isScanCurrent(epoch)) return;
+      _didNotMakeItTimer = Timer(const Duration(seconds: 10), () {
+        if (!_isScanCurrent(epoch)) return;
+        enableInstructions = true;
+        notifyListeners();
+      });
+      final service = _pickerService = _scanService = _deviceService;
+      _scanServiceStatus = DeviceServiceStatus.ready;
+      final subscription = _scanSubscription = _PickerDiscoverySubscription(this, epoch);
+      service.subscribe(subscription, subscription);
+      if (!_isScanCurrent(epoch)) return;
+      // Upstream's onboarding cadence, without its saved-device auto-connect.
+      _discoveryTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+        if (!_isScanCurrent(epoch)) {
+          unawaited(cancelDeviceDiscovery());
+          return;
+        }
+        unawaited(_runDiscoveryPass(epoch));
+      });
+      await _runDiscoveryPass(epoch);
+    } catch (error) {
+      if (!_isScanCurrent(epoch)) return;
+      unawaited(pauseDeviceDiscovery());
+      discoveryFailed = true;
+      enableInstructions = true;
+      Logger.debug('Picker preparation failed: ${error.runtimeType}');
+      notifyListeners();
+    }
+  }
+
+  Future<void> _runDiscoveryPass(int epoch) async {
+    if (!_isScanCurrent(epoch) || _scanServiceStatus != DeviceServiceStatus.ready) return;
+    if (_scanInFlight != null) return _scanInFlight;
+    discoveryFailed = false;
+    final passDevices = _passDevices = <String, BtDevice>{};
+    final service = _scanService!;
+    final completion = Completer<void>();
+    _scanInFlight = completion.future;
+    try {
+      await service.discover();
+      if (!_isScanCurrent(epoch)) return;
+      _publishPickerDevices(passDevices);
+    } catch (error) {
+      if (_isScanCurrent(epoch)) {
+        Logger.debug('Picker discovery failed: ${error.runtimeType}');
+        unawaited(pauseDeviceDiscovery());
+        discoveryFailed = true;
+        enableInstructions = true;
+        notifyListeners();
+      }
+    } finally {
+      if (identical(_passDevices, passDevices)) _passDevices = null;
+      if (identical(_scanInFlight, completion.future)) _scanInFlight = null;
+      completion.complete();
+    }
+  }
+
+  Future<void> pauseDeviceDiscovery() => _stopPickerDiscovery(releaseOwner: false);
+
+  bool isDiscoveringFor(Object owner) => _discoveryActive && identical(owner, _pickerOwner);
+
+  Object? discoveryLeaseFor(Object owner) => isDiscoveringFor(owner) ? _scanSubscription : null;
+
+  Future<void> cancelDeviceDiscovery({Object? owner}) {
+    if (owner != null && !identical(owner, _pickerOwner)) return Future.value();
+    return _stopPickerDiscovery(releaseOwner: true);
+  }
+
+  Future<void> _stopPickerDiscovery({required bool releaseOwner}) {
+    _scanEpoch++;
+    _discoveryActive = false;
+    _discoveryTimer?.cancel();
+    _discoveryTimer = null;
+    _didNotMakeItTimer?.cancel();
+    _didNotMakeItTimer = null;
+    final service = _scanService ?? _pickerService;
+    final subscription = _scanSubscription;
+    _scanService = null;
+    _scanSubscription = null;
+    _passDevices = null;
+    _initialScan = null;
+    _canScan = null;
+    if (subscription != null) service?.unsubscribe(subscription);
+    if (releaseOwner) {
+      _pickerOwner = null;
+      _pickerService = null;
+      isClicked = false;
+      connectingToDeviceId = null;
+    }
+    if (service == null) return _scanCleanup ?? Future.value();
+    return _scanCleanup = service.cancelPendingConnection().catchError((Object error) {
+      Logger.debug('Picker cancellation failed: ${error.runtimeType}');
+    });
+  }
+
+  void _cancelDiscoveryForAuthorityChange() {
+    if (_disposed || _pickerOwner == null) return;
+    unawaited(cancelDeviceDiscovery());
+    foundDevicesMap.clear();
+    deviceList = [];
+    discoveryFailed = true;
+    enableInstructions = true;
+    notifyListeners();
+  }
+
+  void _publishPickerDevices(Map<String, BtDevice> devices) {
+    foundDevicesMap = Map.of(devices);
+    deviceList = devices.values.toList();
+    if (deviceList.isNotEmpty) _didNotMakeItTimer?.cancel();
+    notifyListeners();
   }
 
   @override
   void dispose() {
+    unawaited(cancelDeviceDiscovery());
+    _disposed = true;
+    SharedPreferencesUtil.aiConsentAuthorityChanges.removeListener(_cancelDiscoveryForAuthorityChange);
     deviceProvider?.removeListener(_handleDeviceProviderChanged);
-    _didNotMakeItTimer?.cancel();
-    unawaited(_deviceService.cancelPendingConnection());
-    _deviceService.unsubscribe(this);
     super.dispose();
   }
 
@@ -645,32 +821,35 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
 
   @override
   void onDevices(List<BtDevice> devices) {
-    List<BtDevice> foundDevices = devices;
-
-    // Update foundDevicesMap with new devices and remove the ones not found anymore
-    Map<String, BtDevice> updatedDevicesMap = {};
-    for (final device in foundDevices) {
-      // If it's a new device, add it to the map. If it already exists, this will just update the entry.
-      updatedDevicesMap[device.id] = device;
-    }
-
-    // Remove devices that are no longer found
-    foundDevicesMap.keys.where((id) => !updatedDevicesMap.containsKey(id)).toList().forEach(foundDevicesMap.remove);
-
-    // Merge the new devices into the current map to maintain order
-    foundDevicesMap.addAll(updatedDevicesMap);
-
-    // Convert the values of the map back to a list
-    List<BtDevice> orderedDevices = foundDevicesMap.values.toList();
-    if (orderedDevices.isNotEmpty) {
-      deviceList = orderedDevices;
-      notifyListeners();
-      _didNotMakeItTimer?.cancel();
+    if (!_isScanCurrent(_scanEpoch)) return;
+    for (final device in devices) {
+      if (device.id.isNotEmpty) _passDevices?[device.id] = device;
     }
   }
 
   @override
   void onStatusChanged(DeviceServiceStatus status) {
-    // TODO: implement onStatusChanged
+    _scanServiceStatus = status;
+    if (status == DeviceServiceStatus.stop) _cancelDiscoveryForAuthorityChange();
   }
+}
+
+class _PickerDiscoverySubscription implements IDeviceServiceSubsciption {
+  const _PickerDiscoverySubscription(this.provider, this.epoch);
+
+  final OnboardingProvider provider;
+  final int epoch;
+
+  @override
+  void onDevices(List<BtDevice> devices) {
+    if (provider._isScanCurrent(epoch)) provider.onDevices(devices);
+  }
+
+  @override
+  void onStatusChanged(DeviceServiceStatus status) {
+    if (provider._isScanCurrent(epoch)) provider.onStatusChanged(status);
+  }
+
+  @override
+  void onDeviceConnectionStateChanged(String deviceId, DeviceConnectionState state, {int? connectionGeneration}) {}
 }

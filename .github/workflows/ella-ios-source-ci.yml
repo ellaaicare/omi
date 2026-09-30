@@ -636,7 +636,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          expected_issue_test_count=76
+          expected_issue_test_count=77
           issue_test_count="$(find test/ella test/backend test/pages/onboarding/ella -type f -name '*_test.dart' | sort | tee /tmp/ella-issue-tests.txt | wc -l | tr -d ' ')"
           if [[ "$issue_test_count" -ne "$expected_issue_test_count" ]]; then
             cat /tmp/ella-issue-tests.txt
@@ -644,7 +644,7 @@ jobs:
             exit 1
           fi
 
-          expected_app_test_count=121
+          expected_app_test_count=122
           all_app_test_count="$(find test -type f -name '*_test.dart' | sort | tee /tmp/ella-all-app-tests.txt | wc -l | tr -d ' ')"
           if [[ "$all_app_test_count" -ne "$expected_app_test_count" ]]; then
             cat /tmp/ella-all-app-tests.txt
@@ -705,9 +705,10 @@ jobs:
             test/ella/services/voice_session_startup_guard_test.dart
             test/ella/widgets/v2v_fallback_dialog_test.dart
             test/pages/conversation_detail/type_correction_terminal_receipt_test.dart
+            test/ella/upstream_capture/picker_periodic_discovery_test.dart
           )
 
-          expected_focused_test_count=28
+          expected_focused_test_count=29
           if [[ "${#focused_tests[@]}" -ne "$expected_focused_test_count" ]]; then
             echo "Focused source test manifest count drifted." >&2
             exit 1

@@ -1,7 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -11,6 +15,7 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/env/env.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/pages/conversation_detail/widgets.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
@@ -54,7 +59,13 @@ class _TestEnv implements EnvFields {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  setUpAll(() => Env.init(_TestEnv()));
+  setUpAll(() async {
+    Env.init(_TestEnv());
+    await (FontLoader('Manrope')
+          ..addFont(rootBundle.load('assets/fonts/Manrope-400.ttf'))
+          ..addFont(rootBundle.load('assets/fonts/Manrope-700.ttf')))
+        .load();
+  });
 
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
@@ -75,6 +86,65 @@ void main() {
       scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
       scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
     );
+  });
+
+  testWidgets('correction sheet scrolls above keyboard at 3x text on a small phone', (tester) async {
+    tester.view.physicalSize = const Size(320, 568);
+    tester.view.devicePixelRatio = 1;
+    tester.view.viewInsets = const FakeViewPadding(bottom: 260);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetViewInsets);
+    const captureKey = ValueKey('correction-layout-capture');
+    await tester.pumpWidget(RepaintBoundary(
+        key: captureKey,
+        child: MaterialApp(
+          theme: ellaThemeData(),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(textScaler: const TextScaler.linear(3)),
+            child: child!,
+          ),
+          home: Scaffold(
+              body: Builder(
+                  builder: (context) => TextButton(
+                        onPressed: () => showModalBottomSheet<void>(
+                          context: context,
+                          isScrollControlled: true,
+                          builder: (_) => CorrectSummarySheet(
+                            conversation: ServerConversation(
+                                id: 'layout-memory',
+                                createdAt: DateTime.utc(2026),
+                                structured: Structured('Memory', 'Overview')),
+                            appSummary: 'Overview',
+                          ),
+                        ),
+                        child: const Text('Open'),
+                      ))),
+        )));
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    await tester.ensureVisible(find.byKey(const ValueKey('type-correction-submit')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('type-correction-submit')).hitTestable(), findsOneWidget);
+    final submit = tester.widget<FilledButton>(find.byKey(const ValueKey('type-correction-submit')));
+    final foreground = submit.style!.foregroundColor!.resolve({})!;
+    final background = submit.style!.backgroundColor!.resolve({})!;
+    final luminances = [foreground.computeLuminance(), background.computeLuminance()]..sort();
+    expect((luminances.last + 0.05) / (luminances.first + 0.05), greaterThanOrEqualTo(4.5));
+    expect(tester.getSize(find.byKey(const ValueKey('type-correction-submit'))).height, greaterThanOrEqualTo(48));
+    expect(tester.takeException(), isNull);
+    if (const bool.fromEnvironment('ELLA_CAPTURE_TEST_LAYOUT')) {
+      final boundary = tester.renderObject<RenderRepaintBoundary>(find.byKey(captureKey));
+      await tester.runAsync(() async {
+        final image = await boundary.toImage();
+        final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+        await File('/tmp/ella-correction-submit-3x.png').writeAsBytes(bytes!.buffer.asUint8List());
+        image.dispose();
+      });
+    }
   });
 
   testWidgets('test_type_correction_202_acknowledges_queue_immediately_and_polls_without_logging_body', (tester) async {

@@ -2126,6 +2126,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final navHeight = BottomNavBar.navigationHeight(context);
     final upstreamDockBuilder = EllaCaptureHost.homeCaptureDockBuilder;
     final upstreamDockActive = upstreamDockBuilder != null;
+    final inlineBackToRecent = upstreamDockActive && (dockTextScale >= 2 || MediaQuery.sizeOf(context).width < 360);
     final dockClearance =
         todayDockScrollClearance(textScale: dockTextScale, safeBottom: dockSafeBottom, navHeight: navHeight);
     _scheduleHomeMemoryPrefetch();
@@ -2262,6 +2263,22 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                       ),
                     ),
                   ),
+                if (_showBackToRecent && inlineBackToRecent)
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(EllaSizes.screenPadding, 16, EllaSizes.screenPadding, 0),
+                      child: TextButton.icon(
+                        key: const Key('home-back-to-recent'),
+                        onPressed: _scrollHomeBackToRecent,
+                        style: TextButton.styleFrom(
+                          foregroundColor: EllaColors.tealDeep,
+                          minimumSize: const Size(48, 48),
+                        ),
+                        icon: const Icon(Icons.arrow_upward_rounded),
+                        label: Text(context.l10n.backToRecentMemories),
+                      ),
+                    ),
+                  ),
                 SliverToBoxAdapter(
                   child: SizedBox(
                     height: upstreamDockActive ? navHeight + dockSafeBottom + 24 : dockClearance,
@@ -2270,7 +2287,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               ],
             ),
           ),
-          if (_showBackToRecent)
+          if (_showBackToRecent && !inlineBackToRecent)
             Positioned(
               right: 22,
               bottom: upstreamDockActive
@@ -2386,17 +2403,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       return [
         SliverPadding(
           padding: const EdgeInsets.fromLTRB(EllaSizes.screenPadding, 18, EllaSizes.screenPadding, 0),
-          sliver: SliverGrid(
-            gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-              maxCrossAxisExtent: 430,
-              mainAxisSpacing: EllaSizes.cardGap,
-              crossAxisSpacing: EllaSizes.cardGap,
-              childAspectRatio: 0.86,
-            ),
-            delegate: SliverChildBuilderDelegate(
-              (context, index) => _homeMemoryCard(memories[index], automaticRepairMemoryIds: automaticRepairMemoryIds),
-              childCount: memories.length,
-            ),
+          sliver: memoryGalleryFeedSliver(
+            layout: _homeMemoryLayout,
+            itemCount: memories.length,
+            itemBuilder: (context, index) =>
+                _homeMemoryCard(memories[index], automaticRepairMemoryIds: automaticRepairMemoryIds),
           ),
         ),
       ];
@@ -2406,7 +2417,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         padding: const EdgeInsets.fromLTRB(EllaSizes.screenPadding, 18, EllaSizes.screenPadding, 0),
         sliver: SliverList.separated(
           itemCount: memories.length,
-          separatorBuilder: (_, __) => const SizedBox(height: EllaSizes.cardGap),
+          separatorBuilder: (_, __) => const Divider(height: 1, color: EllaColors.cardDeep),
           itemBuilder: (context, index) =>
               _homeMemoryCard(memories[index], automaticRepairMemoryIds: automaticRepairMemoryIds),
         ),
@@ -2636,26 +2647,22 @@ class _HomeMemoryToolbar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final stacked = MediaQuery.textScalerOf(context).scale(1) >= 2 || MediaQuery.sizeOf(context).width < 360;
+    final heading = Semantics(header: true, child: Text(context.l10n.memories, style: EllaTextStyles.eyebrow));
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (stacked) heading,
         Row(
           children: [
-            Expanded(
-              child: Semantics(header: true, child: Text(context.l10n.memories, style: EllaTextStyles.eyebrow)),
-            ),
+            if (stacked) const Spacer() else Expanded(child: heading),
             PopupMenuButton<MemoryGalleryLayout>(
               key: const Key('home-memory-layout-menu'),
               tooltip: context.l10n.memoryGalleryView,
-              initialValue: layout,
+              initialValue: effectiveMemoryGalleryLayout(context, layout),
               icon: const Icon(Icons.view_quilt_outlined, color: EllaColors.tealDeep),
               onSelected: onLayoutSelected,
-              itemBuilder: (context) => [
-                PopupMenuItem(value: MemoryGalleryLayout.journal, child: Text(context.l10n.memoryGalleryJournal)),
-                PopupMenuItem(value: MemoryGalleryLayout.grid, child: Text(context.l10n.memoryGalleryGrid)),
-                PopupMenuItem(value: MemoryGalleryLayout.list, child: Text(context.l10n.memoryGalleryList)),
-                PopupMenuItem(value: MemoryGalleryLayout.days, child: Text(context.l10n.memoryGalleryDays)),
-              ],
+              itemBuilder: memoryGalleryLayoutMenu,
             ),
             PopupMenuButton<MemoryGallerySort>(
               key: const Key('home-memory-sort-menu'),
@@ -2672,43 +2679,44 @@ class _HomeMemoryToolbar extends StatelessWidget {
                 ),
               ],
             ),
-            IconButton(
-              key: const Key('home-memory-artwork-style-menu'),
-              tooltip: artworkPreferences?.releaseEnabled == true
-                  ? context.l10n.memoryArtworkStudio
-                  : context.l10n.memoryArtworkStyleUnavailable,
-              onPressed: artworkPreferences?.releaseEnabled == true ? onArtworkStudio : null,
-              icon: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  Icon(
-                    Icons.palette_outlined,
-                    color: artworkPreferences?.releaseEnabled == true ? EllaColors.tealDeep : EllaColors.inkSoft,
-                  ),
-                  if (artworkStyleSaving || artworkBackfillState == _ArtworkBackfillUiState.running)
-                    const Positioned(
-                      right: -4,
-                      bottom: -4,
-                      child: SizedBox(
-                        key: Key('home-artwork-progress-indicator'),
-                        width: 12,
-                        height: 12,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
-                      ),
-                    )
-                  else if (artworkBackfillState == _ArtworkBackfillUiState.needsAttention)
-                    const Positioned(
-                      right: -3,
-                      bottom: -3,
-                      child: DecoratedBox(
-                        key: Key('home-artwork-attention-indicator'),
-                        decoration: BoxDecoration(color: EllaColors.warning, shape: BoxShape.circle),
-                        child: SizedBox(width: 9, height: 9),
-                      ),
+            if (artworkPreferences?.releaseEnabled == true)
+              IconButton(
+                key: const Key('home-memory-artwork-style-menu'),
+                tooltip: artworkPreferences?.releaseEnabled == true
+                    ? context.l10n.memoryArtworkStudio
+                    : context.l10n.memoryArtworkStyleUnavailable,
+                onPressed: artworkPreferences?.releaseEnabled == true ? onArtworkStudio : null,
+                icon: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    Icon(
+                      Icons.palette_outlined,
+                      color: artworkPreferences?.releaseEnabled == true ? EllaColors.tealDeep : EllaColors.inkSoft,
                     ),
-                ],
+                    if (artworkStyleSaving || artworkBackfillState == _ArtworkBackfillUiState.running)
+                      const Positioned(
+                        right: -4,
+                        bottom: -4,
+                        child: SizedBox(
+                          key: Key('home-artwork-progress-indicator'),
+                          width: 12,
+                          height: 12,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                        ),
+                      )
+                    else if (artworkBackfillState == _ArtworkBackfillUiState.needsAttention)
+                      const Positioned(
+                        right: -3,
+                        bottom: -3,
+                        child: DecoratedBox(
+                          key: Key('home-artwork-attention-indicator'),
+                          decoration: BoxDecoration(color: EllaColors.warning, shape: BoxShape.circle),
+                          child: SizedBox(width: 9, height: 9),
+                        ),
+                      ),
+                  ],
+                ),
               ),
-            ),
           ],
         ),
         if (_showQueueSummary) ...[
