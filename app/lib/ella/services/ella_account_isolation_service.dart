@@ -143,7 +143,11 @@ class EllaAccountIsolationService {
   }
 
   Future<void> resumeAfterVerifiedProvisioning() async {
-    if (EllaCaptureHost.legacyCaptureSuppressed) return;
-    if (ServiceManager.isInitialized) await ServiceManager.instance().start();
+    if (!ServiceManager.isInitialized) return;
+    if (EllaCaptureHost.legacyCaptureSuppressed) {
+      ServiceManager.instance().device.start();
+      return;
+    }
+    await ServiceManager.instance().start();
   }
 }

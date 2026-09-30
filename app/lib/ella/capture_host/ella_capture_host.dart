@@ -1,5 +1,7 @@
 import 'package:flutter/widgets.dart';
 
+import 'package:omi/services/devices.dart';
+
 /// Flag-OFF-safe registration point between the legacy Ella app graph and the
 /// optional upstream capture graph (ellaaicare/ella-ai#1280).
 ///
@@ -72,6 +74,8 @@ class EllaCaptureHost {
 
   static Widget Function(BuildContext context)? _homeCaptureDockBuilder;
 
+  static IDeviceService? _deviceService;
+
   static Future<EllaNativeDiscoveryDiagnostics> Function()? _nativeDiscoveryDiagnosticsLoader;
 
   /// True only in the flag-ON graph after the upstream capture entry point
@@ -85,17 +89,28 @@ class EllaCaptureHost {
   /// Home capture dock supplied by the upstream capture graph, or null (legacy dock).
   static Widget Function(BuildContext context)? get homeCaptureDockBuilder => _homeCaptureDockBuilder;
 
+  /// Flag-ON adapter that routes legacy picker/settings call sites through the
+  /// same upstream hardware authority as the capture dock.
+  static IDeviceService? get deviceService => _deviceService;
+
   /// Loader for cross-layer native BLE discovery diagnostics, supplied by the
   /// upstream capture graph, or null when that graph isn't active (flag OFF,
   /// or not yet booted) — [DeviceDiagnosticsPage] treats null as "unavailable".
   static Future<EllaNativeDiscoveryDiagnostics> Function()? get nativeDiscoveryDiagnosticsLoader =>
       _nativeDiscoveryDiagnosticsLoader;
 
-  static void installUpstreamCapture({required Widget Function(BuildContext context) homeCaptureDockBuilder}) {
+  static void installUpstreamCapture({
+    required Widget Function(BuildContext context) homeCaptureDockBuilder,
+    IDeviceService? deviceService,
+  }) {
     if (!upstreamCaptureDefine) {
       throw StateError('ELLA_UPSTREAM_CAPTURE_ENABLED is not set; refusing to install the upstream capture graph');
     }
+    if (deviceService == null) {
+      throw StateError('The upstream capture graph requires a shared device-service adapter');
+    }
     _homeCaptureDockBuilder = homeCaptureDockBuilder;
+    _deviceService = deviceService;
   }
 
   static void installNativeDiscoveryDiagnosticsLoader(Future<EllaNativeDiscoveryDiagnostics> Function() loader) {
@@ -103,13 +118,18 @@ class EllaCaptureHost {
   }
 
   @visibleForTesting
-  static void installForTesting({required Widget Function(BuildContext context) homeCaptureDockBuilder}) {
+  static void installForTesting({
+    required Widget Function(BuildContext context) homeCaptureDockBuilder,
+    IDeviceService? deviceService,
+  }) {
     _homeCaptureDockBuilder = homeCaptureDockBuilder;
+    _deviceService = deviceService;
   }
 
   @visibleForTesting
   static void resetForTesting() {
     _homeCaptureDockBuilder = null;
+    _deviceService = null;
     _nativeDiscoveryDiagnosticsLoader = null;
   }
 }

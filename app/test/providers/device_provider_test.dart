@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:connectivity_plus_platform_interface/connectivity_plus_platform_interface.dart';
 import 'package:flutter/services.dart';
@@ -13,6 +14,7 @@ import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/devices/device_connection.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart' as upstream;
 import 'package:omi/utils/enums.dart';
 
 class _TestConnectivityPlatform extends ConnectivityPlatform {
@@ -218,6 +220,60 @@ void main() {
 
     await provider.getDeviceInfo();
     expect(provider.pairedDevice, isNull, reason: 'storage sentinels are not Home presentation state');
+  });
+
+  test('Home accepts a remembered necklace written with the upstream stable device type', () async {
+    final upstreamDevice = upstream.BtDevice(
+      name: 'Friend',
+      id: 'remembered-necklace',
+      type: upstream.DeviceType.friendPendant,
+      rssi: -30,
+    );
+    SharedPreferences.setMockInitialValues({
+      'uid': 'home-user',
+      'btDevice': jsonEncode(upstreamDevice.toJson()),
+      'btDeviceOwnerBinding': '',
+    });
+    await SharedPreferencesUtil.init();
+    final provider = DeviceProvider(
+      deviceService: _FakeDeviceService(DeviceServiceStatus.ready),
+      automaticallyReconnectOnReady: false,
+    );
+    addTearDown(provider.dispose);
+
+    final candidate = provider.legacyUntrustedDeviceCandidate;
+
+    expect(candidate?.id, upstreamDevice.id);
+    expect(candidate?.type, DeviceType.friendPendant);
+  });
+
+  test('legacy integer remembered-device types remain readable', () async {
+    final legacyDevice = BtDevice(name: 'Friend', id: 'legacy-necklace', type: DeviceType.friendPendant, rssi: -30);
+    SharedPreferences.setMockInitialValues({'btDevice': jsonEncode(legacyDevice.toJson())});
+    await SharedPreferencesUtil.init();
+
+    final restored = SharedPreferencesUtil().btDevice;
+
+    expect(restored.id, legacyDevice.id);
+    expect(restored.type, DeviceType.friendPendant);
+  });
+
+  test('unknown or malformed remembered devices fail closed without clearing owner binding', () async {
+    SharedPreferences.setMockInitialValues({
+      'btDevice': jsonEncode({'name': 'Future device', 'id': 'future-device', 'type': 'futureDevice', 'rssi': -30}),
+      'btDeviceOwnerBinding': 'current-user',
+    });
+    await SharedPreferencesUtil.init();
+
+    final preferences = SharedPreferencesUtil();
+
+    expect(preferences.btDevice.id, isEmpty);
+    expect(preferences.btDeviceOwnerBinding, 'current-user');
+
+    await preferences.saveString('btDevice', '{not-json');
+
+    expect(preferences.btDevice.id, isEmpty);
+    expect(preferences.btDeviceOwnerBinding, 'current-user');
   });
 
   test('a legacy UID plus consent-profile binding migrates to UID-only ownership', () async {

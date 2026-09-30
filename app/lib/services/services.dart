@@ -40,12 +40,12 @@ class ServiceManager {
   static ServiceManager? _instance;
   bool _started = false;
 
-  static ServiceManager _create() {
+  static ServiceManager _create({IDeviceService? deviceService}) {
     ServiceManager sm = ServiceManager();
     // Manual iOS recording is a foreground interaction; other platforms keep
     // the background runner used for long-lived capture.
     sm._mic = selectMicRecorderService(isIOS: Platform.isIOS);
-    sm._device = DeviceService();
+    sm._device = deviceService ?? DeviceService();
     sm._socket = SocketServicePool();
     sm._wal = WalService();
     if (PlatformService.isDesktop) {
@@ -80,11 +80,11 @@ class ServiceManager {
     return _systemAudio;
   }
 
-  static Future<void> init() async {
+  static Future<void> init({IDeviceService? deviceService}) async {
     if (_instance != null) {
       throw Exception("Service manager is initiated");
     }
-    _instance = ServiceManager._create();
+    _instance = ServiceManager._create(deviceService: deviceService);
     await ConnectivityService().init();
   }
 

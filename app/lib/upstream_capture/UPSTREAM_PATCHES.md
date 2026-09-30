@@ -119,6 +119,15 @@ constructor seams from Ella adapter code outside the vendored trees:
 | WAL upload (disk → network) | `RecordingTransferCoordinator.configure(autoUploadEnabled: ...)` | `EllaUpstreamCaptureRuntime.configureTransferCoordinator` |
 | Native batch writers (no Dart frames) | upstream `CapturePolicy` latch (`SharedPreferencesUtil.setCaptureMuted` → `com.omi/capture_policy` → `CaptureAdmissionPolicy`) | `EllaUpstreamCaptureRuntime._stopUpstreamCapture` |
 
+Flag-ON legacy UI routes use the same rule. `EllaUpstreamDeviceServiceAdapter` is fork-side adapter
+code outside `lib/upstream_capture/**`; it delegates the existing picker/settings `IDeviceService`
+contract to upstream `DeviceService`, and delegates explicit owner-bound connect/disconnect to
+`EllaUpstreamCaptureRuntime`. Dock-origin connections are projected back into the legacy Home and
+Settings presentation only when the upstream authority owner matches the current account; account
+stop and stale wrappers are fenced at this adapter boundary. It adds no scanner, reconnect policy,
+or vendored-source divergence, so there is no additional upstream patch artifact or blob exception
+to record for this routing fix.
+
 ### Two: native discovery still finds no necklace on build 872 (RUN-010) — diagnostics, not a naming-fallback bug
 
 **Symptom** (ellaaicare/ella-ai#1280 RUN-010, ellaaicare/ella-ai#1287): build 872 — which already

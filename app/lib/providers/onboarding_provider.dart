@@ -592,6 +592,7 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   @override
   void dispose() {
     _didNotMakeItTimer.cancel();
+    unawaited(_deviceService.cancelPendingConnection());
     _deviceService.unsubscribe(this);
     super.dispose();
   }

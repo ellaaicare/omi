@@ -77,6 +77,12 @@ files use the fork's `AuthService`, which gained upstream's typed `refreshIdToke
   vendored stack like upstream `main.dart`, builds upstream `CaptureProvider` through its
   constructor seams, configures upstream `RecordingTransferCoordinator`, and on revocation mutes
   upstream's `CapturePolicy` latch and stops capture through upstream's public API).
+* `lib/ella/upstream_capture/ella_upstream_device_service_adapter.dart` — translates the legacy
+  picker/settings service contract onto upstream `DeviceService`, so flag-ON discovery,
+  owner-bound connect, cancellation, disconnect, battery, and device controls use the same native
+  hardware authority as the dock. It projects dock-origin connections only for the bound owner,
+  retains the active disconnect target independently of pairing preferences, and fences stale
+  wrappers/lifecycle completions. It does not implement scanning or reconnect policy.
 * `lib/ella/upstream_capture/ella_upstream_capture_dock.dart` — flag-ON home dock.
 * `ios/Runner/EllaUpstreamCaptureNativeHost.swift` — flag-ON native registration.
 

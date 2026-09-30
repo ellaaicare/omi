@@ -150,8 +150,15 @@ class SharedPreferencesUtil {
 
   BtDevice get btDevice {
     final String device = getString('btDevice');
-    if (device.isEmpty) return BtDevice(id: '', name: '', type: DeviceType.omi, rssi: 0);
-    return BtDevice.fromJson(jsonDecode(device));
+    if (device.isEmpty) return BtDevice.empty();
+    try {
+      final decoded = jsonDecode(device);
+      if (decoded is Map<String, dynamic>) return BtDevice.fromJson(decoded);
+      Logger.debug('Stored device is not a JSON object: ${decoded.runtimeType}');
+    } catch (e) {
+      Logger.debug('Error decoding stored device: ${e.runtimeType}');
+    }
+    return BtDevice.empty();
   }
 
   set deviceName(String value) => saveString('deviceName', value);

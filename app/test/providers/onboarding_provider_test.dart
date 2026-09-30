@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -7,6 +9,7 @@ import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/onboarding_provider.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/devices/device_connection.dart';
+import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart' as upstream;
 
 class _NoopDeviceService implements IDeviceService {
   _NoopDeviceService({this.discoveredDevices = const [], this.calls});
@@ -128,5 +131,28 @@ void main() {
     expect(onboarding.deviceList.map((device) => device.id), [necklace.id]);
     expect(service.ensureConnectionCalls, 0);
     expect(device.presentationIsConnected, isFalse);
+  });
+
+  test('Connect reaches discovery after the upstream writer stores a stable device type', () async {
+    final upstreamDevice = upstream.BtDevice(
+      name: 'Friend',
+      id: 'remembered-necklace',
+      type: upstream.DeviceType.friendPendant,
+      rssi: -30,
+    );
+    SharedPreferences.setMockInitialValues({'btDevice': jsonEncode(upstreamDevice.toJson())});
+    await SharedPreferencesUtil.init();
+    final calls = <String>[];
+    final service = _NoopDeviceService(calls: calls);
+    final device = _OrderedScanDeviceProvider(service, calls);
+    final onboarding = OnboardingProvider(deviceService: service)
+      ..setDeviceProvider(device)
+      ..hasBluetoothPermission = true;
+    addTearDown(device.dispose);
+    addTearDown(onboarding.dispose);
+
+    await onboarding.scanDevices(onShowDialog: () {});
+
+    expect(calls, ['prepare', 'discover']);
   });
 }

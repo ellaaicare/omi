@@ -208,6 +208,7 @@ class EllaUpstreamCaptureRuntime {
   final ValueNotifier<EllaCaptureRevocation?> lastRevocation = ValueNotifier<EllaCaptureRevocation?>(null);
 
   CaptureProvider? get provider => _provider;
+  String? get boundOwnerId => authority.boundUid;
 
   /// Boots the vendored stack once; later calls join the same future.
   Future<CaptureProvider> ensureBooted() => _boot ??= _bootProduction();
@@ -471,12 +472,12 @@ class EllaUpstreamCaptureRuntime {
     return true;
   }
 
-  Future<void> disconnectNecklace() async {
+  Future<void> disconnectNecklace({String? deviceId}) async {
     final provider = _provider;
     if (provider == null) return;
-    final deviceId = upstream.SharedPreferencesUtil().btDevice.id;
+    final targetDeviceId = deviceId ?? upstream.SharedPreferencesUtil().btDevice.id;
     await provider.stopStreamDeviceRecording(cleanDevice: true);
-    if (deviceId.isNotEmpty) await ServiceManager.instance().device.disconnectDevice(deviceId);
+    if (targetDeviceId.isNotEmpty) await ServiceManager.instance().device.disconnectDevice(targetDeviceId);
   }
 
   /// Revokes the bound session (sign-out / account transition from the legacy host).

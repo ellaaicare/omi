@@ -31,6 +31,28 @@ abstract class IDeviceService {
   Future<void> disconnectDevice();
 }
 
+/// Result returned by a device service whose transport and capture lifecycle
+/// are owned outside the legacy provider graph.
+class AuthoritativeDeviceConnection {
+  const AuthoritativeDeviceConnection({required this.device, required this.connectionGeneration});
+
+  final BtDevice device;
+  final int connectionGeneration;
+}
+
+/// Optional extension implemented by the flag-ON upstream device adapter.
+///
+/// The ordinary Ella picker still owns account/pairing presentation, while the
+/// adapter owns the physical connection and starts capture through the
+/// upstream runtime's consent-gated API.
+abstract interface class IAuthoritativeDeviceService {
+  Future<AuthoritativeDeviceConnection?> connectForCurrentUser(String ownerId, BtDevice device);
+
+  /// Owner bound by the authoritative capture runtime for this live device.
+  /// Null means a legacy presentation callback must fail closed.
+  String? ownerBindingForConnection(String deviceId);
+}
+
 enum DeviceServiceStatus { init, ready, scanning, stop }
 
 enum DeviceConnectionState { connected, disconnected }
