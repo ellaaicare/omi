@@ -15,6 +15,7 @@ import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/capture_host/ella_capture_host.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
@@ -2972,6 +2973,42 @@ void main() {
     expect(find.text('Settings'), findsOneWidget);
     expect(tester.takeException(), isNull);
     semantics.dispose();
+  });
+
+  testWidgets('upstream dock stays above Home navigation and scrolls at large text', (tester) async {
+    EllaCaptureHost.installForTesting(
+      homeCaptureDockBuilder: (_) => const SizedBox(
+        key: Key('test-upstream-dock'),
+        height: 600,
+        child: Align(alignment: Alignment.bottomCenter, child: Text('Dock controls')),
+      ),
+    );
+    addTearDown(EllaCaptureHost.resetForTesting);
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      viewport: const Size(320, 568),
+      textScaler: const TextScaler.linear(3),
+    );
+    addTearDown(harness.dispose);
+
+    final dockViewport = find.byType(TodayCaptureDockViewport);
+    expect(dockViewport, findsOneWidget);
+    expect(tester.getTopLeft(dockViewport).dy, greaterThanOrEqualTo(47));
+    expect(tester.getBottomLeft(dockViewport).dy, lessThanOrEqualTo(568 - EllaSizes.navBarHeight - 34));
+
+    final dockScroll = find.byKey(const Key('home-capture-dock-scroll'));
+    expect(dockScroll, findsOneWidget);
+    expect(
+        tester
+            .state<ScrollableState>(find.descendant(of: dockScroll, matching: find.byType(Scrollable)))
+            .position
+            .maxScrollExtent,
+        greaterThan(0));
+    await tester.drag(dockScroll, const Offset(0, -500));
+    await tester.pump();
+    expect(find.text('Dock controls'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('a successful 200 ON write is never rolled back by a native start failure', (tester) async {

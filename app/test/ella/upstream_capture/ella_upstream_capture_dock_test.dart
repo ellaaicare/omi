@@ -625,7 +625,7 @@ void main() {
     await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
     await tester.pump();
     await tester.pump();
-    expect(find.text('Whispers are off. Spoken responses are paused.'), findsOneWidget);
+    expect(find.text('Whispers are off. Spoken responses are paused.'), findsNothing);
     expect(find.text('Whispers was saved off, but spoken playback could not stop. Try again.'), findsOneWidget);
 
     stopShouldFail = false;
@@ -716,6 +716,20 @@ void main() {
     expect(find.text("Ella couldn't connect to transcription, so recording didn't start."), findsOneWidget);
   });
 
+  testWidgets('a delayed successful start does not erase an earlier protocol rejection', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final result = Completer<EllaCaptureStartOutcome>();
+    fixture.runtime.startPhoneOverride = (_) => result.future;
+    await fixture.pump(tester);
+    await tester.tap(find.byKey(const Key('upstream-capture-record-phone')));
+    await tester.pump();
+    fixture.runtime.protocolUnavailable.value = true;
+    result.complete(EllaCaptureStartOutcome.started);
+    await tester.pump();
+    await tester.pump();
+    expect(find.text("Ella couldn't connect to transcription, so recording didn't start."), findsOneWidget);
+  });
+
   testWidgets('full Home-style stack keeps live dock controls reachable at 320x568 and 3x text', (tester) async {
     final fixture = await _DockFixture.create(tester);
     const screen = Size(320, 568);
@@ -755,7 +769,16 @@ void main() {
             bottom: EllaSizes.navBarHeight + 16,
             child: TodayCaptureDockViewport(
               maxHeight: maxDockHeight,
-              child: EllaUpstreamCaptureDock(runtime: fixture.runtime, authenticatedUid: () => _uid),
+              child: EllaUpstreamCaptureDock(
+                runtime: fixture.runtime,
+                authenticatedUid: () => _uid,
+                guardianAvailability: () => true,
+                guardianModeLoader: () async => const GuardianModeInfo(
+                  currentMode: GuardianModeKey.custom,
+                  twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
+                ),
+                guardianNativeState: () => guardian_native.GuardianModeState.active,
+              ),
             ),
           ),
           const Positioned(
@@ -781,20 +804,35 @@ void main() {
       'upstream-capture-stop-phone',
       'upstream-capture-disconnect-necklace',
       'upstream-capture-view-transcript',
-      'upstream-capture-finish'
+      'upstream-capture-finish',
+      'upstream-capture-whispers-switch',
     ]) {
       final finder = find.byKey(Key(key));
-      if (finder.evaluate().isEmpty) continue;
+      if (key == 'upstream-capture-stop-phone') continue;
+      expect(finder, findsOneWidget);
       await tester.ensureVisible(finder);
       await tester.pump();
       final rect = tester.getRect(finder);
       expect(rect.top, greaterThanOrEqualTo(dock.top));
       expect(rect.bottom, lessThanOrEqualTo(dock.bottom));
       expect(rect.height, greaterThanOrEqualTo(EllaSizes.minTouchTarget));
+      expect(finder.hitTestable(), findsOneWidget);
+      if (key == 'upstream-capture-view-transcript') {
+        await expectLater(
+          find.byType(MaterialApp),
+          matchesGoldenFile('goldens/ella_upstream_capture_home_live_transcript_320x568_scale3.png'),
+        );
+      }
+      if (key == 'upstream-capture-finish') {
+        await expectLater(
+          find.byType(MaterialApp),
+          matchesGoldenFile('goldens/ella_upstream_capture_home_live_scrolled_320x568_scale3.png'),
+        );
+      }
     }
     await expectLater(
       find.byType(MaterialApp),
-      matchesGoldenFile('goldens/ella_upstream_capture_home_live_scrolled_320x568_scale3.png'),
+      matchesGoldenFile('goldens/ella_upstream_capture_home_live_whispers_320x568_scale3.png'),
     );
     expect(tester.takeException(), isNull);
   });

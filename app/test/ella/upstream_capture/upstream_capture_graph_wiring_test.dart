@@ -152,8 +152,10 @@ void main() {
       EllaCaptureHost.installForTesting(homeCaptureDockBuilder: (_) => const SizedBox());
       expect(EllaCaptureHost.upstreamCaptureActive, isTrue);
       expect(EllaCaptureHost.legacyCaptureSuppressed, isTrue);
-      expect(_read('lib/pages/home/today_page.dart'),
-          contains('EllaCaptureHost.homeCaptureDockBuilder?.call(context) ??'));
+      final home = _read('lib/pages/home/today_page.dart');
+      expect(home, contains('final upstreamDockBuilder = EllaCaptureHost.homeCaptureDockBuilder;'));
+      expect(home, contains('TodayCaptureDockViewport(maxHeight: dockMaxHeight, child: upstreamDockBuilder(context))'));
+      expect(home, contains(': TodayRecordMomentControl('));
       expect(_read('lib/providers/device_provider.dart'),
           contains('if (EllaCaptureHost.legacyCaptureSuppressed) return;'));
       expect(_read('lib/main.dart'), contains('if (!EllaCaptureHost.legacyCaptureSuppressed) {'));

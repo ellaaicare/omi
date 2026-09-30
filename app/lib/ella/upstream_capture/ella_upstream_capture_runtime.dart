@@ -42,6 +42,43 @@ enum EllaCaptureStartOutcome {
   unavailable,
 }
 
+/// Recovers the one upstream partial-init state: ServiceManager installs its
+/// singleton before awaiting ConnectivityService.init().
+class EllaUpstreamServicesBootstrap {
+  EllaUpstreamServicesBootstrap({
+    Future<void> Function()? initializeManager,
+    bool Function()? managerExists,
+    Future<void> Function()? initializeConnectivity,
+  })  : _initializeManager = initializeManager ?? ServiceManager.init,
+        _managerExists = managerExists ?? _productionManagerExists,
+        _initializeConnectivity = initializeConnectivity ?? ConnectivityService().init;
+
+  final Future<void> Function() _initializeManager;
+  final bool Function() _managerExists;
+  final Future<void> Function() _initializeConnectivity;
+  bool _initialized = false;
+
+  static bool _productionManagerExists() {
+    try {
+      ServiceManager.instance();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> ensureInitialized() async {
+    if (_initialized) return;
+    try {
+      await _initializeManager();
+    } catch (_) {
+      if (!_managerExists()) rethrow;
+      await _initializeConnectivity();
+    }
+    _initialized = true;
+  }
+}
+
 /// Upstream [upstream_env.EnvFields] backed by the fork's already-initialized
 /// Ella [ella_env.Env], so the vendored stack talks to the Ella backend with the
 /// Ella flavor's configuration (no second source of endpoints or keys).
@@ -207,9 +244,11 @@ class EllaUpstreamCaptureRuntime {
     EllaCaptureProtocolSocket? Function()? activeProtocolSocket,
     EllaCaptureFinalizationRequest? finalizationRequest,
     @visibleForTesting Future<CaptureProvider> Function()? bootForTesting,
+    @visibleForTesting Future<DeviceConnection?> Function(String deviceId)? connectDeviceForTesting,
   })  : _activeProtocolSocket = activeProtocolSocket,
         _finalizationRequest = finalizationRequest,
-        _bootForTesting = bootForTesting;
+        _bootForTesting = bootForTesting,
+        _connectDeviceForTesting = connectDeviceForTesting;
 
   static EllaUpstreamCaptureRuntime? _instance;
 
@@ -217,12 +256,13 @@ class EllaUpstreamCaptureRuntime {
       _instance ??= EllaUpstreamCaptureRuntime(authority: EllaCaptureAuthority());
 
   static bool _upstreamEnvInitialized = false;
-  static bool _upstreamServicesInitialized = false;
+  static final EllaUpstreamServicesBootstrap _servicesBootstrap = EllaUpstreamServicesBootstrap();
 
   final EllaCaptureAuthority authority;
   final EllaCaptureProtocolSocket? Function()? _activeProtocolSocket;
   final EllaCaptureFinalizationRequest? _finalizationRequest;
   final Future<CaptureProvider> Function()? _bootForTesting;
+  final Future<DeviceConnection?> Function(String deviceId)? _connectDeviceForTesting;
   CaptureProvider? _provider;
   EllaCaptureProtocolSocket? _protocolSocket;
   EllaCaptureProtocolSocket? _finalizationSocket;
@@ -256,10 +296,7 @@ class EllaUpstreamCaptureRuntime {
       secureStorage: const EllaIsolatedSecureStorage(),
       mirrorNativeAuthToken: false,
     );
-    if (!_upstreamServicesInitialized) {
-      await ServiceManager.init();
-      _upstreamServicesInitialized = true;
-    }
+    await _servicesBootstrap.ensureInitialized();
     // Upstream main.dart registers the native BLE bridge here.
     BleFlutterApi.setUp(BleBridge.instance);
     DebugLogManager.recordBleFlutterApiSetUp();
@@ -547,13 +584,17 @@ class EllaUpstreamCaptureRuntime {
           ? EllaCaptureStartOutcome.consentRequired
           : EllaCaptureStartOutcome.unavailable;
     }
-    if (!authority.isCurrentOwner(uid) || authority.boundUid != uid || !authority.hasCurrentAuthority) {
+    final boundEpoch = authority.bindingEpoch;
+    bool originIsCurrent() =>
+        authority.bindingEpoch == boundEpoch &&
+        authority.isCurrentOwner(uid) &&
+        authority.boundUid == uid &&
+        authority.hasCurrentAuthority;
+    if (!originIsCurrent()) {
       return EllaCaptureStartOutcome.unavailable;
     }
     await provider.streamRecording();
-    return authority.isCurrentOwner(uid) && authority.boundUid == uid && authority.hasCurrentAuthority
-        ? EllaCaptureStartOutcome.started
-        : EllaCaptureStartOutcome.unavailable;
+    return originIsCurrent() ? EllaCaptureStartOutcome.started : EllaCaptureStartOutcome.unavailable;
   }
 
   Future<void> stopPhoneCapture() async {
@@ -598,20 +639,25 @@ class EllaUpstreamCaptureRuntime {
           ? EllaCaptureStartOutcome.consentRequired
           : EllaCaptureStartOutcome.unavailable;
     }
-    if (!authority.isCurrentOwner(uid) || authority.boundUid != uid || !authority.hasCurrentAuthority) {
+    final boundEpoch = authority.bindingEpoch;
+    bool originIsCurrent() =>
+        authority.bindingEpoch == boundEpoch &&
+        authority.isCurrentOwner(uid) &&
+        authority.boundUid == uid &&
+        authority.hasCurrentAuthority;
+    if (!originIsCurrent()) {
       return EllaCaptureStartOutcome.unavailable;
     }
-    final connection = await ServiceManager.instance().device.ensureConnection(device.id, force: true);
+    final connection = await (_connectDeviceForTesting?.call(device.id) ??
+        ServiceManager.instance().device.ensureConnection(device.id, force: true));
     if (connection == null) return EllaCaptureStartOutcome.unavailable;
-    if (!authority.isCurrentOwner(uid) || authority.boundUid != uid || !authority.hasCurrentAuthority) {
+    if (!originIsCurrent()) {
       return EllaCaptureStartOutcome.unavailable;
     }
     upstream.SharedPreferencesUtil().btDevice = device;
     provider.updateRecordingDevice(device);
     await provider.streamDeviceRecording(device: device);
-    return authority.isCurrentOwner(uid) && authority.boundUid == uid && authority.hasCurrentAuthority
-        ? EllaCaptureStartOutcome.started
-        : EllaCaptureStartOutcome.unavailable;
+    return originIsCurrent() ? EllaCaptureStartOutcome.started : EllaCaptureStartOutcome.unavailable;
   }
 
   Future<void> disconnectNecklace({String? deviceId}) async {

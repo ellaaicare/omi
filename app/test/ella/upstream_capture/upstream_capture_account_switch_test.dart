@@ -9,8 +9,10 @@ import 'package:omi/ella/upstream_capture/ella_capture_authority.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
 import 'package:omi/upstream_capture/backend/preferences.dart' as upstream;
 import 'package:omi/upstream_capture/providers/capture_provider.dart';
+import 'package:omi/upstream_capture/services/devices/connectors/device_connection.dart';
 import 'package:omi/upstream_capture/utils/enums.dart';
 
+import '../../upstream_capture/support/capture/scripted_device_connection.dart';
 import 'support/ella_upstream_capture_harness.dart';
 
 void main() {
@@ -44,6 +46,31 @@ void main() {
     expect(await pendingNecklace, EllaCaptureStartOutcome.unavailable);
     expect(h.authority.isBound, isFalse);
     expect(h.hostApi.nativeRecording, isFalse);
+  });
+
+  test('late necklace connection cannot persist or record under a same-UID replacement binding', () async {
+    expect(await h.bind(accountA), isTrue);
+    final originalEpoch = h.authority.bindingEpoch;
+    final connection = Completer<DeviceConnection?>();
+    final connectionStarted = Completer<void>();
+    final runtime = EllaUpstreamCaptureRuntime(
+      authority: h.authority,
+      bootForTesting: () async => h.provider,
+      connectDeviceForTesting: (_) {
+        connectionStarted.complete();
+        return connection.future;
+      },
+    );
+    final pending = runtime.connectNecklace(accountA, EllaUpstreamCaptureHarness.pendant);
+    await connectionStarted.future;
+    await h.runtime.releaseAccount();
+    expect(await h.bind(accountA), isTrue);
+    expect(h.authority.bindingEpoch, isNot(originalEpoch));
+    connection.complete(ScriptedDeviceConnection());
+
+    expect(await pending, EllaCaptureStartOutcome.unavailable);
+    expect(upstream.SharedPreferencesUtil().btDevice.id, isNot(EllaUpstreamCaptureHarness.pendant.id));
+    expect(h.provider.recordingState, isNot(RecordingState.deviceRecord));
   });
 
   test('real runtime retries a rejected boot while concurrent callers share each attempt', () async {

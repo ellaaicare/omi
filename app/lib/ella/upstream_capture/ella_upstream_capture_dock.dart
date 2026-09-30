@@ -331,7 +331,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
       case EllaCaptureStartOutcome.started:
         if (mounted) {
           setState(() {
-            _message = null;
+            if (!_runtime.protocolUnavailable.value) _message = null;
             _necklaceRetryAvailable = false;
           });
         }
@@ -506,6 +506,35 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
         textAlign: TextAlign.center,
       );
 
+  Widget _secondaryAction(
+    BuildContext context, {
+    required Key key,
+    required FocusNode focusNode,
+    required VoidCallback? onPressed,
+    required IconData icon,
+    required String label,
+    required String compactLabel,
+  }) {
+    final text = _actionLabel(context, label, compactLabel: compactLabel);
+    if (MediaQuery.textScalerOf(context).scale(1) >= 3) {
+      return OutlinedButton(
+        key: key,
+        focusNode: focusNode,
+        style: _DockButtonStyles.secondary(context),
+        onPressed: onPressed,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [Icon(icon), const SizedBox(height: 4), text]),
+      );
+    }
+    return OutlinedButton.icon(
+      key: key,
+      focusNode: focusNode,
+      style: _DockButtonStyles.secondary(context),
+      onPressed: onPressed,
+      icon: Icon(icon),
+      label: text,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final provider = _provider;
@@ -572,6 +601,13 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
               if (status != null && status.isNotEmpty) ...[
                 _DockStatus(
                   label: status,
+                  visualLabel: MediaQuery.textScalerOf(context).scale(1) >= 3 && !_protocolMessageActive
+                      ? (necklaceLive
+                          ? context.l10n.todayNecklace
+                          : phoneLive
+                              ? context.l10n.phone
+                              : null)
+                      : null,
                   detail: detail,
                   active: live || _busy || initializing,
                   live: live,
@@ -610,10 +646,10 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
                         ),
                       ),
                 second: necklaceBound
-                    ? OutlinedButton.icon(
+                    ? _secondaryAction(
+                        context,
                         key: const Key('upstream-capture-disconnect-necklace'),
                         focusNode: _connectFocusNode,
-                        style: _DockButtonStyles.secondary(context),
                         onPressed: _busy
                             ? null
                             : () => _run(
@@ -621,40 +657,33 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
                                   _runtime.disconnectNecklace,
                                   failureMessage: context.l10n.upstreamCaptureConnectionFailed,
                                 ),
-                        icon: const Icon(Icons.bluetooth_disabled_rounded),
-                        label: _actionLabel(
-                          context,
-                          context.l10n.upstreamCaptureDisconnectNecklace,
-                          compactLabel: context.l10n.disconnect,
-                        ),
+                        icon: Icons.bluetooth_disabled_rounded,
+                        label: context.l10n.upstreamCaptureDisconnectNecklace,
+                        compactLabel: context.l10n.disconnect,
                       )
-                    : OutlinedButton.icon(
+                    : _secondaryAction(
+                        context,
                         key: const Key('upstream-capture-connect-necklace'),
                         focusNode: _connectFocusNode,
-                        style: _DockButtonStyles.secondary(context),
                         onPressed: _busy ? null : _connectNecklace,
-                        icon: Icon(_necklaceRetryAvailable ? Icons.refresh_rounded : Icons.bluetooth_rounded),
-                        label: _actionLabel(
-                          context,
-                          _necklaceRetryAvailable ? context.l10n.retry : context.l10n.upstreamCaptureConnectNecklace,
-                          compactLabel: _necklaceRetryAvailable ? context.l10n.retry : context.l10n.connect,
-                        ),
+                        icon: _necklaceRetryAvailable ? Icons.refresh_rounded : Icons.bluetooth_rounded,
+                        label:
+                            _necklaceRetryAvailable ? context.l10n.retry : context.l10n.upstreamCaptureConnectNecklace,
+                        compactLabel: _necklaceRetryAvailable ? context.l10n.retry : context.l10n.connect,
                       ),
               ),
               if (live) ...[
                 const SizedBox(height: 8),
                 _AdaptiveActionPair(
-                  first: OutlinedButton.icon(
+                  first: _secondaryAction(
+                    context,
                     key: const Key('upstream-capture-view-transcript'),
                     focusNode: _transcriptFocusNode,
-                    style: _DockButtonStyles.secondary(context),
                     onPressed: () => _openTranscript(provider, necklace: necklaceLive),
-                    icon: const Icon(Icons.subject_rounded),
-                    label: _actionLabel(
-                      context,
-                      necklaceLive ? context.l10n.todayDockTranscriptNecklace : context.l10n.todayDockTranscriptPhone,
-                      compactLabel: context.l10n.transcript,
-                    ),
+                    icon: Icons.subject_rounded,
+                    label:
+                        necklaceLive ? context.l10n.todayDockTranscriptNecklace : context.l10n.todayDockTranscriptPhone,
+                    compactLabel: context.l10n.transcript,
                   ),
                   second: FilledButton.icon(
                     key: const Key('upstream-capture-finish'),
@@ -698,9 +727,16 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
 }
 
 class _DockStatus extends StatelessWidget {
-  const _DockStatus({required this.label, required this.active, required this.error, this.detail, this.live = false});
+  const _DockStatus(
+      {required this.label,
+      required this.active,
+      required this.error,
+      this.detail,
+      this.visualLabel,
+      this.live = false});
 
   final String label;
+  final String? visualLabel;
   final String? detail;
   final bool active;
   final bool live;
@@ -733,8 +769,9 @@ class _DockStatus extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  label,
+                  visualLabel ?? label,
                   key: const Key('upstream-capture-status'),
+                  semanticsLabel: label,
                   style: EllaTextStyles.body.copyWith(
                     color: error ? EllaColors.error : EllaColors.ink,
                     fontWeight: FontWeight.w700,
@@ -912,7 +949,11 @@ class _WhispersRow extends StatelessWidget {
   String _description(BuildContext context) {
     if (busy) return context.l10n.upstreamCaptureSavingWhispers;
     if (!verified) return context.l10n.todayWhispersUnavailable;
-    if (!enabled) return context.l10n.upstreamCaptureWhispersOffDescription;
+    if (!enabled) {
+      return playback == _WhisperPlaybackState.error
+          ? context.l10n.upstreamCaptureWhispersPlaybackStopFailed
+          : context.l10n.upstreamCaptureWhispersOffDescription;
+    }
     return playback == _WhisperPlaybackState.ready
         ? context.l10n.todayWhispersOnDescription
         : context.l10n.upstreamCaptureWhispersPlaybackUnavailable;
@@ -973,7 +1014,7 @@ class _WhispersRow extends StatelessWidget {
         ),
         const SizedBox(height: 2),
         Text(_description(context), style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft)),
-        if (error != null) ...[
+        if (error != null && error != _description(context)) ...[
           const SizedBox(height: 4),
           Text(
             error!,
@@ -985,7 +1026,8 @@ class _WhispersRow extends StatelessWidget {
     );
     return Semantics(
       container: true,
-      label: '${context.l10n.todayWhispersTitle}. ${_description(context)}${error == null ? '' : '. $error'}',
+      label:
+          '${context.l10n.todayWhispersTitle}. ${_description(context)}${error == null || error == _description(context) ? '' : '. $error'}',
       child: textScale >= 2
           ? Column(
               key: const Key('upstream-capture-whispers-stacked'),
@@ -1070,7 +1112,13 @@ class _DockSurface extends StatelessWidget {
       elevation: 6,
       shadowColor: EllaColors.ink.withValues(alpha: 0.16),
       borderRadius: BorderRadius.circular(24),
-      child: Padding(padding: const EdgeInsets.all(16), child: child),
+      child: Padding(
+        padding: EdgeInsets.symmetric(
+          horizontal: MediaQuery.textScalerOf(context).scale(1) >= 3 ? 8 : 16,
+          vertical: 16,
+        ),
+        child: child,
+      ),
     );
   }
 }

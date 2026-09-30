@@ -2062,11 +2062,13 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final viewportHeight = MediaQuery.sizeOf(context).height - MediaQuery.paddingOf(context).top;
     final dockTextScale = MediaQuery.textScalerOf(context).scale(1);
     final dockSafeBottom = MediaQuery.paddingOf(context).bottom;
+    final upstreamDockBuilder = EllaCaptureHost.homeCaptureDockBuilder;
+    final upstreamDockActive = upstreamDockBuilder != null;
     final dockMaxHeight = todayDockReservedHeight(dockTextScale, viewportHeight: viewportHeight);
     final dockClearance = todayDockScrollClearance(
       textScale: dockTextScale,
       safeBottom: dockSafeBottom,
-      viewportHeight: viewportHeight,
+      viewportHeight: upstreamDockActive ? viewportHeight : null,
     );
     _scheduleHomeMemoryPrefetch();
 
@@ -2207,7 +2209,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               bottom: todayBackToRecentBottomOffset(
                 textScale: dockTextScale,
                 safeBottom: dockSafeBottom,
-                viewportHeight: viewportHeight,
+                viewportHeight: upstreamDockActive ? viewportHeight : null,
               ),
               child: FloatingActionButton.small(
                 key: const Key('home-back-to-recent'),
@@ -2222,10 +2224,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
             left: 14,
             right: 14,
             bottom: EllaSizes.navBarHeight + MediaQuery.paddingOf(context).bottom + 16,
-            child: TodayCaptureDockViewport(
-              maxHeight: dockMaxHeight,
-              child: EllaCaptureHost.homeCaptureDockBuilder?.call(context) ??
-                  TodayRecordMomentControl(
+            child: upstreamDockBuilder != null
+                ? TodayCaptureDockViewport(maxHeight: dockMaxHeight, child: upstreamDockBuilder(context))
+                : TodayRecordMomentControl(
                     selectedSource: selectedCaptureSource,
                     activeSource: activeCaptureSource,
                     externalCaptureFinalizationPending: captureFinalizationPending,
@@ -2258,7 +2259,6 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                       legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
                     ),
                   ),
-            ),
           ),
         ],
       ),
@@ -2412,7 +2412,10 @@ double todayDockScrollClearance({required double textScale, required double safe
     EllaSizes.navBarHeight + safeBottom + todayDockReservedHeight(textScale, viewportHeight: viewportHeight) + 24;
 
 double todayBackToRecentBottomOffset({required double textScale, required double safeBottom, double? viewportHeight}) =>
-    EllaSizes.navBarHeight + safeBottom + todayDockReservedHeight(textScale, viewportHeight: viewportHeight) + 32;
+    EllaSizes.navBarHeight +
+    safeBottom +
+    todayDockReservedHeight(textScale, viewportHeight: viewportHeight) +
+    (viewportHeight == null ? 16 : 32);
 
 class TodayCaptureDockViewport extends StatefulWidget {
   const TodayCaptureDockViewport({super.key, required this.maxHeight, required this.child});
