@@ -23,6 +23,7 @@ import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
 import 'package:omi/ella/services/memory_artwork_api.dart';
+import 'package:omi/ella/services/guardian_mode_service.dart' as guardian_native;
 import 'package:omi/ella/services/today_card_repository.dart';
 import 'package:omi/ella/widgets/memory_artwork_image.dart';
 import 'package:omi/l10n/app_localizations.dart';
@@ -78,6 +79,7 @@ void main() {
   });
 
   setUp(() async {
+    guardian_native.GuardianModeService.whisperStateFence.resetForTesting();
     SharedPreferences.setMockInitialValues({'givenName': 'Margaret'});
     await SharedPreferencesUtil.init();
   });
@@ -3168,6 +3170,7 @@ void main() {
         runtime: runtime,
         authenticatedUid: () => 'test-user',
         guardianAvailability: () => true,
+        guardianAuthorityProvider: () => _MutableExactAuthority('test-user'),
         guardianModeLoader: () async => const GuardianModeInfo(
           currentMode: GuardianModeKey.custom,
           twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
@@ -3234,6 +3237,191 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  for (final staleRead in ['on', 'off', 'null', 'error', 'retry']) {
+    testWidgets('cross-surface stale Today $staleRead read cannot override a newer dock choice', (tester) async {
+      await upstream.SharedPreferencesUtil.init();
+      final delayedRead = Completer<GuardianModeInfo?>();
+      final starts = <String>[];
+      final stops = <String>[];
+      final initialOn = staleRead == 'on' || staleRead == 'retry';
+      final whisperAuthority = _MutableExactAuthority('test-user');
+      var nativeOn = initialOn;
+      final connectivity = StreamController<bool>.broadcast();
+      final capture = upstream_capture.CaptureProvider(
+        connectivity: upstream_capture.CaptureConnectivityBoundary(
+          initiallyConnected: true,
+          changes: connectivity.stream,
+          isConnected: () => true,
+        ),
+        bleListeners: const _IntegratedHomeDockBleListeners(),
+        preferences: upstream.SharedPreferencesUtil(),
+      );
+      final authority = EllaCaptureAuthority(authenticatedUid: () => 'test-user', sessionStartAllowed: (_) => false);
+      final runtime = _IntegratedHomeDockRuntime(authority: authority, capture: capture);
+      EllaCaptureHost.installForTesting(
+        homeCaptureDockBuilder: (_) => EllaUpstreamCaptureDock(
+          runtime: runtime,
+          authenticatedUid: () => 'test-user',
+          guardianAvailability: () => true,
+          guardianAuthorityProvider: () => whisperAuthority,
+          guardianModeLoader: () async => GuardianModeInfo(
+            currentMode: initialOn ? GuardianModeKey.custom : GuardianModeKey.off,
+            twoTierState: initialOn ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
+          ),
+          guardianModeSetter: (_) async => true,
+          guardianNativeStart: () async {
+            starts.add('dock');
+            nativeOn = true;
+          },
+          guardianNativeStop: () async {
+            stops.add('dock');
+            nativeOn = false;
+          },
+          guardianNativeState: () =>
+              nativeOn ? guardian_native.GuardianModeState.active : guardian_native.GuardianModeState.idle,
+        ),
+      );
+      addTearDown(() async {
+        EllaCaptureHost.resetForTesting();
+        await tester.pumpWidget(const SizedBox.shrink());
+        capture.dispose();
+        authority.dispose();
+        await connectivity.close();
+      });
+      final harness = await _pumpHome(
+        tester,
+        conversations: const [],
+        guardianAvailability: () => true,
+        guardianAuthorityProvider: () => whisperAuthority,
+        guardianModeLoader: () => staleRead == 'retry'
+            ? Future.value(const GuardianModeInfo(
+                currentMode: GuardianModeKey.custom,
+                twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
+              ))
+            : delayedRead.future,
+        guardianNativeStart: () async {
+          starts.add('today');
+          if (staleRead == 'retry') throw StateError('native unavailable');
+          nativeOn = true;
+        },
+        guardianNativeStop: () async {
+          stops.add('today');
+          nativeOn = false;
+        },
+      );
+      addTearDown(harness.dispose);
+      expect(tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch'))).onChanged, isNotNull);
+      final beforeChoice = guardian_native.GuardianModeService.whisperStateFence.revision;
+      await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(guardian_native.GuardianModeService.whisperStateFence.revision, beforeChoice + 1);
+      expect(guardian_native.GuardianModeService.whisperStateFence.choicePending, isFalse);
+      expect(nativeOn, !initialOn);
+      if (staleRead == 'retry') {
+        await tester.pump(const Duration(seconds: 15));
+      } else if (staleRead == 'error') {
+        delayedRead.completeError(StateError('read unavailable'));
+      } else {
+        delayedRead.complete(staleRead == 'null'
+            ? null
+            : GuardianModeInfo(
+                currentMode: initialOn ? GuardianModeKey.custom : GuardianModeKey.off,
+                twoTierState:
+                    initialOn ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
+              ));
+      }
+      await tester.pump();
+      await tester.pump();
+      expect(starts.where((source) => source == 'today'), staleRead == 'retry' ? ['today'] : isEmpty);
+      expect(stops.where((source) => source == 'today'), isEmpty);
+      expect(nativeOn, !initialOn);
+      expect(tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch'))).value, !initialOn);
+    });
+  }
+
+  testWidgets('a Today read requested during a pending ON cannot cancel its completion', (tester) async {
+    final save = Completer<bool>();
+    var reads = 0;
+    var starts = 0;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      guardianAvailability: () => true,
+      guardianModeLoader: () async {
+        reads++;
+        return const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState());
+      },
+      guardianModeSetter: (_) => save.future,
+      guardianNativeStart: () async => starts++,
+      guardianNativeStop: () async {},
+    );
+    addTearDown(harness.dispose);
+    await tester.tap(find.byKey(const Key('today-dock-status')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.descendant(
+      of: find.byKey(const Key('guardian-whispers-control')),
+      matching: find.byType(Switch),
+    ));
+    await tester.pump();
+    final before = reads;
+    tester.state<TodayPageState>(find.byType(TodayPage)).didChangeAppLifecycleState(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(reads, before);
+    save.complete(true);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(starts, 1);
+    expect(guardian_native.GuardianModeService.whisperStateFence.choicePending, isFalse);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot!.enabled, isTrue);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot!.nativeReconciled, isTrue);
+  });
+
+  testWidgets('a failed Today write after authority drift cannot roll back or read another account', (tester) async {
+    final save = Completer<bool>();
+    final authority = _MutableExactAuthority('test-user');
+    var reads = 0;
+    var writes = 0;
+    var nativeCalls = 0;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      guardianAvailability: () => true,
+      guardianAuthorityProvider: () => authority,
+      guardianModeLoader: () async {
+        reads++;
+        return const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState());
+      },
+      guardianModeSetter: (_) {
+        writes++;
+        return save.future;
+      },
+      guardianNativeStart: () async => nativeCalls++,
+      guardianNativeStop: () async => nativeCalls++,
+    );
+    addTearDown(harness.dispose);
+    await tester.tap(find.byKey(const Key('today-dock-status')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.descendant(
+      of: find.byKey(const Key('guardian-whispers-control')),
+      matching: find.byType(Switch),
+    ));
+    await tester.pump();
+    final previousReads = reads;
+    final previousNativeCalls = nativeCalls;
+    authority.current = false;
+    guardian_native.GuardianModeService.whisperStateFence.invalidate();
+    save.complete(false);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(writes, 1);
+    expect(reads, previousReads);
+    expect(nativeCalls, previousNativeCalls);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot, isNull);
+  });
+
   testWidgets('a successful 200 ON write is never rolled back by a native start failure', (tester) async {
     var guardianModeWrites = 0;
     GuardianModeState? writtenGuardianState;
@@ -3272,7 +3460,9 @@ void main() {
     await tester.tap(find.byKey(const Key('today-dock-status')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 250));
-    expect(find.text('Whispers are on'), findsOneWidget);
+    final l10n = AppLocalizations.of(tester.element(find.byType(TodayPage)));
+    expect(find.text(l10n.todayWhispersUnavailable), findsOneWidget);
+    expect(find.byKey(const Key('guardian-whispers-reconnecting-hint')), findsOneWidget);
     expect(
       tester
           .widget<Switch>(
@@ -3998,6 +4188,7 @@ Future<_HomeHarness> _pumpHome(
   GuardianModeSetter? guardianModeSetter,
   GuardianNativeLifecycle? guardianNativeStart,
   GuardianNativeLifecycle? guardianNativeStop,
+  guardian_native.GuardianWhisperAuthorityProvider? guardianAuthorityProvider,
 }) async {
   tester.view.physicalSize = viewport;
   tester.view.devicePixelRatio = 1;
@@ -4074,6 +4265,7 @@ Future<_HomeHarness> _pumpHome(
                   todayCardAuthorityChanges: authorityChanges,
                   todayCardTalkRouteOpener: todayCardTalkRouteOpener,
                   guardianAvailability: guardianAvailability ?? () => false,
+                  guardianAuthorityProvider: guardianAuthorityProvider ?? () => _MutableExactAuthority('test-user'),
                   guardianModeLoader: guardianModeLoader,
                   guardianModeSetter: guardianModeSetter,
                   guardianNativeStart: guardianNativeStart,

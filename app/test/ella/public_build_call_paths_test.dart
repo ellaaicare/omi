@@ -52,6 +52,7 @@ import 'package:omi/providers/voice_recorder_provider.dart';
 import 'package:omi/services/notifications.dart';
 import 'package:omi/services/notifications/ella_notification_handler.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/ella_pilot_locale_policy.dart';
 import 'package:omi/widgets/bottom_nav_bar.dart';
 
@@ -65,6 +66,15 @@ class _NonlinearNavigationTextScaler extends TextScaler {
 
   @override
   double get textScaleFactor => 3;
+}
+
+class _GuardianFixtureAuthority implements ExactAccountAuthorityVerifier {
+  _GuardianFixtureAuthority(this.uid, this.current);
+  @override
+  final String uid;
+  final bool Function() current;
+  @override
+  bool isExactCurrent() => current();
 }
 
 class _TestConnectivityPlatform extends ConnectivityPlatform {
@@ -181,6 +191,7 @@ void main() {
   });
 
   setUp(() async {
+    GuardianModeService.whisperStateFence.resetForTesting();
     SharedPreferences.setMockInitialValues({});
     await SharedPreferencesUtil.init();
     NotificationUtil.debugNavigationDispatcher = null;
@@ -482,6 +493,10 @@ void main() {
                   todayCardAuthoritySnapshotProvider: () => authoritySnapshot,
                   todayCardAuthorityChanges: authorityChanges,
                   guardianAvailability: () => guardianAvailable,
+                  guardianAuthorityProvider: () {
+                    final captured = authoritySnapshot;
+                    return _GuardianFixtureAuthority(captured.uid, () => authoritySnapshot == captured);
+                  },
                   guardianModeLoader: () async {
                     guardianModeReads++;
                     return guardianReadbackSucceeds

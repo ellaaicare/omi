@@ -23,6 +23,7 @@ import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/onboarding_provider.dart';
 import 'package:omi/services/devices.dart' as legacy_service;
 import 'package:omi/services/devices/device_connection.dart' as legacy_connection;
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/device.dart';
 import 'package:omi/upstream_capture/backend/preferences.dart' as upstream;
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart';
@@ -40,6 +41,15 @@ final _pickerNecklace =
     legacy_device.BtDevice(id: 'necklace-a', name: 'Compass', type: legacy_device.DeviceType.fieldy, rssi: -40);
 final _pickerFriend =
     legacy_device.BtDevice(id: 'friend-a', name: 'Friend', type: legacy_device.DeviceType.friendPendant, rssi: -40);
+
+class _WhisperTestAuthority implements ExactAccountAuthorityVerifier {
+  _WhisperTestAuthority(this.uid, this.current);
+  @override
+  final String uid;
+  final bool Function() current;
+  @override
+  bool isExactCurrent() => current();
+}
 
 class _PickerService implements legacy_service.IDeviceService {
   _PickerService(this.devices);
@@ -213,6 +223,7 @@ class _DockFixture {
     GuardianNativeLifecycle? guardianNativeStop,
     GuardianNativeStateReader? guardianNativeState,
     Stream<guardian_native.GuardianModeState>? guardianNativeStates,
+    guardian_native.GuardianWhisperAuthorityProvider? guardianAuthorityProvider,
     EllaCaptureConsentRequester? consentRequester,
     String Function()? authenticatedUid,
     OnboardingProvider? onboarding,
@@ -241,6 +252,11 @@ class _DockFixture {
                     authenticatedUid: authenticatedUid ?? () => _uid,
                     consentRequester: consentRequester,
                     guardianAvailability: () => guardianAvailable,
+                    guardianAuthorityProvider: guardianAuthorityProvider ??
+                        () {
+                          final uid = authenticatedUid?.call() ?? _uid;
+                          return _WhisperTestAuthority(uid, () => (authenticatedUid?.call() ?? _uid) == uid);
+                        },
                     guardianModeLoader: guardianModeLoader,
                     guardianModeSetter: guardianModeSetter,
                     guardianNativeStart: guardianNativeStart,
@@ -291,6 +307,7 @@ double _contrastRatio(Color foreground, Color background) {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  setUp(() => guardian_native.GuardianModeService.whisperStateFence.resetForTesting());
   registerEllaCaptureProtocolSocketCases();
   registerUpstreamCaptureProtocolV2Cases();
 
@@ -837,6 +854,68 @@ void main() {
     expect(find.text('Whispers are on, but spoken playback is not available right now.'), findsOneWidget);
     expect(find.byKey(const Key('upstream-capture-whispers-retry')), findsOneWidget);
     expect(find.byKey(const Key('upstream-capture-whispers-switch')), findsOneWidget);
+  });
+
+  testWidgets('awaited dock native start cannot publish ready after account profile ABA', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final started = Completer<void>();
+    var epoch = 0;
+    await fixture.pump(
+      tester,
+      guardianAvailable: true,
+      guardianAuthorityProvider: () {
+        final captured = epoch;
+        return _WhisperTestAuthority(_uid, () => epoch == captured);
+      },
+      guardianModeLoader: () async => const GuardianModeInfo(
+        currentMode: GuardianModeKey.off,
+        twoTierState: GuardianModeState(),
+      ),
+      guardianModeSetter: (_) async => true,
+      guardianNativeStart: () => started.future,
+      guardianNativeStop: () async {},
+      guardianNativeState: () => guardian_native.GuardianModeState.idle,
+    );
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+    await tester.pump();
+    epoch++;
+    guardian_native.GuardianModeService.whisperStateFence.invalidate();
+    started.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Whispers are on — Ella can speak up when she can help.'), findsNothing);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot, isNull);
+    expect(find.byKey(const Key('upstream-capture-whispers-switch')), findsNothing);
+    expect(find.byKey(const Key('upstream-capture-whispers-retry')), findsOneWidget);
+  });
+
+  testWidgets('a dock OFF save failure cannot restore native for an authority that changed', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final saved = Completer<bool>();
+    var current = true;
+    var starts = 0;
+    await fixture.pump(
+      tester,
+      guardianAvailable: true,
+      guardianAuthorityProvider: () => _WhisperTestAuthority(_uid, () => current),
+      guardianModeLoader: () async => const GuardianModeInfo(
+        currentMode: GuardianModeKey.custom,
+        twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
+      ),
+      guardianModeSetter: (_) => saved.future,
+      guardianNativeStart: () async => starts++,
+      guardianNativeStop: () async {},
+      guardianNativeState: () => guardian_native.GuardianModeState.active,
+    );
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+    await tester.pump();
+    current = false;
+    guardian_native.GuardianModeService.whisperStateFence.invalidate();
+    saved.complete(false);
+    await tester.pump();
+    await tester.pump();
+    expect(starts, 0);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot, isNull);
   });
 
   testWidgets('Whispers save failure keeps the verified prior state', (tester) async {

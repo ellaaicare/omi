@@ -1,7 +1,136 @@
 import 'dart:async';
 
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ella_public_surface_policy.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
+
+typedef GuardianWhisperAuthorityProvider = ExactAccountAuthorityVerifier? Function();
+typedef GuardianWhisperSnapshot = ({bool enabled, bool modeVerified, bool nativeReconciled});
+
+class GuardianWhisperOperation {
+  GuardianWhisperOperation._(this._fence, this.revision, this.authority);
+
+  final GuardianWhisperStateFence _fence;
+  final int revision;
+  final ExactAccountAuthorityVerifier authority;
+  bool get isCurrent => revision == _fence.revision && authority.isExactCurrent();
+}
+
+/// Ordering and authority fence for the existing native owner, not a second
+/// playback service. Reads remain concurrent; native work and mode writes do not.
+class GuardianWhisperStateFence extends ChangeNotifier {
+  GuardianWhisperStateFence() {
+    SharedPreferencesUtil.aiConsentAuthorityChanges.addListener(invalidate);
+  }
+
+  int revision = 0;
+  bool choicePending = false;
+  GuardianWhisperOperation? _snapshotOperation;
+  GuardianWhisperSnapshot? _snapshot;
+  Future<void>? _inFlight;
+  bool _accountTransitionPending = false;
+  ExactAccountAuthorityVerifier? _outgoingAuthority;
+  int? _outgoingAuthorityGeneration;
+
+  GuardianWhisperSnapshot? get snapshot => _snapshotOperation?.isCurrent == true ? _snapshot : null;
+
+  GuardianWhisperOperation? observe(GuardianWhisperAuthorityProvider authorityProvider) {
+    final authority = authorityProvider();
+    if (authority == null || !_admitAuthority(authority) || choicePending) return null;
+    return GuardianWhisperOperation._(this, revision, authority);
+  }
+
+  GuardianWhisperOperation? choose(GuardianWhisperAuthorityProvider authorityProvider, bool enabled) {
+    final authority = authorityProvider();
+    if (authority == null || !_admitAuthority(authority)) return null;
+    final operation = GuardianWhisperOperation._(this, ++revision, authority);
+    choicePending = true;
+    _snapshotOperation = operation;
+    _snapshot = (enabled: enabled, modeVerified: false, nativeReconciled: false);
+    notifyListeners();
+    return operation;
+  }
+
+  void publish(GuardianWhisperOperation operation, GuardianWhisperSnapshot snapshot) {
+    if (!operation.isCurrent) return;
+    choicePending = false;
+    _snapshotOperation = operation;
+    _snapshot = snapshot;
+    notifyListeners();
+  }
+
+  void invalidate() {
+    revision++;
+    choicePending = _accountTransitionPending;
+    _snapshotOperation = null;
+    _snapshot = null;
+    notifyListeners();
+  }
+
+  bool _admitAuthority(ExactAccountAuthorityVerifier authority) {
+    if (!authority.isExactCurrent()) return false;
+    if (!_accountTransitionPending) return true;
+    final outgoing = _outgoingAuthority;
+    if (outgoing != null
+        ? outgoing.isExactCurrent()
+        : SharedPreferencesUtil().aiConsentAuthorityGeneration == _outgoingAuthorityGeneration) {
+      return false;
+    }
+    _accountTransitionPending = false;
+    _outgoingAuthority = null;
+    _outgoingAuthorityGeneration = null;
+    choicePending = false;
+    return true;
+  }
+
+  @visibleForTesting
+  void resetForTesting() {
+    _accountTransitionPending = false;
+    _outgoingAuthority = null;
+    _outgoingAuthorityGeneration = null;
+    invalidate();
+  }
+
+  Future<T?> serialize<T>(GuardianWhisperOperation operation, Future<T> Function() action) {
+    Future<T?> run() async {
+      if (!operation.isCurrent) return null;
+      return action();
+    }
+
+    final result = _inFlight?.then<T?>((_) => run()) ?? run();
+    _track(result);
+    return result;
+  }
+
+  Future<void> stopAfterInFlight(
+    Future<void> Function() stop, {
+    GuardianWhisperAuthorityProvider authorityProvider = WalOwnerAuthority.active,
+  }) {
+    _outgoingAuthority = authorityProvider();
+    _outgoingAuthorityGeneration = SharedPreferencesUtil().aiConsentAuthorityGeneration;
+    _accountTransitionPending = true;
+    invalidate();
+    final result = _inFlight?.then((_) => stop()) ?? stop();
+    _track(result);
+    return result;
+  }
+
+  void _track(Future<Object?> result) {
+    final tail = result.then<void>((_) {}, onError: (Object error, StackTrace stack) {});
+    _inFlight = tail;
+    tail.then((_) {
+      if (identical(_inFlight, tail)) _inFlight = null;
+    });
+  }
+
+  @override
+  void dispose() {
+    SharedPreferencesUtil.aiConsentAuthorityChanges.removeListener(invalidate);
+    super.dispose();
+  }
+}
 
 enum GuardianModeState {
   idle,
@@ -13,6 +142,7 @@ class GuardianModeService {
   static final GuardianModeService _instance = GuardianModeService._internal();
   factory GuardianModeService() => _instance;
   GuardianModeService._internal();
+  static final whisperStateFence = GuardianWhisperStateFence();
 
   static const MethodChannel _channel = MethodChannel('com.ellaaicare.ella/guardian_mode');
 
@@ -92,7 +222,9 @@ class GuardianModeService {
     }
   }
 
-  Future<void> stopForAccountTransition() async {
+  Future<void> stopForAccountTransition() => whisperStateFence.stopAfterInFlight(_stopForAccountTransition);
+
+  Future<void> _stopForAccountTransition() async {
     _stopTestAudioTimer();
     try {
       await _channel.invokeMethod('configureAvailability', {'enabled': false});

@@ -217,6 +217,7 @@ class TodayPage extends StatefulWidget {
     this.guardianNativeStart,
     this.guardianNativeStop,
     this.guardianAvailability,
+    this.guardianAuthorityProvider,
     this.memoryArtworkApi,
     this.memoryArtworkAuthorityProvider,
     this.memoryPresentationAuthorityProvider,
@@ -236,6 +237,7 @@ class TodayPage extends StatefulWidget {
   final GuardianNativeLifecycle? guardianNativeStart;
   final GuardianNativeLifecycle? guardianNativeStop;
   final GuardianAvailability? guardianAvailability;
+  final guardian_native.GuardianWhisperAuthorityProvider? guardianAuthorityProvider;
   final MemoryArtworkApi? memoryArtworkApi;
   final MemoryArtworkAuthorityProvider? memoryArtworkAuthorityProvider;
   final MemoryPresentationAuthorityProvider? memoryPresentationAuthorityProvider;
@@ -285,6 +287,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   Timer? _whisperNativeRetryTimer;
   int _whisperNativeRetryAttempt = 0;
   int _whisperReconcileGeneration = 0;
+  final _whisperFence = guardian_native.GuardianModeService.whisperStateFence;
+  int _whisperSharedRevision = 0;
+  guardian_native.GuardianWhisperOperation? _whisperRetryOperation;
   static const List<Duration> _whisperNativeRetryBackoff = [
     Duration(seconds: 2),
     Duration(seconds: 4),
@@ -353,6 +358,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     )..addListener(_onTodayCardChanged);
     _todayCardAuthorityChanges = widget.todayCardAuthorityChanges ?? SharedPreferencesUtil.aiConsentAuthorityChanges;
     _todayCardAuthorityChanges.addListener(_onTodayCardAuthorityChanged);
+    _whisperSharedRevision = _whisperFence.revision;
+    _whisperFence.addListener(_onSharedWhisperStateChanged);
     if (_guardianAvailable) {
       _loadWhisperState();
     }
@@ -425,6 +432,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }
 
   void _onTodayCardAuthorityChanged() {
+    _whisperFence.invalidate();
     // In-memory content disappears synchronously; the exact replacement
     // authority is recaptured only after the old card is no longer renderable.
     _homeCaptureAuthorityGeneration++;
@@ -506,6 +514,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _provisioningProvider?.removeListener(_onProvisioningChanged);
     _conversationProvider?.removeListener(_onConversationsChanged);
     _todayCardAuthorityChanges.removeListener(_onTodayCardAuthorityChanged);
+    _whisperFence.removeListener(_onSharedWhisperStateChanged);
     _todayCardController
       ..removeListener(_onTodayCardChanged)
       ..dispose();
@@ -1194,7 +1203,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }
 
   Future<void> _loadWhisperState() async {
-    if (!_guardianAvailable) return;
+    if (!_guardianAvailable || _whisperFence.choicePending) return;
     if (_whisperStateLoading) {
       _whisperStateReloadPending = true;
       return;
@@ -1211,14 +1220,20 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }
 
   Future<void> _loadWhisperStateOnce() async {
+    final operation = _whisperFence.observe(widget.guardianAuthorityProvider ?? WalOwnerAuthority.active);
+    if (operation == null) return;
     final generation = ++_whisperReconcileGeneration;
     _cancelWhisperNativeRetry();
-    final info = await _readWhisperState();
+    final info = await _readWhisperState(operation.authority);
+    if (!_isWhisperOperationCurrent(operation, generation)) return;
     if (info == null) {
-      try {
-        await _reconcileWhisperNative(false);
-      } catch (_) {}
-      if (!mounted || generation != _whisperReconcileGeneration) return;
+      await _whisperFence.serialize(operation, () async {
+        if (!_isWhisperOperationCurrent(operation, generation)) return;
+        try {
+          await _reconcileWhisperNative(false);
+        } catch (_) {}
+      });
+      if (!_isWhisperOperationCurrent(operation, generation)) return;
       setState(() {
         _whispersOn = false;
         _whispersVerified = false;
@@ -1231,8 +1246,12 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final serverEnabled = _whispersEnabled(info);
     var nativeStarted = false;
     try {
-      await _reconcileWhisperNative(serverEnabled);
-      nativeStarted = true;
+      nativeStarted = await _whisperFence.serialize(operation, () async {
+            if (!_isWhisperOperationCurrent(operation, generation)) return false;
+            await _reconcileWhisperNative(serverEnabled);
+            return _isWhisperOperationCurrent(operation, generation);
+          }) ??
+          false;
     } catch (_) {
       // The server is the source of truth for guardian mode. A native
       // capture failure here must never trigger a compensating PUT, and it
@@ -1240,7 +1259,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       // reconcile. Keep the server value, disable the control, and quietly
       // retry the native start.
     }
-    if (!mounted || generation != _whisperReconcileGeneration) return;
+    if (!_isWhisperOperationCurrent(operation, generation)) return;
     final reconnecting = serverEnabled && !nativeStarted;
     setState(() {
       _whispersOn = serverEnabled;
@@ -1248,13 +1267,39 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       _whisperReconnecting = reconnecting;
     });
     _whisperControlsRevision.value++;
-    if (reconnecting) _scheduleWhisperNativeRetry(generation);
+    _whisperFence.publish(operation, (enabled: serverEnabled, modeVerified: true, nativeReconciled: nativeStarted));
+    if (reconnecting) {
+      _whisperRetryOperation = operation;
+      _scheduleWhisperNativeRetry(generation);
+    }
+  }
+
+  bool _isWhisperOperationCurrent(guardian_native.GuardianWhisperOperation operation, int generation) =>
+      mounted && _guardianAvailable && operation.isCurrent && generation == _whisperReconcileGeneration;
+
+  void _onSharedWhisperStateChanged() {
+    if (!mounted) return;
+    if (_whisperSharedRevision != _whisperFence.revision) {
+      _whisperSharedRevision = _whisperFence.revision;
+      _whisperReconcileGeneration++;
+      _whisperStateReloadPending = false;
+      _cancelWhisperNativeRetry();
+    }
+    final snapshot = _whisperFence.snapshot;
+    setState(() {
+      _whispersOn = snapshot?.enabled ?? false;
+      _whispersVerified = snapshot != null && snapshot.modeVerified && snapshot.nativeReconciled;
+      _whisperReconnecting = snapshot != null && snapshot.enabled && !snapshot.nativeReconciled;
+      _updatingWhispers = _whisperFence.choicePending;
+    });
+    _whisperControlsRevision.value++;
   }
 
   void _cancelWhisperNativeRetry() {
     _whisperNativeRetryTimer?.cancel();
     _whisperNativeRetryTimer = null;
     _whisperNativeRetryAttempt = 0;
+    _whisperRetryOperation = null;
   }
 
   void _scheduleWhisperNativeRetry(int generation) {
@@ -1269,15 +1314,21 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   Future<void> _retryWhisperNativeStart(int generation) async {
     // A newer GET, an explicit toggle, or an account switch may have taken
     // over reconciliation since this retry was scheduled.
-    if (!mounted || generation != _whisperReconcileGeneration || !_guardianAvailable) return;
+    final operation = _whisperRetryOperation;
+    if (operation == null || !_isWhisperOperationCurrent(operation, generation)) return;
     var nativeStarted = false;
     try {
-      await _reconcileWhisperNative(true);
-      nativeStarted = true;
+      nativeStarted = await _whisperFence.serialize(operation, () async {
+            if (!_isWhisperOperationCurrent(operation, generation)) return false;
+            await _reconcileWhisperNative(true);
+            return _isWhisperOperationCurrent(operation, generation);
+          }) ??
+          false;
     } catch (_) {}
-    if (!mounted || generation != _whisperReconcileGeneration) return;
+    if (!_isWhisperOperationCurrent(operation, generation)) return;
     if (nativeStarted) {
       _whisperNativeRetryAttempt = 0;
+      _whisperFence.publish(operation, (enabled: true, modeVerified: true, nativeReconciled: true));
       if (_whisperReconnecting || !_whispersVerified) {
         setState(() {
           _whispersVerified = true;
@@ -1294,11 +1345,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _scheduleWhisperNativeRetry(generation);
   }
 
-  Future<GuardianModeInfo?> _readWhisperState() async {
+  Future<GuardianModeInfo?> _readWhisperState([ExactAccountAuthorityVerifier? authority]) async {
     try {
       final loader = widget.guardianModeLoader;
-      if (loader != null) return loader();
-      final result = await guardian_api.getGuardianMode();
+      if (loader != null) return await loader();
+      final result = await guardian_api.getGuardianMode(exactAuthority: authority);
       return result.isSuccess ? result.value : null;
     } catch (_) {
       return null;
@@ -1312,11 +1363,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       ? (widget.guardianNativeStart?.call() ?? guardian_native.GuardianModeService().start())
       : (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
 
-  Future<bool> _writeWhisperState(GuardianModeState state) async {
+  Future<bool> _writeWhisperState(GuardianModeState state, [ExactAccountAuthorityVerifier? authority]) async {
     try {
       final setter = widget.guardianModeSetter;
-      if (setter != null) return setter(state);
-      return (await guardian_api.setGuardianModeTwoTier(state)).isSuccess;
+      if (setter != null) return await setter(state);
+      return (await guardian_api.setGuardianModeTwoTier(state, exactAuthority: authority)).isSuccess;
     } catch (_) {
       return false;
     }
@@ -1330,7 +1381,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   Future<void> _setWhispers(bool enabled) async {
     if (_updatingWhispers || !_guardianAvailable) return;
     final previousEnabled = _whispersOn;
-    _whisperReconcileGeneration++;
+    final operation = _whisperFence.choose(widget.guardianAuthorityProvider ?? WalOwnerAuthority.active, enabled);
+    if (operation == null) return;
+    final generation = _whisperReconcileGeneration;
     _cancelWhisperNativeRetry();
     setState(() {
       _whispersOn = enabled;
@@ -1342,61 +1395,60 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     // client-selected mode — that policy is enforced server-side in every mode.
     final state = enabled ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState();
     var success = false;
-    if (!enabled) {
-      try {
-        await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
-      } catch (_) {}
-    }
-    try {
-      success = await _writeWhisperState(state);
-    } catch (_) {
-      success = false;
-    }
-    if (success && enabled) {
-      // A confirmed 200 write is authoritative. A native start failure past
-      // this point must never be conflated with a write failure and trigger
-      // a compensating rollback PUT of a server state that already succeeded.
-      try {
-        await (widget.guardianNativeStart?.call() ?? guardian_native.GuardianModeService().start());
-      } catch (_) {}
-    }
-    if (!success && enabled) {
-      try {
-        await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
-        await _writeWhisperState(const GuardianModeState());
-      } catch (_) {}
-    }
     var resolvedEnabled = enabled;
-    var resolvedVerified = success;
-    if (!success) {
-      final authoritative = await _readWhisperState();
-      if (authoritative != null) {
-        resolvedEnabled = _whispersEnabled(authoritative);
+    var resolvedVerified = false;
+    var nativeReconciled = false;
+    await _whisperFence.serialize<void>(operation, () async {
+      if (!_isWhisperOperationCurrent(operation, generation)) return;
+      if (!enabled) {
         try {
-          await _reconcileWhisperNative(resolvedEnabled);
-          resolvedVerified = true;
-        } catch (_) {
-          resolvedVerified = false;
-        }
-      } else {
-        // The write may have reached the server even though the response did
-        // not. Keep the last verified display value but mark it unavailable;
-        // never claim OFF (or ON) without an authoritative readback.
-        resolvedEnabled = previousEnabled;
-        resolvedVerified = false;
-        try {
-          await _reconcileWhisperNative(previousEnabled);
+          await _reconcileWhisperNative(false);
+          nativeReconciled = true;
         } catch (_) {}
       }
-    }
-    if (!mounted) return;
-    setState(() {
-      _updatingWhispers = false;
-      _whispersOn = resolvedEnabled;
-      _whispersVerified = resolvedVerified;
+      if (!_isWhisperOperationCurrent(operation, generation)) return;
+      success = await _writeWhisperState(state, operation.authority);
+      if (!_isWhisperOperationCurrent(operation, generation)) return;
+      resolvedVerified = success;
+      if (success && enabled) {
+        // Native failure cannot roll back an authoritative successful mode write.
+        try {
+          await _reconcileWhisperNative(true);
+          nativeReconciled = true;
+        } catch (_) {}
+      }
+      if (!_isWhisperOperationCurrent(operation, generation)) return;
+      if (!success && enabled) {
+        try {
+          await _reconcileWhisperNative(false);
+          if (!_isWhisperOperationCurrent(operation, generation)) return;
+          await _writeWhisperState(const GuardianModeState(), operation.authority);
+        } catch (_) {}
+      }
+      if (!_isWhisperOperationCurrent(operation, generation)) return;
+      if (!success) {
+        final authoritative = await _readWhisperState(operation.authority);
+        if (!_isWhisperOperationCurrent(operation, generation)) return;
+        resolvedEnabled = authoritative == null ? previousEnabled : _whispersEnabled(authoritative);
+        resolvedVerified = authoritative != null;
+        nativeReconciled = false;
+        try {
+          await _reconcileWhisperNative(resolvedEnabled);
+          nativeReconciled = true;
+        } catch (_) {}
+      }
     });
-    _whisperControlsRevision.value++;
+    if (!_isWhisperOperationCurrent(operation, generation)) return;
+    _whisperFence.publish(
+      operation,
+      (enabled: resolvedEnabled, modeVerified: resolvedVerified, nativeReconciled: nativeReconciled),
+    );
+    if (resolvedEnabled && resolvedVerified && !nativeReconciled) {
+      _whisperRetryOperation = operation;
+      _scheduleWhisperNativeRetry(generation);
+    }
     if (!success) {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.anErrorOccurredTryAgain)));
     }
   }

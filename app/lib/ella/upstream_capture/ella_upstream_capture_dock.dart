@@ -49,6 +49,7 @@ class EllaUpstreamCaptureDock extends StatefulWidget {
     this.guardianNativeStop,
     this.guardianNativeState,
     this.guardianNativeStates,
+    this.guardianAuthorityProvider,
   }) : _runtime = runtime;
 
   final EllaUpstreamCaptureRuntime? _runtime;
@@ -61,6 +62,7 @@ class EllaUpstreamCaptureDock extends StatefulWidget {
   final GuardianNativeLifecycle? guardianNativeStop;
   final GuardianNativeStateReader? guardianNativeState;
   final Stream<guardian_native.GuardianModeState>? guardianNativeStates;
+  final guardian_native.GuardianWhisperAuthorityProvider? guardianAuthorityProvider;
 
   @override
   State<EllaUpstreamCaptureDock> createState() => _EllaUpstreamCaptureDockState();
@@ -81,6 +83,8 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   _WhisperPlaybackState _whisperPlayback = _WhisperPlaybackState.unknown;
   String? _whisperError;
   StreamSubscription<guardian_native.GuardianModeState>? _whisperStateSubscription;
+  final _whisperFence = guardian_native.GuardianModeService.whisperStateFence;
+  int _whisperSharedRevision = 0;
 
   String get _uid => widget.authenticatedUid?.call() ?? WalOwnerAuthority.authenticatedUid;
   bool get _busy => _operation != _DockOperation.idle;
@@ -90,9 +94,11 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   void initState() {
     super.initState();
     _runtime.protocolUnavailable.addListener(_onProtocolStatus);
+    _whisperSharedRevision = _whisperFence.revision;
+    _whisperFence.addListener(_onSharedWhisperStateChanged);
     _whisperStateSubscription =
         (widget.guardianNativeStates ?? guardian_native.GuardianModeService().stateStream).listen((_) {
-      if (mounted && _whispersVerified && !_whispersBusy) {
+      if (mounted && _whispersVerified && !_whispersBusy && _whisperFence.snapshot != null) {
         setState(() => _whisperPlayback = _playbackStateFor(_whispersOn));
       }
     });
@@ -140,23 +146,24 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   @override
   void dispose() {
     _runtime.protocolUnavailable.removeListener(_onProtocolStatus);
+    _whisperFence.removeListener(_onSharedWhisperStateChanged);
     unawaited(_whisperStateSubscription?.cancel());
     _connectFocusNode.dispose();
     _transcriptFocusNode.dispose();
     super.dispose();
   }
 
-  Future<GuardianModeInfo?> _readWhisperState() async {
+  Future<GuardianModeInfo?> _readWhisperState([ExactAccountAuthorityVerifier? authority]) async {
     final loader = widget.guardianModeLoader;
     if (loader != null) return loader();
-    final result = await guardian_api.getGuardianMode();
+    final result = await guardian_api.getGuardianMode(exactAuthority: authority);
     return result.isSuccess ? result.value : null;
   }
 
-  Future<bool> _writeWhisperState(GuardianModeState state) async {
+  Future<bool> _writeWhisperState(GuardianModeState state, ExactAccountAuthorityVerifier authority) async {
     final setter = widget.guardianModeSetter;
     if (setter != null) return setter(state);
-    return (await guardian_api.setGuardianModeTwoTier(state)).isSuccess;
+    return (await guardian_api.setGuardianModeTwoTier(state, exactAuthority: authority)).isSuccess;
   }
 
   Future<void> _startWhisperNative() =>
@@ -179,9 +186,11 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
 
   Future<void> _loadWhispersState() async {
     if (!_guardianAvailable) return;
+    final operation = _whisperFence.observe(widget.guardianAuthorityProvider ?? WalOwnerAuthority.active);
+    if (operation == null) return;
     try {
-      final info = await _readWhisperState();
-      if (!mounted) return;
+      final info = await _readWhisperState(operation.authority);
+      if (!_isWhisperOperationCurrent(operation)) return;
       if (info == null) {
         setState(() {
           _whispersVerified = false;
@@ -190,6 +199,14 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
         return;
       }
       final enabled = !(info.twoTierState?.isOff ?? info.currentMode == GuardianModeKey.off);
+      _whisperFence.publish(
+        operation,
+        (
+          enabled: enabled,
+          modeVerified: true,
+          nativeReconciled: !enabled || _playbackStateFor(enabled) == _WhisperPlaybackState.ready
+        ),
+      );
       setState(() {
         _whispersVerified = true;
         _whispersOn = enabled;
@@ -197,7 +214,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
         _whisperError = null;
       });
     } catch (_) {
-      if (!mounted) return;
+      if (!_isWhisperOperationCurrent(operation)) return;
       setState(() {
         _whispersVerified = false;
         _whisperError = context.l10n.todayWhispersUnavailable;
@@ -205,10 +222,31 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
     }
   }
 
+  bool _isWhisperOperationCurrent(guardian_native.GuardianWhisperOperation operation) =>
+      mounted && _guardianAvailable && operation.isCurrent;
+
+  void _onSharedWhisperStateChanged() {
+    if (!mounted) return;
+    final superseded = _whisperSharedRevision != _whisperFence.revision;
+    _whisperSharedRevision = _whisperFence.revision;
+    final snapshot = _whisperFence.snapshot;
+    setState(() {
+      _whispersOn = snapshot?.enabled ?? false;
+      _whispersVerified = snapshot?.modeVerified ?? false;
+      _whispersBusy = _whisperFence.choicePending;
+      _whisperPlayback = snapshot == null || !snapshot.nativeReconciled
+          ? _WhisperPlaybackState.unavailable
+          : _playbackStateFor(snapshot.enabled);
+      if (superseded) _whisperError = null;
+    });
+  }
+
   Future<void> _setWhispers(bool enabled) async {
     if (_whispersBusy || !_whispersVerified) return;
     final previousEnabled = _whispersOn;
     final previousPlayback = _whisperPlayback;
+    final operation = _whisperFence.choose(widget.guardianAuthorityProvider ?? WalOwnerAuthority.active, enabled);
+    if (operation == null) return;
     final saveFailedMessage = context.l10n.upstreamCaptureWhispersSaveFailed;
     final playbackFailedMessage = context.l10n.upstreamCaptureWhispersPlaybackFailed;
     final playbackStopFailedMessage = context.l10n.upstreamCaptureWhispersPlaybackStopFailed;
@@ -218,50 +256,59 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
     });
 
     var nativeStopFailed = false;
-    if (!enabled) {
-      try {
-        await _stopWhisperNative();
-      } catch (_) {
-        nativeStopFailed = true;
-      }
-    }
-
     var saved = false;
-    try {
-      saved = await _writeWhisperState(
-        enabled ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
-      );
-    } catch (_) {
-      saved = false;
-    }
-
     var playback = _WhisperPlaybackState.unavailable;
     String? error;
-    if (!saved) {
-      playback = previousPlayback;
-      error = saveFailedMessage;
-      if (previousEnabled && !enabled) {
+    await _whisperFence.serialize<void>(operation, () async {
+      if (!_isWhisperOperationCurrent(operation)) return;
+      if (!enabled) {
+        try {
+          await _stopWhisperNative();
+        } catch (_) {
+          nativeStopFailed = true;
+        }
+      }
+      if (!_isWhisperOperationCurrent(operation)) return;
+      try {
+        saved = await _writeWhisperState(
+          enabled ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
+          operation.authority,
+        );
+      } catch (_) {}
+      if (!_isWhisperOperationCurrent(operation)) return;
+      if (!saved) {
+        playback = previousPlayback;
+        error = saveFailedMessage;
+        if (previousEnabled && !enabled) {
+          try {
+            await _startWhisperNative();
+            playback = _WhisperPlaybackState.ready;
+          } catch (_) {
+            playback = _WhisperPlaybackState.error;
+          }
+        }
+      } else if (enabled) {
         try {
           await _startWhisperNative();
           playback = _WhisperPlaybackState.ready;
         } catch (_) {
           playback = _WhisperPlaybackState.error;
+          error = playbackFailedMessage;
         }
-      }
-    } else if (enabled) {
-      try {
-        await _startWhisperNative();
-        playback = _WhisperPlaybackState.ready;
-      } catch (_) {
+      } else if (nativeStopFailed) {
         playback = _WhisperPlaybackState.error;
-        error = playbackFailedMessage;
+        error = playbackStopFailedMessage;
       }
-    } else if (nativeStopFailed) {
-      playback = _WhisperPlaybackState.error;
-      error = playbackStopFailedMessage;
-    }
-
-    if (!mounted) return;
+    });
+    if (!_isWhisperOperationCurrent(operation)) return;
+    _whisperFence.publish(
+      operation,
+      (
+        enabled: saved ? enabled : previousEnabled,
+        modeVerified: true,
+        nativeReconciled: playback != _WhisperPlaybackState.error
+      ),
+    );
     setState(() {
       _whispersBusy = false;
       _whispersOn = saved ? enabled : previousEnabled;
@@ -273,11 +320,16 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   Future<void> _retryWhispers() async {
     if (_whispersBusy) return;
     if (!_whispersVerified) {
+      final operation = _whisperFence.observe(widget.guardianAuthorityProvider ?? WalOwnerAuthority.active);
+      if (operation == null) return;
       setState(() => _whispersBusy = true);
       await _loadWhispersState();
-      if (mounted) setState(() => _whispersBusy = false);
+      if (_isWhisperOperationCurrent(operation)) setState(() => _whispersBusy = false);
       return;
     }
+    final operation = _whisperFence.observe(widget.guardianAuthorityProvider ?? WalOwnerAuthority.active);
+    if (operation == null) return;
+    final enabled = _whispersOn;
     final playbackFailedMessage = context.l10n.upstreamCaptureWhispersPlaybackFailed;
     final playbackStopFailedMessage = context.l10n.upstreamCaptureWhispersPlaybackStopFailed;
     setState(() {
@@ -285,23 +337,27 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
       _whisperError = null;
     });
     try {
-      if (_whispersOn) {
-        await _startWhisperNative();
-      } else {
-        await _stopWhisperNative();
-      }
-      if (!mounted) return;
+      await _whisperFence.serialize<void>(operation, () async {
+        if (!_isWhisperOperationCurrent(operation)) return;
+        if (enabled) {
+          await _startWhisperNative();
+        } else {
+          await _stopWhisperNative();
+        }
+      });
+      if (!_isWhisperOperationCurrent(operation)) return;
+      _whisperFence.publish(operation, (enabled: enabled, modeVerified: true, nativeReconciled: true));
       setState(() {
-        _whisperPlayback = _whispersOn ? _WhisperPlaybackState.ready : _WhisperPlaybackState.unavailable;
+        _whisperPlayback = enabled ? _WhisperPlaybackState.ready : _WhisperPlaybackState.unavailable;
       });
     } catch (_) {
-      if (!mounted) return;
+      if (!_isWhisperOperationCurrent(operation)) return;
       setState(() {
         _whisperPlayback = _WhisperPlaybackState.error;
-        _whisperError = _whispersOn ? playbackFailedMessage : playbackStopFailedMessage;
+        _whisperError = enabled ? playbackFailedMessage : playbackStopFailedMessage;
       });
     } finally {
-      if (mounted) setState(() => _whispersBusy = false);
+      if (_isWhisperOperationCurrent(operation)) setState(() => _whispersBusy = false);
     }
   }
 
