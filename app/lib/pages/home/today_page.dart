@@ -2059,9 +2059,16 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final homeCaptureOwned =
         _homeCaptureActive || _homeCaptureFinalizationPending || _homeCaptureFinalizationInFlight != null;
     final captureFinalizationPending = _homeCaptureFinalizationPending || _externalCaptureFinalizationSource != null;
+    final viewportHeight = MediaQuery.sizeOf(context).height - MediaQuery.paddingOf(context).top;
+    final dockTextScale = MediaQuery.textScalerOf(context).scale(1);
+    final dockSafeBottom = MediaQuery.paddingOf(context).bottom;
+    final upstreamDockBuilder = EllaCaptureHost.homeCaptureDockBuilder;
+    final upstreamDockActive = upstreamDockBuilder != null;
+    final dockMaxHeight = todayDockReservedHeight(dockTextScale, viewportHeight: viewportHeight);
     final dockClearance = todayDockScrollClearance(
-      textScale: MediaQuery.textScalerOf(context).scale(1),
-      safeBottom: MediaQuery.paddingOf(context).bottom,
+      textScale: dockTextScale,
+      safeBottom: dockSafeBottom,
+      viewportHeight: upstreamDockActive ? viewportHeight : null,
     );
     _scheduleHomeMemoryPrefetch();
 
@@ -2199,7 +2206,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
           if (_showBackToRecent)
             Positioned(
               right: 22,
-              bottom: EllaSizes.navBarHeight + MediaQuery.paddingOf(context).bottom + 166,
+              bottom: todayBackToRecentBottomOffset(
+                textScale: dockTextScale,
+                safeBottom: dockSafeBottom,
+                viewportHeight: upstreamDockActive ? viewportHeight : null,
+              ),
               child: FloatingActionButton.small(
                 key: const Key('home-back-to-recent'),
                 onPressed: _scrollHomeBackToRecent,
@@ -2213,40 +2224,41 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
             left: 14,
             right: 14,
             bottom: EllaSizes.navBarHeight + MediaQuery.paddingOf(context).bottom + 16,
-            child: EllaCaptureHost.homeCaptureDockBuilder?.call(context) ??
-                TodayRecordMomentControl(
-                  selectedSource: selectedCaptureSource,
-                  activeSource: activeCaptureSource,
-                  externalCaptureFinalizationPending: captureFinalizationPending,
-                  starting: _homeCaptureStarting,
-                  hasNecklace: hasNecklace,
-                  legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
-                  necklaceConnected: deviceConnected,
-                  necklaceConnecting: device.isConnecting,
-                  necklaceConnectionFailed: device.connectionAttemptFailed,
-                  recordingState: capture.recordingState,
-                  diagnostics: capture.captureDiagnostics,
-                  transcriptionReady: capture.transcriptServiceReady,
-                  showWhispers: showGuardianSurfaces,
-                  whispersEnabled: _whispersOn,
-                  whispersVerified: _whispersVerified,
-                  onOpenControls: openControls,
-                  onOpenWhispers: () =>
-                      Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage())),
-                  onViewTranscript: () => _openLiveTranscript(capture),
-                  onSourceSelected: _selectCaptureSource,
-                  onReviewConsent: () => unawaited(AiConsentCoordinator.ensure(context)),
-                  onUnavailable: () => ScaffoldMessenger.of(
-                    context,
-                  ).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable))),
-                  onTap: () => _handleCapturePrimaryAction(
+            child: upstreamDockBuilder != null
+                ? TodayCaptureDockViewport(maxHeight: dockMaxHeight, child: upstreamDockBuilder(context))
+                : TodayRecordMomentControl(
                     selectedSource: selectedCaptureSource,
-                    capture: capture,
-                    device: device,
-                    homeCaptureOwned: homeCaptureOwned,
+                    activeSource: activeCaptureSource,
+                    externalCaptureFinalizationPending: captureFinalizationPending,
+                    starting: _homeCaptureStarting,
+                    hasNecklace: hasNecklace,
                     legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
+                    necklaceConnected: deviceConnected,
+                    necklaceConnecting: device.isConnecting,
+                    necklaceConnectionFailed: device.connectionAttemptFailed,
+                    recordingState: capture.recordingState,
+                    diagnostics: capture.captureDiagnostics,
+                    transcriptionReady: capture.transcriptServiceReady,
+                    showWhispers: showGuardianSurfaces,
+                    whispersEnabled: _whispersOn,
+                    whispersVerified: _whispersVerified,
+                    onOpenControls: openControls,
+                    onOpenWhispers: () =>
+                        Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage())),
+                    onViewTranscript: () => _openLiveTranscript(capture),
+                    onSourceSelected: _selectCaptureSource,
+                    onReviewConsent: () => unawaited(AiConsentCoordinator.ensure(context)),
+                    onUnavailable: () => ScaffoldMessenger.of(
+                      context,
+                    ).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable))),
+                    onTap: () => _handleCapturePrimaryAction(
+                      selectedSource: selectedCaptureSource,
+                      capture: capture,
+                      device: device,
+                      homeCaptureOwned: homeCaptureOwned,
+                      legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
+                    ),
                   ),
-                ),
           ),
         ],
       ),
@@ -2390,8 +2402,58 @@ class _AuthenticatedMemoryPresentationAuthority implements ExactAccountAuthority
   bool isExactCurrent() => uid.isNotEmpty && preferences.uid == uid && WalOwnerAuthority.authenticatedUid == uid;
 }
 
-double todayDockScrollClearance({required double textScale, required double safeBottom}) =>
-    EllaSizes.navBarHeight + safeBottom + 190 * textScale.clamp(1.0, 2.0) + 24;
+double todayDockReservedHeight(double textScale, {double? viewportHeight}) {
+  if (viewportHeight == null) return 190 * textScale.clamp(1.0, 2.0);
+  final effectiveScale = textScale.clamp(1.0, 3.0);
+  final estimatedHeight = 190 + 245 * (effectiveScale - 1);
+  return estimatedHeight.clamp(0.0, viewportHeight * 0.52);
+}
+
+double todayDockScrollClearance({required double textScale, required double safeBottom, double? viewportHeight}) =>
+    EllaSizes.navBarHeight + safeBottom + todayDockReservedHeight(textScale, viewportHeight: viewportHeight) + 24;
+
+double todayBackToRecentBottomOffset({required double textScale, required double safeBottom, double? viewportHeight}) =>
+    EllaSizes.navBarHeight +
+    safeBottom +
+    (viewportHeight == null ? 166 : todayDockReservedHeight(textScale, viewportHeight: viewportHeight) + 32);
+
+class TodayCaptureDockViewport extends StatefulWidget {
+  const TodayCaptureDockViewport({super.key, required this.maxHeight, required this.child});
+
+  final double maxHeight;
+  final Widget child;
+
+  @override
+  State<TodayCaptureDockViewport> createState() => _TodayCaptureDockViewportState();
+}
+
+class _TodayCaptureDockViewportState extends State<TodayCaptureDockViewport> {
+  final ScrollController _controller = ScrollController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: widget.maxHeight),
+        child: RawScrollbar(
+          controller: _controller,
+          thumbVisibility: true,
+          thickness: 4,
+          thumbColor: EllaColors.tealDeep,
+          radius: const Radius.circular(4),
+          child: SingleChildScrollView(
+            key: const Key('home-capture-dock-scroll'),
+            controller: _controller,
+            primary: false,
+            child: widget.child,
+          ),
+        ),
+      );
+}
 
 class _DemoTodayCardRepository implements TodayCardRepository {
   const _DemoTodayCardRepository();

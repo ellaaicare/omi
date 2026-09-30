@@ -500,7 +500,36 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   //----------------- Onboarding Permissions -----------------
 
   void setDeviceProvider(DeviceProvider provider) {
+    if (identical(deviceProvider, provider)) return;
+    deviceProvider?.removeListener(_handleDeviceProviderChanged);
     deviceProvider = provider;
+    provider.addListener(_handleDeviceProviderChanged);
+    _reconcileDevicePresentation(notify: false);
+  }
+
+  void _handleDeviceProviderChanged() => _reconcileDevicePresentation(notify: true);
+
+  void _reconcileDevicePresentation({required bool notify}) {
+    final provider = deviceProvider;
+    final connectedDevice = provider?.presentationConnectedDevice;
+    final connected = provider?.presentationIsConnected == true && connectedDevice != null;
+    final presentedDevice = connected ? connectedDevice : null;
+    final nextDeviceId = presentedDevice?.id ?? '';
+    final nextDeviceName = presentedDevice?.name ?? '';
+    final nextDeviceType = presentedDevice?.type;
+    final nextBatteryPercentage = connected ? provider!.presentationBatteryLevel : -1;
+    final changed = isConnected != connected ||
+        deviceId != nextDeviceId ||
+        deviceName != nextDeviceName ||
+        deviceType != nextDeviceType ||
+        batteryPercentage != nextBatteryPercentage;
+
+    isConnected = connected;
+    deviceId = nextDeviceId;
+    deviceName = nextDeviceName;
+    deviceType = nextDeviceType;
+    batteryPercentage = nextBatteryPercentage;
+    if (changed && notify) notifyListeners();
   }
 
   // Method to handle taps on devices
@@ -591,6 +620,7 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
 
   @override
   void dispose() {
+    deviceProvider?.removeListener(_handleDeviceProviderChanged);
     _didNotMakeItTimer.cancel();
     unawaited(_deviceService.cancelPendingConnection());
     _deviceService.unsubscribe(this);

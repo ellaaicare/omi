@@ -10182,4 +10182,67 @@ class AppLocalizationsCs extends AppLocalizations {
   @override
   String get coreModeEmergencyOnlyDescription =>
       'Critical alerts only - fall detection, medical emergencies, and similar emergencies.';
+
+  @override
+  String get upstreamCapturePreparing => 'Preparing recording controls…';
+
+  @override
+  String get upstreamCaptureConnecting => 'Connecting…';
+
+  @override
+  String get upstreamCaptureConnectingTranscription => 'Connecting to transcription…';
+
+  @override
+  String get upstreamCaptureWaitingForSpeech => 'Ready. Waiting for speech…';
+
+  @override
+  String get upstreamCaptureStopping => 'Stopping recording…';
+
+  @override
+  String get upstreamCaptureDisconnecting => 'Disconnecting necklace…';
+
+  @override
+  String get upstreamCaptureFinishing => 'Finishing and saving…';
+
+  @override
+  String get upstreamCaptureConnectionFailed => 'Ella could not connect to that necklace. Try again.';
+
+  @override
+  String get upstreamCaptureSearchFailed => 'Ella could not search for necklaces. Try again.';
+
+  @override
+  String get upstreamCapturePhoneStartFailed => 'Phone recording could not start. Try again.';
+
+  @override
+  String get upstreamCapturePermissionUpdated => 'Permission updated. Try recording again.';
+
+  @override
+  String get upstreamCaptureChooseNecklace => 'Choose a necklace';
+
+  @override
+  String get upstreamCaptureTranscriptTitle => 'Live transcript';
+
+  @override
+  String get upstreamCaptureTranscriptEmpty => 'Listening for speech…';
+
+  @override
+  String get upstreamCaptureSavingWhispers => 'Saving Whispers…';
+
+  @override
+  String get upstreamCaptureWhispersSaveFailed => 'Whispers could not be updated. Try again.';
+
+  @override
+  String get upstreamCaptureWhispersPlaybackUnavailable =>
+      'Whispers are on, but spoken playback is not available right now.';
+
+  @override
+  String get upstreamCaptureWhispersOffDescription => 'Whispers are off. Spoken responses are paused.';
+
+  @override
+  String get upstreamCaptureWhispersPlaybackFailed =>
+      'Whispers was saved, but spoken playback could not start. Try again.';
+
+  @override
+  String get upstreamCaptureWhispersPlaybackStopFailed =>
+      'Whispers was saved off, but spoken playback could not stop. Try again.';
 }

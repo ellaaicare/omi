@@ -48,7 +48,8 @@ class EllaUpstreamDeviceServiceAdapter
         await runtime.ensureBooted();
         return upstream_services.ServiceManager.instance().device;
       },
-      connect: runtime.connectNecklace,
+      connect: (ownerId, device) async =>
+          await runtime.connectNecklace(ownerId, device) == EllaCaptureStartOutcome.started,
       disconnect: (deviceId) => runtime.disconnectNecklace(deviceId: deviceId),
       connectionOwner: () => runtime.boundOwnerId,
     );

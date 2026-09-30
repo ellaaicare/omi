@@ -81,6 +81,8 @@ class EllaCaptureAuthority {
 
   String? get boundUid => _boundUid;
 
+  bool isCurrentOwner(String uid) => !_disposed && uid.trim().isNotEmpty && _authenticatedUid() == uid.trim();
+
   /// The lease generation observed at [bind]; 0 while unbound.
   int get expectedGeneration => _expectedGeneration;
 

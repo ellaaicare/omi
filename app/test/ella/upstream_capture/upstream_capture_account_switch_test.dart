@@ -1,13 +1,18 @@
 // ellaaicare/ella-ai#1280: switching the bound account mid-session tears the
 // session down and no frame is ever emitted under the old account afterwards.
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:omi/ella/upstream_capture/ella_capture_authority.dart';
+import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
 import 'package:omi/upstream_capture/backend/preferences.dart' as upstream;
+import 'package:omi/upstream_capture/providers/capture_provider.dart';
+import 'package:omi/upstream_capture/services/devices/connectors/device_connection.dart';
 import 'package:omi/upstream_capture/utils/enums.dart';
 
+import '../../upstream_capture/support/capture/scripted_device_connection.dart';
 import 'support/ella_upstream_capture_harness.dart';
 
 void main() {
@@ -28,6 +33,99 @@ void main() {
     expect(await h.bind(accountB), isFalse);
     expect(await h.bind(''), isFalse);
     expect(h.authority.isBound, isFalse);
+  });
+
+  test('real runtime rejects an A start after boot resumes under B without prompting consent', () async {
+    final boot = Completer<CaptureProvider>();
+    final runtime = EllaUpstreamCaptureRuntime(authority: h.authority, bootForTesting: () => boot.future);
+    final pendingPhone = runtime.startPhoneCapture(accountA);
+    final pendingNecklace = runtime.connectNecklace(accountA, EllaUpstreamCaptureHarness.pendant);
+    h.switchAccount(accountB);
+    boot.complete(h.provider);
+    expect(await pendingPhone, EllaCaptureStartOutcome.unavailable);
+    expect(await pendingNecklace, EllaCaptureStartOutcome.unavailable);
+    expect(h.authority.isBound, isFalse);
+    expect(h.hostApi.nativeRecording, isFalse);
+  });
+
+  test('late necklace connection cannot persist or record under a same-UID replacement binding', () async {
+    expect(await h.bind(accountA), isTrue);
+    final originalEpoch = h.authority.bindingEpoch;
+    final connection = Completer<DeviceConnection?>();
+    final connectionStarted = Completer<void>();
+    final runtime = EllaUpstreamCaptureRuntime(
+      authority: h.authority,
+      bootForTesting: () async => h.provider,
+      connectDeviceForTesting: (_) {
+        connectionStarted.complete();
+        return connection.future;
+      },
+    );
+    final pending = runtime.connectNecklace(accountA, EllaUpstreamCaptureHarness.pendant);
+    await connectionStarted.future;
+    await h.runtime.releaseAccount();
+    expect(await h.bind(accountA), isTrue);
+    expect(h.authority.bindingEpoch, isNot(originalEpoch));
+    connection.complete(ScriptedDeviceConnection());
+
+    expect(await pending, EllaCaptureStartOutcome.unavailable);
+    expect(upstream.SharedPreferencesUtil().btDevice.id, isNot(EllaUpstreamCaptureHarness.pendant.id));
+    expect(h.provider.recordingState, isNot(RecordingState.deviceRecord));
+  });
+
+  for (final source in ['phone', 'necklace']) {
+    test('$source start cannot adopt a same-UID lease replaced during policy unmute', () async {
+      expect(await h.bind(accountA), isTrue);
+      await h.runtime.releaseAccount();
+      expect(upstream.SharedPreferencesUtil().capturePolicy.muted, isTrue);
+
+      final unmuteStarted = Completer<void>();
+      final finishUnmute = Completer<void>();
+      upstream.SharedPreferencesUtil.capturePolicyBridgeForTesting = (method, arguments) async {
+        if (method == 'setMuted' && arguments['muted'] == false) {
+          unmuteStarted.complete();
+          await finishUnmute.future;
+        }
+        return null;
+      };
+      try {
+        final pending = source == 'phone'
+            ? h.runtime.startPhoneCapture(accountA)
+            : h.runtime.connectNecklace(accountA, EllaUpstreamCaptureHarness.pendant);
+        await unmuteStarted.future;
+        final retiredEpoch = h.authority.bindingEpoch;
+        h.authority.release();
+        expect(h.authority.bind(accountA), isTrue);
+        expect(h.authority.bindingEpoch, isNot(retiredEpoch));
+        finishUnmute.complete();
+
+        expect(await pending, EllaCaptureStartOutcome.unavailable);
+        expect(h.hostApi.nativeRecording, isFalse);
+        expect(h.connectionAttempts, 0);
+        expect(upstream.SharedPreferencesUtil().btDevice.id, isNot(EllaUpstreamCaptureHarness.pendant.id));
+        await h.runtime.pendingTeardown;
+      } finally {
+        if (!finishUnmute.isCompleted) finishUnmute.complete();
+        upstream.SharedPreferencesUtil.capturePolicyBridgeForTesting = null;
+      }
+    });
+  }
+
+  test('real runtime retries a rejected boot while concurrent callers share each attempt', () async {
+    var attempts = 0;
+    final runtime = EllaUpstreamCaptureRuntime(
+      authority: h.authority,
+      bootForTesting: () async {
+        attempts++;
+        if (attempts == 1) throw StateError('transient boot error');
+        return h.provider;
+      },
+    );
+    final first = runtime.ensureBooted();
+    expect(identical(runtime.ensureBooted(), first), isTrue);
+    await expectLater(first, throwsStateError);
+    expect(await runtime.ensureBooted(), same(h.provider));
+    expect(attempts, 2);
   });
 
   test('phone: account switch mid-session drops the next frame, revokes, and stops upstream capture', () async {

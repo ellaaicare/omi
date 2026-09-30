@@ -36,6 +36,49 @@ import 'package:omi/utils/audio/foreground.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
 
+enum EllaCaptureStartOutcome {
+  started,
+  consentRequired,
+  unavailable,
+}
+
+/// Recovers the one upstream partial-init state: ServiceManager installs its
+/// singleton before awaiting ConnectivityService.init().
+class EllaUpstreamServicesBootstrap {
+  EllaUpstreamServicesBootstrap({
+    Future<void> Function()? initializeManager,
+    bool Function()? managerExists,
+    Future<void> Function()? initializeConnectivity,
+  })  : _initializeManager = initializeManager ?? ServiceManager.init,
+        _managerExists = managerExists ?? _productionManagerExists,
+        _initializeConnectivity = initializeConnectivity ?? ConnectivityService().init;
+
+  final Future<void> Function() _initializeManager;
+  final bool Function() _managerExists;
+  final Future<void> Function() _initializeConnectivity;
+  bool _initialized = false;
+
+  static bool _productionManagerExists() {
+    try {
+      ServiceManager.instance();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> ensureInitialized() async {
+    if (_initialized) return;
+    try {
+      await _initializeManager();
+    } catch (_) {
+      if (!_managerExists()) rethrow;
+      await _initializeConnectivity();
+    }
+    _initialized = true;
+  }
+}
+
 /// Upstream [upstream_env.EnvFields] backed by the fork's already-initialized
 /// Ella [ella_env.Env], so the vendored stack talks to the Ella backend with the
 /// Ella flavor's configuration (no second source of endpoints or keys).
@@ -200,8 +243,12 @@ class EllaUpstreamCaptureRuntime {
     required this.authority,
     EllaCaptureProtocolSocket? Function()? activeProtocolSocket,
     EllaCaptureFinalizationRequest? finalizationRequest,
+    @visibleForTesting Future<CaptureProvider> Function()? bootForTesting,
+    @visibleForTesting Future<DeviceConnection?> Function(String deviceId)? connectDeviceForTesting,
   })  : _activeProtocolSocket = activeProtocolSocket,
-        _finalizationRequest = finalizationRequest;
+        _finalizationRequest = finalizationRequest,
+        _bootForTesting = bootForTesting,
+        _connectDeviceForTesting = connectDeviceForTesting;
 
   static EllaUpstreamCaptureRuntime? _instance;
 
@@ -209,11 +256,13 @@ class EllaUpstreamCaptureRuntime {
       _instance ??= EllaUpstreamCaptureRuntime(authority: EllaCaptureAuthority());
 
   static bool _upstreamEnvInitialized = false;
-  static bool _upstreamServicesInitialized = false;
+  static final EllaUpstreamServicesBootstrap _servicesBootstrap = EllaUpstreamServicesBootstrap();
 
   final EllaCaptureAuthority authority;
   final EllaCaptureProtocolSocket? Function()? _activeProtocolSocket;
   final EllaCaptureFinalizationRequest? _finalizationRequest;
+  final Future<CaptureProvider> Function()? _bootForTesting;
+  final Future<DeviceConnection?> Function(String deviceId)? _connectDeviceForTesting;
   CaptureProvider? _provider;
   EllaCaptureProtocolSocket? _protocolSocket;
   EllaCaptureProtocolSocket? _finalizationSocket;
@@ -227,7 +276,16 @@ class EllaUpstreamCaptureRuntime {
   String? get boundOwnerId => authority.boundUid;
 
   /// Boots the vendored stack once; later calls join the same future.
-  Future<CaptureProvider> ensureBooted() => _boot ??= _bootProduction();
+  Future<CaptureProvider> ensureBooted() {
+    final existing = _boot;
+    if (existing != null) return existing;
+    final attempt = _bootForTesting?.call() ?? _bootProduction();
+    _boot = attempt;
+    attempt.then((_) {}, onError: (Object _, StackTrace __) {
+      if (identical(_boot, attempt)) _boot = null;
+    });
+    return attempt;
+  }
 
   Future<CaptureProvider> _bootProduction() async {
     if (!_upstreamEnvInitialized) {
@@ -238,10 +296,7 @@ class EllaUpstreamCaptureRuntime {
       secureStorage: const EllaIsolatedSecureStorage(),
       mirrorNativeAuthToken: false,
     );
-    if (!_upstreamServicesInitialized) {
-      await ServiceManager.init();
-      _upstreamServicesInitialized = true;
-    }
+    await _servicesBootstrap.ensureInitialized();
     // Upstream main.dart registers the native BLE bridge here.
     BleFlutterApi.setUp(BleBridge.instance);
     DebugLogManager.recordBleFlutterApiSetUp();
@@ -422,20 +477,28 @@ class EllaUpstreamCaptureRuntime {
 
   /// Binds the capture session to [uid] (fresh consent lease + generation) and
   /// releases upstream's capture-policy latch if a previous revocation set it.
-  Future<bool> bindAccount(String uid) async {
+  Future<int?> _bindAccountEpoch(String uid) async {
     final bound = authority.bind(uid);
-    if (!bound) return false;
+    if (!bound) return null;
+    final boundEpoch = authority.bindingEpoch;
+    bool originIsCurrent() =>
+        authority.bindingEpoch == boundEpoch &&
+        authority.isCurrentOwner(uid) &&
+        authority.boundUid == uid &&
+        authority.hasCurrentAuthority;
     try {
       final preferences = upstream.SharedPreferencesUtil();
       if (preferences.capturePolicy.muted && _mutedByRevocation) {
         await preferences.setCaptureMuted(false);
       }
-      _mutedByRevocation = false;
+      if (originIsCurrent()) _mutedByRevocation = false;
     } catch (error) {
       Logger.debug('[EllaUpstreamCapture] capture policy unmute failed: ${error.runtimeType}');
     }
-    return authority.hasCurrentAuthority;
+    return originIsCurrent() ? boundEpoch : null;
   }
+
+  Future<bool> bindAccount(String uid) async => await _bindAccountEpoch(uid) != null;
 
   bool _mutedByRevocation = false;
   Future<void> _teardown = Future<void>.value();
@@ -518,11 +581,28 @@ class EllaUpstreamCaptureRuntime {
   // capture/device API, gated only by [bindAccount]. No capture state lives here.
 
   /// Phone mic: binds the signed-in account, then upstream `streamRecording()`.
-  Future<bool> startPhoneCapture(String uid) async {
+  Future<EllaCaptureStartOutcome> startPhoneCapture(String uid) async {
+    final originEpoch = authority.bindingEpoch;
     final provider = await ensureBooted();
-    if (!await bindAccount(uid)) return false;
+    if (!authority.isCurrentOwner(uid) || authority.bindingEpoch != originEpoch) {
+      return EllaCaptureStartOutcome.unavailable;
+    }
+    final boundEpoch = await _bindAccountEpoch(uid);
+    if (boundEpoch == null) {
+      return authority.bindingEpoch == originEpoch && authority.isCurrentOwner(uid)
+          ? EllaCaptureStartOutcome.consentRequired
+          : EllaCaptureStartOutcome.unavailable;
+    }
+    bool originIsCurrent() =>
+        authority.bindingEpoch == boundEpoch &&
+        authority.isCurrentOwner(uid) &&
+        authority.boundUid == uid &&
+        authority.hasCurrentAuthority;
+    if (!originIsCurrent()) {
+      return EllaCaptureStartOutcome.unavailable;
+    }
     await provider.streamRecording();
-    return true;
+    return originIsCurrent() ? EllaCaptureStartOutcome.started : EllaCaptureStartOutcome.unavailable;
   }
 
   Future<void> stopPhoneCapture() async {
@@ -556,15 +636,36 @@ class EllaUpstreamCaptureRuntime {
   /// DeviceProvider does on connect: force-connect through DeviceService,
   /// remember the device, hand it to capture, and start device recording.
   /// There is intentionally no Ella auto-connect / reconnect loop.
-  Future<bool> connectNecklace(String uid, BtDevice device) async {
+  Future<EllaCaptureStartOutcome> connectNecklace(String uid, BtDevice device) async {
+    final originEpoch = authority.bindingEpoch;
     final provider = await ensureBooted();
-    if (!await bindAccount(uid)) return false;
-    final connection = await ServiceManager.instance().device.ensureConnection(device.id, force: true);
-    if (connection == null) return false;
+    if (!authority.isCurrentOwner(uid) || authority.bindingEpoch != originEpoch) {
+      return EllaCaptureStartOutcome.unavailable;
+    }
+    final boundEpoch = await _bindAccountEpoch(uid);
+    if (boundEpoch == null) {
+      return authority.bindingEpoch == originEpoch && authority.isCurrentOwner(uid)
+          ? EllaCaptureStartOutcome.consentRequired
+          : EllaCaptureStartOutcome.unavailable;
+    }
+    bool originIsCurrent() =>
+        authority.bindingEpoch == boundEpoch &&
+        authority.isCurrentOwner(uid) &&
+        authority.boundUid == uid &&
+        authority.hasCurrentAuthority;
+    if (!originIsCurrent()) {
+      return EllaCaptureStartOutcome.unavailable;
+    }
+    final connection = await (_connectDeviceForTesting?.call(device.id) ??
+        ServiceManager.instance().device.ensureConnection(device.id, force: true));
+    if (connection == null) return EllaCaptureStartOutcome.unavailable;
+    if (!originIsCurrent()) {
+      return EllaCaptureStartOutcome.unavailable;
+    }
     upstream.SharedPreferencesUtil().btDevice = device;
     provider.updateRecordingDevice(device);
     await provider.streamDeviceRecording(device: device);
-    return true;
+    return originIsCurrent() ? EllaCaptureStartOutcome.started : EllaCaptureStartOutcome.unavailable;
   }
 
   Future<void> disconnectNecklace({String? deviceId}) async {
