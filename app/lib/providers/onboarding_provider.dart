@@ -24,6 +24,8 @@ import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 
+enum DeviceSelectionOutcome { connected, consentRequired, unavailable, cancelled }
+
 class OnboardingProvider extends BaseProvider with MessageNotifierMixin implements IDeviceServiceSubsciption {
   OnboardingProvider({IDeviceService? deviceService}) : _deviceServiceOverride = deviceService;
 
@@ -39,7 +41,7 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   String deviceId = '';
   String? connectingToDeviceId;
   List<BtDevice> deviceList = [];
-  late Timer _didNotMakeItTimer;
+  Timer? _didNotMakeItTimer;
   bool enableInstructions = false;
   Map<String, BtDevice> foundDevicesMap = {};
 
@@ -533,15 +535,24 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   }
 
   // Method to handle taps on devices
-  Future<void> handleTap({required BtDevice device, required bool isFromOnboarding, VoidCallback? goNext}) async {
+  Future<DeviceSelectionOutcome> handleTap(
+      {required BtDevice device, required bool isFromOnboarding, VoidCallback? goNext}) async {
     try {
-      if (isClicked) return;
+      if (isClicked) return DeviceSelectionOutcome.cancelled;
       isClicked = true;
 
       connectingToDeviceId = device.id;
       notifyListeners();
       final connected = await deviceProvider!.connectDeviceForCurrentUser(device);
-      if (!connected) throw StateError('Connected device was unavailable after pairing');
+      if (!connected) {
+        if (deviceProvider!.lastConnectionConsentRequired) {
+          isClicked = false;
+          connectingToDeviceId = null;
+          notifyListeners();
+          return DeviceSelectionOutcome.consentRequired;
+        }
+        throw StateError('Connected device was unavailable after pairing');
+      }
       Logger.debug('Connected to device: ${device.name}');
       deviceId = device.id;
       deviceName = device.name;
@@ -562,10 +573,9 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
       } else {
         notifyInfo('DEVICE_CONNECTED');
       }
+      return DeviceSelectionOutcome.connected;
     } catch (e) {
       Logger.debug('Error connecting to device: $e');
-      foundDevicesMap.remove(device.id);
-      deviceList.removeWhere((element) => element.id == device.id);
       isClicked = false; // Allow clicks again after finishing the operation
       connectingToDeviceId = null; // Reset the connecting device
       final activeDevice = deviceProvider!.presentationConnectedDevice;
@@ -579,9 +589,8 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
         isConnected = false;
       }
       notifyListeners();
+      return DeviceSelectionOutcome.unavailable;
     }
-
-    notifyListeners();
   }
 
   void deviceAlreadyUnpaired() {
@@ -609,6 +618,8 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
       }
     }
 
+    _didNotMakeItTimer?.cancel();
+    enableInstructions = false;
     _didNotMakeItTimer = Timer(const Duration(seconds: 10), () {
       enableInstructions = true;
       notifyListeners();
@@ -621,7 +632,7 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   @override
   void dispose() {
     deviceProvider?.removeListener(_handleDeviceProviderChanged);
-    _didNotMakeItTimer.cancel();
+    _didNotMakeItTimer?.cancel();
     unawaited(_deviceService.cancelPendingConnection());
     _deviceService.unsubscribe(this);
     super.dispose();
@@ -654,7 +665,7 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
     if (orderedDevices.isNotEmpty) {
       deviceList = orderedDevices;
       notifyListeners();
-      _didNotMakeItTimer.cancel();
+      _didNotMakeItTimer?.cancel();
     }
   }
 

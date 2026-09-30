@@ -106,10 +106,12 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   int? _activeConnectionAttemptToken;
   DateTime? _connectionAttemptStartedAt;
   bool _connectionAttemptFailed = false;
+  bool _lastConnectionConsentRequired = false;
 
   int get automaticReconnectAttempts => _automaticReconnectAttempts;
   bool get automaticReconnectExhausted => _automaticReconnectExhausted;
   bool get connectionAttemptFailed => _connectionAttemptFailed;
+  bool get lastConnectionConsentRequired => _lastConnectionConsentRequired;
   @visibleForTesting
   int get connectedCaptureRecoveryAttempts => _connectedCaptureRecoveryAttempts;
 
@@ -449,6 +451,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     _activeConnectionAttemptToken = token;
     _connectionAttemptStartedAt = DateTime.now();
     _connectionAttemptFailed = false;
+    _lastConnectionConsentRequired = false;
     isConnecting = true;
     notifyListeners();
 
@@ -477,6 +480,13 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
         _connectionAttemptFailed = !connected;
       }
       return connected;
+    } on DeviceConsentRequiredException {
+      if (_isConnectionAttemptCurrent(token)) {
+        _connectionAttemptFailed = true;
+        _lastConnectionConsentRequired = true;
+        _clearUncommittedConnectionState();
+      }
+      return false;
     } catch (error) {
       Logger.debug('BLE connection attempt failed: $error');
       if (_isConnectionAttemptCurrent(token)) {
@@ -598,6 +608,7 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
   /// Capture consent is checked later by [CaptureProvider.streamDeviceRecording]
   /// before any audio leaves the app.
   Future<bool> connectDeviceForCurrentUser(BtDevice device, {bool requireFreshSession = false}) async {
+    _lastConnectionConsentRequired = false;
     if (!_deviceServiceReady ||
         device.id.isEmpty ||
         _rememberedDeviceOwnerBinding() == null ||

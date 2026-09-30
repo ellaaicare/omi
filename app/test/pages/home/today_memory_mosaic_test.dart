@@ -335,6 +335,120 @@ void main() {
     expect(find.byKey(const Key('memory-artwork-generation-progress-resolved-without-artwork')), findsNothing);
   });
 
+  for (final failure in ['null', 'transport exception']) {
+    testWidgets('day artwork $failure is terminal until an explicit GET retry', (tester) async {
+      final artwork = _ScriptedDayArtworkApi();
+      artwork.responses.add(() async {
+        if (failure == 'transport exception') throw StateError('read unavailable');
+        return null;
+      });
+      artwork.responses.add(() async => const MemoryArtworkDay(
+            day: '2026-09-24',
+            utcOffsetMinutes: 0,
+            items: <String, MemoryArtworkResult>{},
+          ));
+      final memory = ServerConversation(
+        id: 'day-artwork-retry',
+        createdAt: DateTime(2026, 9, 24, 12),
+        structured: Structured('A saved memory', 'Its illustration read can be retried.'),
+      );
+      await tester.pumpWidget(MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: MemoryDayGalleryCard(
+            dayLabel: 'TODAY',
+            memories: [memory],
+            artworkApi: artwork,
+            automaticRepairMemoryIds: {memory.id},
+            now: DateTime(2026, 9, 24),
+            onOpen: () {},
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(artwork.fetchDayCalls, 1);
+      expect(artwork.displayCalls, 0, reason: 'a failed batch read must not generate per-memory artwork');
+      expect(find.byKey(const Key('memory-day-artwork-retry')), findsOneWidget);
+      expect(find.byKey(const Key('memory-artwork-generation-progress-day-artwork-retry')), findsNothing);
+      await tester.pump(const Duration(seconds: 1));
+      expect(artwork.fetchDayCalls, 1);
+      await tester.tap(find.byKey(const Key('memory-day-artwork-retry')));
+      await tester.pumpAndSettle();
+      expect(artwork.fetchDayCalls, 2);
+      expect(artwork.displayCalls, 0);
+      expect(find.byKey(const Key('memory-day-artwork-retry')), findsNothing);
+      expect(find.byKey(const Key('memory-artwork-generation-progress-day-artwork-retry')), findsNothing);
+    });
+  }
+
+  testWidgets('a delayed day read cannot replace the result after account authority changes', (tester) async {
+    final first = Completer<MemoryArtworkDay?>();
+    final artwork = _ScriptedDayArtworkApi();
+    artwork.responses.add(() => first.future);
+    artwork.responses.add(() async => null);
+    final memory = ServerConversation(
+      id: 'day-artwork-owner',
+      createdAt: DateTime(2026, 9, 24, 12),
+      structured: Structured('A saved memory', 'Its earlier account read must be discarded.'),
+    );
+    var authorityEpoch = 0;
+    late StateSetter update;
+    await tester.pumpWidget(MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: Scaffold(body: StatefulBuilder(builder: (context, setState) {
+        update = setState;
+        return MemoryDayGalleryCard(
+          dayLabel: 'TODAY',
+          memories: [memory],
+          artworkApi: artwork,
+          artworkAuthorityEpoch: authorityEpoch,
+          now: DateTime(2026, 9, 24),
+          onOpen: () {},
+        );
+      })),
+    ));
+    await tester.pump();
+    update(() => authorityEpoch++);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('memory-day-artwork-retry')), findsOneWidget);
+    first.complete(const MemoryArtworkDay(day: '2026-09-24', utcOffsetMinutes: 0, items: {}));
+    await tester.pump();
+    expect(artwork.fetchDayCalls, 2);
+    expect(find.byKey(const Key('memory-day-artwork-retry')), findsOneWidget);
+  });
+
+  testWidgets('older compact day keeps a bounded retry without hiding its saved memory', (tester) async {
+    final artwork = _ScriptedDayArtworkApi()..responses.add(() async => null);
+    final memory = ServerConversation(
+      id: 'older-day-artwork',
+      createdAt: DateTime(2026, 9, 20, 12),
+      structured: Structured('Older saved memory', 'Its artwork read is unavailable.'),
+    );
+    await tester.pumpWidget(MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: Scaffold(
+        body: SizedBox(
+          width: 320,
+          child: MemoryDayGalleryCard(
+            dayLabel: 'SEPTEMBER 20',
+            memories: [memory],
+            artworkApi: artwork,
+            now: DateTime(2026, 9, 30),
+            onOpen: () {},
+          ),
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(find.text('Older saved memory'), findsWidgets);
+    expect(find.byKey(const Key('memory-day-artwork-retry')), findsOneWidget);
+    expect(tester.getSize(find.byKey(const Key('memory-day-artwork-retry'))).height, greaterThanOrEqualTo(48));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('Home retains day artwork state when midnight relabels the calendar date', (tester) async {
     final authority = await _installArtworkAuthority();
     await SharedPreferencesUtil().saveMemoryGalleryLayout(MemoryGalleryLayout.days.name);
@@ -2983,7 +3097,7 @@ void main() {
     semantics.dispose();
   });
 
-  testWidgets('upstream dock stays above Home navigation and scrolls at large text', (tester) async {
+  testWidgets('upstream dock scrolls with Home instead of trapping actions above navigation', (tester) async {
     EllaCaptureHost.installForTesting(
       homeCaptureDockBuilder: (_) => const SizedBox(
         key: Key('test-upstream-dock'),
@@ -3000,22 +3114,15 @@ void main() {
     );
     addTearDown(harness.dispose);
 
-    final dockViewport = find.byType(TodayCaptureDockViewport);
-    expect(dockViewport, findsOneWidget);
-    expect(tester.getTopLeft(dockViewport).dy, greaterThanOrEqualTo(47));
-    expect(tester.getBottomLeft(dockViewport).dy, lessThanOrEqualTo(568 - EllaSizes.navBarHeight - 34));
-
-    final dockScroll = find.byKey(const Key('home-capture-dock-scroll'));
-    expect(dockScroll, findsOneWidget);
-    expect(
-        tester
-            .state<ScrollableState>(find.descendant(of: dockScroll, matching: find.byType(Scrollable)))
-            .position
-            .maxScrollExtent,
-        greaterThan(0));
-    await tester.drag(dockScroll, const Offset(0, -500));
+    expect(find.byKey(const Key('home-capture-dock-scroll')), findsNothing);
+    final homeScroll = tester.state<ScrollableState>(
+      find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
+    );
+    expect(homeScroll.position.maxScrollExtent, greaterThan(0));
+    await tester.ensureVisible(find.text('Dock controls'));
     await tester.pump();
     expect(find.text('Dock controls'), findsOneWidget);
+    expect(tester.getBottomLeft(find.text('Dock controls')).dy, lessThan(568 - EllaSizes.navBarHeight - 34));
     expect(tester.takeException(), isNull);
   });
 
@@ -3077,26 +3184,38 @@ void main() {
     final harness = await _pumpHome(
       tester,
       conversations: _ConversationFixtures.withMemories(photoBase64: ''),
-      viewport: const Size(320, 568),
-      textScaler: const TextScaler.linear(2),
+      viewport: const Size(390, 844),
+      textScaler: const TextScaler.linear(1),
       includeBottomNav: true,
     );
     addTearDown(harness.dispose);
 
-    Future<void> expectReachable(String key) async {
-      final control = find.byKey(Key(key));
-      expect(control, findsOneWidget);
-      await tester.ensureVisible(control);
-      await tester.pump();
-      expect(control.hitTestable(), findsOneWidget, reason: '$key must accept a tap inside the real Home shell');
-    }
-
     capture.updateRecordingState(upstream_capture.RecordingState.record);
     capture.onConnected();
     await tester.pump();
-    await expectReachable('upstream-capture-stop-phone');
-    await expectReachable('upstream-capture-view-transcript');
-    await expectReachable('upstream-capture-whispers-switch');
+    for (final key in [
+      'upstream-capture-stop-phone',
+      'upstream-capture-view-transcript',
+      'upstream-capture-whispers-switch',
+    ]) {
+      final control = find.byKey(Key(key));
+      expect(control.hitTestable(), findsOneWidget, reason: '$key must be visible without scrolling the dock');
+      expect(tester.getSize(control).height, greaterThanOrEqualTo(48));
+    }
+    final transcriptButton = tester.widget<OutlinedButton>(find.byKey(const Key('upstream-capture-view-transcript')));
+    expect(transcriptButton.style!.foregroundColor!.resolve({}), EllaColors.tealDeep);
+    expect(transcriptButton.style!.backgroundColor!.resolve({}), EllaColors.elevatedCard);
+    expect(transcriptButton.style!.foregroundColor!.resolve({WidgetState.disabled}), EllaColors.inkSoft);
+    expect(transcriptButton.style!.backgroundColor!.resolve({WidgetState.focused}), EllaColors.cardDeep);
+    expect(find.byKey(const Key('home-capture-dock-scroll')), findsNothing);
+    expect(
+      tester.getBottomLeft(find.byKey(const Key('upstream-capture-dock'))).dy,
+      lessThan(tester.getTopLeft(find.byType(MemoryGalleryCard).first).dy),
+    );
+    await expectLater(
+      find.byType(MaterialApp),
+      matchesGoldenFile('goldens/ella_home_upstream_capture_live_390_100_full_shell.png'),
+    );
 
     capture.updateRecordingDevice(
       upstream_device.BtDevice(id: 'test-pendant', name: 'Compass', type: upstream_device.DeviceType.omi, rssi: -40),
@@ -3104,8 +3223,13 @@ void main() {
     capture.updateRecordingState(upstream_capture.RecordingState.deviceRecord);
     capture.onConnected();
     await tester.pump();
-    await expectReachable('upstream-capture-disconnect-necklace');
-    await expectReachable('upstream-capture-finish');
+    for (final key in ['upstream-capture-disconnect-necklace', 'upstream-capture-finish']) {
+      expect(find.byKey(Key(key)).hitTestable(), findsOneWidget, reason: '$key must be visible at ordinary scale');
+    }
+    final disconnectButton =
+        tester.widget<OutlinedButton>(find.byKey(const Key('upstream-capture-disconnect-necklace')));
+    expect(disconnectButton.style!.foregroundColor!.resolve({}), EllaColors.tealDeep);
+    expect(disconnectButton.style!.backgroundColor!.resolve({}), EllaColors.elevatedCard);
     expect(find.byType(BottomNavBar), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
@@ -3460,6 +3584,49 @@ Future<_MutableExactAuthority> _installArtworkAuthority({
     await preferences.clearMemoryArtworkBackfillCursor(style);
   }
   return _MutableExactAuthority(uid);
+}
+
+class _ScriptedDayArtworkApi extends MemoryArtworkApi {
+  _ScriptedDayArtworkApi() : super(authorityProvider: () => null);
+
+  final responses = <Future<MemoryArtworkDay?> Function()>[];
+  int fetchDayCalls = 0;
+  int displayCalls = 0;
+
+  @override
+  bool get supportsDayArtworkBatch => true;
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(
+    String memoryId, {
+    bool enqueueIfMissing = false,
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) async {
+    displayCalls++;
+    return const MemoryArtworkResult(status: MemoryArtworkResultStatus.unavailable);
+  }
+
+  @override
+  Future<MemoryArtworkResult> loadAutomaticallyForDisplay(
+    String memoryId, {
+    int pollAttempts = 10,
+    Duration pollInterval = const Duration(seconds: 3),
+    void Function()? onEnqueueAttempt,
+  }) async {
+    displayCalls++;
+    return const MemoryArtworkResult(status: MemoryArtworkResultStatus.unavailable);
+  }
+
+  @override
+  Future<MemoryArtworkDay?> fetchDay(
+    DateTime localDay, {
+    required int utcOffsetMinutes,
+    int authorityRevision = 0,
+    int contentRevision = 0,
+  }) {
+    return responses[fetchDayCalls++]();
+  }
 }
 
 class _ResolvedDayArtworkApi extends MemoryArtworkApi {

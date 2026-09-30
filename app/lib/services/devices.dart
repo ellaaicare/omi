@@ -40,6 +40,11 @@ class AuthoritativeDeviceConnection {
   final int connectionGeneration;
 }
 
+/// The selected transport did not start capture because managed consent needs renewal.
+class DeviceConsentRequiredException implements Exception {
+  const DeviceConsentRequiredException();
+}
+
 /// Optional extension implemented by the flag-ON upstream device adapter.
 ///
 /// The ordinary Ella picker still owns account/pairing presentation, while the

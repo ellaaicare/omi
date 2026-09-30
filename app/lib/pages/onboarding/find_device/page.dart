@@ -6,6 +6,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/providers/onboarding_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
@@ -18,9 +19,17 @@ class FindDevicesPage extends StatefulWidget {
   final VoidCallback goNext;
   final VoidCallback? onSkip;
   final bool includeSkip;
+  final bool Function()? canConnect;
+  final Future<bool> Function(BuildContext)? consentRequester;
 
   const FindDevicesPage(
-      {super.key, required this.goNext, this.includeSkip = true, this.isFromOnboarding = false, this.onSkip});
+      {super.key,
+      required this.goNext,
+      this.includeSkip = true,
+      this.isFromOnboarding = false,
+      this.onSkip,
+      this.canConnect,
+      this.consentRequester});
 
   @override
   State<FindDevicesPage> createState() => _FindDevicesPageState();
@@ -28,6 +37,7 @@ class FindDevicesPage extends StatefulWidget {
 
 class _FindDevicesPageState extends State<FindDevicesPage> {
   OnboardingProvider? _provider;
+  bool _scanError = false;
 
   @override
   void initState() {
@@ -50,25 +60,31 @@ class _FindDevicesPageState extends State<FindDevicesPage> {
   }
 
   Future<void> _scanDevices() async {
-    _provider?.scanDevices(
-      onShowDialog: () {
-        if (mounted) {
-          showDialog(
-            context: context,
-            builder: (c) => getDialog(
-              context,
-              () {
-                Navigator.of(context).pop();
-              },
-              () {},
-              context.l10n.enableBluetooth,
-              context.l10n.bluetoothNeeded,
-              singleButton: true,
-            ),
-          );
-        }
-      },
-    );
+    if (!mounted || (widget.canConnect != null && !widget.canConnect!())) return;
+    setState(() => _scanError = false);
+    try {
+      await _provider?.scanDevices(
+        onShowDialog: () {
+          if (mounted) {
+            showDialog(
+              context: context,
+              builder: (c) => getDialog(
+                context,
+                () {
+                  Navigator.of(context).pop();
+                },
+                () {},
+                context.l10n.enableBluetooth,
+                context.l10n.bluetoothNeeded,
+                singleButton: true,
+              ),
+            );
+          }
+        },
+      );
+    } catch (_) {
+      if (mounted) setState(() => _scanError = true);
+    }
   }
 
   @override
@@ -79,10 +95,24 @@ class _FindDevicesPageState extends State<FindDevicesPage> {
           mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            FoundDevices(
-              goNext: widget.goNext,
-              isFromOnboarding: widget.isFromOnboarding,
-            ),
+            if (!_scanError || provider.deviceList.isNotEmpty)
+              FoundDevices(
+                goNext: widget.goNext,
+                isFromOnboarding: widget.isFromOnboarding,
+                canConnect: widget.canConnect,
+                consentRequester: widget.consentRequester,
+              ),
+            if (provider.deviceList.isEmpty && _scanError) Text(context.l10n.upstreamCaptureSearchFailed),
+            if (provider.deviceList.isEmpty && (_scanError || provider.enableInstructions))
+              TextButton.icon(
+                style: TextButton.styleFrom(
+                  foregroundColor: EllaColors.tealDeep,
+                  minimumSize: const Size(EllaSizes.minTouchTarget, EllaSizes.minTouchTarget),
+                ),
+                onPressed: widget.canConnect != null && !widget.canConnect!() ? null : _scanDevices,
+                icon: const Icon(Icons.refresh_rounded),
+                label: Text(context.l10n.tryAgain),
+              ),
             if (provider.deviceList.isEmpty && provider.enableInstructions) const SizedBox(height: 48),
             if (provider.deviceList.isEmpty && provider.enableInstructions)
               ElevatedButton(

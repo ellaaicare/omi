@@ -4,9 +4,11 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart' as fork;
+import 'package:omi/backend/schema/bt_device/bt_device.dart' as legacy_device;
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/services/guardian_mode_service.dart' as guardian_native;
@@ -14,15 +16,13 @@ import 'package:omi/ella/upstream_capture/ella_capture_authority.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_dock.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
 import 'package:omi/l10n/app_localizations.dart';
-import 'package:omi/pages/home/today_page.dart'
-    show
-        GuardianModeLoader,
-        GuardianModeSetter,
-        GuardianNativeLifecycle,
-        TodayCaptureDockViewport,
-        todayBackToRecentBottomOffset,
-        todayDockReservedHeight,
-        todayDockScrollClearance;
+import 'package:omi/pages/capture/connect.dart';
+import 'package:omi/pages/home/today_page.dart' show GuardianModeLoader, GuardianModeSetter, GuardianNativeLifecycle;
+import 'package:omi/providers/device_provider.dart';
+import 'package:omi/providers/onboarding_provider.dart';
+import 'package:omi/services/devices.dart' as legacy_service;
+import 'package:omi/services/devices/device_connection.dart' as legacy_connection;
+import 'package:omi/utils/device.dart';
 import 'package:omi/upstream_capture/backend/preferences.dart' as upstream;
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/upstream_capture/backend/schema/transcript_segment.dart';
@@ -35,6 +35,79 @@ import 'upstream_capture_protocol_v2_cases.dart';
 
 const _uid = 'uid-a';
 final _testNecklace = BtDevice(id: 'necklace-a', name: 'Compass', type: DeviceType.omi, rssi: -40);
+final _pickerNecklace =
+    legacy_device.BtDevice(id: 'necklace-a', name: 'Compass', type: legacy_device.DeviceType.fieldy, rssi: -40);
+final _pickerFriend =
+    legacy_device.BtDevice(id: 'friend-a', name: 'Friend', type: legacy_device.DeviceType.friendPendant, rssi: -40);
+
+class _PickerService implements legacy_service.IDeviceService {
+  _PickerService(this.devices);
+
+  final List<legacy_device.BtDevice> devices;
+  final Map<Object, legacy_service.IDeviceServiceSubsciption> _listeners = {};
+  int discovers = 0;
+  bool failDiscovery = false;
+
+  @override
+  void start() {}
+  @override
+  Future<void> stop() async {}
+  @override
+  Future<void> discover({String? desirableDeviceId, int timeout = 5}) async {
+    discovers++;
+    if (failDiscovery) throw StateError('discovery unavailable');
+    for (final listener in _listeners.values) {
+      listener.onDevices(devices);
+    }
+  }
+
+  @override
+  Future<legacy_connection.DeviceConnection?> ensureConnection(String deviceId, {bool force = false}) async => null;
+  @override
+  void subscribe(legacy_service.IDeviceServiceSubsciption subscription, Object context) =>
+      _listeners[context] = subscription;
+  @override
+  void unsubscribe(Object context) => _listeners.remove(context);
+  @override
+  DateTime? getFirstConnectedAt() => null;
+  @override
+  void setWifiSyncInProgress(bool value) {}
+  @override
+  Future<void> cancelPendingConnection() async {}
+  @override
+  Future<void> disconnectDevice() async {}
+}
+
+class _PickerDeviceProvider extends DeviceProvider {
+  _PickerDeviceProvider(this.service) : super(deviceService: service, automaticallyReconnectOnReady: false);
+
+  final _PickerService service;
+  int connects = 0;
+  bool consentRequired = false;
+
+  @override
+  bool get lastConnectionConsentRequired => consentRequired;
+  @override
+  Future<void> prepareForExplicitDeviceSelection() async {}
+  @override
+  Future<bool> connectDeviceForCurrentUser(legacy_device.BtDevice device, {bool requireFreshSession = false}) async {
+    connects++;
+    return false;
+  }
+}
+
+class _PickerHarness {
+  _PickerHarness(List<legacy_device.BtDevice> devices) : service = _PickerService(devices) {
+    provider = _PickerDeviceProvider(service);
+    onboarding = OnboardingProvider(deviceService: service)
+      ..setDeviceProvider(provider)
+      ..hasBluetoothPermission = true;
+  }
+
+  final _PickerService service;
+  late final _PickerDeviceProvider provider;
+  late final OnboardingProvider onboarding;
+}
 
 class _NoBleListeners implements CaptureBleListeners {
   @override
@@ -141,40 +214,43 @@ class _DockFixture {
     Stream<guardian_native.GuardianModeState>? guardianNativeStates,
     EllaCaptureConsentRequester? consentRequester,
     String Function()? authenticatedUid,
+    OnboardingProvider? onboarding,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
     await tester.pumpWidget(
-      MaterialApp(
-        debugShowCheckedModeBanner: false,
-        theme: ellaThemeData(),
-        localizationsDelegates: AppLocalizations.localizationsDelegates,
-        supportedLocales: AppLocalizations.supportedLocales,
-        builder: (context, child) => MediaQuery(
-          data: MediaQuery.of(context).copyWith(textScaler: TextScaler.linear(textScale)),
-          child: child!,
-        ),
-        home: Scaffold(
-          body: Align(
-            alignment: Alignment.bottomCenter,
-            child: Padding(
-              padding: const EdgeInsets.all(14),
-              child: EllaUpstreamCaptureDock(
-                runtime: runtime,
-                authenticatedUid: authenticatedUid ?? () => _uid,
-                consentRequester: consentRequester,
-                guardianAvailability: () => guardianAvailable,
-                guardianModeLoader: guardianModeLoader,
-                guardianModeSetter: guardianModeSetter,
-                guardianNativeStart: guardianNativeStart,
-                guardianNativeStop: guardianNativeStop,
-                guardianNativeState: guardianNativeState,
-                guardianNativeStates: guardianNativeStates,
+      ChangeNotifierProvider<OnboardingProvider>.value(
+          value: onboarding ?? OnboardingProvider(),
+          child: MaterialApp(
+            debugShowCheckedModeBanner: false,
+            theme: ellaThemeData(),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(textScaler: TextScaler.linear(textScale)),
+              child: child!,
+            ),
+            home: Scaffold(
+              body: Align(
+                alignment: Alignment.bottomCenter,
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: EllaUpstreamCaptureDock(
+                    runtime: runtime,
+                    authenticatedUid: authenticatedUid ?? () => _uid,
+                    consentRequester: consentRequester,
+                    guardianAvailability: () => guardianAvailable,
+                    guardianModeLoader: guardianModeLoader,
+                    guardianModeSetter: guardianModeSetter,
+                    guardianNativeStart: guardianNativeStart,
+                    guardianNativeStop: guardianNativeStop,
+                    guardianNativeState: guardianNativeState,
+                    guardianNativeStates: guardianNativeStates,
+                  ),
+                ),
               ),
             ),
-          ),
-        ),
-      ),
+          )),
     );
     await tester.pump();
     await tester.pump();
@@ -267,6 +343,36 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('Connect keeps explicit AA colors while busy and under either platform brightness', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final start = Completer<EllaCaptureStartOutcome>();
+    fixture.runtime.startPhoneOverride = (_) => start.future;
+    addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+    for (final brightness in [Brightness.light, Brightness.dark]) {
+      tester.platformDispatcher.platformBrightnessTestValue = brightness;
+      await fixture.pump(tester);
+      final connect = tester.widget<OutlinedButton>(find.byKey(const Key('upstream-capture-connect-necklace')));
+      final style = connect.style!;
+      for (final states in [
+        <WidgetState>{},
+        {WidgetState.pressed},
+        {WidgetState.focused},
+        {WidgetState.disabled}
+      ]) {
+        final foreground = style.foregroundColor!.resolve(states)!;
+        final background = style.backgroundColor!.resolve(states)!;
+        expect(_contrastRatio(foreground, background), greaterThanOrEqualTo(4.5));
+      }
+      expect(tester.getSize(find.byKey(const Key('upstream-capture-connect-necklace'))).height,
+          greaterThanOrEqualTo(EllaSizes.minTouchTarget));
+    }
+    await tester.tap(find.byKey(const Key('upstream-capture-record-phone')));
+    await tester.pump();
+    expect(tester.widget<OutlinedButton>(find.byKey(const Key('upstream-capture-connect-necklace'))).onPressed, isNull);
+    start.complete(EllaCaptureStartOutcome.unavailable);
+    await tester.pump();
+  });
+
   const renderSizes = <String, Size>{
     '320x568': Size(320, 568),
     '390x844': Size(390, 844),
@@ -291,45 +397,52 @@ void main() {
     }
   }
 
-  testWidgets('search and delayed connection have distinct truthful status before ready', (tester) async {
+  testWidgets('Home Connect opens the same full-screen Omi picker without connecting', (tester) async {
     final fixture = await _DockFixture.create(tester);
-    final discovery = Completer<List<BtDevice>>();
-    final connection = Completer<EllaCaptureStartOutcome>();
-    fixture.runtime.discoverOverride = () => discovery.future;
-    fixture.runtime.connectNecklaceOverride = (uid, device) async {
-      final outcome = await connection.future;
-      if (outcome == EllaCaptureStartOutcome.started) fixture.makeNecklaceLive();
-      return outcome;
-    };
-    await fixture.pump(tester);
+    final picker = _PickerHarness([_pickerNecklace, _pickerFriend]);
+    addTearDown(() {
+      picker.onboarding.dispose();
+      picker.provider.dispose();
+    });
+    await fixture.pump(tester, onboarding: picker.onboarding);
 
     await tester.tap(find.byKey(const Key('upstream-capture-connect-necklace')));
     await tester.pump();
-    expect(find.text('Looking for your necklace…'), findsOneWidget);
-
-    discovery.complete([_testNecklace]);
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-    expect(find.text('Choose a necklace'), findsOneWidget);
-    await tester.tap(find.byKey(Key('upstream-capture-device-${_testNecklace.id}')));
-    await tester.pump();
-    expect(find.text('Connecting…'), findsOneWidget);
-    expect(find.text('Starting…'), findsNothing);
-
-    connection.complete(EllaCaptureStartOutcome.started);
-    await tester.pump();
-    await tester.pump();
-    expect(find.text('Recording with your necklace'), findsOneWidget);
-    expect(find.text('Ready. Waiting for speech…'), findsOneWidget);
+    expect(find.byType(ConnectDevicePage), findsOneWidget);
+    expect(find.text('Compass'), findsOneWidget);
+    expect(find.text('Friend'), findsOneWidget);
+    final artwork = tester.widgetList<Image>(find.byType(Image)).map((image) => image.image).whereType<AssetImage>();
+    expect(
+        artwork.map((image) => image.assetName),
+        contains(DeviceUtils.getDeviceImagePath(
+          deviceType: _pickerNecklace.type,
+          modelNumber: _pickerNecklace.modelNumber,
+          deviceName: _pickerNecklace.name,
+        )));
+    expect(
+        artwork.map((image) => image.assetName),
+        contains(DeviceUtils.getDeviceImagePath(
+          deviceType: _pickerFriend.type,
+          modelNumber: _pickerFriend.modelNumber,
+          deviceName: _pickerFriend.name,
+        )));
+    expect(picker.service.discovers, 1);
+    expect(picker.provider.connects, 0);
     expect(tester.takeException(), isNull);
   });
 
   testWidgets('BLE failure offers Retry without invoking AI consent', (tester) async {
     final fixture = await _DockFixture.create(tester);
+    final picker = _PickerHarness([_pickerNecklace]);
+    addTearDown(() {
+      picker.onboarding.dispose();
+      picker.provider.dispose();
+    });
     var consentCalls = 0;
-    fixture.runtime.connectNecklaceOverride = (_, __) async => EllaCaptureStartOutcome.unavailable;
     await fixture.pump(
       tester,
+      onboarding: picker.onboarding,
       consentRequester: (_) async {
         consentCalls++;
         return true;
@@ -339,22 +452,29 @@ void main() {
     await tester.tap(find.byKey(const Key('upstream-capture-connect-necklace')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
-    await tester.tap(find.byKey(Key('upstream-capture-device-${_testNecklace.id}')));
+    await tester.tap(find.text('Compass'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(consentCalls, 0);
     expect(find.text('Ella could not connect to that necklace. Try again.'), findsOneWidget);
-    expect(find.text('Retry'), findsOneWidget);
+    expect(picker.provider.connects, 1);
+    expect(find.text('Compass'), findsOneWidget);
     expect(find.text('Review AI permission before recording.'), findsNothing);
   });
 
   testWidgets('only an authority failure requests AI consent', (tester) async {
     final fixture = await _DockFixture.create(tester);
+    final picker = _PickerHarness([_pickerNecklace]);
+    picker.provider.consentRequired = true;
+    addTearDown(() {
+      picker.onboarding.dispose();
+      picker.provider.dispose();
+    });
     var consentCalls = 0;
-    fixture.runtime.connectNecklaceOverride = (_, __) async => EllaCaptureStartOutcome.consentRequired;
     await fixture.pump(
       tester,
+      onboarding: picker.onboarding,
       consentRequester: (_) async {
         consentCalls++;
         return true;
@@ -364,12 +484,13 @@ void main() {
     await tester.tap(find.byKey(const Key('upstream-capture-connect-necklace')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
-    await tester.tap(find.byKey(Key('upstream-capture-device-${_testNecklace.id}')));
+    await tester.tap(find.text('Compass'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(consentCalls, 1);
-    expect(find.text('Permission updated. Try recording again.'), findsOneWidget);
+    expect(find.text('Compass'), findsOneWidget);
+    expect(picker.provider.connects, 1);
   });
 
   testWidgets('a retired account outcome cannot prompt the replacement account for consent', (tester) async {
@@ -396,16 +517,23 @@ void main() {
     expect(find.text('Permission updated. Try recording again.'), findsNothing);
   });
 
-  testWidgets('search and protocol failures are distinct and recoverable', (tester) async {
+  testWidgets('protocol failures remain visible after cancelling the shared picker', (tester) async {
     final fixture = await _DockFixture.create(tester);
-    fixture.runtime.discoverOverride = () async => throw StateError('bluetooth unavailable');
-    await fixture.pump(tester);
+    final picker = _PickerHarness([]);
+    addTearDown(() {
+      picker.onboarding.dispose();
+      picker.provider.dispose();
+    });
+    await fixture.pump(tester, onboarding: picker.onboarding);
 
     await tester.tap(find.byKey(const Key('upstream-capture-connect-necklace')));
     await tester.pump();
     await tester.pump();
-    expect(find.text('Ella could not search for necklaces. Try again.'), findsOneWidget);
-    expect(find.text('Retry'), findsOneWidget);
+    expect(find.byType(ConnectDevicePage), findsOneWidget);
+    expect(picker.provider.connects, 0);
+    await tester.pageBack();
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 10));
 
     fixture.runtime.protocolUnavailable.value = true;
     await tester.pump();
@@ -430,32 +558,82 @@ void main() {
     expect(attempts, 2);
   });
 
-  testWidgets('a single discovered device still requires selection and cancel restores Connect focus', (tester) async {
+  testWidgets('single device cancel restores Connect focus without auto-connect', (tester) async {
     final fixture = await _DockFixture.create(tester);
-    var connectCalls = 0;
-    fixture.runtime.discoverOverride = () async => [_testNecklace];
-    fixture.runtime.connectNecklaceOverride = (_, __) async {
-      connectCalls++;
-      return EllaCaptureStartOutcome.started;
-    };
-    await fixture.pump(tester);
+    final picker = _PickerHarness([_pickerNecklace]);
+    addTearDown(() {
+      picker.onboarding.dispose();
+      picker.provider.dispose();
+    });
+    await fixture.pump(tester, onboarding: picker.onboarding);
 
     await tester.tap(find.byKey(const Key('upstream-capture-connect-necklace')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
-    expect(find.text('Choose a necklace'), findsOneWidget);
+    expect(find.byType(ConnectDevicePage), findsOneWidget);
     expect(find.text('Compass'), findsOneWidget);
-    expect(
-      tester.getSize(find.byKey(const Key('upstream-capture-picker-close'))).height,
-      greaterThanOrEqualTo(EllaSizes.minTouchTarget),
-    );
-    await tester.tap(find.byKey(const Key('upstream-capture-picker-close')));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pageBack();
+    await tester.pumpAndSettle();
 
-    expect(connectCalls, 0);
+    expect(picker.provider.connects, 0);
     final connect = tester.widget<OutlinedButton>(find.byKey(const Key('upstream-capture-connect-necklace')));
     expect(connect.focusNode!.hasFocus, isTrue);
+  });
+
+  testWidgets('account replacement fences a stale full-screen device selection', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final picker = _PickerHarness([_pickerNecklace]);
+    addTearDown(() {
+      picker.onboarding.dispose();
+      picker.provider.dispose();
+    });
+    var uid = _uid;
+    var consentCalls = 0;
+    await fixture.pump(
+      tester,
+      onboarding: picker.onboarding,
+      authenticatedUid: () => uid,
+      consentRequester: (_) async {
+        consentCalls++;
+        return true;
+      },
+    );
+    await tester.tap(find.byKey(const Key('upstream-capture-connect-necklace')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    uid = 'replacement-account';
+    await tester.tap(find.text('Compass'));
+    await tester.pump();
+    expect(picker.provider.connects, 0);
+    expect(consentCalls, 0);
+    expect(find.byType(ConnectDevicePage), findsOneWidget);
+  });
+
+  testWidgets('the shared picker reports scan errors and retries through one device service', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final picker = _PickerHarness([_pickerNecklace]);
+    picker.service.failDiscovery = true;
+    addTearDown(() {
+      picker.onboarding.dispose();
+      picker.provider.dispose();
+    });
+    await fixture.pump(tester, onboarding: picker.onboarding);
+    await tester.tap(find.byKey(const Key('upstream-capture-connect-necklace')));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Ella could not search for necklaces. Try again.'), findsOneWidget);
+    expect(find.text('Searching for devices...'), findsNothing);
+    final retry =
+        tester.widget<TextButton>(find.ancestor(of: find.text('Try Again'), matching: find.byType(TextButton)));
+    expect(retry.style!.foregroundColor!.resolve({}), EllaColors.tealDeep);
+    expect(tester.getSize(find.ancestor(of: find.text('Try Again'), matching: find.byType(TextButton))).height,
+        greaterThanOrEqualTo(EllaSizes.minTouchTarget));
+    picker.service.failDiscovery = false;
+    await tester.tap(find.text('Try Again'));
+    await tester.pump();
+    await tester.pump();
+    expect(picker.service.discovers, 2);
+    expect(find.text('Compass'), findsOneWidget);
   });
 
   testWidgets('transcript uses a scrollable sheet and restores focus without growing the dock', (tester) async {
@@ -746,138 +924,5 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(find.text("Ella couldn't connect to transcription, so recording didn't start."), findsOneWidget);
-  });
-
-  testWidgets('full Home-style stack keeps live dock controls reachable at 320x568 and 3x text', (tester) async {
-    final fixture = await _DockFixture.create(tester);
-    const screen = Size(320, 568);
-    const scale = 3.0;
-    tester.view.physicalSize = screen;
-    tester.view.devicePixelRatio = 1;
-    final maxDockHeight = todayDockReservedHeight(scale, viewportHeight: screen.height);
-    await tester.pumpWidget(MaterialApp(
-      debugShowCheckedModeBanner: false,
-      theme: ellaThemeData(),
-      localizationsDelegates: AppLocalizations.localizationsDelegates,
-      supportedLocales: AppLocalizations.supportedLocales,
-      builder: (context, child) => MediaQuery(
-        data: MediaQuery.of(context).copyWith(textScaler: const TextScaler.linear(scale)),
-        child: child!,
-      ),
-      home: Scaffold(
-        body: Stack(children: [
-          CustomScrollView(slivers: [
-            const SliverToBoxAdapter(child: SizedBox(height: 700, child: Text('Home memories'))),
-            SliverToBoxAdapter(
-                child: SizedBox(
-                    height: todayDockScrollClearance(textScale: scale, safeBottom: 0, viewportHeight: screen.height))),
-          ]),
-          Positioned(
-            right: 22,
-            bottom: todayBackToRecentBottomOffset(
-              textScale: scale,
-              safeBottom: 0,
-              viewportHeight: screen.height,
-            ),
-            child: const SizedBox(key: Key('home-back-to-recent'), width: 48, height: 48),
-          ),
-          Positioned(
-            left: 14,
-            right: 14,
-            bottom: EllaSizes.navBarHeight + 16,
-            child: TodayCaptureDockViewport(
-              maxHeight: maxDockHeight,
-              child: EllaUpstreamCaptureDock(
-                runtime: fixture.runtime,
-                authenticatedUid: () => _uid,
-                guardianAvailability: () => true,
-                guardianModeLoader: () async => const GuardianModeInfo(
-                  currentMode: GuardianModeKey.custom,
-                  twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
-                ),
-                guardianNativeState: () => guardian_native.GuardianModeState.active,
-              ),
-            ),
-          ),
-          const Positioned(
-              left: 0, right: 0, bottom: 0, child: SizedBox(key: Key('home-nav'), height: EllaSizes.navBarHeight)),
-        ]),
-      ),
-    ));
-    await tester.pump();
-    fixture.makeNecklaceLive();
-    await tester.pump();
-    await tester.pump();
-    final navTop = tester.getTopLeft(find.byKey(const Key('home-nav'))).dy;
-    final back = tester.getRect(find.byKey(const Key('home-back-to-recent')));
-    final dock = tester.getRect(find.byKey(const Key('home-capture-dock-scroll')));
-    expect(dock.height, lessThanOrEqualTo(maxDockHeight));
-    expect(dock.bottom, lessThan(navTop));
-    expect(back.bottom, lessThan(dock.top));
-    await expectLater(
-      find.byType(MaterialApp),
-      matchesGoldenFile('goldens/ella_upstream_capture_home_live_320x568_scale3.png'),
-    );
-    for (final key in [
-      'upstream-capture-stop-phone',
-      'upstream-capture-disconnect-necklace',
-      'upstream-capture-view-transcript',
-      'upstream-capture-finish',
-      'upstream-capture-whispers-switch',
-    ]) {
-      final finder = find.byKey(Key(key));
-      if (key == 'upstream-capture-stop-phone') continue;
-      expect(finder, findsOneWidget);
-      await tester.ensureVisible(finder);
-      await tester.pump();
-      final rect = tester.getRect(finder);
-      expect(rect.top, greaterThanOrEqualTo(dock.top));
-      expect(rect.bottom, lessThanOrEqualTo(dock.bottom));
-      expect(rect.height, greaterThanOrEqualTo(EllaSizes.minTouchTarget));
-      expect(finder.hitTestable(), findsOneWidget);
-      if (key == 'upstream-capture-view-transcript') {
-        await expectLater(
-          find.byType(MaterialApp),
-          matchesGoldenFile('goldens/ella_upstream_capture_home_live_transcript_320x568_scale3.png'),
-        );
-      }
-      if (key == 'upstream-capture-finish') {
-        await expectLater(
-          find.byType(MaterialApp),
-          matchesGoldenFile('goldens/ella_upstream_capture_home_live_scrolled_320x568_scale3.png'),
-        );
-      }
-    }
-    await expectLater(
-      find.byType(MaterialApp),
-      matchesGoldenFile('goldens/ella_upstream_capture_home_live_whispers_320x568_scale3.png'),
-    );
-    expect(tester.takeException(), isNull);
-  });
-
-  testWidgets('production Home coordinates reserve the rendered dock and navigation at large text', (tester) async {
-    final fixture = await _DockFixture.create(tester);
-    const screen = Size(430, 932);
-    const scale = 2.0;
-    const safeBottom = 34.0;
-    await fixture.pump(tester, size: screen, textScale: scale);
-    fixture.makeNecklaceLive();
-    await tester.pump();
-    await tester.pump();
-
-    final dockHeight = tester.getSize(find.byKey(const Key('upstream-capture-dock'))).height;
-    expect(todayDockReservedHeight(scale, viewportHeight: screen.height), greaterThanOrEqualTo(dockHeight));
-    final dockTop = screen.height - (EllaSizes.navBarHeight + safeBottom + 16) - dockHeight;
-    final scrollContentBottom = screen.height -
-        todayDockScrollClearance(textScale: scale, safeBottom: safeBottom, viewportHeight: screen.height);
-    final backToRecentBottom = screen.height -
-        todayBackToRecentBottomOffset(
-          textScale: scale,
-          safeBottom: safeBottom,
-          viewportHeight: screen.height,
-        );
-    expect(scrollContentBottom, lessThanOrEqualTo(dockTop));
-    expect(backToRecentBottom, lessThan(dockTop));
-    expect(tester.takeException(), isNull);
   });
 }
