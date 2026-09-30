@@ -15,6 +15,7 @@
 //   * every vendored native source is a Runner Compile Sources member and is excluded when NO;
 //   * AppDelegate registers the Pigeon hosts only under #if ELLA_UPSTREAM_CAPTURE_ENABLED_YES;
 //   * the build script derives the Dart define JSON + entry point from the same value.
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/widgets.dart';
@@ -416,6 +417,96 @@ void main() {
       expect(script, contains(r'FLUTTER_TARGET_ARGS=(-t "$ELLA_UPSTREAM_CAPTURE_FLUTTER_TARGET")'));
       expect(script, contains(r'"${FLUTTER_TARGET_ARGS[@]}"'));
       expect(script, isNot(contains('--dart-define=ELLA_UPSTREAM_CAPTURE_ENABLED')));
+    });
+
+    Future<Map<String, dynamic>> runCloudBuild(String? config) async {
+      final tmp = await Directory.systemTemp.createTemp('ella cloud build ');
+      addTearDown(() => tmp.deleteSync(recursive: true));
+      final app = '${tmp.path}/repo with spaces/app';
+      final home = '${tmp.path}/home with spaces';
+      for (final path in ['$app/ios/Flutter', '$app/ios/scripts', '$app/ios/ci_scripts', '$home/flutter/bin']) {
+        Directory(path).createSync(recursive: true);
+      }
+      if (config != null) {
+        File('$app/ios/Flutter/EllaUpstreamCapture.xcconfig').writeAsStringSync(config);
+      }
+      for (final script in ['scripts/ella_upstream_capture_build_config.sh', 'ci_scripts/ci_pre_xcodebuild.sh']) {
+        File('$_app/ios/$script').copySync('$app/ios/$script');
+      }
+      final flutter = File('$home/flutter/bin/flutter')..writeAsStringSync(r'''#!/bin/bash
+set -e
+printf '%s\n' "$@" > "$FLUTTER_ARGUMENTS_FILE"
+pwd > "$FLUTTER_WORKING_DIRECTORY_FILE"
+''');
+      final chmod = await Process.run('/bin/chmod', ['+x', flutter.path]);
+      expect(chmod.exitCode, 0, reason: '${chmod.stdout}${chmod.stderr}');
+      final arguments = File('${tmp.path}/arguments.txt');
+      final workingDirectory = File('${tmp.path}/working-directory.txt');
+      final result = await Process.run(
+        '/bin/bash',
+        ['$app/ios/ci_scripts/ci_pre_xcodebuild.sh'],
+        includeParentEnvironment: false,
+        environment: {
+          'HOME': home,
+          'PATH': '/usr/bin:/bin',
+          'CI_PRIMARY_REPOSITORY_PATH': '${tmp.path}/repo with spaces',
+          'FLUTTER_ARGUMENTS_FILE': arguments.path,
+          'FLUTTER_WORKING_DIRECTORY_FILE': workingDirectory.path,
+          'ELLA_UPSTREAM_CAPTURE_ENABLED': 'untrusted ambient override',
+        },
+      );
+      return {
+        'result': result,
+        'app': app,
+        'arguments': arguments.existsSync() ? arguments.readAsLinesSync() : null,
+        'workingDirectory': workingDirectory.existsSync() ? workingDirectory.readAsStringSync().trim() : null,
+      };
+    }
+
+    for (final enabled in [false, true]) {
+      test('Xcode Cloud executes the shared build config with capture ${enabled ? 'ON' : 'OFF'}', () async {
+        final cloud = await runCloudBuild('ELLA_UPSTREAM_CAPTURE_ENABLED = ${enabled ? 'YES' : 'NO'}\n');
+        final result = cloud['result'] as ProcessResult;
+        expect(result.exitCode, 0, reason: '${result.stdout}${result.stderr}');
+        final arguments = cloud['arguments'] as List<String>;
+        final defineArgument = arguments.last;
+        expect(defineArgument, startsWith('--dart-define-from-file='));
+        final definePath = defineArgument.substring('--dart-define-from-file='.length);
+        final expectedDefineFile = File('${cloud['app']}/build/ella_upstream_capture_dart_defines.json');
+        expect(File(definePath).resolveSymbolicLinksSync(), expectedDefineFile.resolveSymbolicLinksSync());
+        expect(arguments, [
+          'build',
+          'ios',
+          '--flavor',
+          'prod',
+          '--release',
+          '--no-codesign',
+          '--dart-define=ELLA_PUBLIC_BUILD=true',
+          '-t',
+          enabled ? 'lib/main_upstream_capture.dart' : 'lib/main.dart',
+          '--dart-define-from-file=$definePath',
+        ]);
+        expect(jsonDecode(expectedDefineFile.readAsStringSync()), {'ELLA_UPSTREAM_CAPTURE_ENABLED': enabled});
+        expect(
+          Directory(cloud['workingDirectory'] as String).resolveSymbolicLinksSync(),
+          Directory(cloud['app'] as String).resolveSymbolicLinksSync(),
+        );
+      });
+    }
+
+    test('Xcode Cloud never invokes Flutter when the shared config cannot be derived', () async {
+      for (final config in [
+        'ELLA_UPSTREAM_CAPTURE_ENABLED = maybe\n',
+        'ELLA_UPSTREAM_CAPTURE_ENABLED = NO\nELLA_UPSTREAM_CAPTURE_ENABLED = YES\n',
+        '',
+        null,
+      ]) {
+        final cloud = await runCloudBuild(config);
+        final result = cloud['result'] as ProcessResult;
+        expect(result.exitCode, isNot(0), reason: 'config: $config\n${result.stdout}${result.stderr}');
+        expect(cloud['arguments'], isNull, reason: 'Flutter must not run with invalid or missing config');
+        expect(cloud['workingDirectory'], isNull);
+      }
     });
   });
 }

@@ -40,6 +40,7 @@ import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/widgets/bottom_nav_bar.dart';
 import 'package:omi/ella/capture_host/ella_capture_host.dart';
 
 typedef TodayCardTalkRouteOpener = Future<void> Function(BuildContext context, TodayCard card);
@@ -217,6 +218,7 @@ class TodayPage extends StatefulWidget {
     this.guardianNativeStart,
     this.guardianNativeStop,
     this.guardianAvailability,
+    this.guardianAuthorityProvider,
     this.memoryArtworkApi,
     this.memoryArtworkAuthorityProvider,
     this.memoryPresentationAuthorityProvider,
@@ -236,6 +238,7 @@ class TodayPage extends StatefulWidget {
   final GuardianNativeLifecycle? guardianNativeStart;
   final GuardianNativeLifecycle? guardianNativeStop;
   final GuardianAvailability? guardianAvailability;
+  final guardian_native.GuardianWhisperAuthorityProvider? guardianAuthorityProvider;
   final MemoryArtworkApi? memoryArtworkApi;
   final MemoryArtworkAuthorityProvider? memoryArtworkAuthorityProvider;
   final MemoryPresentationAuthorityProvider? memoryPresentationAuthorityProvider;
@@ -285,6 +288,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   Timer? _whisperNativeRetryTimer;
   int _whisperNativeRetryAttempt = 0;
   int _whisperReconcileGeneration = 0;
+  final _whisperFence = guardian_native.GuardianModeService.whisperStateFence;
+  int _whisperSharedRevision = 0;
+  int _whisperRefreshRevision = 0;
+  guardian_native.GuardianWhisperOperation? _whisperRetryOperation;
+  guardian_native.GuardianWhisperOperation? _pendingWhisperChoice;
   static const List<Duration> _whisperNativeRetryBackoff = [
     Duration(seconds: 2),
     Duration(seconds: 4),
@@ -353,6 +361,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     )..addListener(_onTodayCardChanged);
     _todayCardAuthorityChanges = widget.todayCardAuthorityChanges ?? SharedPreferencesUtil.aiConsentAuthorityChanges;
     _todayCardAuthorityChanges.addListener(_onTodayCardAuthorityChanged);
+    _whisperSharedRevision = _whisperFence.revision;
+    _whisperRefreshRevision = _whisperFence.refreshRevision;
+    _whisperFence.addListener(_onSharedWhisperStateChanged);
     if (_guardianAvailable) {
       _loadWhisperState();
     }
@@ -425,6 +436,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }
 
   void _onTodayCardAuthorityChanged() {
+    _whisperFence.invalidate();
     // In-memory content disappears synchronously; the exact replacement
     // authority is recaptured only after the old card is no longer renderable.
     _homeCaptureAuthorityGeneration++;
@@ -506,6 +518,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _provisioningProvider?.removeListener(_onProvisioningChanged);
     _conversationProvider?.removeListener(_onConversationsChanged);
     _todayCardAuthorityChanges.removeListener(_onTodayCardAuthorityChanged);
+    _whisperFence.removeListener(_onSharedWhisperStateChanged);
+    final pending = _pendingWhisperChoice;
+    if (pending != null) _whisperFence.abandon(pending);
     _todayCardController
       ..removeListener(_onTodayCardChanged)
       ..dispose();
@@ -1194,7 +1209,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }
 
   Future<void> _loadWhisperState() async {
-    if (!_guardianAvailable) return;
+    if (!_guardianAvailable || _whisperFence.choicePending) return;
     if (_whisperStateLoading) {
       _whisperStateReloadPending = true;
       return;
@@ -1211,14 +1226,20 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }
 
   Future<void> _loadWhisperStateOnce() async {
+    final operation = _whisperFence.observe(widget.guardianAuthorityProvider ?? WalOwnerAuthority.active);
+    if (operation == null) return;
     final generation = ++_whisperReconcileGeneration;
     _cancelWhisperNativeRetry();
-    final info = await _readWhisperState();
+    final info = await _readWhisperState(operation.authority);
+    if (!_isWhisperOperationCurrent(operation, generation)) return;
     if (info == null) {
-      try {
-        await _reconcileWhisperNative(false);
-      } catch (_) {}
-      if (!mounted || generation != _whisperReconcileGeneration) return;
+      await _whisperFence.serialize(operation, () async {
+        if (!_isWhisperOperationCurrent(operation, generation)) return;
+        try {
+          await _reconcileWhisperNative(false);
+        } catch (_) {}
+      });
+      if (!_isWhisperOperationCurrent(operation, generation)) return;
       setState(() {
         _whispersOn = false;
         _whispersVerified = false;
@@ -1231,30 +1252,63 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final serverEnabled = _whispersEnabled(info);
     var nativeStarted = false;
     try {
-      await _reconcileWhisperNative(serverEnabled);
-      nativeStarted = true;
+      nativeStarted = await _whisperFence.serialize(operation, () async {
+            if (!_isWhisperOperationCurrent(operation, generation)) return false;
+            await _reconcileWhisperNative(serverEnabled);
+            return _isWhisperOperationCurrent(operation, generation);
+          }) ??
+          false;
     } catch (_) {
       // The server is the source of truth for guardian mode. A native
       // capture failure here must never trigger a compensating PUT, and it
       // must not publish a verified ON/OFF state when capture did not
       // reconcile. Keep the server value, disable the control, and quietly
-      // retry the native start.
+      // retry the native reconciliation.
     }
-    if (!mounted || generation != _whisperReconcileGeneration) return;
-    final reconnecting = serverEnabled && !nativeStarted;
+    if (!_isWhisperOperationCurrent(operation, generation)) return;
+    final reconnecting = !nativeStarted;
     setState(() {
       _whispersOn = serverEnabled;
       _whispersVerified = nativeStarted;
       _whisperReconnecting = reconnecting;
     });
     _whisperControlsRevision.value++;
-    if (reconnecting) _scheduleWhisperNativeRetry(generation);
+    _whisperFence.publish(operation, (enabled: serverEnabled, modeVerified: true, nativeReconciled: nativeStarted));
+    if (reconnecting) {
+      _whisperRetryOperation = operation;
+      _scheduleWhisperNativeRetry(generation);
+    }
+  }
+
+  bool _isWhisperOperationCurrent(guardian_native.GuardianWhisperOperation operation, int generation) =>
+      mounted && _guardianAvailable && operation.isCurrent && generation == _whisperReconcileGeneration;
+
+  void _onSharedWhisperStateChanged() {
+    if (!mounted) return;
+    final refreshRequired = _whisperRefreshRevision != _whisperFence.refreshRevision;
+    _whisperRefreshRevision = _whisperFence.refreshRevision;
+    if (_whisperSharedRevision != _whisperFence.revision) {
+      _whisperSharedRevision = _whisperFence.revision;
+      _whisperReconcileGeneration++;
+      _whisperStateReloadPending = false;
+      _cancelWhisperNativeRetry();
+    }
+    final snapshot = _whisperFence.snapshot;
+    setState(() {
+      _whispersOn = snapshot?.enabled ?? false;
+      _whispersVerified = snapshot != null && snapshot.modeVerified && snapshot.nativeReconciled;
+      _whisperReconnecting = snapshot != null && snapshot.modeVerified && !snapshot.nativeReconciled;
+      _updatingWhispers = _whisperFence.choicePending;
+    });
+    _whisperControlsRevision.value++;
+    if (refreshRequired && _guardianAvailable) unawaited(_loadWhisperState());
   }
 
   void _cancelWhisperNativeRetry() {
     _whisperNativeRetryTimer?.cancel();
     _whisperNativeRetryTimer = null;
     _whisperNativeRetryAttempt = 0;
+    _whisperRetryOperation = null;
   }
 
   void _scheduleWhisperNativeRetry(int generation) {
@@ -1263,21 +1317,30 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final delay = _whisperNativeRetryBackoff[_whisperNativeRetryAttempt];
     _whisperNativeRetryAttempt++;
     _whisperNativeRetryTimer?.cancel();
-    _whisperNativeRetryTimer = Timer(delay, () => unawaited(_retryWhisperNativeStart(generation)));
+    _whisperNativeRetryTimer = Timer(delay, () => unawaited(_retryWhisperNativeReconciliation(generation)));
   }
 
-  Future<void> _retryWhisperNativeStart(int generation) async {
+  Future<void> _retryWhisperNativeReconciliation(int generation) async {
     // A newer GET, an explicit toggle, or an account switch may have taken
     // over reconciliation since this retry was scheduled.
-    if (!mounted || generation != _whisperReconcileGeneration || !_guardianAvailable) return;
+    final operation = _whisperRetryOperation;
+    if (operation == null || !_isWhisperOperationCurrent(operation, generation)) return;
+    final snapshot = _whisperFence.snapshot;
+    if (snapshot == null || !snapshot.modeVerified) return;
+    final enabled = snapshot.enabled;
     var nativeStarted = false;
     try {
-      await _reconcileWhisperNative(true);
-      nativeStarted = true;
+      nativeStarted = await _whisperFence.serialize(operation, () async {
+            if (!_isWhisperOperationCurrent(operation, generation)) return false;
+            await _reconcileWhisperNative(enabled);
+            return _isWhisperOperationCurrent(operation, generation);
+          }) ??
+          false;
     } catch (_) {}
-    if (!mounted || generation != _whisperReconcileGeneration) return;
+    if (!_isWhisperOperationCurrent(operation, generation)) return;
     if (nativeStarted) {
       _whisperNativeRetryAttempt = 0;
+      _whisperFence.publish(operation, (enabled: enabled, modeVerified: true, nativeReconciled: true));
       if (_whisperReconnecting || !_whispersVerified) {
         setState(() {
           _whispersVerified = true;
@@ -1294,11 +1357,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _scheduleWhisperNativeRetry(generation);
   }
 
-  Future<GuardianModeInfo?> _readWhisperState() async {
+  Future<GuardianModeInfo?> _readWhisperState([ExactAccountAuthorityVerifier? authority]) async {
     try {
       final loader = widget.guardianModeLoader;
-      if (loader != null) return loader();
-      final result = await guardian_api.getGuardianMode();
+      if (loader != null) return await loader();
+      final result = await guardian_api.getGuardianMode(exactAuthority: authority);
       return result.isSuccess ? result.value : null;
     } catch (_) {
       return null;
@@ -1312,11 +1375,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       ? (widget.guardianNativeStart?.call() ?? guardian_native.GuardianModeService().start())
       : (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
 
-  Future<bool> _writeWhisperState(GuardianModeState state) async {
+  Future<bool> _writeWhisperState(GuardianModeState state, [ExactAccountAuthorityVerifier? authority]) async {
     try {
       final setter = widget.guardianModeSetter;
-      if (setter != null) return setter(state);
-      return (await guardian_api.setGuardianModeTwoTier(state)).isSuccess;
+      if (setter != null) return await setter(state);
+      return (await guardian_api.setGuardianModeTwoTier(state, exactAuthority: authority)).isSuccess;
     } catch (_) {
       return false;
     }
@@ -1330,74 +1393,73 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   Future<void> _setWhispers(bool enabled) async {
     if (_updatingWhispers || !_guardianAvailable) return;
     final previousEnabled = _whispersOn;
-    _whisperReconcileGeneration++;
-    _cancelWhisperNativeRetry();
-    setState(() {
-      _whispersOn = enabled;
-      _updatingWhispers = true;
-      _whisperReconnecting = false;
-    });
-    // Launch default is MEMORY_SUPPORT, not ACTIVE_SUPPORT (product decision, G4).
-    // Critical-safety Whispers (falls, chest pain, etc.) are never gated by this
-    // client-selected mode — that policy is enforced server-side in every mode.
-    final state = enabled ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState();
-    var success = false;
-    if (!enabled) {
-      try {
-        await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
-      } catch (_) {}
-    }
+    final operation = _whisperFence.choose(widget.guardianAuthorityProvider ?? WalOwnerAuthority.active, enabled);
+    if (operation == null) return;
+    _pendingWhisperChoice = operation;
     try {
-      success = await _writeWhisperState(state);
-    } catch (_) {
-      success = false;
-    }
-    if (success && enabled) {
-      // A confirmed 200 write is authoritative. A native start failure past
-      // this point must never be conflated with a write failure and trigger
-      // a compensating rollback PUT of a server state that already succeeded.
-      try {
-        await (widget.guardianNativeStart?.call() ?? guardian_native.GuardianModeService().start());
-      } catch (_) {}
-    }
-    if (!success && enabled) {
-      try {
-        await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
-        await _writeWhisperState(const GuardianModeState());
-      } catch (_) {}
-    }
-    var resolvedEnabled = enabled;
-    var resolvedVerified = success;
-    if (!success) {
-      final authoritative = await _readWhisperState();
-      if (authoritative != null) {
-        resolvedEnabled = _whispersEnabled(authoritative);
-        try {
-          await _reconcileWhisperNative(resolvedEnabled);
-          resolvedVerified = true;
-        } catch (_) {
-          resolvedVerified = false;
+      final generation = _whisperReconcileGeneration;
+      _cancelWhisperNativeRetry();
+      setState(() {
+        _whispersOn = enabled;
+        _updatingWhispers = true;
+        _whisperReconnecting = false;
+      });
+      // Launch default is MEMORY_SUPPORT, not ACTIVE_SUPPORT (product decision, G4).
+      // Critical-safety Whispers (falls, chest pain, etc.) are never gated by this
+      // client-selected mode — that policy is enforced server-side in every mode.
+      final state = enabled ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState();
+      var success = false;
+      var resolvedEnabled = enabled;
+      var resolvedVerified = false;
+      var nativeReconciled = false;
+      await _whisperFence.serialize<void>(operation, () async {
+        if (!_isWhisperOperationCurrent(operation, generation)) return;
+        if (!enabled) {
+          try {
+            await _reconcileWhisperNative(false);
+            nativeReconciled = true;
+          } catch (_) {}
         }
-      } else {
-        // The write may have reached the server even though the response did
-        // not. Keep the last verified display value but mark it unavailable;
-        // never claim OFF (or ON) without an authoritative readback.
-        resolvedEnabled = previousEnabled;
-        resolvedVerified = false;
-        try {
-          await _reconcileWhisperNative(previousEnabled);
-        } catch (_) {}
+        if (!_isWhisperOperationCurrent(operation, generation)) return;
+        success = await _writeWhisperState(state, operation.authority);
+        if (!_isWhisperOperationCurrent(operation, generation)) return;
+        resolvedVerified = success;
+        if (success && enabled) {
+          // Native failure cannot roll back an authoritative successful mode write.
+          try {
+            await _reconcileWhisperNative(true);
+            nativeReconciled = true;
+          } catch (_) {}
+        }
+        if (!_isWhisperOperationCurrent(operation, generation)) return;
+        if (!success) {
+          final authoritative = await _readWhisperState(operation.authority);
+          if (!_isWhisperOperationCurrent(operation, generation)) return;
+          resolvedEnabled = authoritative == null ? previousEnabled : _whispersEnabled(authoritative);
+          resolvedVerified = authoritative != null;
+          nativeReconciled = false;
+          try {
+            await _reconcileWhisperNative(resolvedVerified && resolvedEnabled);
+            nativeReconciled = resolvedVerified;
+          } catch (_) {}
+        }
+      });
+      if (!_isWhisperOperationCurrent(operation, generation)) return;
+      _whisperFence.publish(
+        operation,
+        (enabled: resolvedEnabled, modeVerified: resolvedVerified, nativeReconciled: nativeReconciled),
+      );
+      if (resolvedVerified && !nativeReconciled) {
+        _whisperRetryOperation = operation;
+        _scheduleWhisperNativeRetry(generation);
       }
-    }
-    if (!mounted) return;
-    setState(() {
-      _updatingWhispers = false;
-      _whispersOn = resolvedEnabled;
-      _whispersVerified = resolvedVerified;
-    });
-    _whisperControlsRevision.value++;
-    if (!success) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.anErrorOccurredTryAgain)));
+      if (!success) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.anErrorOccurredTryAgain)));
+      }
+    } finally {
+      if (identical(_pendingWhisperChoice, operation)) _pendingWhisperChoice = null;
+      _whisperFence.abandon(operation);
     }
   }
 
@@ -2061,9 +2123,12 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final captureFinalizationPending = _homeCaptureFinalizationPending || _externalCaptureFinalizationSource != null;
     final dockTextScale = MediaQuery.textScalerOf(context).scale(1);
     final dockSafeBottom = MediaQuery.paddingOf(context).bottom;
+    final navHeight = BottomNavBar.navigationHeight(context);
     final upstreamDockBuilder = EllaCaptureHost.homeCaptureDockBuilder;
     final upstreamDockActive = upstreamDockBuilder != null;
-    final dockClearance = todayDockScrollClearance(textScale: dockTextScale, safeBottom: dockSafeBottom);
+    final inlineBackToRecent = upstreamDockActive && (dockTextScale >= 2 || MediaQuery.sizeOf(context).width < 360);
+    final dockClearance =
+        todayDockScrollClearance(textScale: dockTextScale, safeBottom: dockSafeBottom, navHeight: navHeight);
     _scheduleHomeMemoryPrefetch();
 
     void openControls() => unawaited(
@@ -2198,20 +2263,37 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                       ),
                     ),
                   ),
+                if (_showBackToRecent && inlineBackToRecent)
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(EllaSizes.screenPadding, 16, EllaSizes.screenPadding, 0),
+                      child: TextButton.icon(
+                        key: const Key('home-back-to-recent'),
+                        onPressed: _scrollHomeBackToRecent,
+                        style: TextButton.styleFrom(
+                          foregroundColor: EllaColors.tealDeep,
+                          minimumSize: const Size(48, 48),
+                        ),
+                        icon: const Icon(Icons.arrow_upward_rounded),
+                        label: Text(context.l10n.backToRecentMemories),
+                      ),
+                    ),
+                  ),
                 SliverToBoxAdapter(
                   child: SizedBox(
-                    height: upstreamDockActive ? EllaSizes.navBarHeight + dockSafeBottom + 24 : dockClearance,
+                    height: upstreamDockActive ? navHeight + dockSafeBottom + 24 : dockClearance,
                   ),
                 ),
               ],
             ),
           ),
-          if (_showBackToRecent)
+          if (_showBackToRecent && !inlineBackToRecent)
             Positioned(
               right: 22,
               bottom: upstreamDockActive
-                  ? EllaSizes.navBarHeight + dockSafeBottom + 16
-                  : todayBackToRecentBottomOffset(textScale: dockTextScale, safeBottom: dockSafeBottom),
+                  ? navHeight + dockSafeBottom + 16
+                  : todayBackToRecentBottomOffset(
+                      textScale: dockTextScale, safeBottom: dockSafeBottom, navHeight: navHeight),
               child: FloatingActionButton.small(
                 key: const Key('home-back-to-recent'),
                 onPressed: _scrollHomeBackToRecent,
@@ -2225,7 +2307,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
             Positioned(
               left: 14,
               right: 14,
-              bottom: EllaSizes.navBarHeight + MediaQuery.paddingOf(context).bottom + 16,
+              bottom: navHeight + MediaQuery.paddingOf(context).bottom + 16,
               child: TodayRecordMomentControl(
                 selectedSource: selectedCaptureSource,
                 activeSource: activeCaptureSource,
@@ -2321,17 +2403,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       return [
         SliverPadding(
           padding: const EdgeInsets.fromLTRB(EllaSizes.screenPadding, 18, EllaSizes.screenPadding, 0),
-          sliver: SliverGrid(
-            gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-              maxCrossAxisExtent: 430,
-              mainAxisSpacing: EllaSizes.cardGap,
-              crossAxisSpacing: EllaSizes.cardGap,
-              childAspectRatio: 0.86,
-            ),
-            delegate: SliverChildBuilderDelegate(
-              (context, index) => _homeMemoryCard(memories[index], automaticRepairMemoryIds: automaticRepairMemoryIds),
-              childCount: memories.length,
-            ),
+          sliver: memoryGalleryFeedSliver(
+            layout: _homeMemoryLayout,
+            itemCount: memories.length,
+            itemBuilder: (context, index) =>
+                _homeMemoryCard(memories[index], automaticRepairMemoryIds: automaticRepairMemoryIds),
           ),
         ),
       ];
@@ -2341,7 +2417,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         padding: const EdgeInsets.fromLTRB(EllaSizes.screenPadding, 18, EllaSizes.screenPadding, 0),
         sliver: SliverList.separated(
           itemCount: memories.length,
-          separatorBuilder: (_, __) => const SizedBox(height: EllaSizes.cardGap),
+          separatorBuilder: (_, __) => const Divider(height: 1, color: EllaColors.cardDeep),
           itemBuilder: (context, index) =>
               _homeMemoryCard(memories[index], automaticRepairMemoryIds: automaticRepairMemoryIds),
         ),
@@ -2409,11 +2485,21 @@ double todayDockReservedHeight(double textScale, {double? viewportHeight}) {
   return estimatedHeight.clamp(0.0, viewportHeight * 0.52);
 }
 
-double todayDockScrollClearance({required double textScale, required double safeBottom, double? viewportHeight}) =>
-    EllaSizes.navBarHeight + safeBottom + todayDockReservedHeight(textScale, viewportHeight: viewportHeight) + 24;
+double todayDockScrollClearance({
+  required double textScale,
+  required double safeBottom,
+  double? viewportHeight,
+  double navHeight = EllaSizes.navBarHeight,
+}) =>
+    navHeight + safeBottom + todayDockReservedHeight(textScale, viewportHeight: viewportHeight) + 24;
 
-double todayBackToRecentBottomOffset({required double textScale, required double safeBottom, double? viewportHeight}) =>
-    EllaSizes.navBarHeight +
+double todayBackToRecentBottomOffset({
+  required double textScale,
+  required double safeBottom,
+  double? viewportHeight,
+  double navHeight = EllaSizes.navBarHeight,
+}) =>
+    navHeight +
     safeBottom +
     (viewportHeight == null ? 166 : todayDockReservedHeight(textScale, viewportHeight: viewportHeight) + 32);
 
@@ -2561,26 +2647,22 @@ class _HomeMemoryToolbar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final stacked = MediaQuery.textScalerOf(context).scale(1) >= 2 || MediaQuery.sizeOf(context).width < 360;
+    final heading = Semantics(header: true, child: Text(context.l10n.memories, style: EllaTextStyles.eyebrow));
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (stacked) heading,
         Row(
           children: [
-            Expanded(
-              child: Semantics(header: true, child: Text(context.l10n.memories, style: EllaTextStyles.eyebrow)),
-            ),
+            if (stacked) const Spacer() else Expanded(child: heading),
             PopupMenuButton<MemoryGalleryLayout>(
               key: const Key('home-memory-layout-menu'),
               tooltip: context.l10n.memoryGalleryView,
-              initialValue: layout,
+              initialValue: effectiveMemoryGalleryLayout(context, layout),
               icon: const Icon(Icons.view_quilt_outlined, color: EllaColors.tealDeep),
               onSelected: onLayoutSelected,
-              itemBuilder: (context) => [
-                PopupMenuItem(value: MemoryGalleryLayout.journal, child: Text(context.l10n.memoryGalleryJournal)),
-                PopupMenuItem(value: MemoryGalleryLayout.grid, child: Text(context.l10n.memoryGalleryGrid)),
-                PopupMenuItem(value: MemoryGalleryLayout.list, child: Text(context.l10n.memoryGalleryList)),
-                PopupMenuItem(value: MemoryGalleryLayout.days, child: Text(context.l10n.memoryGalleryDays)),
-              ],
+              itemBuilder: memoryGalleryLayoutMenu,
             ),
             PopupMenuButton<MemoryGallerySort>(
               key: const Key('home-memory-sort-menu'),
@@ -2597,43 +2679,44 @@ class _HomeMemoryToolbar extends StatelessWidget {
                 ),
               ],
             ),
-            IconButton(
-              key: const Key('home-memory-artwork-style-menu'),
-              tooltip: artworkPreferences?.releaseEnabled == true
-                  ? context.l10n.memoryArtworkStudio
-                  : context.l10n.memoryArtworkStyleUnavailable,
-              onPressed: artworkPreferences?.releaseEnabled == true ? onArtworkStudio : null,
-              icon: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  Icon(
-                    Icons.palette_outlined,
-                    color: artworkPreferences?.releaseEnabled == true ? EllaColors.tealDeep : EllaColors.inkSoft,
-                  ),
-                  if (artworkStyleSaving || artworkBackfillState == _ArtworkBackfillUiState.running)
-                    const Positioned(
-                      right: -4,
-                      bottom: -4,
-                      child: SizedBox(
-                        key: Key('home-artwork-progress-indicator'),
-                        width: 12,
-                        height: 12,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
-                      ),
-                    )
-                  else if (artworkBackfillState == _ArtworkBackfillUiState.needsAttention)
-                    const Positioned(
-                      right: -3,
-                      bottom: -3,
-                      child: DecoratedBox(
-                        key: Key('home-artwork-attention-indicator'),
-                        decoration: BoxDecoration(color: EllaColors.warning, shape: BoxShape.circle),
-                        child: SizedBox(width: 9, height: 9),
-                      ),
+            if (artworkPreferences?.releaseEnabled == true)
+              IconButton(
+                key: const Key('home-memory-artwork-style-menu'),
+                tooltip: artworkPreferences?.releaseEnabled == true
+                    ? context.l10n.memoryArtworkStudio
+                    : context.l10n.memoryArtworkStyleUnavailable,
+                onPressed: artworkPreferences?.releaseEnabled == true ? onArtworkStudio : null,
+                icon: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    Icon(
+                      Icons.palette_outlined,
+                      color: artworkPreferences?.releaseEnabled == true ? EllaColors.tealDeep : EllaColors.inkSoft,
                     ),
-                ],
+                    if (artworkStyleSaving || artworkBackfillState == _ArtworkBackfillUiState.running)
+                      const Positioned(
+                        right: -4,
+                        bottom: -4,
+                        child: SizedBox(
+                          key: Key('home-artwork-progress-indicator'),
+                          width: 12,
+                          height: 12,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                        ),
+                      )
+                    else if (artworkBackfillState == _ArtworkBackfillUiState.needsAttention)
+                      const Positioned(
+                        right: -3,
+                        bottom: -3,
+                        child: DecoratedBox(
+                          key: Key('home-artwork-attention-indicator'),
+                          decoration: BoxDecoration(color: EllaColors.warning, shape: BoxShape.circle),
+                          child: SizedBox(width: 9, height: 9),
+                        ),
+                      ),
+                  ],
+                ),
               ),
-            ),
           ],
         ),
         if (_showQueueSummary) ...[
