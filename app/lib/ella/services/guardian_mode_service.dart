@@ -61,6 +61,10 @@ class GuardianWhisperStateFence extends ChangeNotifier {
     notifyListeners();
   }
 
+  void abandon(GuardianWhisperOperation operation) {
+    if (choicePending && !_accountTransitionPending && operation.isCurrent) invalidate();
+  }
+
   void invalidate() {
     revision++;
     choicePending = _accountTransitionPending;

@@ -162,4 +162,24 @@ void main() {
     expect(oldRead.isCurrent, isFalse);
     expect(fence.choose(() => replacement, true), isNotNull);
   });
+
+  test('abandon releases only the exact current explicit choice', () {
+    final old = fence.choose(() => authority, true)!;
+    final newer = fence.choose(() => authority, false)!;
+    fence.abandon(old);
+    expect(fence.choicePending, isTrue);
+    expect(newer.isCurrent, isTrue);
+    fence.abandon(newer);
+    expect(fence.choicePending, isFalse);
+    expect(fence.observe(() => authority), isNotNull);
+    expect(newer.isCurrent, isFalse);
+  });
+
+  test('abandon cannot reopen account shutdown admission', () async {
+    final old = fence.choose(() => authority, true)!;
+    await fence.stopAfterInFlight(() async {}, authorityProvider: () => authority);
+    fence.abandon(old);
+    expect(fence.choicePending, isTrue);
+    expect(fence.observe(() => authority), isNull);
+  });
 }

@@ -290,6 +290,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   final _whisperFence = guardian_native.GuardianModeService.whisperStateFence;
   int _whisperSharedRevision = 0;
   guardian_native.GuardianWhisperOperation? _whisperRetryOperation;
+  guardian_native.GuardianWhisperOperation? _pendingWhisperChoice;
   static const List<Duration> _whisperNativeRetryBackoff = [
     Duration(seconds: 2),
     Duration(seconds: 4),
@@ -515,6 +516,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _conversationProvider?.removeListener(_onConversationsChanged);
     _todayCardAuthorityChanges.removeListener(_onTodayCardAuthorityChanged);
     _whisperFence.removeListener(_onSharedWhisperStateChanged);
+    final pending = _pendingWhisperChoice;
+    if (pending != null) _whisperFence.abandon(pending);
     _todayCardController
       ..removeListener(_onTodayCardChanged)
       ..dispose();
@@ -1383,73 +1386,79 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final previousEnabled = _whispersOn;
     final operation = _whisperFence.choose(widget.guardianAuthorityProvider ?? WalOwnerAuthority.active, enabled);
     if (operation == null) return;
-    final generation = _whisperReconcileGeneration;
-    _cancelWhisperNativeRetry();
-    setState(() {
-      _whispersOn = enabled;
-      _updatingWhispers = true;
-      _whisperReconnecting = false;
-    });
-    // Launch default is MEMORY_SUPPORT, not ACTIVE_SUPPORT (product decision, G4).
-    // Critical-safety Whispers (falls, chest pain, etc.) are never gated by this
-    // client-selected mode — that policy is enforced server-side in every mode.
-    final state = enabled ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState();
-    var success = false;
-    var resolvedEnabled = enabled;
-    var resolvedVerified = false;
-    var nativeReconciled = false;
-    await _whisperFence.serialize<void>(operation, () async {
-      if (!_isWhisperOperationCurrent(operation, generation)) return;
-      if (!enabled) {
-        try {
-          await _reconcileWhisperNative(false);
-          nativeReconciled = true;
-        } catch (_) {}
-      }
-      if (!_isWhisperOperationCurrent(operation, generation)) return;
-      success = await _writeWhisperState(state, operation.authority);
-      if (!_isWhisperOperationCurrent(operation, generation)) return;
-      resolvedVerified = success;
-      if (success && enabled) {
-        // Native failure cannot roll back an authoritative successful mode write.
-        try {
-          await _reconcileWhisperNative(true);
-          nativeReconciled = true;
-        } catch (_) {}
-      }
-      if (!_isWhisperOperationCurrent(operation, generation)) return;
-      if (!success && enabled) {
-        try {
-          await _reconcileWhisperNative(false);
-          if (!_isWhisperOperationCurrent(operation, generation)) return;
-          await _writeWhisperState(const GuardianModeState(), operation.authority);
-        } catch (_) {}
-      }
-      if (!_isWhisperOperationCurrent(operation, generation)) return;
-      if (!success) {
-        final authoritative = await _readWhisperState(operation.authority);
+    _pendingWhisperChoice = operation;
+    try {
+      final generation = _whisperReconcileGeneration;
+      _cancelWhisperNativeRetry();
+      setState(() {
+        _whispersOn = enabled;
+        _updatingWhispers = true;
+        _whisperReconnecting = false;
+      });
+      // Launch default is MEMORY_SUPPORT, not ACTIVE_SUPPORT (product decision, G4).
+      // Critical-safety Whispers (falls, chest pain, etc.) are never gated by this
+      // client-selected mode — that policy is enforced server-side in every mode.
+      final state = enabled ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState();
+      var success = false;
+      var resolvedEnabled = enabled;
+      var resolvedVerified = false;
+      var nativeReconciled = false;
+      await _whisperFence.serialize<void>(operation, () async {
         if (!_isWhisperOperationCurrent(operation, generation)) return;
-        resolvedEnabled = authoritative == null ? previousEnabled : _whispersEnabled(authoritative);
-        resolvedVerified = authoritative != null;
-        nativeReconciled = false;
-        try {
-          await _reconcileWhisperNative(resolvedEnabled);
-          nativeReconciled = true;
-        } catch (_) {}
+        if (!enabled) {
+          try {
+            await _reconcileWhisperNative(false);
+            nativeReconciled = true;
+          } catch (_) {}
+        }
+        if (!_isWhisperOperationCurrent(operation, generation)) return;
+        success = await _writeWhisperState(state, operation.authority);
+        if (!_isWhisperOperationCurrent(operation, generation)) return;
+        resolvedVerified = success;
+        if (success && enabled) {
+          // Native failure cannot roll back an authoritative successful mode write.
+          try {
+            await _reconcileWhisperNative(true);
+            nativeReconciled = true;
+          } catch (_) {}
+        }
+        if (!_isWhisperOperationCurrent(operation, generation)) return;
+        if (!success && enabled) {
+          try {
+            await _reconcileWhisperNative(false);
+            if (!_isWhisperOperationCurrent(operation, generation)) return;
+            await _writeWhisperState(const GuardianModeState(), operation.authority);
+          } catch (_) {}
+        }
+        if (!_isWhisperOperationCurrent(operation, generation)) return;
+        if (!success) {
+          final authoritative = await _readWhisperState(operation.authority);
+          if (!_isWhisperOperationCurrent(operation, generation)) return;
+          resolvedEnabled = authoritative == null ? previousEnabled : _whispersEnabled(authoritative);
+          resolvedVerified = authoritative != null;
+          nativeReconciled = false;
+          try {
+            await _reconcileWhisperNative(resolvedEnabled);
+            nativeReconciled = true;
+          } catch (_) {}
+        }
+      });
+      if (!_isWhisperOperationCurrent(operation, generation)) return;
+      _whisperFence.publish(
+        operation,
+        (enabled: resolvedEnabled, modeVerified: resolvedVerified, nativeReconciled: nativeReconciled),
+      );
+      if (resolvedEnabled && resolvedVerified && !nativeReconciled) {
+        _whisperRetryOperation = operation;
+        _scheduleWhisperNativeRetry(generation);
       }
-    });
-    if (!_isWhisperOperationCurrent(operation, generation)) return;
-    _whisperFence.publish(
-      operation,
-      (enabled: resolvedEnabled, modeVerified: resolvedVerified, nativeReconciled: nativeReconciled),
-    );
-    if (resolvedEnabled && resolvedVerified && !nativeReconciled) {
-      _whisperRetryOperation = operation;
-      _scheduleWhisperNativeRetry(generation);
-    }
-    if (!success) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.anErrorOccurredTryAgain)));
+      if (!success) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.anErrorOccurredTryAgain)));
+      }
+    } finally {
+      if (identical(_pendingWhisperChoice, operation)) _pendingWhisperChoice = null;
+      _whisperFence.abandon(operation);
     }
   }
 
