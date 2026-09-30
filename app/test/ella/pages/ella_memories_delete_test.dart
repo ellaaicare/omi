@@ -375,6 +375,36 @@ void main() {
     expect(api.displayEnqueueRequests, isEmpty);
   });
 
+  testWidgets('manual queue retry retains its one day refresh through null then unchanged success', (tester) async {
+    final api = _QueueReadArtworkApi();
+    final unchanged = _queueStatus(ready: 0, active: 1, queued: 0);
+    api.queueReads.addAll([() async => unchanged, () async => null, () async => null, () async => null]);
+    await pumpQueuePage(tester, api);
+    for (var i = 0; i < 3; i++) {
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump();
+    }
+    final dayReads = api.dayReads;
+    api.queueReads.addAll([() async => null, () async => unchanged, () async => unchanged]);
+    api.dayItems = const {'queue-memory': MemoryArtworkResult(status: MemoryArtworkResultStatus.declined)};
+    await tester.tap(find.byKey(const Key('memory-artwork-queue-read-retry')));
+    await tester.pump();
+    expect(find.byKey(const Key('memory-artwork-queue-read-unavailable')), findsOneWidget);
+    expect(api.dayReads, dayReads, reason: 'a failed queue GET must not reread old day metadata');
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pump();
+    expect(api.dayReads, dayReads + 1, reason: 'current success consumes the retained manual refresh once');
+    expect(find.byKey(const Key('memory-artwork-queue-read-unavailable')), findsNothing);
+    expect(tester.widget<MemoryArtworkImage>(find.byType(MemoryArtworkImage)).prefetchedResult?.status,
+        MemoryArtworkResultStatus.declined);
+    expect(find.byKey(const Key('memory-artwork-generation-progress-queue-memory')), findsNothing);
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pump();
+    expect(api.dayReads, dayReads + 1, reason: 'a second unchanged success cannot consume intent again');
+    expect(api.backfillCalls, 0);
+    expect(api.displayEnqueueRequests, isEmpty);
+  });
+
   testWidgets('terminal queue reads retain ready day artwork rather than replacing it with unavailable',
       (tester) async {
     final api = _QueueReadArtworkApi();

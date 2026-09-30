@@ -93,6 +93,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   int _artworkQueueReads = 0;
   int _artworkQueueUnavailableReads = 0;
   bool _artworkQueueReadUnavailable = false;
+  bool _artworkQueueManualRefreshPending = false;
   late final Listenable _artworkAuthorityChanges;
 
   @override
@@ -247,7 +248,8 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     }
     _artworkQueueUnavailableReads = 0;
     final previous = _artworkQueueStatus;
-    final refreshVisibleArtwork = previous == null ||
+    final refreshVisibleArtwork = _artworkQueueManualRefreshPending ||
+        previous == null ||
         status.styleVersion != previous.styleVersion ||
         status.generationId != previous.generationId ||
         status.ready > previous.ready ||
@@ -255,6 +257,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     setState(() {
       _artworkQueueStatus = status;
       _artworkQueueReadUnavailable = false;
+      _artworkQueueManualRefreshPending = false;
       if (refreshVisibleArtwork) _artworkDisplayEpoch++;
     });
     if (_shouldPollArtworkQueue(status)) {
@@ -280,28 +283,22 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     _artworkQueuePollTimer?.cancel();
     _artworkQueueReads = 0;
     _artworkQueueUnavailableReads = 0;
+    _artworkQueueManualRefreshPending = false;
   }
 
   void _stopArtworkQueueReads() {
     _artworkQueuePollTimer?.cancel();
+    _artworkQueueManualRefreshPending = false;
     if (mounted) setState(() => _artworkQueueReadUnavailable = true);
   }
 
   Future<void> _retryArtworkQueueRead() async {
     if (!_artworkApi.isDisplayAuthorityCurrent() || _artworkPreferences?.releaseEnabled != true) return;
     _resetArtworkQueueReadBudget();
-    final authorityEpoch = _artworkAuthorityEpoch;
-    final refreshSequence = _artworkQueueRefreshSequence + 1;
+    // The first read may be unavailable; retain intent until this bounded cycle
+    // receives a current success, rather than refreshing old day metadata.
+    _artworkQueueManualRefreshPending = true;
     await _refreshArtworkQueueStatus();
-    if (!mounted ||
-        authorityEpoch != _artworkAuthorityEpoch ||
-        refreshSequence != _artworkQueueRefreshSequence ||
-        !_artworkApi.isDisplayAuthorityCurrent() ||
-        _artworkQueueReadUnavailable) {
-      return;
-    }
-    // Refresh the shared day GET once, even if queue totals did not change.
-    setState(() => _artworkDisplayEpoch++);
   }
 
   /// Gallery browsing must never spend image allowance. A deliberate style
