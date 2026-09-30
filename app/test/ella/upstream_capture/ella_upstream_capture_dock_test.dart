@@ -19,6 +19,7 @@ import 'package:omi/pages/home/today_page.dart'
         GuardianModeLoader,
         GuardianModeSetter,
         GuardianNativeLifecycle,
+        TodayCaptureDockViewport,
         todayBackToRecentBottomOffset,
         todayDockReservedHeight,
         todayDockScrollClearance;
@@ -137,7 +138,9 @@ class _DockFixture {
     GuardianNativeLifecycle? guardianNativeStart,
     GuardianNativeLifecycle? guardianNativeStop,
     GuardianNativeStateReader? guardianNativeState,
+    Stream<guardian_native.GuardianModeState>? guardianNativeStates,
     EllaCaptureConsentRequester? consentRequester,
+    String Function()? authenticatedUid,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
@@ -158,7 +161,7 @@ class _DockFixture {
               padding: const EdgeInsets.all(14),
               child: EllaUpstreamCaptureDock(
                 runtime: runtime,
-                authenticatedUid: () => _uid,
+                authenticatedUid: authenticatedUid ?? () => _uid,
                 consentRequester: consentRequester,
                 guardianAvailability: () => guardianAvailable,
                 guardianModeLoader: guardianModeLoader,
@@ -166,6 +169,7 @@ class _DockFixture {
                 guardianNativeStart: guardianNativeStart,
                 guardianNativeStop: guardianNativeStop,
                 guardianNativeState: guardianNativeState,
+                guardianNativeStates: guardianNativeStates,
               ),
             ),
           ),
@@ -243,6 +247,11 @@ void main() {
     final secondaryBackground = secondary.style!.backgroundColor!.resolve({})!;
 
     expect(_contrastRatio(primaryForeground, primaryBackground), greaterThanOrEqualTo(4.5));
+    for (final state in [WidgetState.pressed, WidgetState.focused]) {
+      final overlay = primary.style!.overlayColor!.resolve({state})!;
+      final composited = Color.alphaBlend(overlay, primaryBackground);
+      expect(_contrastRatio(primaryForeground, composited), greaterThanOrEqualTo(4.5));
+    }
     expect(_contrastRatio(secondaryForeground, secondaryBackground), greaterThanOrEqualTo(4.5));
     expect(tester.getSize(primaryFinder).height, greaterThanOrEqualTo(EllaSizes.minTouchTarget));
     expect(tester.getSize(secondaryFinder).height, greaterThanOrEqualTo(EllaSizes.minTouchTarget));
@@ -361,6 +370,30 @@ void main() {
 
     expect(consentCalls, 1);
     expect(find.text('Permission updated. Try recording again.'), findsOneWidget);
+  });
+
+  testWidgets('a retired account outcome cannot prompt the replacement account for consent', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final result = Completer<EllaCaptureStartOutcome>();
+    var signedInUid = _uid;
+    var consentCalls = 0;
+    fixture.runtime.startPhoneOverride = (_) => result.future;
+    await fixture.pump(
+      tester,
+      authenticatedUid: () => signedInUid,
+      consentRequester: (_) async {
+        consentCalls++;
+        return true;
+      },
+    );
+    await tester.tap(find.byKey(const Key('upstream-capture-record-phone')));
+    await tester.pump();
+    signedInUid = 'replacement-account';
+    result.complete(EllaCaptureStartOutcome.consentRequired);
+    await tester.pump();
+    await tester.pump();
+    expect(consentCalls, 0);
+    expect(find.text('Permission updated. Try recording again.'), findsNothing);
   });
 
   testWidgets('search and protocol failures are distinct and recoverable', (tester) async {
@@ -544,6 +577,7 @@ void main() {
     expect(find.text('Whispers was saved, but spoken playback could not start. Try again.'), findsOneWidget);
     expect(find.text('Whispers are on, but spoken playback is not available right now.'), findsOneWidget);
     expect(find.byKey(const Key('upstream-capture-whispers-retry')), findsOneWidget);
+    expect(find.byKey(const Key('upstream-capture-whispers-switch')), findsOneWidget);
   });
 
   testWidgets('Whispers save failure keeps the verified prior state', (tester) async {
@@ -599,6 +633,170 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(find.byKey(const Key('upstream-capture-whispers-error')), findsNothing);
+  });
+
+  testWidgets('production MethodChannel stop failure remains visible after saved OFF', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    const channel = MethodChannel('com.ellaaicare.ella/guardian_mode');
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'configureAvailability' &&
+          call.arguments is Map &&
+          (call.arguments as Map)['enabled'] == false) {
+        throw PlatformException(code: 'native_stop_failed');
+      }
+      return null;
+    });
+    addTearDown(() => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, null));
+    await fixture.pump(
+      tester,
+      guardianAvailable: true,
+      guardianModeLoader: () async => const GuardianModeInfo(
+        currentMode: GuardianModeKey.custom,
+        twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
+      ),
+      guardianModeSetter: (_) async => true,
+    );
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Whispers was saved off, but spoken playback could not stop. Try again.'), findsOneWidget);
+    expect(find.byKey(const Key('upstream-capture-whispers-retry')), findsOneWidget);
+  });
+
+  testWidgets('Whispers playback recovers when the native service starts after the server read', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final states = StreamController<guardian_native.GuardianModeState>.broadcast();
+    addTearDown(states.close);
+    var nativeState = guardian_native.GuardianModeState.idle;
+    await fixture.pump(
+      tester,
+      guardianAvailable: true,
+      guardianModeLoader: () async => const GuardianModeInfo(
+        currentMode: GuardianModeKey.custom,
+        twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
+      ),
+      guardianNativeState: () => nativeState,
+      guardianNativeStates: states.stream,
+    );
+    expect(find.text('Whispers are on, but spoken playback is not available right now.'), findsOneWidget);
+    nativeState = guardian_native.GuardianModeState.active;
+    states.add(nativeState);
+    await tester.pump();
+    await tester.pump();
+    final visibleWhisperCopy = tester
+        .widgetList<Text>(find.byType(Text))
+        .map((text) => text.data)
+        .whereType<String>()
+        .where((text) => text.contains('Whispers'))
+        .toList();
+    expect(find.text('Whispers are on — Ella can speak up when she can help.'), findsOneWidget,
+        reason: '$visibleWhisperCopy');
+  });
+
+  testWidgets('empty transcript stops saying listening after capture retires', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    await fixture.pump(tester);
+    fixture.makeNecklaceLive();
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('upstream-capture-view-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    fixture.provider.updateRecordingState(RecordingState.error);
+    await tester.pump();
+    expect(find.text('Listening for speech…'), findsNothing);
+    expect(find.text('Recording is unavailable right now.'), findsOneWidget);
+  });
+
+  testWidgets('protocol rejection remains visible while the provider is pending', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    await fixture.pump(tester);
+    fixture.provider.updateRecordingState(RecordingState.initialising);
+    fixture.runtime.protocolUnavailable.value = true;
+    await tester.pump();
+    expect(find.text("Ella couldn't connect to transcription, so recording didn't start."), findsOneWidget);
+  });
+
+  testWidgets('full Home-style stack keeps live dock controls reachable at 320x568 and 3x text', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    const screen = Size(320, 568);
+    const scale = 3.0;
+    tester.view.physicalSize = screen;
+    tester.view.devicePixelRatio = 1;
+    final maxDockHeight = todayDockReservedHeight(scale, viewportHeight: screen.height);
+    await tester.pumpWidget(MaterialApp(
+      debugShowCheckedModeBanner: false,
+      theme: ellaThemeData(),
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(context).copyWith(textScaler: const TextScaler.linear(scale)),
+        child: child!,
+      ),
+      home: Scaffold(
+        body: Stack(children: [
+          CustomScrollView(slivers: [
+            const SliverToBoxAdapter(child: SizedBox(height: 700, child: Text('Home memories'))),
+            SliverToBoxAdapter(
+                child: SizedBox(
+                    height: todayDockScrollClearance(textScale: scale, safeBottom: 0, viewportHeight: screen.height))),
+          ]),
+          Positioned(
+            right: 22,
+            bottom: todayBackToRecentBottomOffset(
+              textScale: scale,
+              safeBottom: 0,
+              viewportHeight: screen.height,
+            ),
+            child: const SizedBox(key: Key('home-back-to-recent'), width: 48, height: 48),
+          ),
+          Positioned(
+            left: 14,
+            right: 14,
+            bottom: EllaSizes.navBarHeight + 16,
+            child: TodayCaptureDockViewport(
+              maxHeight: maxDockHeight,
+              child: EllaUpstreamCaptureDock(runtime: fixture.runtime, authenticatedUid: () => _uid),
+            ),
+          ),
+          const Positioned(
+              left: 0, right: 0, bottom: 0, child: SizedBox(key: Key('home-nav'), height: EllaSizes.navBarHeight)),
+        ]),
+      ),
+    ));
+    await tester.pump();
+    fixture.makeNecklaceLive();
+    await tester.pump();
+    await tester.pump();
+    final navTop = tester.getTopLeft(find.byKey(const Key('home-nav'))).dy;
+    final back = tester.getRect(find.byKey(const Key('home-back-to-recent')));
+    final dock = tester.getRect(find.byKey(const Key('home-capture-dock-scroll')));
+    expect(dock.height, lessThanOrEqualTo(maxDockHeight));
+    expect(dock.bottom, lessThan(navTop));
+    expect(back.bottom, lessThan(dock.top));
+    await expectLater(
+      find.byType(MaterialApp),
+      matchesGoldenFile('goldens/ella_upstream_capture_home_live_320x568_scale3.png'),
+    );
+    for (final key in [
+      'upstream-capture-stop-phone',
+      'upstream-capture-disconnect-necklace',
+      'upstream-capture-view-transcript',
+      'upstream-capture-finish'
+    ]) {
+      final finder = find.byKey(Key(key));
+      if (finder.evaluate().isEmpty) continue;
+      await tester.ensureVisible(finder);
+      await tester.pump();
+      final rect = tester.getRect(finder);
+      expect(rect.top, greaterThanOrEqualTo(dock.top));
+      expect(rect.bottom, lessThanOrEqualTo(dock.bottom));
+      expect(rect.height, greaterThanOrEqualTo(EllaSizes.minTouchTarget));
+    }
+    await expectLater(
+      find.byType(MaterialApp),
+      matchesGoldenFile('goldens/ella_upstream_capture_home_live_scrolled_320x568_scale3.png'),
+    );
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('production Home coordinates reserve the rendered dock and navigation at large text', (tester) async {

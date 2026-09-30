@@ -206,8 +206,10 @@ class EllaUpstreamCaptureRuntime {
     required this.authority,
     EllaCaptureProtocolSocket? Function()? activeProtocolSocket,
     EllaCaptureFinalizationRequest? finalizationRequest,
+    @visibleForTesting Future<CaptureProvider> Function()? bootForTesting,
   })  : _activeProtocolSocket = activeProtocolSocket,
-        _finalizationRequest = finalizationRequest;
+        _finalizationRequest = finalizationRequest,
+        _bootForTesting = bootForTesting;
 
   static EllaUpstreamCaptureRuntime? _instance;
 
@@ -220,6 +222,7 @@ class EllaUpstreamCaptureRuntime {
   final EllaCaptureAuthority authority;
   final EllaCaptureProtocolSocket? Function()? _activeProtocolSocket;
   final EllaCaptureFinalizationRequest? _finalizationRequest;
+  final Future<CaptureProvider> Function()? _bootForTesting;
   CaptureProvider? _provider;
   EllaCaptureProtocolSocket? _protocolSocket;
   EllaCaptureProtocolSocket? _finalizationSocket;
@@ -233,7 +236,16 @@ class EllaUpstreamCaptureRuntime {
   String? get boundOwnerId => authority.boundUid;
 
   /// Boots the vendored stack once; later calls join the same future.
-  Future<CaptureProvider> ensureBooted() => _boot ??= _bootProduction();
+  Future<CaptureProvider> ensureBooted() {
+    final existing = _boot;
+    if (existing != null) return existing;
+    final attempt = _bootForTesting?.call() ?? _bootProduction();
+    _boot = attempt;
+    attempt.then((_) {}, onError: (Object _, StackTrace __) {
+      if (identical(_boot, attempt)) _boot = null;
+    });
+    return attempt;
+  }
 
   Future<CaptureProvider> _bootProduction() async {
     if (!_upstreamEnvInitialized) {
@@ -525,10 +537,23 @@ class EllaUpstreamCaptureRuntime {
 
   /// Phone mic: binds the signed-in account, then upstream `streamRecording()`.
   Future<EllaCaptureStartOutcome> startPhoneCapture(String uid) async {
+    final originEpoch = authority.bindingEpoch;
     final provider = await ensureBooted();
-    if (!await bindAccount(uid)) return EllaCaptureStartOutcome.consentRequired;
+    if (!authority.isCurrentOwner(uid) || authority.bindingEpoch != originEpoch) {
+      return EllaCaptureStartOutcome.unavailable;
+    }
+    if (!await bindAccount(uid)) {
+      return authority.isCurrentOwner(uid)
+          ? EllaCaptureStartOutcome.consentRequired
+          : EllaCaptureStartOutcome.unavailable;
+    }
+    if (!authority.isCurrentOwner(uid) || authority.boundUid != uid || !authority.hasCurrentAuthority) {
+      return EllaCaptureStartOutcome.unavailable;
+    }
     await provider.streamRecording();
-    return EllaCaptureStartOutcome.started;
+    return authority.isCurrentOwner(uid) && authority.boundUid == uid && authority.hasCurrentAuthority
+        ? EllaCaptureStartOutcome.started
+        : EllaCaptureStartOutcome.unavailable;
   }
 
   Future<void> stopPhoneCapture() async {
@@ -563,14 +588,30 @@ class EllaUpstreamCaptureRuntime {
   /// remember the device, hand it to capture, and start device recording.
   /// There is intentionally no Ella auto-connect / reconnect loop.
   Future<EllaCaptureStartOutcome> connectNecklace(String uid, BtDevice device) async {
+    final originEpoch = authority.bindingEpoch;
     final provider = await ensureBooted();
-    if (!await bindAccount(uid)) return EllaCaptureStartOutcome.consentRequired;
+    if (!authority.isCurrentOwner(uid) || authority.bindingEpoch != originEpoch) {
+      return EllaCaptureStartOutcome.unavailable;
+    }
+    if (!await bindAccount(uid)) {
+      return authority.isCurrentOwner(uid)
+          ? EllaCaptureStartOutcome.consentRequired
+          : EllaCaptureStartOutcome.unavailable;
+    }
+    if (!authority.isCurrentOwner(uid) || authority.boundUid != uid || !authority.hasCurrentAuthority) {
+      return EllaCaptureStartOutcome.unavailable;
+    }
     final connection = await ServiceManager.instance().device.ensureConnection(device.id, force: true);
     if (connection == null) return EllaCaptureStartOutcome.unavailable;
+    if (!authority.isCurrentOwner(uid) || authority.boundUid != uid || !authority.hasCurrentAuthority) {
+      return EllaCaptureStartOutcome.unavailable;
+    }
     upstream.SharedPreferencesUtil().btDevice = device;
     provider.updateRecordingDevice(device);
     await provider.streamDeviceRecording(device: device);
-    return EllaCaptureStartOutcome.started;
+    return authority.isCurrentOwner(uid) && authority.boundUid == uid && authority.hasCurrentAuthority
+        ? EllaCaptureStartOutcome.started
+        : EllaCaptureStartOutcome.unavailable;
   }
 
   Future<void> disconnectNecklace({String? deviceId}) async {

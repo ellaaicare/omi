@@ -48,6 +48,7 @@ class EllaUpstreamCaptureDock extends StatefulWidget {
     this.guardianNativeStart,
     this.guardianNativeStop,
     this.guardianNativeState,
+    this.guardianNativeStates,
   }) : _runtime = runtime;
 
   final EllaUpstreamCaptureRuntime? _runtime;
@@ -59,6 +60,7 @@ class EllaUpstreamCaptureDock extends StatefulWidget {
   final GuardianNativeLifecycle? guardianNativeStart;
   final GuardianNativeLifecycle? guardianNativeStop;
   final GuardianNativeStateReader? guardianNativeState;
+  final Stream<guardian_native.GuardianModeState>? guardianNativeStates;
 
   @override
   State<EllaUpstreamCaptureDock> createState() => _EllaUpstreamCaptureDockState();
@@ -78,6 +80,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   bool _whispersBusy = false;
   _WhisperPlaybackState _whisperPlayback = _WhisperPlaybackState.unknown;
   String? _whisperError;
+  StreamSubscription<guardian_native.GuardianModeState>? _whisperStateSubscription;
 
   String get _uid => widget.authenticatedUid?.call() ?? WalOwnerAuthority.authenticatedUid;
   bool get _busy => _operation != _DockOperation.idle;
@@ -87,6 +90,12 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   void initState() {
     super.initState();
     _runtime.protocolUnavailable.addListener(_onProtocolStatus);
+    _whisperStateSubscription =
+        (widget.guardianNativeStates ?? guardian_native.GuardianModeService().stateStream).listen((_) {
+      if (mounted && _whispersVerified && !_whispersBusy) {
+        setState(() => _whisperPlayback = _playbackStateFor(_whispersOn));
+      }
+    });
     unawaited(_boot());
     unawaited(_loadWhispersState());
   }
@@ -131,6 +140,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   @override
   void dispose() {
     _runtime.protocolUnavailable.removeListener(_onProtocolStatus);
+    unawaited(_whisperStateSubscription?.cancel());
     _connectFocusNode.dispose();
     _transcriptFocusNode.dispose();
     super.dispose();
@@ -314,7 +324,9 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
     }
   }
 
-  Future<void> _handleStartOutcome(EllaCaptureStartOutcome outcome, {required bool necklace}) async {
+  Future<void> _handleStartOutcome(EllaCaptureStartOutcome outcome,
+      {required bool necklace, required String originUid}) async {
+    if (originUid.isEmpty || _uid != originUid) return;
     switch (outcome) {
       case EllaCaptureStartOutcome.started:
         if (mounted) {
@@ -348,12 +360,16 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
 
   Future<void> _startPhone() => _run(
         _DockOperation.connecting,
-        () async => _handleStartOutcome(await _runtime.startPhoneCapture(_uid), necklace: false),
+        () async {
+          final originUid = _uid;
+          await _handleStartOutcome(await _runtime.startPhoneCapture(originUid), necklace: false, originUid: originUid);
+        },
         failureMessage: context.l10n.upstreamCapturePhoneStartFailed,
       );
 
   Future<void> _connectNecklace() async {
     if (_busy) return;
+    final originUid = _uid;
     setState(() {
       _operation = _DockOperation.searching;
       _message = null;
@@ -370,9 +386,10 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
         return;
       }
       final device = await _pickDevice(devices);
-      if (device == null || !mounted) return;
+      if (device == null || !mounted || _uid != originUid) return;
       setState(() => _operation = _DockOperation.connecting);
-      await _handleStartOutcome(await _runtime.connectNecklace(_uid, device), necklace: true);
+      await _handleStartOutcome(await _runtime.connectNecklace(originUid, device),
+          necklace: true, originUid: originUid);
     } catch (_) {
       if (!mounted) return;
       setState(() {
@@ -532,6 +549,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
         final initializing = state == RecordingState.initialising;
         final operationLabel = _operationLabel(context);
         final status = operationLabel ??
+            (_protocolMessageActive && _message != null ? _message : null) ??
             (phoneLive
                 ? context.l10n.upstreamCaptureRecordingPhone
                 : necklaceLive
@@ -539,9 +557,9 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
                     : (state == RecordingState.record || state == RecordingState.deviceRecord || initializing)
                         ? context.l10n.upstreamCaptureConnectingTranscription
                         : _message);
-        final detail = live && provider.segments.isEmpty
+        final detail = live && provider.segments.isEmpty && !_protocolMessageActive
             ? context.l10n.upstreamCaptureWaitingForSpeech
-            : live && _message != null
+            : live && _message != null && !_protocolMessageActive
                 ? _message
                 : null;
 
@@ -557,7 +575,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
                   detail: detail,
                   active: live || _busy || initializing,
                   live: live,
-                  error: !_busy && !live && _message != null,
+                  error: !_busy && _message != null && (_protocolMessageActive || !live),
                 ),
                 const SizedBox(height: 12),
               ],
@@ -820,11 +838,16 @@ class _TranscriptSheet extends StatelessWidget {
                   builder: (context, _) {
                     final segments = provider.segments;
                     if (segments.isEmpty) {
+                      final listening = (provider.recordingState == RecordingState.record ||
+                              provider.recordingState == RecordingState.deviceRecord) &&
+                          provider.transcriptServiceReady;
                       return Semantics(
                         liveRegion: true,
                         child: Center(
                           child: Text(
-                            context.l10n.upstreamCaptureTranscriptEmpty,
+                            listening
+                                ? context.l10n.upstreamCaptureTranscriptEmpty
+                                : context.l10n.upstreamCaptureUnavailable,
                             key: const Key('upstream-capture-transcript-empty'),
                             textAlign: TextAlign.center,
                             style: EllaTextStyles.body.copyWith(color: EllaColors.inkSoft),
@@ -914,25 +937,31 @@ class _WhispersRow extends StatelessWidget {
               ),
             ),
           )
-        : canRetry
-            ? TextButton.icon(
-                key: const Key('upstream-capture-whispers-retry'),
-                style: _DockButtonStyles.text(context),
-                onPressed: onRetry,
-                icon: const Icon(Icons.refresh_rounded),
-                label: Text(context.l10n.retry),
-              )
-            : Semantics(
-                label: context.l10n.todayWhispersTitle,
-                toggled: enabled,
-                child: Switch(
-                  key: const Key('upstream-capture-whispers-switch'),
-                  value: enabled,
-                  onChanged: onChanged,
-                  activeTrackColor: EllaColors.tealDeep,
-                  activeThumbColor: EllaColors.paper,
+        : Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (canRetry)
+                TextButton.icon(
+                  key: const Key('upstream-capture-whispers-retry'),
+                  style: _DockButtonStyles.text(context),
+                  onPressed: onRetry,
+                  icon: const Icon(Icons.refresh_rounded),
+                  label: Text(context.l10n.retry),
                 ),
-              );
+              if (verified)
+                Semantics(
+                  label: context.l10n.todayWhispersTitle,
+                  toggled: enabled,
+                  child: Switch(
+                    key: const Key('upstream-capture-whispers-switch'),
+                    value: enabled,
+                    onChanged: onChanged,
+                    activeTrackColor: EllaColors.tealDeep,
+                    activeThumbColor: EllaColors.paper,
+                  ),
+                ),
+            ],
+          );
     final copy = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -985,8 +1014,8 @@ class _DockButtonStyles {
           (states) => states.contains(WidgetState.disabled) ? EllaColors.cardDeep : EllaColors.tealDeep,
         ),
         overlayColor: WidgetStateProperty.resolveWith((states) {
-          if (states.contains(WidgetState.pressed)) return EllaColors.paper.withValues(alpha: 0.18);
-          if (states.contains(WidgetState.focused)) return EllaColors.paper.withValues(alpha: 0.12);
+          if (states.contains(WidgetState.pressed)) return EllaColors.ink.withValues(alpha: 0.18);
+          if (states.contains(WidgetState.focused)) return EllaColors.ink.withValues(alpha: 0.12);
           return null;
         }),
         textStyle: WidgetStatePropertyAll(

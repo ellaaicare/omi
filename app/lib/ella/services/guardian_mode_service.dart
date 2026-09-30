@@ -88,6 +88,7 @@ class GuardianModeService {
     } catch (e) {
       print('GuardianMode: Error stopping: $e');
       _updateState(GuardianModeState.error);
+      rethrow;
     }
   }
 
