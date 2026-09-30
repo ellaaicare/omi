@@ -457,7 +457,9 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                 bottom: widget.isPivotBottom
                                     ? (textFieldFocusNode.hasFocus
                                         ? 6
-                                        : EllaSizes.navBarHeight + MediaQuery.of(context).padding.bottom + 8)
+                                        : BottomNavBar.navigationHeight(context) +
+                                            MediaQuery.of(context).padding.bottom +
+                                            8)
                                     : (textFieldFocusNode.hasFocus &&
                                             (textController.text.length > 40 || textController.text.contains('\n'))
                                         ? 0

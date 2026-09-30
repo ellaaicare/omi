@@ -13,7 +13,7 @@ import 'package:omi/utils/l10n_extensions.dart';
 ///
 /// - Text labels always visible (elder-friendly)
 /// - Teal active color, no center record button
-/// - 80dp height including safe area
+/// - At least 80dp high, with additional space for scaled labels and safe area
 class BottomNavBar extends StatelessWidget {
   const BottomNavBar({
     super.key,
@@ -22,13 +22,46 @@ class BottomNavBar extends StatelessWidget {
 
   final void Function(int index, bool isRepeat) onTabTap;
 
+  static TextStyle _labelStyle(BuildContext context, {required bool isSelected}) {
+    final textScale = MediaQuery.textScalerOf(context).scale(14) / 14;
+    return Theme.of(context).textTheme.bodyMedium!.copyWith(
+          color: isSelected ? EllaColors.primary : EllaColors.textTertiary,
+          fontSize: textScale >= 1.8 ? 10 : 14,
+          fontWeight: isSelected ? FontWeight.w500 : FontWeight.w400,
+        );
+  }
+
+  /// Shared with page clearances so larger labels never cover page controls.
+  static double navigationHeight(BuildContext context) {
+    final media = MediaQuery.of(context);
+    final tabWidth = (media.size.width - media.padding.horizontal) / 4;
+    final labels = [
+      context.l10n.bottomNavHome,
+      context.l10n.bottomNavChat,
+      context.l10n.bottomNavTalk,
+      context.l10n.bottomNavSettings,
+    ];
+    var height = EllaSizes.navBarHeight;
+    for (final label in labels) {
+      final painter = TextPainter(
+        text: TextSpan(text: label, style: _labelStyle(context, isSelected: true)),
+        textDirection: Directionality.of(context),
+        textScaler: media.textScaler,
+        locale: Localizations.localeOf(context),
+        textAlign: TextAlign.center,
+      )..layout(maxWidth: tabWidth);
+      final requiredHeight = EllaSizes.iconMedium + 4 + painter.height + 16;
+      if (requiredHeight > height) height = requiredHeight.ceilToDouble();
+      painter.dispose();
+    }
+    return height;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Consumer<HomeProvider>(
       builder: (context, home, child) {
-        final textScale = MediaQuery.textScalerOf(context).scale(14) / 14;
-        const navigationHeight = EllaSizes.navBarHeight;
-        final labelFontSize = textScale >= 1.8 ? 10.0 : 14.0;
+        final height = navigationHeight(context);
         return Align(
           alignment: Alignment.bottomCenter,
           child: Container(
@@ -42,14 +75,13 @@ class BottomNavBar extends StatelessWidget {
             child: SafeArea(
               top: false,
               child: SizedBox(
-                height: navigationHeight,
+                height: height,
                 child: Row(
                   children: [
                     _NavTab(
                       icon: FontAwesomeIcons.house,
                       label: context.l10n.bottomNavHome,
-                      height: navigationHeight,
-                      labelFontSize: labelFontSize,
+                      height: height,
                       isSelected: home.selectedIndex == 0,
                       onTap: () {
                         HapticFeedback.mediumImpact();
@@ -61,8 +93,7 @@ class BottomNavBar extends StatelessWidget {
                     _NavTab(
                       icon: FontAwesomeIcons.solidComment,
                       label: context.l10n.bottomNavChat,
-                      height: navigationHeight,
-                      labelFontSize: labelFontSize,
+                      height: height,
                       isSelected: home.selectedIndex == 1,
                       onTap: () {
                         HapticFeedback.mediumImpact();
@@ -74,8 +105,7 @@ class BottomNavBar extends StatelessWidget {
                     _NavTab(
                       icon: FontAwesomeIcons.waveSquare,
                       label: context.l10n.bottomNavTalk,
-                      height: navigationHeight,
-                      labelFontSize: labelFontSize,
+                      height: height,
                       isSelected: home.selectedIndex == 2,
                       onTap: () {
                         HapticFeedback.mediumImpact();
@@ -87,8 +117,7 @@ class BottomNavBar extends StatelessWidget {
                     _NavTab(
                       icon: FontAwesomeIcons.gear,
                       label: context.l10n.bottomNavSettings,
-                      height: navigationHeight,
-                      labelFontSize: labelFontSize,
+                      height: height,
                       isSelected: home.selectedIndex == 3,
                       onTap: () {
                         HapticFeedback.mediumImpact();
@@ -113,7 +142,6 @@ class _NavTab extends StatelessWidget {
     required this.icon,
     required this.label,
     required this.height,
-    required this.labelFontSize,
     required this.isSelected,
     required this.onTap,
   });
@@ -121,7 +149,6 @@ class _NavTab extends StatelessWidget {
   final IconData icon;
   final String label;
   final double height;
-  final double labelFontSize;
   final bool isSelected;
   final VoidCallback onTap;
 
@@ -129,26 +156,25 @@ class _NavTab extends StatelessWidget {
   Widget build(BuildContext context) {
     final color = isSelected ? EllaColors.primary : EllaColors.textTertiary;
     return Expanded(
-      child: InkWell(
-        onTap: onTap,
-        child: SizedBox(
-          height: height,
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, color: color, size: EllaSizes.iconMedium),
-              const SizedBox(height: 4),
-              Text(
-                label,
-                maxLines: 2,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: color,
-                  fontSize: labelFontSize,
-                  fontWeight: isSelected ? FontWeight.w500 : FontWeight.w400,
+      child: Semantics(
+        button: true,
+        selected: isSelected,
+        child: InkWell(
+          onTap: onTap,
+          child: SizedBox(
+            height: height,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, color: color, size: EllaSizes.iconMedium),
+                const SizedBox(height: 4),
+                Text(
+                  label,
+                  textAlign: TextAlign.center,
+                  style: BottomNavBar._labelStyle(context, isSelected: isSelected),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
