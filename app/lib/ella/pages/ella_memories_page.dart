@@ -621,6 +621,7 @@ class MemoryDayGalleryCard extends StatefulWidget {
 class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
   MemoryArtworkDay? _dayArtwork;
   bool _dayBatchResolved = false;
+  bool _dayBatchFailed = false;
   int _loadGeneration = 0;
 
   @override
@@ -644,23 +645,31 @@ class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
     final generation = ++_loadGeneration;
     final memories = widget.memories;
     if (memories.isEmpty) return;
+    if (!_usesDayBatch) return;
     if (mounted && _usesDayBatch) {
       setState(() {
         _dayArtwork = null;
         _dayBatchResolved = false;
+        _dayBatchFailed = false;
       });
     }
     final localDay = memories.first.createdAt.toLocal();
-    final result = await (widget.artworkApi ?? MemoryArtworkApi()).fetchDay(
-      DateTime(localDay.year, localDay.month, localDay.day),
-      utcOffsetMinutes: localDay.timeZoneOffset.inMinutes,
-      authorityRevision: widget.artworkAuthorityEpoch,
-      contentRevision: widget.artworkRefreshEpoch,
-    );
+    MemoryArtworkDay? result;
+    try {
+      result = await (widget.artworkApi ?? MemoryArtworkApi()).fetchDay(
+        DateTime(localDay.year, localDay.month, localDay.day),
+        utcOffsetMinutes: localDay.timeZoneOffset.inMinutes,
+        authorityRevision: widget.artworkAuthorityEpoch,
+        contentRevision: widget.artworkRefreshEpoch,
+      );
+    } catch (_) {
+      // A failed batch GET is terminal until the user explicitly retries it.
+    }
     if (!mounted || generation != _loadGeneration) return;
     setState(() {
       _dayArtwork = result;
-      _dayBatchResolved = result != null;
+      _dayBatchResolved = true;
+      _dayBatchFailed = result == null;
     });
   }
 
@@ -705,15 +714,19 @@ class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
         children: [
           AspectRatio(
             aspectRatio: 1.75,
-            child: _MemoryDayArtworkCollage(
-              memories: widget.memories,
-              artworkApi: widget.artworkApi,
-              artworkRefreshEpoch: widget.artworkRefreshEpoch,
-              artworkAuthorityEpoch: widget.artworkAuthorityEpoch,
-              automaticRepairMemoryIds: widget.automaticRepairMemoryIds,
-              prefetchedArtwork: _dayArtwork?.items ?? const <String, MemoryArtworkResult>{},
-              dayBatchResolved: _dayBatchResolved,
-            ),
+            child: Stack(children: [
+              Positioned.fill(
+                  child: _MemoryDayArtworkCollage(
+                memories: widget.memories,
+                artworkApi: widget.artworkApi,
+                artworkRefreshEpoch: widget.artworkRefreshEpoch,
+                artworkAuthorityEpoch: widget.artworkAuthorityEpoch,
+                automaticRepairMemoryIds: _dayBatchFailed ? const <String>{} : widget.automaticRepairMemoryIds,
+                prefetchedArtwork: _dayArtwork?.items ?? const <String, MemoryArtworkResult>{},
+                dayBatchResolved: _dayBatchResolved,
+              )),
+              if (_dayBatchFailed) Positioned(left: 8, right: 8, bottom: 8, child: _dayArtworkRetry(context)),
+            ]),
           ),
           _dayDescription(context, titles),
         ],
@@ -729,22 +742,53 @@ class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
         children: [
           SizedBox(
             width: 112,
-            child: MemoryArtworkImage(
-              conversation: memory,
-              api: widget.artworkApi,
-              refreshEpoch: widget.artworkRefreshEpoch,
-              authorityEpoch: widget.artworkAuthorityEpoch,
-              allowManualGeneration: false,
-              prefetchedResult: _dayArtwork?.items[memory.id],
-              prefetchResolved: _dayBatchResolved,
-              deferRemoteFetch: _usesDayBatch && !_dayBatchResolved,
-            ),
+            child: Stack(children: [
+              Positioned.fill(
+                  child: MemoryArtworkImage(
+                conversation: memory,
+                api: widget.artworkApi,
+                refreshEpoch: widget.artworkRefreshEpoch,
+                authorityEpoch: widget.artworkAuthorityEpoch,
+                allowManualGeneration: false,
+                prefetchedResult: _dayArtwork?.items[memory.id],
+                prefetchResolved: _dayBatchResolved,
+                deferRemoteFetch: _usesDayBatch && !_dayBatchResolved,
+              )),
+              if (_dayBatchFailed) Positioned(right: 4, bottom: 4, child: _dayArtworkRetry(context, compact: true)),
+            ]),
           ),
           Expanded(child: _dayDescription(context, titles, compact: true)),
         ],
       ),
     );
   }
+
+  Widget _dayArtworkRetry(BuildContext context, {bool compact = false}) => Align(
+        alignment: Alignment.bottomRight,
+        child: DecoratedBox(
+          decoration: BoxDecoration(color: EllaColors.card, borderRadius: BorderRadius.circular(12)),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (!compact)
+                Flexible(
+                  child: Padding(
+                    padding: const EdgeInsets.only(left: 8),
+                    child: Text(context.l10n.memoryArtworkUnavailableLabel,
+                        maxLines: 2, overflow: TextOverflow.ellipsis, style: EllaTextStyles.secondary),
+                  ),
+                ),
+              IconButton(
+                key: const Key('memory-day-artwork-retry'),
+                tooltip: '${context.l10n.memoryArtworkUnavailableLabel}. ${context.l10n.tryAgain}',
+                constraints: const BoxConstraints.tightFor(width: 48, height: 48),
+                onPressed: () => unawaited(_loadDayArtwork()),
+                icon: const Icon(Icons.refresh_rounded, color: EllaColors.tealDeep),
+              ),
+            ],
+          ),
+        ),
+      );
 
   Widget _dayDescription(BuildContext context, String titles, {bool compact = false}) => Padding(
         padding: EdgeInsets.all(compact ? 12 : 16),

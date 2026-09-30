@@ -10,10 +10,10 @@ import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
 import 'package:omi/ella/services/guardian_mode_service.dart' as guardian_native;
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
+import 'package:omi/pages/capture/connect.dart';
 import 'package:omi/pages/home/today_page.dart'
     show GuardianAvailability, GuardianModeLoader, GuardianModeSetter, GuardianNativeLifecycle;
 import 'package:omi/services/wals/wal_owner_authority.dart';
-import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/upstream_capture/backend/schema/transcript_segment.dart';
 import 'package:omi/upstream_capture/providers/capture_provider.dart';
 import 'package:omi/upstream_capture/utils/enums.dart';
@@ -370,108 +370,36 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   Future<void> _connectNecklace() async {
     if (_busy) return;
     final originUid = _uid;
+    if (originUid.isEmpty) return;
     setState(() {
       _operation = _DockOperation.searching;
       _message = null;
       _necklaceRetryAvailable = false;
     });
     try {
-      final devices = await _runtime.discoverNecklaces();
-      if (!mounted) return;
-      if (devices.isEmpty) {
-        setState(() {
-          _message = context.l10n.upstreamCaptureNoNecklaceFound;
-          _necklaceRetryAvailable = true;
-        });
-        return;
-      }
-      final device = await _pickDevice(devices);
-      if (device == null || !mounted || _uid != originUid) return;
-      setState(() => _operation = _DockOperation.connecting);
-      await _handleStartOutcome(await _runtime.connectNecklace(originUid, device),
-          necklace: true, originUid: originUid);
+      final route = MaterialPageRoute<void>(
+        builder: (_) => ConnectDevicePage(
+          originUid: originUid,
+          authenticatedUid: () => _uid,
+          consentRequester: widget.consentRequester,
+        ),
+      );
+      await Navigator.of(context).push<void>(route);
+      await route.completed;
     } catch (_) {
       if (!mounted) return;
       setState(() {
-        _message = _operation == _DockOperation.searching
-            ? context.l10n.upstreamCaptureSearchFailed
-            : context.l10n.upstreamCaptureConnectionFailed;
+        _message = context.l10n.upstreamCaptureSearchFailed;
         _necklaceRetryAvailable = true;
       });
     } finally {
-      if (mounted) setState(() => _operation = _DockOperation.idle);
+      if (mounted) {
+        setState(() => _operation = _DockOperation.idle);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && _uid == originUid) _connectFocusNode.requestFocus();
+        });
+      }
     }
-  }
-
-  Future<BtDevice?> _pickDevice(List<BtDevice> devices) async {
-    final selected = await showModalBottomSheet<BtDevice>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: EllaColors.paper,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(EllaSizes.cardRadius)),
-      ),
-      builder: (context) => SafeArea(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * 0.72),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 20, 8, 8),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Semantics(
-                        header: true,
-                        child: Text(
-                          context.l10n.upstreamCaptureChooseNecklace,
-                          style: Theme.of(context).textTheme.titleLarge,
-                        ),
-                      ),
-                    ),
-                    IconButton(
-                      key: const Key('upstream-capture-picker-close'),
-                      tooltip: context.l10n.close,
-                      constraints: const BoxConstraints.tightFor(
-                        width: EllaSizes.minTouchTarget,
-                        height: EllaSizes.minTouchTarget,
-                      ),
-                      onPressed: () => Navigator.of(context).pop(),
-                      icon: const Icon(Icons.close_rounded, color: EllaColors.tealDeep),
-                    ),
-                  ],
-                ),
-              ),
-              Flexible(
-                child: ListView(
-                  shrinkWrap: true,
-                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 20),
-                  children: [
-                    for (final device in devices)
-                      ListTile(
-                        key: Key('upstream-capture-device-${device.id}'),
-                        minVerticalPadding: 12,
-                        leading: const Icon(Icons.bluetooth_rounded, color: EllaColors.tealDeep),
-                        title: Text(device.name),
-                        trailing: const Icon(Icons.chevron_right_rounded, color: EllaColors.inkSoft),
-                        onTap: () => Navigator.of(context).pop(device),
-                      ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-    if (mounted) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _connectFocusNode.requestFocus();
-      });
-    }
-    return selected;
   }
 
   Future<void> _openTranscript(CaptureProvider provider, {required bool necklace}) async {

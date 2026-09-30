@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
+import 'package:omi/ella/services/ai_consent_coordinator.dart';
 import 'package:omi/gen/flutter_communicator.g.dart';
 import 'package:omi/pages/onboarding/apple_watch_permission_page.dart';
 import 'package:omi/providers/onboarding_provider.dart';
@@ -20,11 +21,15 @@ import 'package:omi/widgets/confirmation_dialog.dart';
 class FoundDevices extends StatefulWidget {
   final bool isFromOnboarding;
   final VoidCallback goNext;
+  final bool Function()? canConnect;
+  final Future<bool> Function(BuildContext)? consentRequester;
 
   const FoundDevices({
     super.key,
     required this.goNext,
     required this.isFromOnboarding,
+    this.canConnect,
+    this.consentRequester,
   });
 
   @override
@@ -153,7 +158,7 @@ class _FoundDevicesState extends State<FoundDevices> {
 
     // Check if user has already acknowledged this device type
     final prefKey = 'firmware_warning_acknowledged_${device.type.toString()}';
-    final alreadyAcknowledged = SharedPreferencesUtil().getBool(prefKey) ?? false;
+    final alreadyAcknowledged = SharedPreferencesUtil().getBool(prefKey);
 
     if (alreadyAcknowledged) {
       return; // User already acknowledged this warning
@@ -221,7 +226,9 @@ class _FoundDevicesState extends State<FoundDevices> {
             !provider.isConnected
                 ? Text(
                     provider.deviceList.isEmpty
-                        ? context.l10n.searchingForDevices
+                        ? provider.enableInstructions
+                            ? context.l10n.upstreamCaptureNoNecklaceFound
+                            : context.l10n.searchingForDevices
                         : context.l10n.devicesFoundNearby(provider.deviceList.length),
                     style: const TextStyle(
                       fontWeight: FontWeight.w400,
@@ -284,17 +291,46 @@ class _FoundDevicesState extends State<FoundDevices> {
         return GestureDetector(
           onTap: !provider.isClicked
               ? () async {
+                  if (widget.canConnect != null && !widget.canConnect!()) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(context.l10n.upstreamCaptureUnavailable)),
+                    );
+                    return;
+                  }
                   if (device.type == DeviceType.appleWatch) {
                     await _handleAppleWatchOnboarding(device, provider);
                   } else {
                     // Handle other devices
-                    await provider.handleTap(
+                    final outcome = await provider.handleTap(
                       device: device,
                       isFromOnboarding: widget.isFromOnboarding,
                       goNext: widget.goNext,
                     );
 
-                    if (!mounted) return;
+                    if (!mounted || (widget.canConnect != null && !widget.canConnect!())) return;
+
+                    if (outcome == DeviceSelectionOutcome.consentRequired) {
+                      var accepted = false;
+                      try {
+                        accepted =
+                            await (widget.consentRequester?.call(context) ?? AiConsentCoordinator.ensure(context));
+                      } catch (_) {
+                        // The candidate remains available for an explicit retry.
+                      }
+                      if (!mounted || (widget.canConnect != null && !widget.canConnect!())) return;
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                        content: Text(accepted
+                            ? context.l10n.upstreamCapturePermissionUpdated
+                            : context.l10n.upstreamCaptureConsentRequired),
+                      ));
+                      return;
+                    }
+                    if (outcome == DeviceSelectionOutcome.unavailable) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text(context.l10n.upstreamCaptureConnectionFailed)),
+                      );
+                      return;
+                    }
 
                     // Show firmware warning after successful connection
                     if (provider.isConnected) {

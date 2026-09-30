@@ -48,8 +48,13 @@ class EllaUpstreamDeviceServiceAdapter
         await runtime.ensureBooted();
         return upstream_services.ServiceManager.instance().device;
       },
-      connect: (ownerId, device) async =>
-          await runtime.connectNecklace(ownerId, device) == EllaCaptureStartOutcome.started,
+      connect: (ownerId, device) async {
+        final outcome = await runtime.connectNecklace(ownerId, device);
+        if (outcome == EllaCaptureStartOutcome.consentRequired) {
+          throw const legacy_service.DeviceConsentRequiredException();
+        }
+        return outcome == EllaCaptureStartOutcome.started;
+      },
       disconnect: (deviceId) => runtime.disconnectNecklace(deviceId: deviceId),
       connectionOwner: () => runtime.boundOwnerId,
     );
@@ -218,6 +223,9 @@ class EllaUpstreamDeviceServiceAdapter
     var connected = false;
     try {
       connected = await _connect(ownerId, upstreamDevice);
+    } on legacy_service.DeviceConsentRequiredException {
+      if (_isCurrent(operationGeneration)) rethrow;
+      return null;
     } catch (error) {
       Logger.debug('[EllaUpstreamDeviceAdapter] explicit connection failed: ${error.runtimeType}');
       await _disconnectStaleConnection(device.id);

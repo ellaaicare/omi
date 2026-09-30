@@ -293,6 +293,37 @@ void main() {
     );
   });
 
+  for (final status in [404, 403, 200]) {
+    test('day artwork GET returns no batch for ${status == 200 ? 'malformed JSON' : status}', () async {
+      final authority = _Authority('owner-a');
+      final methods = <String>[];
+      final api = MemoryArtworkApi(
+        baseUrl: 'https://api.example/',
+        authorityProvider: () => authority,
+        request: ({
+          required url,
+          required headers,
+          required body,
+          required method,
+          timeout,
+          retries,
+          requireAuthCheck,
+          expectedAuthenticatedUid,
+          exactAuthority,
+          onSendAttempt,
+        }) async {
+          methods.add(method);
+          expect(expectedAuthenticatedUid, authority.uid);
+          expect(exactAuthority, same(authority));
+          return http.Response(status == 200 ? '{invalid' : '{}', status);
+        },
+      );
+
+      expect(await api.fetchDay(DateTime(2026, 9, 24), utcOffsetMinutes: 0), isNull);
+      expect(methods, ['GET']);
+    });
+  }
+
   test('recent recovery accepts only the bounded authenticated server contract', () async {
     final authority = _Authority('owner-a');
     late String requestedUrl;

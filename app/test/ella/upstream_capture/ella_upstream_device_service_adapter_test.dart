@@ -8,6 +8,7 @@ import 'package:omi/backend/schema/bt_device/bt_device.dart' as legacy_device;
 import 'package:omi/ella/upstream_capture/ella_upstream_device_service_adapter.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/onboarding_provider.dart';
+import 'package:omi/services/devices.dart' show DeviceConsentRequiredException;
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart' as upstream_device;
 import 'package:omi/upstream_capture/services/devices.dart' as upstream_service;
 import 'package:omi/upstream_capture/services/devices/connectors/device_connection.dart' as upstream_connection;
@@ -226,6 +227,28 @@ void main() {
     expect(legacy_preferences.SharedPreferencesUtil().btDevice.id, friend.id);
     expect(legacy_preferences.SharedPreferencesUtil().btDeviceOwnerBinding, 'owner-a');
     expect(presentationCommits, 1);
+  });
+
+  test('consent-required selection retains the discovered device and never commits pairing', () async {
+    final friend = _upstreamDevice('Friend', 'friend-1', upstream_device.DeviceType.friendPendant);
+    final service = _FakeUpstreamDeviceService(discovered: [friend]);
+    final adapter = _adapter(service, connect: (_, __) async => throw const DeviceConsentRequiredException());
+    final deviceProvider = DeviceProvider(deviceService: adapter, automaticallyReconnectOnReady: false);
+    final onboarding = OnboardingProvider(deviceService: adapter)
+      ..setDeviceProvider(deviceProvider)
+      ..hasBluetoothPermission = true;
+    addTearDown(deviceProvider.dispose);
+    addTearDown(onboarding.dispose);
+    addTearDown(adapter.stop);
+
+    await onboarding.scanDevices(onShowDialog: () {});
+    final outcome = await onboarding.handleTap(device: onboarding.deviceList.single, isFromOnboarding: false);
+
+    expect(outcome, DeviceSelectionOutcome.consentRequired);
+    expect(deviceProvider.lastConnectionConsentRequired, isTrue);
+    expect(deviceProvider.presentationIsConnected, isFalse);
+    expect(onboarding.deviceList.single.id, friend.id);
+    expect(onboarding.isClicked, isFalse);
   });
 
   test('disposing the picker cancels delayed upstream discovery and fences late results', () async {

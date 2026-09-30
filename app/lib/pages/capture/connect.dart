@@ -7,19 +7,29 @@ import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/pages/onboarding/find_device/page.dart';
 import 'package:omi/pages/settings/device_settings.dart';
 import 'package:omi/providers/onboarding_provider.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/widgets/device_widget.dart';
 
 class ConnectDevicePage extends StatefulWidget {
-  const ConnectDevicePage({super.key});
+  const ConnectDevicePage({super.key, this.originUid, this.authenticatedUid, this.consentRequester});
+
+  final String? originUid;
+  final String Function()? authenticatedUid;
+  final Future<bool> Function(BuildContext)? consentRequester;
 
   @override
   State<ConnectDevicePage> createState() => _ConnectDevicePageState();
 }
 
 class _ConnectDevicePageState extends State<ConnectDevicePage> {
+  late final String _originUid = widget.originUid ?? _currentUid;
+
+  String get _currentUid => widget.authenticatedUid?.call() ?? WalOwnerAuthority.authenticatedUid;
+  bool get _ownerIsCurrent => _originUid.isNotEmpty && _originUid == _currentUid;
+
   @override
   void initState() {
     super.initState();
@@ -64,6 +74,8 @@ class _ConnectDevicePageState extends State<ConnectDevicePage> {
             ),
             FindDevicesPage(
               isFromOnboarding: false,
+              canConnect: () => _ownerIsCurrent,
+              consentRequester: widget.consentRequester,
               goNext: () {
                 Logger.debug('onConnected from FindDevicesPage');
                 routeToPage(context, const HomePageWrapper(), replace: true);
