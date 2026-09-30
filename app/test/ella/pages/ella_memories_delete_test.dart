@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -12,6 +13,8 @@ import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
 import 'package:omi/ella/services/memory_artwork_api.dart';
+import 'package:omi/ella/services/memory_artwork_cache.dart';
+import 'package:omi/ella/widgets/memory_artwork_image.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
@@ -43,6 +46,9 @@ class _FakeArtworkApi extends MemoryArtworkApi {
 
   @override
   bool get supportsDayArtworkBatch => false;
+
+  @override
+  bool isDisplayAuthorityCurrent() => true;
 
   final bool releaseEnabled;
   String selectedStyle = memoryArtworkDefaultStyle;
@@ -174,6 +180,51 @@ class _UnavailablePreferencesArtworkApi extends _FakeArtworkApi {
   }
 }
 
+class _QueueReadArtworkApi extends _FakeArtworkApi {
+  bool current = true;
+  int dayReads = 0;
+  final List<Future<MemoryArtworkQueueStatus?> Function()> queueReads = [];
+  Map<String, MemoryArtworkResult> dayItems = const {
+    'queue-memory': MemoryArtworkResult(status: MemoryArtworkResultStatus.generating),
+  };
+
+  @override
+  bool get supportsDayArtworkBatch => true;
+
+  @override
+  bool isDisplayAuthorityCurrent() => current;
+
+  @override
+  Future<MemoryArtworkQueueStatus?> queueStatus() {
+    queueStatusRequests++;
+    if (queueReads.isNotEmpty) return queueReads.removeAt(0)();
+    return Future.value(_queueStatus(ready: 0, active: 1, queued: 0));
+  }
+
+  @override
+  Future<MemoryArtworkDay?> fetchDay(
+    DateTime day, {
+    required int utcOffsetMinutes,
+    int authorityRevision = 0,
+    int contentRevision = 0,
+  }) async {
+    dayReads++;
+    return MemoryArtworkDay(day: '2026-08-10', utcOffsetMinutes: utcOffsetMinutes, items: dayItems);
+  }
+}
+
+class _QueueConversationProvider extends ConversationProvider {
+  @override
+  Future<void> getInitialConversations() async {}
+}
+
+class _CachedQueueArtworkApi extends _QueueReadArtworkApi {
+  @override
+  String cacheKeyForDisplay(
+          {required String memoryId, required String styleVersion, required String enrichmentRevision}) =>
+      'gallery-cached-queue-$memoryId';
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -186,6 +237,12 @@ void main() {
   setUp(() async {
     SharedPreferences.setMockInitialValues({'uid': 'test-user', 'aiConsentProfileBindingId': 'profile-test-user'});
     await SharedPreferencesUtil.init();
+    MemoryArtworkCache.configureTerminalEvictorForTesting((_) async {});
+    MemoryArtworkCache.resetRuntimeTrustForTesting();
+  });
+
+  tearDown(() async {
+    MemoryArtworkCache.configureTerminalEvictorForTesting(null);
   });
 
   ServerConversation memory(
@@ -231,6 +288,255 @@ void main() {
       await tester.pump(const Duration(milliseconds: 400));
     }
   }
+
+  Future<void> pumpQueuePage(WidgetTester tester, _QueueReadArtworkApi api,
+      {String layout = 'days', DateTime? at}) async {
+    await SharedPreferencesUtil().saveMemoryArchiveGalleryLayout(layout);
+    final provider = _QueueConversationProvider()
+      ..conversations = [memory('queue-memory', at: at)]
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true
+      ..hasMoreConversations = false;
+    addTearDown(provider.dispose);
+    await pumpPage(tester, provider, artworkApi: api, settle: false);
+  }
+
+  for (final layout in ['journal', 'grid', 'list', 'days']) {
+    testWidgets('$layout stops pending artwork after terminal parent queue failure', (tester) async {
+      final api = _QueueReadArtworkApi();
+      api.queueReads.addAll([() async => null, () async => null, () async => null]);
+      await pumpQueuePage(tester, api, layout: layout, at: DateTime.now());
+      expect(find.byKey(const Key('memory-artwork-generation-progress-queue-memory')), findsOneWidget);
+      for (var i = 0; i < 2; i++) {
+        await tester.pump(const Duration(seconds: 4));
+        await tester.pump();
+      }
+      expect(find.byKey(const Key('memory-artwork-generation-progress-queue-memory')), findsNothing);
+      expect(find.byKey(const Key('memory-artwork-queue-read-unavailable')), findsOneWidget);
+      final dayReads = api.dayReads;
+      await tester.pump(const Duration(minutes: 5));
+      expect(api.dayReads, dayReads);
+      expect(api.queueStatusRequests, 3);
+      expect(api.backfillCalls, 0);
+    });
+  }
+
+  for (final throws in [false, true]) {
+    testWidgets('queue ${throws ? 'exception' : 'null'} has finite reads and stops the prefetched spinner',
+        (tester) async {
+      final api = _QueueReadArtworkApi();
+      api.queueReads.add(() async => _queueStatus(ready: 0, active: 1, queued: 0));
+      for (var i = 0; i < 3; i++) {
+        api.queueReads.add(() async {
+          if (throws) throw StateError('queue read unavailable');
+          return null;
+        });
+      }
+      await pumpQueuePage(tester, api);
+      expect(find.byKey(const Key('memory-artwork-generation-progress-queue-memory')), findsOneWidget);
+      final dayReads = api.dayReads;
+      for (var i = 0; i < 3; i++) {
+        await tester.pump(const Duration(seconds: 4));
+        await tester.pump();
+      }
+      expect(api.queueStatusRequests, 4);
+      expect(find.byKey(const Key('memory-artwork-queue-read-unavailable')), findsOneWidget);
+      expect(find.byKey(const Key('memory-artwork-generation-progress-queue-memory')), findsNothing);
+      await tester.pump(const Duration(minutes: 5));
+      expect(api.queueStatusRequests, 4);
+      expect(api.dayReads, dayReads, reason: 'queue recovery must not fan out into day/card reads');
+      expect(api.backfillCalls, 0);
+      expect(api.displayEnqueueRequests, isEmpty);
+    });
+  }
+
+  testWidgets('unchanged pending queue reaches a finite terminal state and explicit GET retry recovers',
+      (tester) async {
+    final api = _QueueReadArtworkApi();
+    await pumpQueuePage(tester, api);
+    for (var i = 1; i < 45; i++) {
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump();
+    }
+    expect(api.queueStatusRequests, 45);
+    expect(find.byKey(const Key('memory-artwork-generation-progress-queue-memory')), findsNothing);
+    await tester.pump(const Duration(minutes: 5));
+    expect(api.queueStatusRequests, 45);
+    final dayReads = api.dayReads;
+    api.queueReads.add(() async => _queueStatus(ready: 1, active: 0, queued: 0));
+    api.dayItems = const {'queue-memory': MemoryArtworkResult(status: MemoryArtworkResultStatus.declined)};
+    await tester.tap(find.byKey(const Key('memory-artwork-queue-read-retry')));
+    await tester.pumpAndSettle();
+    expect(api.queueStatusRequests, 46);
+    expect(api.dayReads, dayReads + 1, reason: 'one shared day GET follows explicit recovery');
+    expect(find.byKey(const Key('memory-artwork-queue-read-unavailable')), findsNothing);
+    expect(find.byKey(const Key('memory-artwork-generation-progress-queue-memory')), findsNothing);
+    expect(api.backfillCalls, 0);
+    expect(api.displayEnqueueRequests, isEmpty);
+  });
+
+  testWidgets('terminal queue reads retain ready day artwork rather than replacing it with unavailable',
+      (tester) async {
+    final api = _QueueReadArtworkApi();
+    final ready = MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.ready,
+        url: Uri.parse('https://cdn.example.test/ready.png'),
+        cacheKey: 'ready-cache');
+    api.dayItems = {'queue-memory': ready};
+    api.queueReads.addAll([() async => null, () async => null, () async => null]);
+    await pumpQueuePage(tester, api);
+    for (var i = 0; i < 2; i++) {
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump();
+    }
+    final image = tester.widget<MemoryArtworkImage>(find.byType(MemoryArtworkImage));
+    expect(image.prefetchedResult, same(ready));
+    expect(find.byKey(const Key('memory-artwork-queue-read-unavailable')), findsOneWidget);
+  });
+
+  testWidgets('terminal queue preserves ready image authority without asserting its refresh is still progressing',
+      (tester) async {
+    final api = _QueueReadArtworkApi();
+    final authority = _MutableAuthority('test-user');
+    final ready = MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.ready,
+      url: Uri.parse('https://cdn.example.test/ready-refreshing.png'),
+      cacheKey: 'ready-refreshing-cache',
+      refreshPending: true,
+      stale: true,
+      authority: authority,
+    );
+    api.dayItems = {'queue-memory': ready};
+    api.queueReads.addAll([() async => null, () async => null, () async => null]);
+    await pumpQueuePage(tester, api);
+    for (var i = 0; i < 2; i++) {
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump();
+    }
+    final result = tester.widget<MemoryArtworkImage>(find.byType(MemoryArtworkImage)).prefetchedResult!;
+    expect(result.isReady, isTrue);
+    expect(result.url, ready.url);
+    expect(result.cacheKey, ready.cacheKey);
+    expect(result.stale, isTrue);
+    expect(result.authority, same(authority));
+    expect(result.refreshPending, isFalse);
+    expect(find.byKey(const Key('memory-artwork-queue-read-unavailable')), findsOneWidget);
+  });
+
+  for (final result in [
+    const MemoryArtworkResult(status: MemoryArtworkResultStatus.declined),
+    const MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.unavailable, failureCode: 'memory_artwork_consent_required'),
+  ]) {
+    testWidgets('terminal queue retains ${result.status.name}/${result.failureCode} privacy suppression',
+        (tester) async {
+      final api = _QueueReadArtworkApi();
+      api.dayItems = {'queue-memory': result};
+      api.queueReads.addAll([() async => null, () async => null, () async => null]);
+      await pumpQueuePage(tester, api);
+      for (var i = 0; i < 2; i++) {
+        await tester.pump(const Duration(seconds: 4));
+        await tester.pump();
+      }
+      final projected = tester.widget<MemoryArtworkImage>(find.byType(MemoryArtworkImage));
+      expect(projected.prefetchedResult, same(result));
+      await tester.pumpWidget(MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: projected.conversation,
+          api: _CachedQueueArtworkApi(),
+          prefetchedResult: projected.prefetchedResult,
+          cachedFileLookup: (_) async => File('assets/images/onboarding-bg-1.webp'),
+          cacheEvictor: (_) async {},
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('memory-cached-artwork-queue-memory')), findsNothing);
+      expect(api.backfillCalls, 0);
+    });
+  }
+
+  testWidgets('terminal gallery projection preserves cached artwork bytes', (tester) async {
+    final api = _QueueReadArtworkApi();
+    api.queueReads.addAll([() async => null, () async => null, () async => null]);
+    await pumpQueuePage(tester, api);
+    for (var i = 0; i < 2; i++) {
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump();
+    }
+    final projected = tester.widget<MemoryArtworkImage>(find.byType(MemoryArtworkImage));
+    expect(projected.prefetchedResult?.failureCode, 'memory_artwork_progress_read_unavailable');
+    await tester.pumpWidget(MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: MemoryArtworkImage(
+        conversation: projected.conversation,
+        api: _CachedQueueArtworkApi(),
+        prefetchedResult: projected.prefetchedResult,
+        cachedFileLookup: (_) async => File('assets/images/onboarding-bg-1.webp'),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('memory-cached-artwork-queue-memory')), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-generation-progress-queue-memory')), findsNothing);
+  });
+
+  testWidgets('stale account queue completion cannot restore old pending state', (tester) async {
+    final api = _QueueReadArtworkApi();
+    final oldRead = Completer<MemoryArtworkQueueStatus?>();
+    api.queueReads.add(() => oldRead.future);
+    await pumpQueuePage(tester, api);
+    SharedPreferencesUtil().invalidateAccountAuthorityForTransition();
+    api.queueReads.add(() async => _queueStatus(ready: 1, active: 0, queued: 0));
+    await tester.pump();
+    await tester.pump();
+    final requests = api.queueStatusRequests;
+    oldRead.complete(_queueStatus(ready: 0, active: 1, queued: 0));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 12));
+    expect(api.queueStatusRequests, requests, reason: 'old authority must not schedule a new poll');
+    expect(find.byKey(const Key('memory-artwork-queue-read-unavailable')), findsNothing);
+  });
+
+  testWidgets('stale overlapping queue GET cannot replace the newer completed result', (tester) async {
+    final api = _QueueReadArtworkApi();
+    final oldRead = Completer<MemoryArtworkQueueStatus?>();
+    api.queueReads.add(() => oldRead.future);
+    await pumpQueuePage(tester, api);
+    api.queueReads.addAll([
+      () async => _queueStatus(ready: 1, active: 0, queued: 0),
+      () async => _queueStatus(ready: 1, active: 0, queued: 0),
+    ]);
+    final refresh = tester.widget<RefreshIndicator>(find.byType(RefreshIndicator));
+    final refreshing = refresh.onRefresh();
+    await tester.pump();
+    await refreshing;
+    final requests = api.queueStatusRequests;
+    oldRead.complete(_queueStatus(ready: 0, active: 1, queued: 0));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 12));
+    expect(api.queueStatusRequests, requests);
+    expect(find.byKey(const Key('memory-artwork-queue-read-unavailable')), findsNothing);
+  });
+
+  testWidgets('unauthorized explicit retry never issues queue or generation requests', (tester) async {
+    final api = _QueueReadArtworkApi();
+    api.queueReads.addAll([() async => null, () async => null, () async => null]);
+    await pumpQueuePage(tester, api);
+    for (var i = 0; i < 2; i++) {
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump();
+    }
+    final retry = tester.widget<IconButton>(find.byKey(const Key('memory-artwork-queue-read-retry')));
+    api.current = false;
+    retry.onPressed!();
+    await tester.pump();
+    await tester.pump(const Duration(minutes: 5));
+    expect(api.queueStatusRequests, 3);
+    expect(api.backfillCalls, 0);
+    expect(api.displayEnqueueRequests, isEmpty);
+  });
 
   testWidgets('gallery swipe-left confirms and permanently deletes the selected memory', (tester) async {
     final requestedIds = <String>[];
