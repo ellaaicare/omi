@@ -27,11 +27,13 @@ bool memoryGalleryUsesWideLayout(BuildContext context) =>
     MediaQuery.sizeOf(context).width >= 640 && MediaQuery.textScalerOf(context).scale(1) < 2;
 
 MemoryGalleryLayout effectiveMemoryGalleryLayout(BuildContext context, MemoryGalleryLayout layout) =>
-    memoryGalleryUsesWideLayout(context) || layout == MemoryGalleryLayout.days ? layout : MemoryGalleryLayout.list;
+    layout != MemoryGalleryLayout.journal &&
+            (memoryGalleryUsesWideLayout(context) || layout == MemoryGalleryLayout.days)
+        ? layout
+        : MemoryGalleryLayout.list;
 
 List<PopupMenuEntry<MemoryGalleryLayout>> memoryGalleryLayoutMenu(BuildContext context) => [
       if (memoryGalleryUsesWideLayout(context)) ...[
-        PopupMenuItem(value: MemoryGalleryLayout.journal, child: Text(context.l10n.memoryGalleryJournal)),
         PopupMenuItem(value: MemoryGalleryLayout.grid, child: Text(context.l10n.memoryGalleryGrid)),
       ],
       PopupMenuItem(value: MemoryGalleryLayout.list, child: Text(context.l10n.memoryGalleryList)),

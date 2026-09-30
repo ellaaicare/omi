@@ -1343,7 +1343,14 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         _ => Icons.auto_stories_outlined,
       };
       return Semantics(
-        label: isPreparing ? context.l10n.memoryArtworkPreparingLabel : context.l10n.memoryArtworkUnavailableLabel,
+        label: canGenerate
+            ? context.l10n.memoryArtworkRetry
+            : isPreparing
+                ? context.l10n.memoryArtworkPreparingLabel
+                : context.l10n.memoryArtworkUnavailableLabel,
+        button: canGenerate,
+        onTap: canGenerate ? _generateArtwork : null,
+        excludeSemantics: true,
         child: Material(
           key: Key('memory-artwork-placeholder-${widget.conversation.id}'),
           color: Colors.transparent,
@@ -1351,7 +1358,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
               ? IconButton(
                   tooltip: context.l10n.memoryArtworkRetry,
                   onPressed: _generateArtwork,
-                  icon: Icon(icon, color: const Color(0xFF38695E), size: 24),
+                  icon: const Icon(Icons.add_photo_alternate_outlined, color: Color(0xFF38695E), size: 24),
                 )
               : ExcludeSemantics(child: Icon(icon, color: const Color(0xFF665F56), size: 24)),
         ),

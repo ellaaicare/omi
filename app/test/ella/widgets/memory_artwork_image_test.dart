@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' show SemanticsAction;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -1532,6 +1533,65 @@ void main() {
     await tester.pump();
     expect(find.byKey(const Key('memory-artwork-generation-progress-memory-manual-generation')), findsNothing);
     expect(find.byKey(const Key('memory-artwork-read-retry-memory-manual-generation')), findsOneWidget);
+  });
+
+  testWidgets('compact artwork action names its image action rather than using a category icon', (tester) async {
+    final semantics = tester.ensureSemantics();
+    final api = _ManualGenerationArtworkApi(initialFailureCode: 'memory_artwork_provider_failed');
+    final conversation = ServerConversation(
+      id: 'compact-artwork-action',
+      createdAt: DateTime(2026, 9, 2),
+      structured: Structured('Coffee with Rose', 'We talked about the garden.', category: 'family'),
+    );
+    await tester.pumpWidget(MaterialApp(
+      debugShowCheckedModeBanner: false,
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: Center(
+        child: RepaintBoundary(
+          key: const Key('compact-artwork-action-render'),
+          child: SizedBox(
+            width: 64,
+            height: 64,
+            child: MemoryArtworkImage(
+              conversation: conversation,
+              api: api,
+              compactPlaceholder: true,
+              cachedFileLookup: (_) async => null,
+              allowManualGeneration: true,
+              maxTransientRetries: 0,
+            ),
+          ),
+        ),
+      ),
+    ));
+    await tester.pump();
+    final action = find.byTooltip('Try artwork again');
+    expect(action, findsOneWidget);
+    expect(find.byIcon(Icons.add_photo_alternate_outlined), findsOneWidget);
+    expect(find.byIcon(Icons.people_outline_rounded), findsNothing);
+    final actionSemantics =
+        tester.getSemantics(find.byKey(const Key('memory-artwork-placeholder-compact-artwork-action')));
+    expect(actionSemantics.label, contains('Try artwork again'));
+    expect(actionSemantics.getSemanticsData().hasAction(SemanticsAction.tap), isTrue);
+    expect(tester.getSize(action).shortestSide, greaterThanOrEqualTo(48));
+    await expectLater(find.byKey(const Key('compact-artwork-action-render')),
+        matchesGoldenFile('goldens/compact_artwork_action.png'));
+    expect(api.enqueueRequests, [isFalse], reason: 'rendering does not generate an illustration');
+    await tester.tap(action);
+    await tester.pump();
+    expect(find.byIcon(Icons.add_photo_alternate_outlined), findsNothing);
+    expect(find.byIcon(Icons.people_outline_rounded), findsOneWidget);
+    await tester.tap(find.byKey(const Key('memory-artwork-placeholder-compact-artwork-action')));
+    await tester.pump();
+    expect(api.enqueueRequests, [isFalse, isTrue],
+        reason: 'the familiar image action keeps the existing single-call gate');
+    api.generationResult.complete(const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating));
+    await tester.pump();
+    expect(find.byIcon(Icons.people_outline_rounded), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(tester.takeException(), isNull);
+    semantics.dispose();
   });
 
   testWidgets('a high-priority memory uses its typographic fallback and keeps retry available', (tester) async {
