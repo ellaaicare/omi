@@ -1,4 +1,5 @@
 import 'package:omi/backend/http/api/conversations.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 
 enum MemoryReceiptDiscoveryState { applied, noChange, pendingReview, failed, timeout, sessionMismatch, cancelled }
 
@@ -38,35 +39,39 @@ class MemoryReinterpretationReceiptDiscovery {
     MemoryReceiptPollDelay? wait,
     this.maxAttempts = defaultMaxAttempts,
     this.pollInterval = defaultPollInterval,
-  })  : _fetchLatest = fetchLatest ?? _getLatest,
-        _fetchReceipt = fetchReceipt ?? _getReceipt,
+  })  : _fetchLatest = fetchLatest,
+        _fetchReceipt = fetchReceipt,
         _wait = wait ?? ((duration) => Future<void>.delayed(duration));
 
-  final LatestReinterpretationFetcher _fetchLatest;
-  final CorrectionReceiptFetcher _fetchReceipt;
+  final LatestReinterpretationFetcher? _fetchLatest;
+  final CorrectionReceiptFetcher? _fetchReceipt;
   final MemoryReceiptPollDelay _wait;
   final int maxAttempts;
   final Duration pollInterval;
-
-  static Future<ConversationReinterpretationJob?> _getLatest(String conversationId) =>
-      getLatestConversationReinterpretation(conversationId: conversationId);
-
-  static Future<ConversationCorrectionReceipt?> _getReceipt(String conversationId, String correctionId) =>
-      getConversationCorrectionReceipt(conversationId: conversationId, correctionId: correctionId);
 
   Future<MemoryReceiptDiscoveryResult> discover({
     required String conversationId,
     required String sessionId,
     bool Function()? shouldContinue,
+    ExactAccountAuthorityVerifier? exactAuthority,
   }) async {
     var sawSessionMismatch = false;
+    final fetchLatest = _fetchLatest;
+    final fetchReceipt = _fetchReceipt;
+    bool canContinue() => shouldContinue?.call() != false && (exactAuthority?.isExactCurrent() ?? true);
     for (var attempt = 0; attempt < maxAttempts; attempt++) {
-      if (shouldContinue?.call() == false) {
+      if (!canContinue()) {
         return const MemoryReceiptDiscoveryResult(MemoryReceiptDiscoveryState.cancelled);
       }
 
-      final job = await _fetchLatest(conversationId);
-      if (shouldContinue?.call() == false) {
+      final job = fetchLatest != null
+          ? await fetchLatest(conversationId)
+          : await getLatestConversationReinterpretation(
+              conversationId: conversationId,
+              expectedAuthenticatedUid: exactAuthority?.uid,
+              exactAuthority: exactAuthority,
+            );
+      if (!canContinue()) {
         return const MemoryReceiptDiscoveryResult(MemoryReceiptDiscoveryState.cancelled);
       }
 
@@ -76,8 +81,15 @@ class MemoryReinterpretationReceiptDiscovery {
         } else {
           final correctionId = job.appliedCorrectionId;
           if (job.hasTerminalAppliedCorrection && correctionId != null) {
-            final receipt = await _fetchReceipt(conversationId, correctionId);
-            if (shouldContinue?.call() == false) {
+            final receipt = fetchReceipt != null
+                ? await fetchReceipt(conversationId, correctionId)
+                : await getConversationCorrectionReceipt(
+                    conversationId: conversationId,
+                    correctionId: correctionId,
+                    expectedAuthenticatedUid: exactAuthority?.uid,
+                    exactAuthority: exactAuthority,
+                  );
+            if (!canContinue()) {
               return const MemoryReceiptDiscoveryResult(MemoryReceiptDiscoveryState.cancelled);
             }
             if (receipt != null) {
