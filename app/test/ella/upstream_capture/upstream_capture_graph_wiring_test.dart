@@ -124,9 +124,11 @@ void main() {
       final entries = Directory('$_app/lib')
           .listSync()
           .whereType<File>()
-          .where((f) =>
-              f.path.endsWith('.dart') &&
-              RegExp(r'^(void|Future<void>)\s+main\(', multiLine: true).hasMatch(f.readAsStringSync()))
+          .where(
+            (f) =>
+                f.path.endsWith('.dart') &&
+                RegExp(r'^(void|Future<void>)\s+main\(', multiLine: true).hasMatch(f.readAsStringSync()),
+          )
           .map((f) => f.path.substring(_app.length + 1))
           .where((rel) => rel != 'lib/main_upstream_capture.dart')
           .toList();
@@ -197,15 +199,14 @@ void main() {
       expect(EllaCaptureHost.legacyCaptureSuppressed, isTrue);
       final home = _read('lib/pages/home/today_page.dart');
       expect(home, contains('final upstreamDockBuilder = EllaCaptureHost.homeCaptureDockBuilder;'));
-      expect(home, contains('TodayCaptureDockViewport(maxHeight: dockMaxHeight, child: upstreamDockBuilder(context))'));
+      expect(home, contains('SliverToBoxAdapter(child: upstreamDockBuilder(context))'));
       expect(home, contains(': TodayRecordMomentControl('));
-      expect(_read('lib/providers/device_provider.dart'),
-          contains('if (EllaCaptureHost.legacyCaptureSuppressed) return;'));
-      expect(_read('lib/main.dart'), contains('if (!EllaCaptureHost.legacyCaptureSuppressed) {'));
       expect(
-        _read('lib/main.dart'),
-        contains('ServiceManager.init(deviceService: EllaCaptureHost.deviceService)'),
+        _read('lib/providers/device_provider.dart'),
+        contains('if (EllaCaptureHost.legacyCaptureSuppressed) return;'),
       );
+      expect(_read('lib/main.dart'), contains('if (!EllaCaptureHost.legacyCaptureSuppressed) {'));
+      expect(_read('lib/main.dart'), contains('ServiceManager.init(deviceService: EllaCaptureHost.deviceService)'));
       expect(_read('lib/main.dart'), contains('ServiceManager.instance().device.start()'));
     });
   });
@@ -223,17 +224,23 @@ void main() {
 
     test('the same value drives source exclusion, the Swift #if condition and the C define', () {
       expect(
-          settings,
-          contains(
-              r'EXCLUDED_SOURCE_FILE_NAMES = $(inherited) $(ELLA_UPSTREAM_CAPTURE_EXCLUDED_$(ELLA_UPSTREAM_CAPTURE_ENABLED))'));
+        settings,
+        contains(
+          r'EXCLUDED_SOURCE_FILE_NAMES = $(inherited) $(ELLA_UPSTREAM_CAPTURE_EXCLUDED_$(ELLA_UPSTREAM_CAPTURE_ENABLED))',
+        ),
+      );
       expect(
-          settings,
-          contains(
-              r'SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) ELLA_UPSTREAM_CAPTURE_ENABLED_$(ELLA_UPSTREAM_CAPTURE_ENABLED)'));
+        settings,
+        contains(
+          r'SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) ELLA_UPSTREAM_CAPTURE_ENABLED_$(ELLA_UPSTREAM_CAPTURE_ENABLED)',
+        ),
+      );
       expect(
-          settings,
-          contains(
-              r'GCC_PREPROCESSOR_DEFINITIONS = $(inherited) ELLA_UPSTREAM_CAPTURE_ENABLED_$(ELLA_UPSTREAM_CAPTURE_ENABLED)=1'));
+        settings,
+        contains(
+          r'GCC_PREPROCESSOR_DEFINITIONS = $(inherited) ELLA_UPSTREAM_CAPTURE_ENABLED_$(ELLA_UPSTREAM_CAPTURE_ENABLED)=1',
+        ),
+      );
       expect(settings, contains(r'ELLA_UPSTREAM_CAPTURE_EXCLUDED_NO = $(ELLA_UPSTREAM_CAPTURE_NATIVE_SOURCES)'));
       expect(settings, contains('ELLA_UPSTREAM_CAPTURE_EXCLUDED_YES = FlutterCommunicator.g.swift'));
     });
@@ -244,11 +251,9 @@ void main() {
       final vendored = _vendoredNativeSources().map((p) => p.split('/').last).toSet();
       expect(excluded, vendored);
       // Basenames must be unique in the Runner tree, or exclusion would hit fork files.
-      final runnerNames = Directory('$_app/ios/Runner')
-          .listSync(recursive: true)
-          .whereType<File>()
-          .map((f) => f.path.split('/').last)
-          .toList();
+      final runnerNames = Directory(
+        '$_app/ios/Runner',
+      ).listSync(recursive: true).whereType<File>().map((f) => f.path.split('/').last).toList();
       for (final name in excluded) {
         expect(runnerNames.where((n) => n == name), hasLength(1), reason: name);
       }
@@ -263,7 +268,7 @@ void main() {
         'devRelease',
         'prodDebug',
         'prodProfile',
-        'prodRelease'
+        'prodRelease',
       ]) {
         expect(_read('ios/Flutter/$name.xcconfig'), contains('#include "EllaUpstreamCapture.xcconfig"'), reason: name);
       }
@@ -271,10 +276,10 @@ void main() {
 
     test('pbxproj: vendored sources are Runner Compile Sources members; overrides keep \$(inherited)', () {
       final pbx = _read('ios/Runner.xcodeproj/project.pbxproj');
-      final runnerSources =
-          RegExp(r'97C146EA1CF9000F007C117D /\* Sources \*/ = \{[^}]*?files = \(([^)]*)\);', dotAll: true)
-              .firstMatch(pbx)!
-              .group(1)!;
+      final runnerSources = RegExp(
+        r'97C146EA1CF9000F007C117D /\* Sources \*/ = \{[^}]*?files = \(([^)]*)\);',
+        dotAll: true,
+      ).firstMatch(pbx)!.group(1)!;
       for (final path in _vendoredNativeSources()) {
         final name = path.split('/').last;
         expect(pbx, contains('path = $name;'), reason: '$name file reference');
@@ -283,8 +288,11 @@ void main() {
       }
       expect(runnerSources, contains('/* EllaUpstreamCaptureNativeHost.swift in Sources */'));
       expect(runnerSources, contains('/* FlutterCommunicator.g.swift in Sources */'));
-      expect(pbx, isNot(contains('"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*]" = omiWatchApp.app;')),
-          reason: r'a simulator override without $(inherited) would drop the flag-OFF exclusion');
+      expect(
+        pbx,
+        isNot(contains('"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*]" = omiWatchApp.app;')),
+        reason: r'a simulator override without $(inherited) would drop the flag-OFF exclusion',
+      );
       for (final key in ['EXCLUDED_SOURCE_FILE_NAMES', 'SWIFT_ACTIVE_COMPILATION_CONDITIONS']) {
         for (final match in RegExp('"?$key(?:\\[[^\\]]*\\])?"? = ([^;]*);').allMatches(pbx)) {
           expect(match.group(1), contains(r'$(inherited)'), reason: match.group(0));
@@ -297,18 +305,24 @@ void main() {
 
     test('AppDelegate registers the upstream Pigeon hosts only under the ON condition', () {
       final delegate = _read('ios/Runner/AppDelegate.swift');
-      final blocks =
-          RegExp(r'#if ELLA_UPSTREAM_CAPTURE_ENABLED_YES\n(.*?)#endif', dotAll: true).allMatches(delegate).toList();
-      expect(blocks.map((m) => m.group(1)!).join(),
-          contains('EllaUpstreamCaptureNativeHost.shared.register(binaryMessenger: controller.binaryMessenger)'));
-      final outside =
-          delegate.replaceAll(RegExp(r'#if ELLA_UPSTREAM_CAPTURE_ENABLED_YES\n.*?#endif', dotAll: true), '');
+      final blocks = RegExp(
+        r'#if ELLA_UPSTREAM_CAPTURE_ENABLED_YES\n(.*?)#endif',
+        dotAll: true,
+      ).allMatches(delegate).toList();
+      expect(
+        blocks.map((m) => m.group(1)!).join(),
+        contains('EllaUpstreamCaptureNativeHost.shared.register(binaryMessenger: controller.binaryMessenger)'),
+      );
+      final outside = delegate.replaceAll(
+        RegExp(r'#if ELLA_UPSTREAM_CAPTURE_ENABLED_YES\n.*?#endif', dotAll: true),
+        '',
+      );
       for (final symbol in [
         'EllaUpstreamCaptureNativeHost',
         'OmiBleManager',
         'BleHostApiSetup',
         'PhoneMicHostApiSetup',
-        'PhoneMicController'
+        'PhoneMicController',
       ]) {
         expect(outside, isNot(contains(symbol)), reason: '$symbol must only be referenced under the flag');
       }
@@ -333,10 +347,14 @@ void main() {
     test('Dart channels used by the vendored stack have ON-mode native hosts', () {
       final host = _read('ios/Runner/EllaUpstreamCaptureNativeHost.swift');
       expect(
-          _read('lib/upstream_capture/backend/preferences.dart'), contains("MethodChannel('com.omi/capture_policy')"));
+        _read('lib/upstream_capture/backend/preferences.dart'),
+        contains("MethodChannel('com.omi/capture_policy')"),
+      );
       expect(host, contains('"com.omi/capture_policy"'));
-      expect(_read('lib/upstream_capture/services/wals/sync_transfer_keep_alive.dart'),
-          contains("'com.friend.ios/sync_transfer'"));
+      expect(
+        _read('lib/upstream_capture/services/wals/sync_transfer_keep_alive.dart'),
+        contains("'com.friend.ios/sync_transfer'"),
+      );
       expect(host, contains('"com.friend.ios/sync_transfer"'));
     });
 
@@ -346,7 +364,8 @@ void main() {
       Directory('${tmp.path}/app/ios/Flutter').createSync(recursive: true);
       Directory('${tmp.path}/app/ios/scripts').createSync(recursive: true);
       File('${tmp.path}/app/ios/Flutter/EllaUpstreamCapture.xcconfig').writeAsStringSync(
-          xcconfig.replaceFirst('ELLA_UPSTREAM_CAPTURE_ENABLED = NO', 'ELLA_UPSTREAM_CAPTURE_ENABLED = $value'));
+        xcconfig.replaceFirst('ELLA_UPSTREAM_CAPTURE_ENABLED = NO', 'ELLA_UPSTREAM_CAPTURE_ENABLED = $value'),
+      );
       File('$_app/ios/scripts/ella_upstream_capture_build_config.sh').copySync('${tmp.path}/app/ios/scripts/cfg.sh');
       final out = '${tmp.path}/defines.json';
       final result = await Process.run('bash', ['${tmp.path}/app/ios/scripts/cfg.sh', out]);
@@ -382,7 +401,7 @@ void main() {
       for (final body in [
         'ELLA_UPSTREAM_CAPTURE_ENABLED = maybe\n',
         'ELLA_UPSTREAM_CAPTURE_ENABLED = NO\nELLA_UPSTREAM_CAPTURE_ENABLED = YES\n',
-        ''
+        '',
       ]) {
         File('${tmp.path}/app/ios/Flutter/EllaUpstreamCapture.xcconfig').writeAsStringSync(body);
         final result = await Process.run('bash', ['${tmp.path}/app/ios/scripts/cfg.sh', '${tmp.path}/x.json']);

@@ -2983,7 +2983,7 @@ void main() {
     semantics.dispose();
   });
 
-  testWidgets('upstream dock stays above Home navigation and scrolls at large text', (tester) async {
+  testWidgets('upstream dock scrolls with Home instead of trapping actions above navigation', (tester) async {
     EllaCaptureHost.installForTesting(
       homeCaptureDockBuilder: (_) => const SizedBox(
         key: Key('test-upstream-dock'),
@@ -3000,22 +3000,15 @@ void main() {
     );
     addTearDown(harness.dispose);
 
-    final dockViewport = find.byType(TodayCaptureDockViewport);
-    expect(dockViewport, findsOneWidget);
-    expect(tester.getTopLeft(dockViewport).dy, greaterThanOrEqualTo(47));
-    expect(tester.getBottomLeft(dockViewport).dy, lessThanOrEqualTo(568 - EllaSizes.navBarHeight - 34));
-
-    final dockScroll = find.byKey(const Key('home-capture-dock-scroll'));
-    expect(dockScroll, findsOneWidget);
-    expect(
-        tester
-            .state<ScrollableState>(find.descendant(of: dockScroll, matching: find.byType(Scrollable)))
-            .position
-            .maxScrollExtent,
-        greaterThan(0));
-    await tester.drag(dockScroll, const Offset(0, -500));
+    expect(find.byKey(const Key('home-capture-dock-scroll')), findsNothing);
+    final homeScroll = tester.state<ScrollableState>(
+      find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
+    );
+    expect(homeScroll.position.maxScrollExtent, greaterThan(0));
+    await tester.ensureVisible(find.text('Dock controls'));
     await tester.pump();
     expect(find.text('Dock controls'), findsOneWidget);
+    expect(tester.getBottomLeft(find.text('Dock controls')).dy, lessThan(568 - EllaSizes.navBarHeight - 34));
     expect(tester.takeException(), isNull);
   });
 
@@ -3077,26 +3070,33 @@ void main() {
     final harness = await _pumpHome(
       tester,
       conversations: _ConversationFixtures.withMemories(photoBase64: ''),
-      viewport: const Size(320, 568),
-      textScaler: const TextScaler.linear(2),
+      viewport: const Size(390, 844),
+      textScaler: const TextScaler.linear(1),
       includeBottomNav: true,
     );
     addTearDown(harness.dispose);
 
-    Future<void> expectReachable(String key) async {
-      final control = find.byKey(Key(key));
-      expect(control, findsOneWidget);
-      await tester.ensureVisible(control);
-      await tester.pump();
-      expect(control.hitTestable(), findsOneWidget, reason: '$key must accept a tap inside the real Home shell');
-    }
-
     capture.updateRecordingState(upstream_capture.RecordingState.record);
     capture.onConnected();
     await tester.pump();
-    await expectReachable('upstream-capture-stop-phone');
-    await expectReachable('upstream-capture-view-transcript');
-    await expectReachable('upstream-capture-whispers-switch');
+    for (final key in [
+      'upstream-capture-stop-phone',
+      'upstream-capture-view-transcript',
+      'upstream-capture-whispers-switch',
+    ]) {
+      final control = find.byKey(Key(key));
+      expect(control.hitTestable(), findsOneWidget, reason: '$key must be visible without scrolling the dock');
+      expect(tester.getSize(control).height, greaterThanOrEqualTo(48));
+    }
+    expect(find.byKey(const Key('home-capture-dock-scroll')), findsNothing);
+    expect(
+      tester.getBottomLeft(find.byKey(const Key('upstream-capture-dock'))).dy,
+      lessThan(tester.getTopLeft(find.byType(MemoryGalleryCard).first).dy),
+    );
+    await expectLater(
+      find.byType(MaterialApp),
+      matchesGoldenFile('goldens/ella_home_upstream_capture_live_390_100_full_shell.png'),
+    );
 
     capture.updateRecordingDevice(
       upstream_device.BtDevice(id: 'test-pendant', name: 'Compass', type: upstream_device.DeviceType.omi, rssi: -40),
@@ -3104,8 +3104,9 @@ void main() {
     capture.updateRecordingState(upstream_capture.RecordingState.deviceRecord);
     capture.onConnected();
     await tester.pump();
-    await expectReachable('upstream-capture-disconnect-necklace');
-    await expectReachable('upstream-capture-finish');
+    for (final key in ['upstream-capture-disconnect-necklace', 'upstream-capture-finish']) {
+      expect(find.byKey(Key(key)).hitTestable(), findsOneWidget, reason: '$key must be visible at ordinary scale');
+    }
     expect(find.byType(BottomNavBar), findsOneWidget);
     expect(tester.takeException(), isNull);
   });

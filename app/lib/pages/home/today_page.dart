@@ -2059,17 +2059,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final homeCaptureOwned =
         _homeCaptureActive || _homeCaptureFinalizationPending || _homeCaptureFinalizationInFlight != null;
     final captureFinalizationPending = _homeCaptureFinalizationPending || _externalCaptureFinalizationSource != null;
-    final viewportHeight = MediaQuery.sizeOf(context).height - MediaQuery.paddingOf(context).top;
     final dockTextScale = MediaQuery.textScalerOf(context).scale(1);
     final dockSafeBottom = MediaQuery.paddingOf(context).bottom;
     final upstreamDockBuilder = EllaCaptureHost.homeCaptureDockBuilder;
     final upstreamDockActive = upstreamDockBuilder != null;
-    final dockMaxHeight = todayDockReservedHeight(dockTextScale, viewportHeight: viewportHeight);
-    final dockClearance = todayDockScrollClearance(
-      textScale: dockTextScale,
-      safeBottom: dockSafeBottom,
-      viewportHeight: upstreamDockActive ? viewportHeight : null,
-    );
+    final dockClearance = todayDockScrollClearance(textScale: dockTextScale, safeBottom: dockSafeBottom);
     _scheduleHomeMemoryPrefetch();
 
     void openControls() => unawaited(
@@ -2113,6 +2107,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                     ),
                   ),
                 ),
+                if (upstreamDockBuilder != null)
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(14, 16, 14, 0),
+                    sliver: SliverToBoxAdapter(child: upstreamDockBuilder(context)),
+                  ),
                 if (visibleConversations.isNotEmpty)
                   SliverPadding(
                     padding: const EdgeInsets.fromLTRB(EllaSizes.screenPadding, 16, EllaSizes.screenPadding, 10),
@@ -2199,18 +2198,20 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                       ),
                     ),
                   ),
-                SliverToBoxAdapter(child: SizedBox(height: dockClearance)),
+                SliverToBoxAdapter(
+                  child: SizedBox(
+                    height: upstreamDockActive ? EllaSizes.navBarHeight + dockSafeBottom + 24 : dockClearance,
+                  ),
+                ),
               ],
             ),
           ),
           if (_showBackToRecent)
             Positioned(
               right: 22,
-              bottom: todayBackToRecentBottomOffset(
-                textScale: dockTextScale,
-                safeBottom: dockSafeBottom,
-                viewportHeight: upstreamDockActive ? viewportHeight : null,
-              ),
+              bottom: upstreamDockActive
+                  ? EllaSizes.navBarHeight + dockSafeBottom + 16
+                  : todayBackToRecentBottomOffset(textScale: dockTextScale, safeBottom: dockSafeBottom),
               child: FloatingActionButton.small(
                 key: const Key('home-back-to-recent'),
                 onPressed: _scrollHomeBackToRecent,
@@ -2220,46 +2221,45 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                 child: const Icon(Icons.arrow_upward_rounded),
               ),
             ),
-          Positioned(
-            left: 14,
-            right: 14,
-            bottom: EllaSizes.navBarHeight + MediaQuery.paddingOf(context).bottom + 16,
-            child: upstreamDockBuilder != null
-                ? TodayCaptureDockViewport(maxHeight: dockMaxHeight, child: upstreamDockBuilder(context))
-                : TodayRecordMomentControl(
-                    selectedSource: selectedCaptureSource,
-                    activeSource: activeCaptureSource,
-                    externalCaptureFinalizationPending: captureFinalizationPending,
-                    starting: _homeCaptureStarting,
-                    hasNecklace: hasNecklace,
-                    legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
-                    necklaceConnected: deviceConnected,
-                    necklaceConnecting: device.isConnecting,
-                    necklaceConnectionFailed: device.connectionAttemptFailed,
-                    recordingState: capture.recordingState,
-                    diagnostics: capture.captureDiagnostics,
-                    transcriptionReady: capture.transcriptServiceReady,
-                    showWhispers: showGuardianSurfaces,
-                    whispersEnabled: _whispersOn,
-                    whispersVerified: _whispersVerified,
-                    onOpenControls: openControls,
-                    onOpenWhispers: () =>
-                        Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage())),
-                    onViewTranscript: () => _openLiveTranscript(capture),
-                    onSourceSelected: _selectCaptureSource,
-                    onReviewConsent: () => unawaited(AiConsentCoordinator.ensure(context)),
-                    onUnavailable: () => ScaffoldMessenger.of(
-                      context,
-                    ).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable))),
-                    onTap: () => _handleCapturePrimaryAction(
-                      selectedSource: selectedCaptureSource,
-                      capture: capture,
-                      device: device,
-                      homeCaptureOwned: homeCaptureOwned,
-                      legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
-                    ),
-                  ),
-          ),
+          if (!upstreamDockActive)
+            Positioned(
+              left: 14,
+              right: 14,
+              bottom: EllaSizes.navBarHeight + MediaQuery.paddingOf(context).bottom + 16,
+              child: TodayRecordMomentControl(
+                selectedSource: selectedCaptureSource,
+                activeSource: activeCaptureSource,
+                externalCaptureFinalizationPending: captureFinalizationPending,
+                starting: _homeCaptureStarting,
+                hasNecklace: hasNecklace,
+                legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
+                necklaceConnected: deviceConnected,
+                necklaceConnecting: device.isConnecting,
+                necklaceConnectionFailed: device.connectionAttemptFailed,
+                recordingState: capture.recordingState,
+                diagnostics: capture.captureDiagnostics,
+                transcriptionReady: capture.transcriptServiceReady,
+                showWhispers: showGuardianSurfaces,
+                whispersEnabled: _whispersOn,
+                whispersVerified: _whispersVerified,
+                onOpenControls: openControls,
+                onOpenWhispers: () =>
+                    Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage())),
+                onViewTranscript: () => _openLiveTranscript(capture),
+                onSourceSelected: _selectCaptureSource,
+                onReviewConsent: () => unawaited(AiConsentCoordinator.ensure(context)),
+                onUnavailable: () => ScaffoldMessenger.of(
+                  context,
+                ).showSnackBar(SnackBar(content: Text(context.l10n.todayRecordingUnavailable))),
+                onTap: () => _handleCapturePrimaryAction(
+                  selectedSource: selectedCaptureSource,
+                  capture: capture,
+                  device: device,
+                  homeCaptureOwned: homeCaptureOwned,
+                  legacyNecklaceNeedsConfirmation: legacyNecklaceNeedsConfirmation,
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -2416,44 +2416,6 @@ double todayBackToRecentBottomOffset({required double textScale, required double
     EllaSizes.navBarHeight +
     safeBottom +
     (viewportHeight == null ? 166 : todayDockReservedHeight(textScale, viewportHeight: viewportHeight) + 32);
-
-class TodayCaptureDockViewport extends StatefulWidget {
-  const TodayCaptureDockViewport({super.key, required this.maxHeight, required this.child});
-
-  final double maxHeight;
-  final Widget child;
-
-  @override
-  State<TodayCaptureDockViewport> createState() => _TodayCaptureDockViewportState();
-}
-
-class _TodayCaptureDockViewportState extends State<TodayCaptureDockViewport> {
-  final ScrollController _controller = ScrollController();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => ConstrainedBox(
-        constraints: BoxConstraints(maxHeight: widget.maxHeight),
-        child: RawScrollbar(
-          controller: _controller,
-          thumbVisibility: true,
-          thickness: 4,
-          thumbColor: EllaColors.tealDeep,
-          radius: const Radius.circular(4),
-          child: SingleChildScrollView(
-            key: const Key('home-capture-dock-scroll'),
-            controller: _controller,
-            primary: false,
-            child: widget.child,
-          ),
-        ),
-      );
-}
 
 class _DemoTodayCardRepository implements TodayCardRepository {
   const _DemoTodayCardRepository();
