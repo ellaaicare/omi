@@ -43,6 +43,7 @@ class LocalWalSyncImpl implements LocalWalSync {
   final WalOwner? Function() _pendingOwner;
   final ActiveWalAuthority? Function() _activeAuthority;
   final WalUpload _upload;
+  final DateTime Function() _now;
 
   LocalWalSyncImpl(
     this.listener, {
@@ -50,10 +51,12 @@ class LocalWalSyncImpl implements LocalWalSync {
     WalOwner? Function()? pendingOwner,
     ActiveWalAuthority? Function()? activeAuthority,
     WalUpload? upload,
+    DateTime Function()? now,
   })  : _currentOwner = currentOwner ?? WalOwnerAuthority.currentOwner,
         _pendingOwner = pendingOwner ?? WalOwnerAuthority.pendingSameAccountOwner,
         _activeAuthority = activeAuthority ?? WalOwnerAuthority.active,
-        _upload = upload ?? ((files, expectedUid) => syncLocalFiles(files, expectedAuthenticatedUid: expectedUid));
+        _upload = upload ?? ((files, expectedUid) => syncLocalFiles(files, expectedAuthenticatedUid: expectedUid)),
+        _now = now ?? DateTime.now;
 
   @override
   void cancelSync() {
@@ -173,7 +176,7 @@ class LocalWalSyncImpl implements LocalWalSync {
 
     final device = _deviceId ?? 'omi';
     var groupStart = 0;
-    var timerStart = DateTime.now().millisecondsSinceEpoch ~/ 1000 - (_frames.length / _framesPerSecond).ceil();
+    var timerStart = _now().millisecondsSinceEpoch ~/ 1000 - (_frames.length / _framesPerSecond).ceil();
     while (groupStart < _frames.length) {
       final owner = _frameOwners[groupStart];
       var groupEnd = groupStart + 1;
@@ -347,7 +350,7 @@ class LocalWalSyncImpl implements LocalWalSync {
     }
 
     var lossesThreshold = 10 * _framesPerSecond;
-    var timerEnd = DateTime.now().millisecondsSinceEpoch ~/ 1000 - newFrameSyncDelaySeconds;
+    var timerEnd = _now().millisecondsSinceEpoch ~/ 1000 - newFrameSyncDelaySeconds;
     var pivot = _frames.length - newFrameSyncDelaySeconds * _framesPerSecond;
     if (pivot <= 0) {
       return;
@@ -432,6 +435,18 @@ class LocalWalSyncImpl implements LocalWalSync {
           w.owner != null &&
           owner != null &&
           w.owner!.matches(owner));
+      if (walIdx < 0 && owner != null) {
+        walIdx = _wals.lastIndexWhere((w) {
+          final candidateEnd = w.timerStart + (w.totalFrames / _framesPerSecond).ceil();
+          final startSkew = timerStart - candidateEnd;
+          return w.storage == WalStorage.mem &&
+              timerStart >= w.timerStart &&
+              startSkew.abs() <= 1 &&
+              w.device == (_deviceId ?? "omi") &&
+              w.codec == _codec &&
+              w.owner?.matches(owner!) == true;
+        });
+      }
       if (walIdx < 0) {
         wal = Wal(
           codec: _codec,
@@ -454,11 +469,16 @@ class LocalWalSyncImpl implements LocalWalSync {
         _wals.add(wal);
       } else {
         wal = _wals[walIdx];
+        final previousTotalFrames = wal.totalFrames;
+        final previousSyncedFrameOffset = wal.syncedFrameOffset;
         wal.data.addAll(chunk);
         wal.storage = WalStorage.mem;
-        wal.totalFrames = chunkFrameCount;
-        wal.syncedFrameOffset = syncedOffset;
-        wal.status = syncedOffset == chunkFrameCount ? WalStatus.synced : WalStatus.miss;
+        wal.totalFrames += chunkFrameCount;
+        wal.seconds = (wal.totalFrames / _framesPerSecond).ceil();
+        if (previousSyncedFrameOffset == previousTotalFrames) {
+          wal.syncedFrameOffset += syncedOffset;
+        }
+        wal.status = wal.syncedFrameOffset == wal.totalFrames ? WalStatus.synced : WalStatus.miss;
         _wals[walIdx] = wal;
       }
 
