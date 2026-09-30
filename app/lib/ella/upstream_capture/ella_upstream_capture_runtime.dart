@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import 'package:omi/backend/http/api/conversations.dart' as ella_api;
 import 'package:omi/ella/capture_host/ella_capture_host.dart';
 import 'package:omi/ella/upstream_capture/ella_capture_authority.dart';
 import 'package:omi/ella/upstream_capture/ella_capture_protocol_socket.dart';
@@ -195,7 +196,12 @@ Future<EllaNativeDiscoveryDiagnostics> loadNativeDiscoveryDiagnostics([BleHostAp
 /// (sources, sockets, WAL, sessions) stays in upstream's CaptureController /
 /// CaptureCoordinator.
 class EllaUpstreamCaptureRuntime {
-  EllaUpstreamCaptureRuntime({required this.authority});
+  EllaUpstreamCaptureRuntime({
+    required this.authority,
+    EllaCaptureProtocolSocket? Function()? activeProtocolSocket,
+    EllaCaptureFinalizationRequest? finalizationRequest,
+  })  : _activeProtocolSocket = activeProtocolSocket,
+        _finalizationRequest = finalizationRequest;
 
   static EllaUpstreamCaptureRuntime? _instance;
 
@@ -206,6 +212,8 @@ class EllaUpstreamCaptureRuntime {
   static bool _upstreamServicesInitialized = false;
 
   final EllaCaptureAuthority authority;
+  final EllaCaptureProtocolSocket? Function()? _activeProtocolSocket;
+  final EllaCaptureFinalizationRequest? _finalizationRequest;
   CaptureProvider? _provider;
   EllaCaptureProtocolSocket? _protocolSocket;
   EllaCaptureProtocolSocket? _finalizationSocket;
@@ -345,12 +353,19 @@ class EllaUpstreamCaptureRuntime {
   }
 
   Future<CreateConversationResponse?> _processCaptureProtocolConversation() async {
-    final socket = _finalizationSocket;
+    final socket = _finalizationSocket ?? _activeProtocolSocket?.call() ?? _protocolSocket;
     if (socket == null) return null;
-    return finalizeEllaCaptureProtocolConversation(
-      socket: socket,
-      exactAuthority: _CaptureProtocolAccountAuthority(socket, authority),
-    );
+    _finalizationSocket = socket;
+    try {
+      final exactAuthority = _CaptureProtocolAccountAuthority(socket, authority);
+      return await finalizeEllaCaptureProtocolConversation(
+        socket: socket,
+        exactAuthority: exactAuthority,
+        request: _finalizationRequest ?? ella_api.processInProgressConversation,
+      );
+    } finally {
+      if (identical(_finalizationSocket, socket)) _finalizationSocket = null;
+    }
   }
 
   /// Builds upstream's CaptureProvider through its own constructor seams with
@@ -360,8 +375,8 @@ class EllaUpstreamCaptureRuntime {
   /// This forwards exactly the seams upstream's `composeCaptureProvider(
   /// CaptureDependencies)` forwards (that helper is a pure forwarder into this
   /// same constructor), plus `processInProgressConversation`, which
-  /// CaptureDependencies does not expose; production leaves it null so
-  /// upstream's own REST call is used, deterministic tests inject it.
+  /// CaptureDependencies does not expose; production uses the exact protocol
+  /// finalizer, while deterministic legacy tests can inject their own callback.
   CaptureProvider compose(EllaUpstreamCaptureWiring wiring) {
     final gatedDeviceConnection = ellaGatedDeviceConnectionLoader(wiring.ensureDeviceConnection, authority);
     final gatedSocket = ellaGatedConversationSocketOpen(wiring.openConversationSocket, authority);
@@ -397,7 +412,7 @@ class EllaUpstreamCaptureRuntime {
       recordingTelemetry: wiring.telemetry ?? RecordingLifecycleTelemetry(),
       localSegmentStore: wiring.localSegments ?? LocalSegmentStore.disabled(),
       deviceConnectionLoader: gatedDeviceConnection,
-      processInProgressConversation: wiring.processInProgressConversation,
+      processInProgressConversation: wiring.processInProgressConversation ?? _processCaptureProtocolConversation,
     );
     _provider = provider;
     unawaited(_revocationSubscription?.cancel());

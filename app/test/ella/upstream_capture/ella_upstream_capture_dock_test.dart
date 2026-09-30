@@ -17,6 +17,9 @@ import 'package:omi/upstream_capture/providers/capture_provider.dart';
 import 'package:omi/upstream_capture/services/capture/capture_seams.dart';
 import 'package:omi/upstream_capture/utils/enums.dart';
 
+import 'ella_capture_protocol_socket_cases.dart';
+import 'upstream_capture_protocol_v2_cases.dart';
+
 const _uid = 'uid-a';
 
 class _NoBleListeners implements CaptureBleListeners {
@@ -55,6 +58,8 @@ final _testNecklace = BtDevice(id: 'necklace-under-test', name: 'Test Necklace',
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  registerEllaCaptureProtocolSocketCases();
+  registerUpstreamCaptureProtocolV2Cases();
 
   testWidgets('verified v10 authority renders the idle flag-on dock as one compact row', (tester) async {
     SharedPreferences.setMockInitialValues({});

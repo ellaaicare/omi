@@ -26,15 +26,20 @@ Future<upstream_schema.CreateConversationResponse?> finalizeEllaCaptureProtocolC
   if (capture == null || !exactAuthority.isExactCurrent()) return null;
   if (socket.state == SocketServiceState.connected) await socket.stop(reason: 'process capture');
   if (!exactAuthority.isExactCurrent()) return null;
-  final result = await request(
-    conversationId: capture.conversationId,
-    protocolVersion: capture.protocolVersion,
-    generation: capture.generation,
-    ownerToken: capture.ownerToken,
-    transportLost: !socket.drainAcknowledged,
-    expectedAuthenticatedUid: exactAuthority.uid,
-    exactAuthority: exactAuthority,
-  );
+  ella_schema.CreateConversationResponse? result;
+  try {
+    result = await request(
+      conversationId: capture.conversationId,
+      protocolVersion: capture.protocolVersion,
+      generation: capture.generation,
+      ownerToken: capture.ownerToken,
+      transportLost: !socket.drainAcknowledged,
+      expectedAuthenticatedUid: exactAuthority.uid,
+      exactAuthority: exactAuthority,
+    );
+  } on ExactAccountAuthorityChangedException {
+    return null;
+  }
   if (!exactAuthority.isExactCurrent() || result?.conversation?.id != capture.conversationId) return null;
   return upstream_schema.CreateConversationResponse.fromJson({
     'conversation': result!.conversation!.toJson(),

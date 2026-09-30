@@ -7,6 +7,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart' as fork;
+import 'package:omi/backend/schema/conversation.dart' as ella_schema;
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
@@ -135,6 +136,8 @@ class EllaUpstreamCaptureHarness {
   bool connected = true;
   bool protocolV2 = false;
   int processCalls = 0;
+  final List<({String conversationId, int protocolVersion, String generation, String ownerToken})>
+      protocolFinalizations = [];
 
   static final BtDevice pendant = BtDevice(id: 'pendant-1', name: 'Omi', type: DeviceType.omi, rssi: -40);
 
@@ -206,7 +209,34 @@ class EllaUpstreamCaptureHarness {
         return lease;
       },
     );
-    runtime = EllaUpstreamCaptureRuntime(authority: authority);
+    runtime = EllaUpstreamCaptureRuntime(
+      authority: authority,
+      activeProtocolSocket: () => sockets.isEmpty ? null : sockets.last.service as EllaCaptureProtocolSocket,
+      finalizationRequest: ({
+        required conversationId,
+        required protocolVersion,
+        required generation,
+        required ownerToken,
+        required transportLost,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async {
+        protocolFinalizations.add((
+          conversationId: conversationId,
+          protocolVersion: protocolVersion,
+          generation: generation,
+          ownerToken: ownerToken,
+        ));
+        return ella_schema.CreateConversationResponse.fromJson({
+          'messages': const [],
+          'conversation': {
+            'id': conversationId,
+            'created_at': '2026-09-29T00:00:00Z',
+            'structured': {'title': 'Moment', 'overview': '', 'emoji': '', 'category': 'other'},
+          },
+        });
+      },
+    );
 
     // Placeholder passes; the production configuration comes from the runtime.
     coordinator = RecordingTransferCoordinator(
@@ -252,10 +282,12 @@ class EllaUpstreamCaptureHarness {
         codec: (deviceId) async => BleAudioCodec.pcm16,
         microphonePermission: () async => true,
         refreshConversation: (_) async {},
-        processInProgressConversation: () async {
-          processCalls++;
-          return null;
-        },
+        processInProgressConversation: protocolV2
+            ? null
+            : () async {
+                processCalls++;
+                return null;
+              },
       ),
     );
   }

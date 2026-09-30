@@ -90,7 +90,7 @@ const _authority = {
 
 Future<void> _tick() async => Future<void>.delayed(const Duration(milliseconds: 1));
 
-void main() {
+void registerEllaCaptureProtocolSocketCases() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   test('production URL preserves upstream parameters and negotiates capture protocol v2', () {
@@ -397,5 +397,34 @@ void main() {
     );
     expect(result, isNull);
     expect(requests, 1);
+  });
+
+  test('authority change during exact reconciliation returns null rather than rejecting', () async {
+    final transport = _Transport();
+    final socket = EllaCaptureProtocolSocket.withTransport(16000, BleAudioCodec.pcm16, 'multi', transport);
+    final start = socket.start();
+    await _tick();
+    transport.serverStatus('capture_protocol_ready', fields: _authority);
+    await start;
+    final verifier = _AccountVerifier('account-a');
+    final resultFuture = finalizeEllaCaptureProtocolConversation(
+      socket: socket,
+      exactAuthority: verifier,
+      request: ({
+        required conversationId,
+        required protocolVersion,
+        required generation,
+        required ownerToken,
+        required transportLost,
+        expectedAuthenticatedUid,
+        exactAuthority,
+      }) async {
+        verifier.current = false;
+        throw ExactAccountAuthorityChangedException('account changed');
+      },
+    );
+    await _tick();
+    transport.serverStatus('capture_protocol_drained', fields: _authority);
+    expect(await resultFuture, isNull);
   });
 }
