@@ -57,6 +57,16 @@ import 'package:omi/widgets/bottom_nav_bar.dart';
 
 const bool _isConfiguredCallPathRun = bool.fromEnvironment('ELLA_CALL_PATH_CONFIG_TEST');
 
+class _NonlinearNavigationTextScaler extends TextScaler {
+  const _NonlinearNavigationTextScaler();
+
+  @override
+  double scale(double fontSize) => fontSize * (fontSize <= 14 ? 3 : 2);
+
+  @override
+  double get textScaleFactor => 3;
+}
+
 class _TestConnectivityPlatform extends ConnectivityPlatform {
   @override
   Future<List<ConnectivityResult>> checkConnectivity() async => [ConnectivityResult.none];
@@ -859,6 +869,68 @@ void main() {
         }
       });
     }
+  }
+
+  for (final scenario in const [
+    (locale: Locale('de'), scaler: TextScaler.linear(3)),
+    (locale: Locale('ar'), scaler: _NonlinearNavigationTextScaler()),
+  ]) {
+    testWidgets('Navigation fits localized labels with actual scaling in ${scenario.locale}', (tester) async {
+      tester.view.physicalSize = const Size(320, 568);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      var measuredHeight = 0.0;
+      await tester.pumpWidget(
+        ChangeNotifierProvider(
+          create: (_) => HomeProvider(),
+          child: MaterialApp(
+            theme: ellaThemeData(),
+            locale: scenario.locale,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                textScaler: scenario.scaler,
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 34),
+              ),
+              child: child!,
+            ),
+            home: Scaffold(
+              body: Builder(builder: (context) {
+                measuredHeight = BottomNavBar.navigationHeight(context);
+                return BottomNavBar(onTabTap: (_, __) {});
+              }),
+            ),
+          ),
+        ),
+      );
+      expect(tester.takeException(), isNull);
+      final nav = find.byType(BottomNavBar);
+      final context = tester.element(nav);
+      final labels = AppLocalizations.of(context)!;
+      expect(Localizations.localeOf(context).languageCode, scenario.locale.languageCode);
+      expect(Directionality.of(context), scenario.locale.languageCode == 'ar' ? TextDirection.rtl : TextDirection.ltr);
+      final row = find.descendant(of: nav, matching: find.byType(Row)).first;
+      final bounds = tester.getRect(row);
+      expect(bounds.height, measuredHeight);
+      for (final label in [
+        labels.bottomNavHome,
+        labels.bottomNavChat,
+        labels.bottomNavTalk,
+        labels.bottomNavSettings
+      ]) {
+        final text = find.descendant(of: row, matching: find.text(label));
+        final target = find.ancestor(of: text, matching: find.byType(InkWell));
+        expect(tester.getRect(target).width, greaterThanOrEqualTo(48));
+        expect(tester.getRect(target).height, greaterThanOrEqualTo(48));
+        expect(bounds.contains(tester.getRect(text).topLeft), isTrue);
+        expect(bounds.contains(tester.getRect(text).bottomRight - const Offset(0.01, 0.01)), isTrue);
+        expect(tester.widget<Text>(text).maxLines, isNull);
+        expect(tester.widget<Text>(text).textScaler, isNull);
+        expect(MediaQuery.textScalerOf(tester.element(text)).scale(10), scenario.scaler.scale(10));
+      }
+    });
   }
 
   testWidgets('Settings does not construct developer provider before Advanced Settings is opened', (tester) async {
