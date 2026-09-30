@@ -3446,6 +3446,131 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  for (final replacement in ['account', 'same_uid_profile', 'same_uid_profile_aba']) {
+    for (final trigger in ['authority_notification', 'lifecycle_resume']) {
+      testWidgets('mounted Today admits $replacement after shutdown through $trigger without another surface',
+          (tester) async {
+        var authority = _MutableExactAuthority('test-user');
+        final outgoing = authority;
+        final reads = <ExactAccountAuthorityVerifier>[];
+        var starts = 0;
+        var writes = 0;
+        final harness = await _pumpHome(
+          tester,
+          conversations: const [],
+          guardianAvailability: () => true,
+          guardianAuthorityProvider: () => authority,
+          guardianModeLoader: () async {
+            reads.add(authority);
+            final enabled = !identical(authority, outgoing);
+            return GuardianModeInfo(
+              currentMode: enabled ? GuardianModeKey.custom : GuardianModeKey.off,
+              twoTierState: enabled ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
+            );
+          },
+          guardianModeSetter: (_) async {
+            writes++;
+            return true;
+          },
+          guardianNativeStart: () async => starts++,
+          guardianNativeStop: () async {},
+        );
+        addTearDown(harness.dispose);
+        expect(find.byKey(const Key('upstream-capture-whispers-switch')), findsNothing);
+        await tester.tap(find.byKey(const Key('today-dock-status')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 250));
+        final toggle =
+            find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch));
+        expect(tester.widget<Switch>(toggle).onChanged, isNotNull);
+        final fence = guardian_native.GuardianModeService.whisperStateFence;
+        await fence.stopAfterInFlight(() async {}, authorityProvider: () => outgoing);
+        harness.authorityChanges.value++;
+        await tester.pump();
+        expect(reads, [outgoing], reason: 'repeated outgoing notifications cannot reopen shutdown admission');
+        expect(fence.choicePending, isTrue);
+        expect(fence.snapshot, isNull);
+        outgoing.current = false;
+        if (replacement == 'same_uid_profile_aba') {
+          authority = _MutableExactAuthority('test-user')..current = false;
+          harness.authorityChanges.value++;
+          await tester.pump();
+          expect(reads, [outgoing], reason: 'a revoked intermediate same-UID profile cannot read');
+        }
+        authority = _MutableExactAuthority(replacement == 'account' ? 'replacement-user' : 'test-user');
+        if (trigger == 'authority_notification') {
+          harness.authorityChanges.value++;
+        } else {
+          tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+          tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        }
+        await tester.pump();
+        await tester.pump();
+        expect(reads, [outgoing, authority]);
+        expect(starts, 1);
+        expect(writes, 0, reason: 'authority recovery reads current truth without changing durable mode');
+        expect(fence.choicePending, isFalse);
+        expect(fence.snapshot, (enabled: true, modeVerified: true, nativeReconciled: true));
+        if (toggle.evaluate().isEmpty) {
+          await tester.tap(find.byKey(const Key('today-dock-status')));
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 250));
+        }
+        expect(tester.widget<Switch>(toggle).value, isTrue);
+        expect(tester.widget<Switch>(toggle).onChanged, isNotNull);
+        expect(outgoing.isExactCurrent(), isFalse);
+        expect(tester.takeException(), isNull);
+      });
+    }
+  }
+
+  testWidgets('mounted Today replacement read waits for the outgoing native shutdown drain', (tester) async {
+    var authority = _MutableExactAuthority('test-user');
+    final outgoing = authority;
+    final drain = Completer<void>();
+    var reads = 0;
+    var starts = 0;
+    var writes = 0;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      guardianAvailability: () => true,
+      guardianAuthorityProvider: () => authority,
+      guardianModeLoader: () async {
+        reads++;
+        final enabled = !identical(authority, outgoing);
+        return GuardianModeInfo(
+          currentMode: enabled ? GuardianModeKey.custom : GuardianModeKey.off,
+          twoTierState: enabled ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
+        );
+      },
+      guardianModeSetter: (_) async {
+        writes++;
+        return true;
+      },
+      guardianNativeStart: () async => starts++,
+      guardianNativeStop: () async {},
+    );
+    addTearDown(harness.dispose);
+    final fence = guardian_native.GuardianModeService.whisperStateFence;
+    final shutdown = fence.stopAfterInFlight(() => drain.future, authorityProvider: () => outgoing);
+    outgoing.current = false;
+    authority = _MutableExactAuthority('test-user');
+    harness.authorityChanges.value++;
+    await tester.pump();
+    expect(reads, 2);
+    expect(starts, 0, reason: 'replacement native ON cannot overtake the outgoing OFF drain');
+    expect(fence.snapshot, isNull);
+    drain.complete();
+    await shutdown;
+    await tester.pump();
+    await tester.pump();
+    expect(starts, 1);
+    expect(writes, 0);
+    expect(fence.snapshot, (enabled: true, modeVerified: true, nativeReconciled: true));
+    expect(tester.takeException(), isNull);
+  });
+
   for (final staleRead in ['on', 'off', 'null', 'error', 'retry']) {
     testWidgets('cross-surface stale Today $staleRead read cannot override a newer dock choice', (tester) async {
       await upstream.SharedPreferencesUtil.init();

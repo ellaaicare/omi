@@ -1209,7 +1209,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }
 
   Future<void> _loadWhisperState() async {
-    if (!_guardianAvailable || _whisperFence.choicePending) return;
+    if (!_guardianAvailable) return;
     if (_whisperStateLoading) {
       _whisperStateReloadPending = true;
       return;
