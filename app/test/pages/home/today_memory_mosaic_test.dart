@@ -84,6 +84,13 @@ void main() {
     await SharedPreferencesUtil.init();
   });
 
+  test('Today clearances retain defaults and grow with the shared navigation height', () {
+    expect(todayDockScrollClearance(textScale: 1, safeBottom: 34), 328);
+    expect(todayBackToRecentBottomOffset(textScale: 1, safeBottom: 34), 280);
+    expect(todayDockScrollClearance(textScale: 1, safeBottom: 34, navHeight: 140), 388);
+    expect(todayBackToRecentBottomOffset(textScale: 1, safeBottom: 34, navHeight: 140), 340);
+  });
+
   test('recent Home artwork recovery selects today and yesterday only, newest first and bounded', () {
     final memories = [
       for (var index = 0; index < 6; index++)
@@ -3113,6 +3120,7 @@ void main() {
       conversations: const [],
       viewport: const Size(320, 568),
       textScaler: const TextScaler.linear(3),
+      includeBottomNav: true,
     );
     addTearDown(harness.dispose);
 
@@ -3124,7 +3132,9 @@ void main() {
     await tester.ensureVisible(find.text('Dock controls'));
     await tester.pump();
     expect(find.text('Dock controls'), findsOneWidget);
-    expect(tester.getBottomLeft(find.text('Dock controls')).dy, lessThan(568 - EllaSizes.navBarHeight - 34));
+    final navHeight = BottomNavBar.navigationHeight(tester.element(find.byType(BottomNavBar)));
+    expect(navHeight, greaterThan(EllaSizes.navBarHeight));
+    expect(tester.getBottomLeft(find.text('Dock controls')).dy, lessThan(568 - navHeight - 34));
     expect(tester.takeException(), isNull);
   });
 
@@ -3134,6 +3144,7 @@ void main() {
       conversations: _ConversationFixtures.withMemories(photoBase64: ''),
       viewport: const Size(320, 568),
       textScaler: const TextScaler.linear(3),
+      includeBottomNav: true,
     );
     addTearDown(harness.dispose);
 
@@ -3147,7 +3158,9 @@ void main() {
     final backToRecent = find.byKey(const Key('home-back-to-recent'));
     expect(backToRecent, findsOneWidget);
     expect(tester.getTopLeft(backToRecent).dy, greaterThanOrEqualTo(47));
-    expect(tester.getBottomLeft(backToRecent).dy, lessThan(568 - EllaSizes.navBarHeight - 34));
+    final navHeight = BottomNavBar.navigationHeight(tester.element(find.byType(BottomNavBar)));
+    expect(navHeight, greaterThan(EllaSizes.navBarHeight));
+    expect(tester.getBottomLeft(backToRecent).dy, lessThan(568 - navHeight - 34));
     expect(tester.takeException(), isNull);
   });
 

@@ -40,6 +40,7 @@ import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/widgets/bottom_nav_bar.dart';
 import 'package:omi/ella/capture_host/ella_capture_host.dart';
 
 typedef TodayCardTalkRouteOpener = Future<void> Function(BuildContext context, TodayCard card);
@@ -2127,9 +2128,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final captureFinalizationPending = _homeCaptureFinalizationPending || _externalCaptureFinalizationSource != null;
     final dockTextScale = MediaQuery.textScalerOf(context).scale(1);
     final dockSafeBottom = MediaQuery.paddingOf(context).bottom;
+    final navHeight = BottomNavBar.navigationHeight(context);
     final upstreamDockBuilder = EllaCaptureHost.homeCaptureDockBuilder;
     final upstreamDockActive = upstreamDockBuilder != null;
-    final dockClearance = todayDockScrollClearance(textScale: dockTextScale, safeBottom: dockSafeBottom);
+    final dockClearance =
+        todayDockScrollClearance(textScale: dockTextScale, safeBottom: dockSafeBottom, navHeight: navHeight);
     _scheduleHomeMemoryPrefetch();
 
     void openControls() => unawaited(
@@ -2266,7 +2269,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                   ),
                 SliverToBoxAdapter(
                   child: SizedBox(
-                    height: upstreamDockActive ? EllaSizes.navBarHeight + dockSafeBottom + 24 : dockClearance,
+                    height: upstreamDockActive ? navHeight + dockSafeBottom + 24 : dockClearance,
                   ),
                 ),
               ],
@@ -2276,8 +2279,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
             Positioned(
               right: 22,
               bottom: upstreamDockActive
-                  ? EllaSizes.navBarHeight + dockSafeBottom + 16
-                  : todayBackToRecentBottomOffset(textScale: dockTextScale, safeBottom: dockSafeBottom),
+                  ? navHeight + dockSafeBottom + 16
+                  : todayBackToRecentBottomOffset(
+                      textScale: dockTextScale, safeBottom: dockSafeBottom, navHeight: navHeight),
               child: FloatingActionButton.small(
                 key: const Key('home-back-to-recent'),
                 onPressed: _scrollHomeBackToRecent,
@@ -2291,7 +2295,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
             Positioned(
               left: 14,
               right: 14,
-              bottom: EllaSizes.navBarHeight + MediaQuery.paddingOf(context).bottom + 16,
+              bottom: navHeight + MediaQuery.paddingOf(context).bottom + 16,
               child: TodayRecordMomentControl(
                 selectedSource: selectedCaptureSource,
                 activeSource: activeCaptureSource,
@@ -2475,11 +2479,21 @@ double todayDockReservedHeight(double textScale, {double? viewportHeight}) {
   return estimatedHeight.clamp(0.0, viewportHeight * 0.52);
 }
 
-double todayDockScrollClearance({required double textScale, required double safeBottom, double? viewportHeight}) =>
-    EllaSizes.navBarHeight + safeBottom + todayDockReservedHeight(textScale, viewportHeight: viewportHeight) + 24;
+double todayDockScrollClearance({
+  required double textScale,
+  required double safeBottom,
+  double? viewportHeight,
+  double navHeight = EllaSizes.navBarHeight,
+}) =>
+    navHeight + safeBottom + todayDockReservedHeight(textScale, viewportHeight: viewportHeight) + 24;
 
-double todayBackToRecentBottomOffset({required double textScale, required double safeBottom, double? viewportHeight}) =>
-    EllaSizes.navBarHeight +
+double todayBackToRecentBottomOffset({
+  required double textScale,
+  required double safeBottom,
+  double? viewportHeight,
+  double navHeight = EllaSizes.navBarHeight,
+}) =>
+    navHeight +
     safeBottom +
     (viewportHeight == null ? 166 : todayDockReservedHeight(textScale, viewportHeight: viewportHeight) + 32);
 
