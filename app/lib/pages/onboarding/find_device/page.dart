@@ -126,7 +126,6 @@ class _FindDevicesPageState extends State<FindDevicesPage> {
                     style: const TextStyle(
                       fontWeight: FontWeight.w400,
                       fontSize: 16,
-                      color: Color(0xFF2D2D2D),
                       decoration: TextDecoration.underline,
                     ),
                   ),
@@ -151,7 +150,6 @@ class _FindDevicesPageState extends State<FindDevicesPage> {
                     style: const TextStyle(
                       fontWeight: FontWeight.w400,
                       fontSize: 16,
-                      color: Color(0xFF2D2D2D),
                     ),
                   ),
                 ),

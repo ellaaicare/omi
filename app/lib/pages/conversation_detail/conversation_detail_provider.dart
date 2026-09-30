@@ -25,20 +25,30 @@ import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
 typedef ConversationReprocessor = Future<ServerConversation?> Function(String conversationId, {String? appId});
+typedef ConversationDetailLoader = Future<ServerConversation?> Function(
+  String conversationId, {
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+});
 
 class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixin {
   ConversationDetailProvider({
     ConversationReprocessor? reprocessConversation,
     SharedPreferencesUtil? preferences,
     ActiveAccountAuthorityProvider? activeAuthority,
+    ConversationDetailLoader? conversationLoader,
   })  : _reprocessConversation = reprocessConversation ?? reProcessConversationServer,
         _preferences = preferences ?? SharedPreferencesUtil(),
-        _activeAuthority = activeAuthority ?? WalOwnerAuthority.activeAccount;
+        _activeAuthority = activeAuthority ?? WalOwnerAuthority.activeAccount,
+        _conversationLoader = conversationLoader ?? getConversationById;
 
   final ConversationReprocessor _reprocessConversation;
   final SharedPreferencesUtil _preferences;
   final ActiveAccountAuthorityProvider _activeAuthority;
+  final ConversationDetailLoader _conversationLoader;
   int _operationGeneration = 0;
+  int _conversationGeneration = 0;
+  int _refreshRequestGeneration = 0;
 
   AppProvider? appProvider;
   ConversationProvider? conversationProvider;
@@ -550,14 +560,30 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
   }
 
   void setCachedConversation(ServerConversation conversation) {
+    _conversationGeneration++;
     _cachedConversation = conversation;
     _cachedConversationId = conversation.id;
     notifyListeners();
   }
 
-  Future<void> refreshConversation() async {
+  Future<void> refreshConversation({
+    String? expectedConversationId,
+    ExactAccountAuthorityVerifier? exactAuthority,
+  }) async {
+    final conversationId = expectedConversationId ?? conversation.id;
+    final generation = _conversationGeneration;
+    final accountGeneration = _operationGeneration;
+    final requestGeneration = ++_refreshRequestGeneration;
+    bool canCommit() =>
+        !_isDisposed &&
+        requestGeneration == _refreshRequestGeneration &&
+        generation == _conversationGeneration &&
+        accountGeneration == _operationGeneration &&
+        (exactAuthority == null || exactAuthority.isExactCurrent()) &&
+        _cachedConversationId == conversationId;
+    if (!canCommit()) return;
     if (SharedPreferencesUtil().demoMode) {
-      final fixture = DemoFixtures.conversationById(conversation.id);
+      final fixture = DemoFixtures.conversationById(conversationId);
       if (fixture != null) {
         _cachedConversation = fixture;
         conversationProvider?.updateConversation(fixture);
@@ -566,9 +592,13 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
       return;
     }
     try {
-      final updatedConversation = await getConversationById(conversation.id);
-      if (_isDisposed) return;
-      if (updatedConversation != null) {
+      final updatedConversation = await _conversationLoader(
+        conversationId,
+        expectedAuthenticatedUid: exactAuthority?.uid,
+        exactAuthority: exactAuthority,
+      );
+      if (!canCommit()) return;
+      if (updatedConversation != null && updatedConversation.id == conversationId) {
         _cachedConversation = updatedConversation;
         conversationProvider?.updateConversation(updatedConversation);
         notifyListeners();

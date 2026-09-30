@@ -17,6 +17,7 @@ import 'package:omi/ella/upstream_capture/ella_upstream_capture_dock.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/pages/capture/connect.dart';
+import 'package:omi/pages/onboarding/find_device/page.dart';
 import 'package:omi/pages/home/today_page.dart' show GuardianModeLoader, GuardianModeSetter, GuardianNativeLifecycle;
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/onboarding_provider.dart';
@@ -431,6 +432,68 @@ void main() {
     expect(picker.provider.connects, 0);
     expect(tester.takeException(), isNull);
   });
+
+  for (final useEllaTheme in [true, false]) {
+    testWidgets('picker support and Connect Later inherit ${useEllaTheme ? 'Ella' : 'default'} button foreground',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await fork.SharedPreferencesUtil.init();
+      final picker = _PickerHarness([]);
+      addTearDown(() async {
+        await tester.pumpWidget(const SizedBox.shrink());
+        picker.onboarding.dispose();
+        picker.provider.dispose();
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      tester.view.physicalSize = const Size(320, 568);
+      tester.view.devicePixelRatio = 1;
+      final theme = useEllaTheme ? ellaThemeData() : ThemeData();
+      await tester.pumpWidget(ChangeNotifierProvider<OnboardingProvider>.value(
+        value: picker.onboarding,
+        child: MaterialApp(
+          theme: theme,
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(textScaler: const TextScaler.linear(2)),
+            child: child!,
+          ),
+          home: Scaffold(
+            body: SingleChildScrollView(child: FindDevicesPage(goNext: () {})),
+          ),
+        ),
+      ));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 10));
+      for (final label in ['Contact Support?', 'Connect Later']) {
+        final textFinder = find.text(label);
+        final buttonFinder = find.ancestor(of: textFinder, matching: find.byType(ElevatedButton));
+        expect(buttonFinder, findsOneWidget);
+        expect(tester.widget<Text>(textFinder).style!.color, isNull);
+        final rendered = tester.widget<RichText>(find.descendant(of: buttonFinder, matching: find.byType(RichText)));
+        final foreground = rendered.text.style!.color!;
+        if (useEllaTheme) {
+          expect(foreground, theme.elevatedButtonTheme.style!.foregroundColor!.resolve({}));
+          expect(_contrastRatio(foreground, EllaColors.tealDeep), greaterThanOrEqualTo(4.5));
+        } else {
+          expect(foreground, theme.colorScheme.primary);
+        }
+        expect(tester.getSize(buttonFinder).height, greaterThanOrEqualTo(EllaSizes.minTouchTarget));
+        await tester.ensureVisible(buttonFinder);
+        expect(buttonFinder.hitTestable(), findsOneWidget);
+        final press = await tester.startGesture(tester.getCenter(buttonFinder));
+        await tester.pump();
+        final pressedText = tester.widget<RichText>(find.descendant(of: buttonFinder, matching: find.byType(RichText)));
+        expect(pressedText.text.style!.color, foreground);
+        await press.cancel();
+        await tester.pumpAndSettle();
+      }
+      expect(picker.service.discovers, 1);
+      expect(picker.provider.connects, 0);
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets('BLE failure offers Retry without invoking AI consent', (tester) async {
     final fixture = await _DockFixture.create(tester);

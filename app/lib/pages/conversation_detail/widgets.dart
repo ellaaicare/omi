@@ -767,11 +767,25 @@ typedef MemoryTalkRouteOpener = Future<void> Function(
 );
 
 class MemoryTalkButton extends StatefulWidget {
-  const MemoryTalkButton({required this.conversation, this.routeOpener, this.receiptDiscovery, super.key});
+  const MemoryTalkButton({
+    required this.conversation,
+    this.routeOpener,
+    this.receiptDiscovery,
+    this.authorityProvider = WalOwnerAuthority.operationEntry,
+    this.undoCorrection = undoConversationCorrection,
+    super.key,
+  });
 
   final ServerConversation conversation;
   final MemoryTalkRouteOpener? routeOpener;
   final MemoryReinterpretationReceiptDiscovery? receiptDiscovery;
+  final ExactAccountAuthorityVerifier? Function() authorityProvider;
+  final Future<ConversationCorrectionReceipt?> Function({
+    required String conversationId,
+    required String correctionId,
+    String? expectedAuthenticatedUid,
+    ExactAccountAuthorityVerifier? exactAuthority,
+  }) undoCorrection;
 
   @visibleForTesting
   static V2VSessionScope sessionScopeFor(ServerConversation conversation) => V2VSessionScope.memory(
@@ -788,6 +802,8 @@ class _MemoryTalkButtonState extends State<MemoryTalkButton> {
   String? _activeDiscoveryKey;
   MemoryReceiptDiscoveryResult? _discoveryResult;
   ConversationCorrectionReceipt? _receipt;
+  ExactAccountAuthorityVerifier? _receiptAuthority;
+  int _talkGeneration = 0;
 
   ServerConversation get conversation => widget.conversation;
 
@@ -804,9 +820,11 @@ class _MemoryTalkButtonState extends State<MemoryTalkButton> {
       _receiptDiscovery = widget.receiptDiscovery ?? MemoryReinterpretationReceiptDiscovery();
     }
     if (oldWidget.conversation.id != conversation.id) {
+      _talkGeneration++;
       _activeDiscoveryKey = null;
       _discoveryResult = null;
       _receipt = null;
+      _receiptAuthority = null;
     }
   }
 
@@ -844,45 +862,105 @@ class _MemoryTalkButtonState extends State<MemoryTalkButton> {
   }
 
   Future<void> _openMemoryTalk() async {
+    final authority = widget.authorityProvider();
+    if (authority == null || authority.uid.isEmpty || !authority.isExactCurrent()) return;
+    final originConversationId = conversation.id;
+    final generation = ++_talkGeneration;
     final openRoute = widget.routeOpener ?? _openDefaultVoiceRoute;
-    await openRoute(context, conversation, _handleMemorySessionEnded);
+    await openRoute(context, conversation, (request) {
+      if (!_isCurrentOrigin(originConversationId, generation, authority)) return;
+      _handleMemorySessionEnded(request, authority, generation);
+    });
   }
 
-  void _handleMemorySessionEnded(MemoryReceiptDiscoveryRequest request) {
+  bool _isCurrentOrigin(String conversationId, int generation, ExactAccountAuthorityVerifier authority) =>
+      mounted && conversation.id == conversationId && _talkGeneration == generation && authority.isExactCurrent();
+
+  void _handleMemorySessionEnded(
+    MemoryReceiptDiscoveryRequest request,
+    ExactAccountAuthorityVerifier authority,
+    int generation,
+  ) {
     if (request.conversationId != conversation.id || request.sessionId.isEmpty) return;
     if (_activeDiscoveryKey == request.key) return;
     _activeDiscoveryKey = request.key;
     _discoveryResult = null;
-    unawaited(_discoverReceipt(request));
+    unawaited(_discoverReceipt(request, authority, generation));
   }
 
-  Future<void> _discoverReceipt(MemoryReceiptDiscoveryRequest request) async {
+  Future<void> _discoverReceipt(
+    MemoryReceiptDiscoveryRequest request,
+    ExactAccountAuthorityVerifier authority,
+    int generation,
+  ) async {
     final discoveryKey = request.key;
-    final result = await _receiptDiscovery.discover(
-      conversationId: request.conversationId,
-      sessionId: request.sessionId,
-      shouldContinue: () => mounted && _activeDiscoveryKey == discoveryKey,
-    );
-    if (!mounted || _activeDiscoveryKey != discoveryKey) return;
+    final detailProvider = context.read<ConversationDetailProvider>();
+    bool isCurrent() =>
+        _isCurrentOrigin(request.conversationId, generation, authority) && _activeDiscoveryKey == discoveryKey;
+    MemoryReceiptDiscoveryResult result;
+    try {
+      result = await _receiptDiscovery.discover(
+        conversationId: request.conversationId,
+        sessionId: request.sessionId,
+        shouldContinue: isCurrent,
+        exactAuthority: authority,
+      );
+    } catch (_) {
+      return;
+    }
+    if (!isCurrent()) return;
     setState(() {
       _discoveryResult = result;
       if (result.receipt != null && result.receipt!.conversationId == conversation.id) {
         _receipt = result.receipt;
+        _receiptAuthority = authority;
       }
     });
+    if (result.state == MemoryReceiptDiscoveryState.applied && result.receipt?.isApplied == true && isCurrent()) {
+      await detailProvider.refreshConversation(
+        expectedConversationId: request.conversationId,
+        exactAuthority: authority,
+      );
+    }
   }
 
   Future<ConversationCorrectionReceipt?> _undoMemoryCorrection() async {
     final receipt = _receipt;
-    if (receipt == null || !receipt.isApplied) return null;
-    final updated = await undoConversationCorrection(
-      conversationId: receipt.conversationId,
-      correctionId: receipt.correctionId,
-    );
-    if (mounted && updated != null && _receipt?.correctionId == receipt.correctionId) {
-      setState(() => _receipt = updated);
+    final authority = _receiptAuthority;
+    final generation = _talkGeneration;
+    if (receipt == null ||
+        !receipt.isApplied ||
+        authority == null ||
+        !_isCurrentOrigin(receipt.conversationId, generation, authority)) {
+      return null;
     }
-    return updated;
+    final detailProvider = context.read<ConversationDetailProvider>();
+    ConversationCorrectionReceipt? updated;
+    try {
+      updated = await widget.undoCorrection(
+        conversationId: receipt.conversationId,
+        correctionId: receipt.correctionId,
+        expectedAuthenticatedUid: authority.uid,
+        exactAuthority: authority,
+      );
+    } catch (_) {
+      return null;
+    }
+    if (!_isCurrentOrigin(receipt.conversationId, generation, authority) ||
+        updated == null ||
+        updated.conversationId != receipt.conversationId ||
+        updated.correctionId != receipt.correctionId ||
+        _receipt?.correctionId != receipt.correctionId) {
+      return null;
+    }
+    if (updated.isUndone) {
+      setState(() => _receipt = updated);
+      await detailProvider.refreshConversation(
+        expectedConversationId: receipt.conversationId,
+        exactAuthority: authority,
+      );
+    }
+    return _isCurrentOrigin(receipt.conversationId, generation, authority) ? updated : null;
   }
 
   void _reviewMemoryCorrection() {

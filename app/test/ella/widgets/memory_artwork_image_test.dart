@@ -724,6 +724,60 @@ class _AuthoritySettlesAfterFinalRetryArtworkApi extends MemoryArtworkApi {
   }
 }
 
+class _TerminalPollArtworkApi extends MemoryArtworkApi {
+  _TerminalPollArtworkApi({required this.read, this.dayBatch = false, this.cacheScope = 'terminal-poll-cache'})
+      : super(authorityProvider: () => null);
+
+  Future<MemoryArtworkResult?> Function(int) read;
+  final bool dayBatch;
+  final String cacheScope;
+  bool current = true;
+  int readCalls = 0;
+  int generationCalls = 0;
+  final List<bool> enqueueRequests = [];
+  final List<int> pollRequests = [];
+
+  @override
+  bool get supportsDayArtworkBatch => dayBatch;
+
+  @override
+  bool isDisplayAuthorityCurrent() => current;
+
+  @override
+  String cacheKeyForDisplay(
+          {required String memoryId, required String styleVersion, required String enrichmentRevision}) =>
+      current ? cacheScope : '';
+
+  @override
+  Future<MemoryArtworkResult> loadForDisplay(String memoryId,
+      {bool enqueueIfMissing = false,
+      int pollAttempts = 10,
+      Duration pollInterval = const Duration(seconds: 3)}) async {
+    enqueueRequests.add(enqueueIfMissing);
+    pollRequests.add(pollAttempts);
+    return (await read(++readCalls))!;
+  }
+
+  @override
+  Future<MemoryArtworkDay?> fetchDay(DateTime localDay,
+      {required int utcOffsetMinutes, int authorityRevision = 0, int contentRevision = 0}) async {
+    final result = await read(++readCalls);
+    return result == null
+        ? null
+        : MemoryArtworkDay(
+            day: '2026-09-30', utcOffsetMinutes: utcOffsetMinutes, items: {'memory-poll-terminal': result});
+  }
+
+  @override
+  Future<MemoryArtworkResult> loadAutomaticallyForDisplay(String memoryId,
+      {int pollAttempts = 10,
+      Duration pollInterval = const Duration(seconds: 3),
+      void Function()? onEnqueueAttempt}) async {
+    generationCalls++;
+    return const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating);
+  }
+}
+
 void main() {
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
@@ -748,6 +802,51 @@ void main() {
     );
     expect(trustedKey, cacheKey);
   }
+
+  Future<void> pumpTerminalPoll(
+    WidgetTester tester,
+    _TerminalPollArtworkApi api, {
+    int authorityEpoch = 0,
+    int refreshEpoch = 0,
+    File? cachedFile,
+    int maxRetries = 2,
+    bool enqueueIfMissing = false,
+    MemoryArtworkResult? prefetchedResult,
+  }) async {
+    await tester.pumpWidget(MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: Center(
+        child: SizedBox(
+          width: 200,
+          height: 200,
+          child: MemoryArtworkImage(
+            conversation: ServerConversation(
+              id: 'memory-poll-terminal',
+              createdAt: DateTime(2026, 9, 30),
+              structured: Structured('A memory', 'A useful summary'),
+              artwork: const MemoryArtworkState(status: MemoryArtworkStatus.generating),
+            ),
+            api: api,
+            authorityEpoch: authorityEpoch,
+            refreshEpoch: refreshEpoch,
+            cachedFileLookup: (_) async => cachedFile,
+            cacheEvictor: (_) async {},
+            retryDelay: const Duration(milliseconds: 10),
+            maxTransientRetries: maxRetries,
+            maxVisibleEnrichmentRetries: maxRetries,
+            enqueueIfMissing: enqueueIfMissing,
+            allowManualGeneration: true,
+            prefetchedResult: prefetchedResult,
+          ),
+        ),
+      ),
+    ));
+    await tester.pump();
+  }
+
+  final progress = find.byKey(const Key('memory-artwork-generation-progress-memory-poll-terminal'));
+  final readRetry = find.byKey(const Key('memory-artwork-read-retry-memory-poll-terminal'));
 
   test('a superseded source key stays untrusted after alias pressure evicts its replacement mapping', () async {
     const staleCacheKey = 'stale-ready-cache-key';
@@ -1431,7 +1530,8 @@ void main() {
 
     api.generationResult.complete(const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating));
     await tester.pump();
-    expect(find.byKey(const Key('memory-artwork-generation-progress-memory-manual-generation')), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-generation-progress-memory-manual-generation')), findsNothing);
+    expect(find.byKey(const Key('memory-artwork-read-retry-memory-manual-generation')), findsOneWidget);
   });
 
   testWidgets('a high-priority memory uses its typographic fallback and keeps retry available', (tester) async {
@@ -1894,7 +1994,8 @@ void main() {
     await tester.pump();
     expect(api.enqueueRequests, [false, true]);
     expect(api.automaticRequests, 0, reason: 'the no-repeat automatic route cannot repair a missing completed object');
-    expect(find.byKey(const Key('memory-artwork-generation-progress-memory-missing-object')), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-generation-progress-memory-missing-object')), findsNothing);
+    expect(find.byKey(const Key('memory-artwork-read-retry-memory-missing-object')), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
@@ -3527,5 +3628,201 @@ void main() {
     expect(find.byKey(const Key('memory-artwork-placeholder-memory-generating-compact')), findsOneWidget);
     expect(find.byIcon(Icons.brush_outlined), findsNothing);
     expect(tester.takeException(), isNull);
+  });
+  for (final failure in ['generating', 'exception', 'enrichment']) {
+    testWidgets('terminal poll $failure exhaustion stops progress and explicit retry only reads', (tester) async {
+      final api = _TerminalPollArtworkApi(read: (_) async {
+        if (failure == 'exception') throw StateError('read unavailable');
+        return MemoryArtworkResult(
+          status:
+              failure == 'enrichment' ? MemoryArtworkResultStatus.unavailable : MemoryArtworkResultStatus.generating,
+          failureCode: failure == 'enrichment' ? 'memory_artwork_enrichment_not_terminal' : '',
+        );
+      });
+      await pumpTerminalPoll(tester, api, enqueueIfMissing: true);
+      for (var index = 0; index < 2; index++) {
+        await tester.pump(const Duration(milliseconds: 10));
+        await tester.pump();
+      }
+      expect(api.readCalls, 3);
+      expect(progress, findsNothing);
+      expect(readRetry, findsOneWidget);
+      await tester.pump(const Duration(seconds: 1));
+      expect(api.readCalls, 3, reason: 'exhausted polling is finite');
+
+      api.read = (index) async => MemoryArtworkResult(
+          status: index == 4 ? MemoryArtworkResultStatus.generating : MemoryArtworkResultStatus.unavailable);
+      await tester.tap(readRetry);
+      await tester.pump();
+      expect(api.readCalls, 4);
+      expect(progress, findsOneWidget);
+      await tester.pump(const Duration(milliseconds: 10));
+      await tester.pump();
+      expect(api.readCalls, 5);
+      expect(api.enqueueRequests, everyElement(isFalse));
+      expect(api.pollRequests, everyElement(0));
+      expect(api.generationCalls, 0, reason: 'Retry progress cannot fall into the automatic generation path');
+      expect(progress, findsNothing);
+      expect(readRetry, findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
+  for (final throws in [false, true]) {
+    testWidgets('terminal poll day ${throws ? 'exception' : 'null'} exposes a read retry without private polling',
+        (tester) async {
+      final api = _TerminalPollArtworkApi(
+          dayBatch: true,
+          read: (_) async {
+            if (throws) throw StateError('day unavailable');
+            return null;
+          });
+      await pumpTerminalPoll(tester, api);
+      expect(readRetry, findsOneWidget);
+      expect(progress, findsNothing);
+      await tester.pump(const Duration(seconds: 1));
+      expect(api.readCalls, 1, reason: 'parent day/queue authority still owns background polling');
+      api.read = (_) async => const MemoryArtworkResult(status: MemoryArtworkResultStatus.declined);
+      await tester.tap(readRetry);
+      await tester.pump();
+      expect(api.readCalls, 2);
+      expect(readRetry, findsNothing);
+      expect(api.generationCalls, 0);
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
+  testWidgets('terminal poll day retry leaves a still-pending job finite and never starts private polling',
+      (tester) async {
+    final api = _TerminalPollArtworkApi(dayBatch: true, read: (_) async => null);
+    await pumpTerminalPoll(tester, api);
+    api.read = (_) async => const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating);
+    await tester.tap(readRetry);
+    await tester.pump();
+    expect(api.readCalls, 2);
+    expect(progress, findsNothing);
+    expect(readRetry, findsOneWidget);
+    await tester.pump(const Duration(seconds: 1));
+    expect(api.readCalls, 2);
+    expect(api.generationCalls, 0);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('terminal poll prefetched pending state still belongs to the parent queue', (tester) async {
+    final api = _TerminalPollArtworkApi(dayBatch: true, read: (_) async => null);
+    await pumpTerminalPoll(tester, api,
+        maxRetries: 0, prefetchedResult: const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating));
+    await tester.pump(const Duration(seconds: 1));
+    expect(progress, findsOneWidget);
+    expect(readRetry, findsNothing);
+    expect(api.readCalls, 0, reason: 'a card must not create private polling to replace the parent queue');
+    expect(api.generationCalls, 0);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('terminal poll read-only retry also fences signed-image recovery from generation', (tester) async {
+    final api = _TerminalPollArtworkApi(
+        read: (_) async => const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating));
+    await pumpTerminalPoll(tester, api, maxRetries: 0, enqueueIfMissing: true);
+    api.read = (index) async => index == 2
+        ? MemoryArtworkResult(
+            status: MemoryArtworkResultStatus.ready,
+            url: Uri.parse('https://private-storage.example/expired.png'),
+            cacheKey: api.cacheScope)
+        : const MemoryArtworkResult(
+            status: MemoryArtworkResultStatus.unavailable, failureCode: 'memory_artwork_provider_failed');
+    await tester.tap(readRetry);
+    await tester.pump();
+    await tester.pump();
+    final image = tester.widget<CachedNetworkImage>(find.byType(CachedNetworkImage));
+    image.errorListener!(Exception('expired signed URL'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+    expect(api.readCalls, 3);
+    expect(api.enqueueRequests, everyElement(isFalse));
+    expect(api.generationCalls, 0);
+    expect(progress, findsNothing);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('terminal poll exhaustion retains cached art and read retry publishes completed artwork', (tester) async {
+    final api = _TerminalPollArtworkApi(
+        read: (_) async => const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating));
+    await trustDisplayKey(api.cacheScope);
+    await pumpTerminalPoll(tester, api, cachedFile: File('assets/images/onboarding-bg-1.webp'), maxRetries: 0);
+    expect(find.byKey(const Key('memory-cached-artwork-memory-poll-terminal')), findsOneWidget);
+    expect(readRetry, findsOneWidget);
+    expect(progress, findsNothing);
+    api.read = (_) async => MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.ready,
+        url: Uri.parse('https://private-storage.example/completed.png'),
+        cacheKey: api.cacheScope);
+    await tester.tap(readRetry);
+    await tester.pump();
+    await tester.pump();
+    expect(find.byKey(const Key('memory-generated-artwork-memory-poll-terminal')), findsOneWidget);
+    expect(readRetry, findsNothing);
+    expect(api.enqueueRequests, everyElement(isFalse));
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  for (final declined in [false, true]) {
+    testWidgets('terminal poll read retry retains consent and decline suppression', (tester) async {
+      final api = _TerminalPollArtworkApi(
+          read: (_) async => const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating));
+      await trustDisplayKey(api.cacheScope);
+      await pumpTerminalPoll(tester, api, cachedFile: File('assets/images/onboarding-bg-1.webp'), maxRetries: 0);
+      expect(find.byKey(const Key('memory-cached-artwork-memory-poll-terminal')), findsOneWidget);
+      api.read = (_) async => MemoryArtworkResult(
+          status: declined ? MemoryArtworkResultStatus.declined : MemoryArtworkResultStatus.unavailable,
+          failureCode: declined ? '' : 'memory_artwork_consent_required');
+      await tester.tap(readRetry);
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const Key('memory-cached-artwork-memory-poll-terminal')), findsNothing);
+      expect(progress, findsNothing);
+      expect(readRetry, findsNothing);
+      expect(api.enqueueRequests, everyElement(isFalse));
+      expect(api.generationCalls, 0);
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
+  testWidgets('terminal poll retry refuses a replaced account and ignores late old-account results', (tester) async {
+    final oldAuthority = _MutableArtworkAuthority();
+    final oldApi = _TerminalPollArtworkApi(
+        read: (_) async => MemoryArtworkResult(status: MemoryArtworkResultStatus.generating, authority: oldAuthority));
+    await pumpTerminalPoll(tester, oldApi, maxRetries: 0);
+    oldApi.current = false;
+    await tester.tap(readRetry);
+    await tester.pump();
+    expect(oldApi.readCalls, 1, reason: 'no retry read under a replaced display authority');
+
+    oldApi.current = true;
+    final late = Completer<MemoryArtworkResult>();
+    oldApi.read = (_) => late.future;
+    await tester.tap(readRetry);
+    await tester.pump();
+    expect(progress, findsOneWidget);
+    oldApi.current = false;
+    oldAuthority.current = false;
+    final nextApi = _TerminalPollArtworkApi(
+        cacheScope: 'replacement-owner-cache',
+        read: (_) async => MemoryArtworkResult(
+            status: MemoryArtworkResultStatus.ready,
+            url: Uri.parse('https://private-storage.example/replacement.png'),
+            cacheKey: 'replacement-owner-cache'));
+    await pumpTerminalPoll(tester, nextApi, authorityEpoch: 1, maxRetries: 0);
+    await tester.pump();
+    late.complete(MemoryArtworkResult(status: MemoryArtworkResultStatus.declined, authority: oldAuthority));
+    await tester.pump();
+    expect(find.byKey(const Key('memory-generated-artwork-memory-poll-terminal')), findsOneWidget);
+    expect(tester.widget<CachedNetworkImage>(find.byType(CachedNetworkImage)).imageUrl,
+        'https://private-storage.example/replacement.png');
+    expect(readRetry, findsNothing);
+    expect(nextApi.readCalls, 1);
+    expect(oldApi.enqueueRequests, everyElement(isFalse));
+    await tester.pumpWidget(const SizedBox());
   });
 }

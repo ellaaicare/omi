@@ -1037,13 +1037,27 @@ class ConversationReinterpretationJob {
   }
 }
 
-Future<ConversationReinterpretationJob?> getLatestConversationReinterpretation({required String conversationId}) async {
+Future<ConversationReinterpretationJob?> getLatestConversationReinterpretation({
+  required String conversationId,
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+}) async {
+  _verifyConversationFinalizationAuthority(
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
+  );
   final encodedConversationId = Uri.encodeComponent(conversationId);
   final response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/ella/conversations/$encodedConversationId/reinterpretations/latest',
     headers: {},
     method: 'GET',
     body: '',
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
+  );
+  _verifyConversationFinalizationAuthority(
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
   );
   if (response == null || response.statusCode != 200) return null;
   final decoded = jsonDecode(response.body);
@@ -1142,12 +1156,35 @@ Future<ConversationCorrectionReceipt?> pollConversationCorrectionReceipt({
 Future<ConversationCorrectionReceipt?> undoConversationCorrection({
   required String conversationId,
   required String correctionId,
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+  ConversationCorrectionTransport? transport,
 }) async {
-  final response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/ella/conversations/$conversationId/corrections/$correctionId/undo',
-    headers: {},
-    method: 'POST',
-    body: jsonEncode({}),
+  _verifyConversationFinalizationAuthority(
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
+  );
+  final url = '${Env.apiBaseUrl}v1/ella/conversations/$conversationId/corrections/$correctionId/undo';
+  final response = transport == null
+      ? await makeApiCall(
+          url: url,
+          headers: {},
+          method: 'POST',
+          body: jsonEncode({}),
+          expectedAuthenticatedUid: expectedAuthenticatedUid,
+          exactAuthority: exactAuthority,
+        )
+      : await transport(
+          url: url,
+          method: 'POST',
+          body: jsonEncode({}),
+          expectedAuthenticatedUid: expectedAuthenticatedUid,
+          exactAuthority: exactAuthority,
+          timeout: null,
+        );
+  _verifyConversationFinalizationAuthority(
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
   );
   if (response == null || response.statusCode != 200) return null;
   final decoded = jsonDecode(response.body);
@@ -1171,12 +1208,37 @@ Future<bool> deleteConversationServer(
   return response.statusCode == 204;
 }
 
-Future<ServerConversation?> getConversationById(String conversationId) async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/conversations/$conversationId',
-    headers: {},
-    method: 'GET',
-    body: '',
+Future<ServerConversation?> getConversationById(
+  String conversationId, {
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+  ConversationCorrectionTransport? transport,
+}) async {
+  _verifyConversationFinalizationAuthority(
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
+  );
+  final url = '${Env.apiBaseUrl}v1/conversations/$conversationId';
+  final response = transport == null
+      ? await makeApiCall(
+          url: url,
+          headers: {},
+          method: 'GET',
+          body: '',
+          expectedAuthenticatedUid: expectedAuthenticatedUid,
+          exactAuthority: exactAuthority,
+        )
+      : await transport(
+          url: url,
+          method: 'GET',
+          body: '',
+          expectedAuthenticatedUid: expectedAuthenticatedUid,
+          exactAuthority: exactAuthority,
+          timeout: null,
+        );
+  _verifyConversationFinalizationAuthority(
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
   );
   if (response == null) return null;
   if (response.statusCode == 200) {

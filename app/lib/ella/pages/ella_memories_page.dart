@@ -24,6 +24,42 @@ enum MemoryGalleryLayout { journal, grid, list, days }
 
 enum MemoryGallerySort { recent, oldest }
 
+const _queueReadUnavailableArtwork = MemoryArtworkResult(
+  status: MemoryArtworkResultStatus.unavailable,
+  failureCode: 'memory_artwork_progress_read_unavailable',
+);
+
+MemoryArtworkResult? _artworkWithQueueReadState(MemoryArtworkResult? result, bool unavailable) {
+  if (!unavailable) return result;
+  if (result == null) return _queueReadUnavailableArtwork;
+  if (result.status == MemoryArtworkResultStatus.generating) {
+    return MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.unavailable,
+      failureCode: _queueReadUnavailableArtwork.failureCode,
+      authority: result.authority,
+    );
+  }
+  // Queue transport failure must never soften a terminal privacy decision.
+  if (!result.isReady) return result;
+  if (!result.refreshPending) return result;
+  // Keep the last authenticated image; the parent reports unknown progress.
+  return MemoryArtworkResult(
+    status: result.status,
+    url: result.url,
+    cacheKey: result.cacheKey,
+    styleVersion: result.styleVersion,
+    enrichmentRevision: result.enrichmentRevision,
+    failureCode: result.failureCode,
+    refreshFailureCode: result.refreshFailureCode,
+    requestedStyleVersion: result.requestedStyleVersion,
+    stale: result.stale,
+    pixelWidth: result.pixelWidth,
+    selectedVariantWidth: result.selectedVariantWidth,
+    variants: result.variants,
+    authority: result.authority,
+  );
+}
+
 class EllaMemoriesPage extends StatefulWidget {
   const EllaMemoriesPage({super.key, this.artworkApi, this.onRecord});
 
@@ -36,6 +72,8 @@ class EllaMemoriesPage extends StatefulWidget {
 
 class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   static const _maxArtworkPreferenceUnavailableRetries = 3;
+  static const _maxArtworkQueueUnavailableReads = 3;
+  static const _maxArtworkQueueReads = 45;
   final ScrollController _scrollController = ScrollController();
   late final MemoryArtworkApi _artworkApi = widget.artworkApi ?? MemoryArtworkApi();
   MemoryArtworkPreferences? _artworkPreferences;
@@ -52,6 +90,10 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   int _artworkDisplayEpoch = 0;
   int _artworkAuthorityEpoch = 0;
   int _artworkPreferenceUnavailableRetries = 0;
+  int _artworkQueueReads = 0;
+  int _artworkQueueUnavailableReads = 0;
+  bool _artworkQueueReadUnavailable = false;
+  bool _artworkQueueManualRefreshPending = false;
   late final Listenable _artworkAuthorityChanges;
 
   @override
@@ -86,10 +128,12 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     _artworkQueuePollTimer?.cancel();
     _artworkPreferencesRetryTimer?.cancel();
     _artworkPreferenceUnavailableRetries = 0;
+    _resetArtworkQueueReadBudget();
     if (mounted) {
       setState(() {
         _artworkPreferences = null;
         _artworkQueueStatus = null;
+        _artworkQueueReadUnavailable = false;
         _artworkAuthorityEpoch++;
         _artworkDisplayEpoch++;
       });
@@ -132,14 +176,16 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
       setState(() => _sort = MemoryGallerySort.recent);
     }
     await context.read<ConversationProvider>().getInitialConversations();
+    _resetArtworkQueueReadBudget();
     await _loadArtworkPreferences();
     await _refreshArtworkQueueStatus();
   }
 
   Future<void> _loadArtworkPreferences({bool retryOnUnavailable = false}) async {
     final loadSequence = ++_artworkPreferenceLoadSequence;
+    final authorityEpoch = _artworkAuthorityEpoch;
     final preferences = await _artworkApi.preferences();
-    if (!mounted || loadSequence != _artworkPreferenceLoadSequence) return;
+    if (!mounted || loadSequence != _artworkPreferenceLoadSequence || authorityEpoch != _artworkAuthorityEpoch) return;
     if (preferences == null) {
       if (retryOnUnavailable) _scheduleArtworkPreferencesRetry(loadSequence);
       return;
@@ -166,32 +212,93 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
 
   Future<void> _refreshArtworkQueueStatus() async {
     if (!mounted || _artworkPreferences?.releaseEnabled != true) return;
+    _artworkQueuePollTimer?.cancel();
+    if (!_artworkApi.isDisplayAuthorityCurrent() || _artworkQueueReads >= _maxArtworkQueueReads) {
+      _stopArtworkQueueReads();
+      return;
+    }
     final refreshSequence = ++_artworkQueueRefreshSequence;
+    final authorityEpoch = _artworkAuthorityEpoch;
+    _artworkQueueReads++;
+    bool isCurrent() =>
+        mounted && refreshSequence == _artworkQueueRefreshSequence && authorityEpoch == _artworkAuthorityEpoch;
     MemoryArtworkQueueStatus? status;
     try {
       status = await _artworkApi.queueStatus();
     } on ExactAccountAuthorityChangedException {
+      if (isCurrent()) _stopArtworkQueueReads();
       return;
     } catch (_) {
+      // A failed read is unknown progress, not proof the server job stopped.
+    }
+    if (!isCurrent()) return;
+    if (!_artworkApi.isDisplayAuthorityCurrent()) {
+      _stopArtworkQueueReads();
       return;
     }
-    if (!mounted || refreshSequence != _artworkQueueRefreshSequence || status == null) return;
+    if (status == null) {
+      _artworkQueueUnavailableReads++;
+      if (_artworkQueueUnavailableReads >= _maxArtworkQueueUnavailableReads ||
+          _artworkQueueReads >= _maxArtworkQueueReads) {
+        _stopArtworkQueueReads();
+      } else {
+        _scheduleArtworkQueueRead(refreshSequence, authorityEpoch);
+      }
+      return;
+    }
+    _artworkQueueUnavailableReads = 0;
     final previous = _artworkQueueStatus;
-    final refreshVisibleArtwork = previous == null ||
+    final refreshVisibleArtwork = _artworkQueueManualRefreshPending ||
+        previous == null ||
         status.styleVersion != previous.styleVersion ||
         status.generationId != previous.generationId ||
         status.ready > previous.ready ||
         (status.state == MemoryArtworkQueueState.completed && previous.state != MemoryArtworkQueueState.completed);
     setState(() {
       _artworkQueueStatus = status;
+      _artworkQueueReadUnavailable = false;
+      _artworkQueueManualRefreshPending = false;
       if (refreshVisibleArtwork) _artworkDisplayEpoch++;
     });
-    _artworkQueuePollTimer?.cancel();
     if (_shouldPollArtworkQueue(status)) {
-      _artworkQueuePollTimer = Timer(const Duration(seconds: 4), () {
-        if (mounted) unawaited(_refreshArtworkQueueStatus());
-      });
+      if (_artworkQueueReads >= _maxArtworkQueueReads) {
+        _stopArtworkQueueReads();
+      } else {
+        _scheduleArtworkQueueRead(refreshSequence, authorityEpoch);
+      }
     }
+  }
+
+  void _scheduleArtworkQueueRead(int refreshSequence, int authorityEpoch) {
+    _artworkQueuePollTimer = Timer(const Duration(seconds: 4), () {
+      if (!mounted || refreshSequence != _artworkQueueRefreshSequence || authorityEpoch != _artworkAuthorityEpoch) {
+        return;
+      }
+      unawaited(_refreshArtworkQueueStatus());
+    });
+  }
+
+  void _resetArtworkQueueReadBudget() {
+    _artworkQueueRefreshSequence++;
+    _artworkQueuePollTimer?.cancel();
+    _artworkQueueReads = 0;
+    _artworkQueueUnavailableReads = 0;
+    _artworkQueueManualRefreshPending = false;
+  }
+
+  void _stopArtworkQueueReads() {
+    _artworkQueuePollTimer?.cancel();
+    _artworkQueueManualRefreshPending = false;
+    if (mounted) setState(() => _artworkQueueReadUnavailable = true);
+  }
+
+  Future<void> _retryArtworkQueueRead() async {
+    if (!_artworkApi.isDisplayAuthorityCurrent() || _artworkPreferences?.releaseEnabled != true) return;
+    _resetArtworkQueueReadBudget();
+    // The first read may be unavailable; retain intent until this bounded cycle
+    // receives a current success, rather than refreshing old day metadata.
+    _artworkQueueManualRefreshPending = true;
+    await _refreshArtworkQueueStatus();
   }
 
   /// Gallery browsing must never spend image allowance. A deliberate style
@@ -236,6 +343,8 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
       // A prior style can have a larger ready count. Resetting its queue
       // snapshot makes the new style's first status authoritative.
       _artworkQueueStatus = null;
+      _resetArtworkQueueReadBudget();
+      _artworkQueueReadUnavailable = false;
       _artworkDisplayEpoch++;
     });
     _showMessage(context.l10n.memoryArtworkStyleUpdated);
@@ -373,6 +482,22 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
                     : null,
               ),
             ),
+            if (_artworkQueueReadUnavailable)
+              SliverToBoxAdapter(
+                child: Padding(
+                  key: const Key('memory-artwork-queue-read-unavailable'),
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                  child: Row(children: [
+                    Expanded(child: Text(context.l10n.memoryArtworkUnavailableLabel, style: EllaTextStyles.secondary)),
+                    IconButton(
+                      key: const Key('memory-artwork-queue-read-retry'),
+                      tooltip: context.l10n.tryAgain,
+                      onPressed: _artworkApi.isDisplayAuthorityCurrent() ? _retryArtworkQueueRead : null,
+                      icon: const Icon(Icons.refresh_rounded, color: EllaColors.tealDeep),
+                    ),
+                  ]),
+                ),
+              ),
             if (live)
               SliverPadding(
                 padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
@@ -494,6 +619,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
               artworkApi: _artworkApi,
               artworkRefreshEpoch: _artworkDisplayEpoch,
               artworkAuthorityEpoch: _artworkAuthorityEpoch,
+              artworkQueueReadUnavailable: _artworkQueueReadUnavailable,
               onOpen: () => Navigator.of(context).push(
                 MaterialPageRoute(
                   builder: (_) => EllaMemoryDayPage(
@@ -558,6 +684,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
         artworkApi: _artworkApi,
         artworkRefreshEpoch: _artworkDisplayEpoch,
         artworkAuthorityEpoch: _artworkAuthorityEpoch,
+        artworkQueueReadUnavailable: _artworkQueueReadUnavailable,
         onOpen: () => _openMemory(conversation),
         onDelete: () => _deleteMemory(conversation),
       );
@@ -601,6 +728,7 @@ class MemoryDayGalleryCard extends StatefulWidget {
     this.artworkApi,
     this.artworkRefreshEpoch = 0,
     this.artworkAuthorityEpoch = 0,
+    this.artworkQueueReadUnavailable = false,
     this.automaticRepairMemoryIds = const <String>{},
     this.now,
   });
@@ -611,6 +739,7 @@ class MemoryDayGalleryCard extends StatefulWidget {
   final MemoryArtworkApi? artworkApi;
   final int artworkRefreshEpoch;
   final int artworkAuthorityEpoch;
+  final bool artworkQueueReadUnavailable;
   final Set<String> automaticRepairMemoryIds;
   final DateTime? now;
 
@@ -721,6 +850,7 @@ class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
                 artworkApi: widget.artworkApi,
                 artworkRefreshEpoch: widget.artworkRefreshEpoch,
                 artworkAuthorityEpoch: widget.artworkAuthorityEpoch,
+                artworkQueueReadUnavailable: widget.artworkQueueReadUnavailable,
                 automaticRepairMemoryIds: _dayBatchFailed ? const <String>{} : widget.automaticRepairMemoryIds,
                 prefetchedArtwork: _dayArtwork?.items ?? const <String, MemoryArtworkResult>{},
                 dayBatchResolved: _dayBatchResolved,
@@ -750,7 +880,8 @@ class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
                 refreshEpoch: widget.artworkRefreshEpoch,
                 authorityEpoch: widget.artworkAuthorityEpoch,
                 allowManualGeneration: false,
-                prefetchedResult: _dayArtwork?.items[memory.id],
+                prefetchedResult:
+                    _artworkWithQueueReadState(_dayArtwork?.items[memory.id], widget.artworkQueueReadUnavailable),
                 prefetchResolved: _dayBatchResolved,
                 deferRemoteFetch: _usesDayBatch && !_dayBatchResolved,
               )),
@@ -835,6 +966,7 @@ class _MemoryDayArtworkCollage extends StatelessWidget {
     this.artworkApi,
     this.artworkRefreshEpoch = 0,
     this.artworkAuthorityEpoch = 0,
+    this.artworkQueueReadUnavailable = false,
     this.automaticRepairMemoryIds = const <String>{},
     this.prefetchedArtwork = const <String, MemoryArtworkResult>{},
     this.dayBatchResolved = false,
@@ -844,6 +976,7 @@ class _MemoryDayArtworkCollage extends StatelessWidget {
   final MemoryArtworkApi? artworkApi;
   final int artworkRefreshEpoch;
   final int artworkAuthorityEpoch;
+  final bool artworkQueueReadUnavailable;
   final Set<String> automaticRepairMemoryIds;
   final Map<String, MemoryArtworkResult> prefetchedArtwork;
   final bool dayBatchResolved;
@@ -855,7 +988,7 @@ class _MemoryDayArtworkCollage extends StatelessWidget {
         authorityEpoch: artworkAuthorityEpoch,
         enqueueIfMissing: automaticRepairMemoryIds.contains(memory.id),
         allowManualGeneration: true,
-        prefetchedResult: prefetchedArtwork[memory.id],
+        prefetchedResult: _artworkWithQueueReadState(prefetchedArtwork[memory.id], artworkQueueReadUnavailable),
         prefetchResolved: dayBatchResolved,
         deferRemoteFetch: (artworkApi ?? MemoryArtworkApi()).supportsDayArtworkBatch && !dayBatchResolved,
       );
@@ -1087,6 +1220,7 @@ class MemoryGalleryCard extends StatelessWidget {
     this.artworkRefreshEpoch = 0,
     this.artworkAuthorityEpoch = 0,
     this.enqueueArtworkIfMissing = false,
+    this.artworkQueueReadUnavailable = false,
   });
 
   final ServerConversation conversation;
@@ -1098,6 +1232,7 @@ class MemoryGalleryCard extends StatelessWidget {
   final int artworkRefreshEpoch;
   final int artworkAuthorityEpoch;
   final bool enqueueArtworkIfMissing;
+  final bool artworkQueueReadUnavailable;
 
   String get _title => displayTitle ?? conversation.structured.title;
 
@@ -1118,6 +1253,7 @@ class MemoryGalleryCard extends StatelessWidget {
                   authorityEpoch: artworkAuthorityEpoch,
                   allowManualGeneration: true,
                   enqueueIfMissing: enqueueArtworkIfMissing,
+                  prefetchedResult: artworkQueueReadUnavailable ? _queueReadUnavailableArtwork : null,
                 ),
               ),
               Expanded(
@@ -1137,6 +1273,7 @@ class MemoryGalleryCard extends StatelessWidget {
                   authorityEpoch: artworkAuthorityEpoch,
                   allowManualGeneration: true,
                   enqueueIfMissing: enqueueArtworkIfMissing,
+                  prefetchedResult: artworkQueueReadUnavailable ? _queueReadUnavailableArtwork : null,
                 ),
               ),
               Padding(padding: const EdgeInsets.all(16), child: details),

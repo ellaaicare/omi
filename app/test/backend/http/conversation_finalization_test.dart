@@ -86,6 +86,85 @@ Map<String, dynamic> _v2ConversationJson(String id, String status, String captur
     };
 
 void main() {
+  for (final undo in [false, true]) {
+    final action = undo ? 'Undo' : 'summary refresh';
+    test('$action forwards exact original authority to transport', () async {
+      final authority = _CaptureGenerationAuthority('owner');
+      Future<http.Response?> transport({
+        required String url,
+        required String method,
+        required String body,
+        required String? expectedAuthenticatedUid,
+        required ExactAccountAuthorityVerifier? exactAuthority,
+        required Duration? timeout,
+      }) async {
+        expect(expectedAuthenticatedUid, 'owner');
+        expect(exactAuthority, same(authority));
+        expect(method, undo ? 'POST' : 'GET');
+        expect(url.endsWith(undo ? '/corrections/correction-1/undo' : '/v1/conversations/conversation-1'), isTrue);
+        return http.Response(
+            jsonEncode(undo
+                ? {
+                    'conversation_id': 'conversation-1',
+                    'correction_id': 'correction-1',
+                    'status': 'undone',
+                    'before': {},
+                    'after': {},
+                  }
+                : _conversationJson('conversation-1', 'completed')),
+            200);
+      }
+
+      if (undo) {
+        final result = await undoConversationCorrection(
+          conversationId: 'conversation-1',
+          correctionId: 'correction-1',
+          expectedAuthenticatedUid: authority.uid,
+          exactAuthority: authority,
+          transport: transport,
+        );
+        expect(result?.isUndone, isTrue);
+      } else {
+        final result = await getConversationById(
+          'conversation-1',
+          expectedAuthenticatedUid: authority.uid,
+          exactAuthority: authority,
+          transport: transport,
+        );
+        expect(result?.id, 'conversation-1');
+      }
+    });
+    for (final beforeRequest in [false, true]) {
+      test('$action rejects account replacement ${beforeRequest ? 'before' : 'after'} transport', () async {
+        final authority = _CaptureGenerationAuthority('owner')..current = !beforeRequest;
+        var calls = 0;
+        Future<http.Response?> transport({
+          required String url,
+          required String method,
+          required String body,
+          required String? expectedAuthenticatedUid,
+          required ExactAccountAuthorityVerifier? exactAuthority,
+          required Duration? timeout,
+        }) async {
+          calls++;
+          authority.current = false;
+          return http.Response('{}', 200);
+        }
+
+        final result = undo
+            ? undoConversationCorrection(
+                conversationId: 'conversation-1',
+                correctionId: 'correction-1',
+                expectedAuthenticatedUid: authority.uid,
+                exactAuthority: authority,
+                transport: transport)
+            : getConversationById('conversation-1',
+                expectedAuthenticatedUid: authority.uid, exactAuthority: authority, transport: transport);
+        await expectLater(result, throwsA(isA<ExactAccountAuthorityChangedException>()));
+        expect(calls, beforeRequest ? 0 : 1);
+      });
+    }
+  }
   TestWidgetsFlutterBinding.ensureInitialized();
   const conversationId = 'capture-conversation';
   setUpAll(() async {
