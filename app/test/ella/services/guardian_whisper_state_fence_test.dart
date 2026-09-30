@@ -182,4 +182,39 @@ void main() {
     expect(fence.choicePending, isTrue);
     expect(fence.observe(() => authority), isNull);
   });
+
+  test('abandoned write keeps reads closed until settled and requests canonical refresh', () async {
+    final pending = Completer<void>();
+    final choice = fence.choose(() => authority, true)!;
+    final writing = fence.serialize(choice, () => pending.future);
+    fence.abandon(choice);
+    expect(choice.isCurrent, isFalse);
+    expect(fence.choicePending, isTrue);
+    expect(fence.observe(() => authority), isNull);
+    final refresh = fence.refreshRevision;
+    pending.complete();
+    await writing;
+    await Future<void>.delayed(Duration.zero);
+    expect(fence.choicePending, isFalse);
+    expect(fence.refreshRevision, refresh + 1);
+    expect(fence.observe(() => authority), isNotNull);
+  });
+
+  test('abandoned completion cannot clear a newer choice or shutdown admission', () async {
+    final pending = Completer<void>();
+    final old = fence.choose(() => authority, true)!;
+    final writing = fence.serialize(old, () => pending.future);
+    fence.abandon(old);
+    final newer = fence.choose(() => authority, false)!;
+    pending.complete();
+    await writing;
+    await Future<void>.delayed(Duration.zero);
+    expect(newer.isCurrent, isTrue);
+    expect(fence.choicePending, isTrue);
+    expect(fence.snapshot!.enabled, isFalse);
+    fence.abandon(newer);
+    await fence.stopAfterInFlight(() async {}, authorityProvider: () => authority);
+    expect(fence.observe(() => authority), isNull);
+    expect(fence.choicePending, isTrue);
+  });
 }

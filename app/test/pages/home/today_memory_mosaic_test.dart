@@ -3375,7 +3375,7 @@ void main() {
         available = false;
       } else {
         await tester.pumpWidget(const SizedBox.shrink());
-        expect(guardian_native.GuardianModeService.whisperStateFence.choicePending, isFalse);
+        expect(guardian_native.GuardianModeService.whisperStateFence.choicePending, isTrue);
       }
       pending.complete();
       await tester.pump();
@@ -3401,6 +3401,67 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   }
+
+  testWidgets('Today remounted before abandoned ON write settles refreshes committed truth and native', (tester) async {
+    final pending = Completer<void>();
+    var serverOn = false;
+    var reads = 0;
+    var staleNativeStarts = 0;
+    Future<GuardianModeInfo?> read() async {
+      reads++;
+      return GuardianModeInfo(
+        currentMode: serverOn ? GuardianModeKey.custom : GuardianModeKey.off,
+        twoTierState: serverOn ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
+      );
+    }
+
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      guardianAvailability: () => true,
+      guardianModeLoader: read,
+      guardianModeSetter: (_) async {
+        await pending.future;
+        serverOn = true;
+        return true;
+      },
+      guardianNativeStart: () async => staleNativeStarts++,
+      guardianNativeStop: () async {},
+    );
+    addTearDown(harness.dispose);
+    await tester.tap(find.byKey(const Key('today-dock-status')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.descendant(
+      of: find.byKey(const Key('guardian-whispers-control')),
+      matching: find.byType(Switch),
+    ));
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox.shrink());
+    final beforeReads = reads;
+    var currentNativeStarts = 0;
+    final replacement = await _pumpHome(
+      tester,
+      conversations: const [],
+      guardianAvailability: () => true,
+      guardianModeLoader: read,
+      guardianNativeStart: () async => currentNativeStarts++,
+      guardianNativeStop: () async {},
+    );
+    addTearDown(replacement.dispose);
+    expect(reads, beforeReads);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot, isNull);
+    pending.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(reads, beforeReads + 1);
+    expect(staleNativeStarts, 0);
+    expect(currentNativeStarts, 1);
+    expect(guardian_native.GuardianModeService.whisperStateFence.choicePending, isFalse);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot!.enabled, isTrue);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot!.nativeReconciled, isTrue);
+    expect(tester.takeException(), isNull);
+  });
 
   for (final source in ['explicit_off', 'get_off']) {
     testWidgets('Today $source native stop failure remains recoverable and never paused in dock', (tester) async {

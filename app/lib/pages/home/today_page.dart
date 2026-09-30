@@ -289,6 +289,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   int _whisperReconcileGeneration = 0;
   final _whisperFence = guardian_native.GuardianModeService.whisperStateFence;
   int _whisperSharedRevision = 0;
+  int _whisperRefreshRevision = 0;
   guardian_native.GuardianWhisperOperation? _whisperRetryOperation;
   guardian_native.GuardianWhisperOperation? _pendingWhisperChoice;
   static const List<Duration> _whisperNativeRetryBackoff = [
@@ -360,6 +361,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _todayCardAuthorityChanges = widget.todayCardAuthorityChanges ?? SharedPreferencesUtil.aiConsentAuthorityChanges;
     _todayCardAuthorityChanges.addListener(_onTodayCardAuthorityChanged);
     _whisperSharedRevision = _whisperFence.revision;
+    _whisperRefreshRevision = _whisperFence.refreshRevision;
     _whisperFence.addListener(_onSharedWhisperStateChanged);
     if (_guardianAvailable) {
       _loadWhisperState();
@@ -1282,6 +1284,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
 
   void _onSharedWhisperStateChanged() {
     if (!mounted) return;
+    final refreshRequired = _whisperRefreshRevision != _whisperFence.refreshRevision;
+    _whisperRefreshRevision = _whisperFence.refreshRevision;
     if (_whisperSharedRevision != _whisperFence.revision) {
       _whisperSharedRevision = _whisperFence.revision;
       _whisperReconcileGeneration++;
@@ -1296,6 +1300,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       _updatingWhispers = _whisperFence.choicePending;
     });
     _whisperControlsRevision.value++;
+    if (refreshRequired && _guardianAvailable) unawaited(_loadWhisperState());
   }
 
   void _cancelWhisperNativeRetry() {

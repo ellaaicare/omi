@@ -26,7 +26,10 @@ class GuardianWhisperStateFence extends ChangeNotifier {
   }
 
   int revision = 0;
-  bool choicePending = false;
+  int refreshRevision = 0;
+  GuardianWhisperOperation? _choiceOperation;
+  Future<void>? _abandonedWork;
+  bool get choicePending => _choiceOperation != null || _abandonedWork != null || _accountTransitionPending;
   GuardianWhisperOperation? _snapshotOperation;
   GuardianWhisperSnapshot? _snapshot;
   Future<void>? _inFlight;
@@ -46,7 +49,7 @@ class GuardianWhisperStateFence extends ChangeNotifier {
     final authority = authorityProvider();
     if (authority == null || !_admitAuthority(authority)) return null;
     final operation = GuardianWhisperOperation._(this, ++revision, authority);
-    choicePending = true;
+    _choiceOperation = operation;
     _snapshotOperation = operation;
     _snapshot = (enabled: enabled, modeVerified: false, nativeReconciled: false);
     notifyListeners();
@@ -55,19 +58,37 @@ class GuardianWhisperStateFence extends ChangeNotifier {
 
   void publish(GuardianWhisperOperation operation, GuardianWhisperSnapshot snapshot) {
     if (!operation.isCurrent) return;
-    choicePending = false;
+    _choiceOperation = null;
     _snapshotOperation = operation;
     _snapshot = snapshot;
     notifyListeners();
   }
 
   void abandon(GuardianWhisperOperation operation) {
-    if (choicePending && !_accountTransitionPending && operation.isCurrent) invalidate();
+    if (!identical(_choiceOperation, operation) || _accountTransitionPending || !operation.isCurrent) return;
+    // The request may already be writing on the server. Keep replacement reads
+    // closed until it settles, then fetch current truth without reviving it.
+    final pending = _inFlight;
+    _abandonedWork = pending;
+    invalidate();
+    if (pending == null) {
+      _finishAbandonedWork(pending);
+    } else {
+      pending.then((_) => _finishAbandonedWork(pending));
+    }
+  }
+
+  void _finishAbandonedWork(Future<void>? pending) {
+    if (!identical(_abandonedWork, pending)) return;
+    _abandonedWork = null;
+    if (_choiceOperation != null || _accountTransitionPending) return;
+    refreshRevision++;
+    invalidate();
   }
 
   void invalidate() {
     revision++;
-    choicePending = _accountTransitionPending;
+    _choiceOperation = null;
     _snapshotOperation = null;
     _snapshot = null;
     notifyListeners();
@@ -85,7 +106,6 @@ class GuardianWhisperStateFence extends ChangeNotifier {
     _accountTransitionPending = false;
     _outgoingAuthority = null;
     _outgoingAuthorityGeneration = null;
-    choicePending = false;
     return true;
   }
 
@@ -94,6 +114,7 @@ class GuardianWhisperStateFence extends ChangeNotifier {
     _accountTransitionPending = false;
     _outgoingAuthority = null;
     _outgoingAuthorityGeneration = null;
+    _abandonedWork = null;
     invalidate();
   }
 

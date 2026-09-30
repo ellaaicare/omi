@@ -85,6 +85,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   StreamSubscription<guardian_native.GuardianModeState>? _whisperStateSubscription;
   final _whisperFence = guardian_native.GuardianModeService.whisperStateFence;
   int _whisperSharedRevision = 0;
+  int _whisperRefreshRevision = 0;
   guardian_native.GuardianWhisperOperation? _pendingWhisperChoice;
 
   String get _uid => widget.authenticatedUid?.call() ?? WalOwnerAuthority.authenticatedUid;
@@ -96,6 +97,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
     super.initState();
     _runtime.protocolUnavailable.addListener(_onProtocolStatus);
     _whisperSharedRevision = _whisperFence.revision;
+    _whisperRefreshRevision = _whisperFence.refreshRevision;
     _whisperFence.addListener(_onSharedWhisperStateChanged);
     _whisperStateSubscription =
         (widget.guardianNativeStates ?? guardian_native.GuardianModeService().stateStream).listen((_) {
@@ -236,6 +238,8 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
 
   void _onSharedWhisperStateChanged() {
     if (!mounted) return;
+    final refreshRequired = _whisperRefreshRevision != _whisperFence.refreshRevision;
+    _whisperRefreshRevision = _whisperFence.refreshRevision;
     final superseded = _whisperSharedRevision != _whisperFence.revision;
     _whisperSharedRevision = _whisperFence.revision;
     final snapshot = _whisperFence.snapshot;
@@ -250,6 +254,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
               : _playbackStateFor(snapshot.enabled);
       if (superseded) _whisperError = null;
     });
+    if (refreshRequired && _guardianAvailable) unawaited(_loadWhispersState());
   }
 
   Future<void> _setWhispers(bool enabled) async {
