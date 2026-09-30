@@ -74,6 +74,7 @@ class EllaCaptureAuthority {
   AiConsentActiveSessionLease? _lease;
   String? _boundUid;
   int _expectedGeneration = 0;
+  int _bindingEpoch = 0;
   int _framesAdmitted = 0;
   int _framesDropped = 0;
   bool _disposed = false;
@@ -82,6 +83,9 @@ class EllaCaptureAuthority {
 
   /// The lease generation observed at [bind]; 0 while unbound.
   int get expectedGeneration => _expectedGeneration;
+
+  /// Process-local identity of the current binding, including same-UID rebinds.
+  int get bindingEpoch => _bindingEpoch;
 
   bool get isBound => _lease != null;
 
@@ -124,6 +128,7 @@ class EllaCaptureAuthority {
     _lease = lease;
     _boundUid = account;
     _expectedGeneration = lease.generation;
+    _bindingEpoch++;
     return true;
   }
 
@@ -158,6 +163,7 @@ class EllaCaptureAuthority {
     _lease = null;
     _boundUid = null;
     _expectedGeneration = 0;
+    _bindingEpoch++;
     lease.stop();
     if (!_revocations.isClosed) _revocations.add(EllaCaptureRevocation(uid: uid, reason: reason));
   }

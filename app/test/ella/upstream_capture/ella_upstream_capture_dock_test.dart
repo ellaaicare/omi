@@ -17,6 +17,9 @@ import 'package:omi/upstream_capture/providers/capture_provider.dart';
 import 'package:omi/upstream_capture/services/capture/capture_seams.dart';
 import 'package:omi/upstream_capture/utils/enums.dart';
 
+import 'ella_capture_protocol_socket_cases.dart';
+import 'upstream_capture_protocol_v2_cases.dart';
+
 const _uid = 'uid-a';
 
 class _NoBleListeners implements CaptureBleListeners {
@@ -55,6 +58,8 @@ final _testNecklace = BtDevice(id: 'necklace-under-test', name: 'Test Necklace',
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  registerEllaCaptureProtocolSocketCases();
+  registerUpstreamCaptureProtocolV2Cases();
 
   testWidgets('verified v10 authority renders the idle flag-on dock as one compact row', (tester) async {
     SharedPreferences.setMockInitialValues({});
@@ -104,6 +109,7 @@ void main() {
     tester.view.physicalSize = const Size(1320, 2868);
     tester.view.devicePixelRatio = 3;
     tester.platformDispatcher.textScaleFactorTestValue = 1.5;
+    final runtime = _DockRuntime(authority: authority, capture: provider);
 
     await tester.pumpWidget(
       MaterialApp(
@@ -115,7 +121,7 @@ void main() {
             child: Padding(
               padding: const EdgeInsets.all(14),
               child: EllaUpstreamCaptureDock(
-                runtime: _DockRuntime(authority: authority, capture: provider),
+                runtime: runtime,
                 authenticatedUid: () => _uid,
               ),
             ),
@@ -137,6 +143,9 @@ void main() {
     expect(tester.getSize(find.byKey(const Key('upstream-capture-dock'))).height, lessThan(120));
     expect(preferences.aiConsentAccepted, isTrue);
     expect(preferences.aiConsentContractVersion, fork.SharedPreferencesUtil.legacyAiConsentContractVersionV10);
+    runtime.protocolUnavailable.value = true;
+    await tester.pump();
+    expect(find.text("Ella couldn't connect to transcription, so recording didn't start."), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -213,6 +222,13 @@ void main() {
     provider.updateRecordingState(RecordingState.deviceRecord);
     await tester.pump();
 
+    expect(find.text('Recording with your necklace'), findsNothing);
+    expect(find.text("Recording isn't available right now."), findsOneWidget);
+    expect(find.byKey(const Key('upstream-capture-finish')), findsNothing);
+    provider.onConnected();
+    await tester.pump();
+    await tester.pump();
+
     final finish = find.byKey(const Key('upstream-capture-finish'));
     expect(finish, findsOneWidget);
     expect(tester.widget<TextButton>(finish).onPressed, isNotNull, reason: 'Finish must be tappable once live');
@@ -271,6 +287,7 @@ void main() {
                 if (connected) {
                   provider.updateRecordingDevice(device);
                   provider.updateRecordingState(RecordingState.deviceRecord);
+                  provider.onConnected();
                 }
                 return connected;
               },
