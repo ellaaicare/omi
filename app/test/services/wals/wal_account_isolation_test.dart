@@ -365,6 +365,34 @@ void main() {
     expect(await WalFileManager.getQuarantineCount(), 0);
   });
 
+  test('a real capture gap starts a separate WAL instead of coalescing', () async {
+    final owner = _owner('uid-a');
+    final authority = _authority(owner, () => true);
+    var now = DateTime.utc(2026, 9, 29, 16, 24, 48, 995);
+    SharedPreferencesUtil().unlimitedLocalStorageEnabled = true;
+    await WalFileManager.init(baseDirectory: directory, activeOwner: owner);
+    final sync = LocalWalSyncImpl(
+      listener,
+      currentOwner: () => owner,
+      activeAuthority: () => authority,
+      now: () => now,
+    );
+    await sync.initializeForTesting();
+    await sync.onAudioCodecChanged(BleAudioCodec.opusFS320);
+    _appendChunkableFrames(sync, authority);
+    await sync.chunkForTesting();
+
+    sync.onByteStream([0, 3, 1, 10, 20, 30], authorityAtCapture: authority);
+    now = now.add(const Duration(seconds: 5));
+    await sync.chunkForTesting();
+    await sync.flushForTesting();
+
+    final captureWals = (await sync.getAllWals()).where((wal) => wal.totalFrames > 0).toList();
+    expect(captureWals, hasLength(2));
+    expect(captureWals.map((wal) => wal.totalFrames), everyElement(1));
+    expect(captureWals.last.timerStart - captureWals.first.timerStart, 5);
+  });
+
   test('syncAll rotates a pending disk WAL without waiting for another frame chunk', () async {
     final ownerA = _owner('uid-a');
     final ownerB = _rotatedOwner('uid-a', suffix: 'b', bindingRevision: 4, generation: 8);

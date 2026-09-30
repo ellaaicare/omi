@@ -436,13 +436,16 @@ class LocalWalSyncImpl implements LocalWalSync {
           owner != null &&
           w.owner!.matches(owner));
       if (walIdx < 0 && owner != null) {
-        walIdx = _wals.lastIndexWhere((w) =>
-            w.storage == WalStorage.mem &&
-            timerStart >= w.timerStart &&
-            timerStart - w.timerStart < chunkSizeInSeconds &&
-            w.device == (_deviceId ?? "omi") &&
-            w.codec == _codec &&
-            w.owner?.matches(owner!) == true);
+        walIdx = _wals.lastIndexWhere((w) {
+          final candidateEnd = w.timerStart + (w.totalFrames / _framesPerSecond).ceil();
+          final startSkew = timerStart - candidateEnd;
+          return w.storage == WalStorage.mem &&
+              timerStart >= w.timerStart &&
+              startSkew.abs() <= 1 &&
+              w.device == (_deviceId ?? "omi") &&
+              w.codec == _codec &&
+              w.owner?.matches(owner!) == true;
+        });
       }
       if (walIdx < 0) {
         wal = Wal(
