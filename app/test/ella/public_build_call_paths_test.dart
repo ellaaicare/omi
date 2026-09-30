@@ -923,7 +923,7 @@ void main() {
       expect(tester.takeException(), isNull);
       final nav = find.byType(BottomNavBar);
       final context = tester.element(nav);
-      final labels = AppLocalizations.of(context)!;
+      final labels = AppLocalizations.of(context);
       expect(Localizations.localeOf(context).languageCode, scenario.locale.languageCode);
       expect(Directionality.of(context), scenario.locale.languageCode == 'ar' ? TextDirection.rtl : TextDirection.ltr);
       final row = find.descendant(of: nav, matching: find.byType(Row)).first;
