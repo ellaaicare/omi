@@ -9173,7 +9173,7 @@ class AppLocalizationsEl extends AppLocalizations {
   String get ellaSafetyDataUnavailable => 'Ella could not verify this information. Try again before making changes.';
 
   @override
-  String get todayWhispersUnavailable => 'Whisper status couldn\'t be verified. Pull down to try again.';
+  String get todayWhispersUnavailable => 'Whispers are unavailable right now.';
 
   @override
   String get todayWhispersTitle => 'Whispers';
@@ -10294,17 +10294,15 @@ class AppLocalizationsEl extends AppLocalizations {
   String get upstreamCaptureWhispersSaveFailed => 'Whispers could not be updated. Try again.';
 
   @override
-  String get upstreamCaptureWhispersPlaybackUnavailable =>
-      'Whispers are on, but spoken playback is not available right now.';
+  String get upstreamCaptureWhispersPlaybackUnavailable => 'Whispers are on. Spoken help is unavailable right now.';
 
   @override
   String get upstreamCaptureWhispersOffDescription => 'Whispers are off. Spoken responses are paused.';
 
   @override
-  String get upstreamCaptureWhispersPlaybackFailed =>
-      'Whispers was saved, but spoken playback could not start. Try again.';
+  String get upstreamCaptureWhispersPlaybackFailed => 'Whispers are on, but Ella couldn\'t start spoken help.';
 
   @override
   String get upstreamCaptureWhispersPlaybackStopFailed =>
-      'Whispers was saved off, but spoken playback could not stop. Try again.';
+      'Whispers are set to off, but Ella couldn\'t pause spoken help.';
 }

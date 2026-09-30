@@ -36,6 +36,17 @@ import 'ella_capture_protocol_socket_cases.dart';
 import 'upstream_capture_protocol_v2_cases.dart';
 
 const _uid = 'uid-a';
+
+class _NonlinearWhisperTextScaler extends TextScaler {
+  const _NonlinearWhisperTextScaler();
+
+  @override
+  double scale(double fontSize) => fontSize * (fontSize <= 14 ? 3 : 2);
+
+  @override
+  double get textScaleFactor => 3;
+}
+
 final _testNecklace = BtDevice(id: 'necklace-a', name: 'Compass', type: DeviceType.omi, rssi: -40);
 final _pickerNecklace =
     legacy_device.BtDevice(id: 'necklace-a', name: 'Compass', type: legacy_device.DeviceType.fieldy, rssi: -40);
@@ -216,6 +227,8 @@ class _DockFixture {
     WidgetTester tester, {
     Size size = const Size(390, 844),
     double textScale = 1,
+    TextScaler? textScaler,
+    Locale? locale,
     bool guardianAvailable = false,
     GuardianModeLoader? guardianModeLoader,
     GuardianModeSetter? guardianModeSetter,
@@ -236,10 +249,11 @@ class _DockFixture {
           child: MaterialApp(
             debugShowCheckedModeBanner: false,
             theme: ellaThemeData(),
+            locale: locale,
             localizationsDelegates: AppLocalizations.localizationsDelegates,
             supportedLocales: AppLocalizations.supportedLocales,
             builder: (context, child) => MediaQuery(
-              data: MediaQuery.of(context).copyWith(textScaler: TextScaler.linear(textScale)),
+              data: MediaQuery.of(context).copyWith(textScaler: textScaler ?? TextScaler.linear(textScale)),
               child: child!,
             ),
             home: Scaffold(
@@ -850,8 +864,8 @@ void main() {
     await tester.pump();
 
     expect(savedState?.features, ['MEMORY_SUPPORT']);
-    expect(find.text('Whispers was saved, but spoken playback could not start. Try again.'), findsOneWidget);
-    expect(find.text('Whispers are on, but spoken playback is not available right now.'), findsOneWidget);
+    expect(find.text("Whispers are on, but Ella couldn't start spoken help."), findsOneWidget);
+    expect(find.byKey(const Key('upstream-capture-whispers-error')), findsNothing);
     expect(find.byKey(const Key('upstream-capture-whispers-retry')), findsOneWidget);
     expect(find.byKey(const Key('upstream-capture-whispers-switch')), findsOneWidget);
   });
@@ -1172,10 +1186,95 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    expect(find.text('Whispers could not be updated. Try again.'), findsOneWidget);
+    expect(find.text('Whispers are off. Spoken responses are paused.'), findsOneWidget);
     final toggle = tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch')));
     expect(toggle.value, isFalse);
   });
+
+  testWidgets('unavailable saved-on playback retries without mode writes and waits for native success', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final nativeCompletion = Completer<void>();
+    var starts = 0;
+    var writes = 0;
+    await fixture.pump(
+      tester,
+      guardianAvailable: true,
+      guardianModeLoader: () async => const GuardianModeInfo(
+          currentMode: GuardianModeKey.custom, twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT'])),
+      guardianModeSetter: (_) async {
+        writes++;
+        return true;
+      },
+      guardianNativeStart: () async {
+        if (starts++ == 0) throw StateError('HTTP 503 technical provider detail');
+        await nativeCompletion.future;
+      },
+      guardianNativeState: () => guardian_native.GuardianModeState.idle,
+    );
+    final retry = find.byKey(const Key('upstream-capture-whispers-retry'));
+    expect(retry.hitTestable(), findsOneWidget);
+    expect(find.text('Whispers are on. Spoken help is unavailable right now.'), findsOneWidget);
+    await tester.tap(retry);
+    await tester.pump();
+    await tester.pump();
+    expect(find.text("Whispers are on, but Ella couldn't start spoken help."), findsOneWidget);
+    expect(find.textContaining('HTTP'), findsNothing);
+    await tester.tap(retry);
+    await tester.pump();
+    expect(find.text('Whispers are on — Ella can speak up when she can help.'), findsNothing);
+    expect(writes, 0);
+    nativeCompletion.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Whispers are on — Ella can speak up when she can help.'), findsOneWidget);
+    expect(starts, 2);
+    expect(writes, 0);
+    expect(retry, findsNothing);
+  });
+
+  for (final locale in [const Locale('en'), const Locale('ar')]) {
+    testWidgets('gentle Whispers recovery is actionable with ${locale.languageCode} nonlinear large text',
+        (tester) async {
+      final fixture = await _DockFixture.create(tester);
+      final semantics = tester.ensureSemantics();
+      var reads = 0;
+      var writes = 0;
+      await fixture.pump(
+        tester,
+        size: const Size(320, 1600),
+        textScaler: const _NonlinearWhisperTextScaler(),
+        locale: locale,
+        guardianAvailable: true,
+        guardianModeLoader: () async {
+          if (reads++ == 0) throw StateError('HTTP 503 provider secret diagnostic');
+          return const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState());
+        },
+        guardianModeSetter: (_) async {
+          writes++;
+          return true;
+        },
+        guardianNativeStop: () async {},
+        guardianNativeState: () => guardian_native.GuardianModeState.idle,
+      );
+      final row = find.byKey(const Key('upstream-capture-whispers-stacked'));
+      final retry = find.byKey(const Key('upstream-capture-whispers-retry'));
+      expect(find.textContaining('HTTP'), findsNothing);
+      expect(find.textContaining('provider secret'), findsNothing);
+      expect(tester.getSemantics(row).label, isNot(contains('503')));
+      expect(tester.getSize(retry).height, greaterThanOrEqualTo(48));
+      expect(retry.hitTestable(), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.tap(retry);
+      await tester.pump();
+      await tester.pump();
+      expect(reads, 2);
+      expect(writes, 0);
+      expect(find.byKey(const Key('upstream-capture-whispers-retry')), findsNothing);
+      expect(tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch'))).value, isFalse);
+      expect(tester.takeException(), isNull);
+      semantics.dispose();
+    });
+  }
 
   testWidgets('Whispers stop failure stays truthful and Retry stops native playback', (tester) async {
     final fixture = await _DockFixture.create(tester);
@@ -1199,7 +1298,7 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(find.text('Whispers are off. Spoken responses are paused.'), findsNothing);
-    expect(find.text('Whispers was saved off, but spoken playback could not stop. Try again.'), findsOneWidget);
+    expect(find.text("Whispers are set to off, but Ella couldn't pause spoken help."), findsOneWidget);
 
     stopShouldFail = false;
     await tester.tap(find.byKey(const Key('upstream-capture-whispers-retry')));
@@ -1232,7 +1331,7 @@ void main() {
     await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
     await tester.pump();
     await tester.pump();
-    expect(find.text('Whispers was saved off, but spoken playback could not stop. Try again.'), findsOneWidget);
+    expect(find.text("Whispers are set to off, but Ella couldn't pause spoken help."), findsOneWidget);
     expect(find.byKey(const Key('upstream-capture-whispers-retry')), findsOneWidget);
   });
 
@@ -1251,7 +1350,7 @@ void main() {
       guardianNativeState: () => nativeState,
       guardianNativeStates: states.stream,
     );
-    expect(find.text('Whispers are on, but spoken playback is not available right now.'), findsOneWidget);
+    expect(find.text('Whispers are on. Spoken help is unavailable right now.'), findsOneWidget);
     nativeState = guardian_native.GuardianModeState.active;
     states.add(nativeState);
     await tester.pump();

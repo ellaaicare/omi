@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
@@ -21,6 +22,21 @@ import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 enum MemoryGalleryLayout { journal, grid, list, days }
+
+bool memoryGalleryUsesWideLayout(BuildContext context) =>
+    MediaQuery.sizeOf(context).width >= 640 && MediaQuery.textScalerOf(context).scale(1) < 2;
+
+MemoryGalleryLayout effectiveMemoryGalleryLayout(BuildContext context, MemoryGalleryLayout layout) =>
+    memoryGalleryUsesWideLayout(context) || layout == MemoryGalleryLayout.days ? layout : MemoryGalleryLayout.list;
+
+List<PopupMenuEntry<MemoryGalleryLayout>> memoryGalleryLayoutMenu(BuildContext context) => [
+      if (memoryGalleryUsesWideLayout(context)) ...[
+        PopupMenuItem(value: MemoryGalleryLayout.journal, child: Text(context.l10n.memoryGalleryJournal)),
+        PopupMenuItem(value: MemoryGalleryLayout.grid, child: Text(context.l10n.memoryGalleryGrid)),
+      ],
+      PopupMenuItem(value: MemoryGalleryLayout.list, child: Text(context.l10n.memoryGalleryList)),
+      PopupMenuItem(value: MemoryGalleryLayout.days, child: Text(context.l10n.memoryGalleryDays)),
+    ];
 
 enum MemoryGallerySort { recent, oldest }
 
@@ -403,15 +419,10 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
           PopupMenuButton<MemoryGalleryLayout>(
             key: const Key('memory-layout-menu'),
             tooltip: context.l10n.memoryGalleryView,
-            initialValue: _layout,
+            initialValue: effectiveMemoryGalleryLayout(context, _layout),
             icon: const Icon(Icons.view_quilt_outlined, color: EllaColors.tealDeep),
             onSelected: _selectGalleryLayout,
-            itemBuilder: (context) => [
-              PopupMenuItem(value: MemoryGalleryLayout.journal, child: Text(context.l10n.memoryGalleryJournal)),
-              PopupMenuItem(value: MemoryGalleryLayout.grid, child: Text(context.l10n.memoryGalleryGrid)),
-              PopupMenuItem(value: MemoryGalleryLayout.list, child: Text(context.l10n.memoryGalleryList)),
-              PopupMenuItem(value: MemoryGalleryLayout.days, child: Text(context.l10n.memoryGalleryDays)),
-            ],
+            itemBuilder: memoryGalleryLayoutMenu,
           ),
           PopupMenuButton<MemoryGallerySort>(
             key: const Key('memory-sort-menu'),
@@ -428,39 +439,41 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
               ),
             ],
           ),
-          PopupMenuButton<String>(
-            key: const Key('memory-artwork-style-menu'),
-            tooltip: _artworkPreferences?.releaseEnabled == true
-                ? context.l10n.memoryArtworkStyle
-                : context.l10n.memoryArtworkStyleUnavailable,
-            initialValue: _artworkPreferences?.styleVersion,
-            icon: Icon(
-              Icons.palette_outlined,
-              color: _artworkPreferences?.releaseEnabled == true ? EllaColors.tealDeep : EllaColors.inkSoft,
+          if (_artworkPreferences?.releaseEnabled == true)
+            PopupMenuButton<String>(
+              key: const Key('memory-artwork-style-menu'),
+              tooltip: _artworkPreferences?.releaseEnabled == true
+                  ? context.l10n.memoryArtworkStyle
+                  : context.l10n.memoryArtworkStyleUnavailable,
+              initialValue: _artworkPreferences?.styleVersion,
+              icon: Icon(
+                Icons.palette_outlined,
+                color: _artworkPreferences?.releaseEnabled == true ? EllaColors.tealDeep : EllaColors.inkSoft,
+              ),
+              enabled: _artworkPreferences?.releaseEnabled == true,
+              onSelected: _artworkPreferences?.releaseEnabled == true ? _selectArtworkStyle : null,
+              itemBuilder: (context) => [
+                PopupMenuItem(value: memoryArtworkDefaultStyle, child: Text(context.l10n.memoryArtworkSoftGouache)),
+                PopupMenuItem(
+                    value: memoryArtworkPaperCollageStyle, child: Text(context.l10n.memoryArtworkPaperCollage)),
+                PopupMenuItem(
+                  value: memoryArtworkGraphicLandscapeStyle,
+                  child: Text(context.l10n.memoryArtworkGraphicLandscape),
+                ),
+                PopupMenuItem(
+                  value: memoryArtworkWatercolorJournalStyle,
+                  child: Text(context.l10n.memoryArtworkWatercolorJournal),
+                ),
+                PopupMenuItem(
+                  value: memoryArtworkAnimeStorybookStyle,
+                  child: Text(context.l10n.memoryArtworkAnimeStorybook),
+                ),
+                PopupMenuItem(
+                  value: memoryArtworkCinematicStillStyle,
+                  child: Text(context.l10n.memoryArtworkCinematicStill),
+                ),
+              ],
             ),
-            enabled: _artworkPreferences?.releaseEnabled == true,
-            onSelected: _artworkPreferences?.releaseEnabled == true ? _selectArtworkStyle : null,
-            itemBuilder: (context) => [
-              PopupMenuItem(value: memoryArtworkDefaultStyle, child: Text(context.l10n.memoryArtworkSoftGouache)),
-              PopupMenuItem(value: memoryArtworkPaperCollageStyle, child: Text(context.l10n.memoryArtworkPaperCollage)),
-              PopupMenuItem(
-                value: memoryArtworkGraphicLandscapeStyle,
-                child: Text(context.l10n.memoryArtworkGraphicLandscape),
-              ),
-              PopupMenuItem(
-                value: memoryArtworkWatercolorJournalStyle,
-                child: Text(context.l10n.memoryArtworkWatercolorJournal),
-              ),
-              PopupMenuItem(
-                value: memoryArtworkAnimeStorybookStyle,
-                child: Text(context.l10n.memoryArtworkAnimeStorybook),
-              ),
-              PopupMenuItem(
-                value: memoryArtworkCinematicStillStyle,
-                child: Text(context.l10n.memoryArtworkCinematicStill),
-              ),
-            ],
-          ),
         ],
       ),
       body: RefreshIndicator(
@@ -649,17 +662,10 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
       children.add(
         SliverPadding(
           padding: const EdgeInsets.symmetric(horizontal: 20),
-          sliver: SliverGrid(
-            gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-              maxCrossAxisExtent: 430,
-              mainAxisSpacing: EllaSizes.cardGap,
-              crossAxisSpacing: EllaSizes.cardGap,
-              childAspectRatio: 0.86,
-            ),
-            delegate: SliverChildBuilderDelegate(
-              (context, index) => _memoryCard(entry.value[index]),
-              childCount: entry.value.length,
-            ),
+          sliver: memoryGalleryFeedSliver(
+            layout: _layout,
+            itemCount: entry.value.length,
+            itemBuilder: (context, index) => _memoryCard(entry.value[index]),
           ),
         ),
       );
@@ -669,7 +675,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
           padding: const EdgeInsets.symmetric(horizontal: 20),
           sliver: SliverList.separated(
             itemCount: entry.value.length,
-            separatorBuilder: (_, __) => const SizedBox(height: EllaSizes.cardGap),
+            separatorBuilder: (_, __) => const Divider(height: 1, color: EllaColors.cardDeep),
             itemBuilder: (context, index) => _memoryCard(entry.value[index]),
           ),
         ),
@@ -819,8 +825,8 @@ class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
       label: context.l10n.memoryDayOpen(widget.dayLabel, widget.memories.length),
       child: Material(
         key: Key('memory-day-${memoryConversationCalendarDayKey(widget.memories.first)}'),
-        color: EllaColors.card,
-        borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: widget.onOpen,
@@ -841,37 +847,35 @@ class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
   Widget _recentDayContent(BuildContext context, String titles) => Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          AspectRatio(
-            aspectRatio: 1.75,
-            child: Stack(children: [
-              Positioned.fill(
-                  child: _MemoryDayArtworkCollage(
-                memories: widget.memories,
-                artworkApi: widget.artworkApi,
-                artworkRefreshEpoch: widget.artworkRefreshEpoch,
-                artworkAuthorityEpoch: widget.artworkAuthorityEpoch,
-                artworkQueueReadUnavailable: widget.artworkQueueReadUnavailable,
-                automaticRepairMemoryIds: _dayBatchFailed ? const <String>{} : widget.automaticRepairMemoryIds,
-                prefetchedArtwork: _dayArtwork?.items ?? const <String, MemoryArtworkResult>{},
-                dayBatchResolved: _dayBatchResolved,
-              )),
-              if (_dayBatchFailed) Positioned(left: 8, right: 8, bottom: 8, child: _dayArtworkRetry(context)),
-            ]),
+          SizedBox(
+            height: 96,
+            child: _MemoryDayArtworkCollage(
+              memories: widget.memories,
+              artworkApi: widget.artworkApi,
+              artworkRefreshEpoch: widget.artworkRefreshEpoch,
+              artworkAuthorityEpoch: widget.artworkAuthorityEpoch,
+              artworkQueueReadUnavailable: widget.artworkQueueReadUnavailable,
+              automaticRepairMemoryIds: _dayBatchFailed ? const <String>{} : widget.automaticRepairMemoryIds,
+              prefetchedArtwork: _dayArtwork?.items ?? const <String, MemoryArtworkResult>{},
+              dayBatchResolved: _dayBatchResolved,
+            ),
           ),
+          if (_dayBatchFailed) _dayArtworkRetry(context),
           _dayDescription(context, titles),
         ],
       );
 
   Widget _olderDayContent(BuildContext context, String titles) {
     final memory = widget.memories.first;
-    return SizedBox(
+    return ConstrainedBox(
       key: Key('memory-day-compact-${memoryConversationCalendarDayKey(memory)}'),
-      height: 112,
+      constraints: const BoxConstraints(minHeight: 96),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(
-            width: 112,
+            width: 72,
+            height: 72,
             child: Stack(children: [
               Positioned.fill(
                   child: MemoryArtworkImage(
@@ -880,6 +884,7 @@ class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
                 refreshEpoch: widget.artworkRefreshEpoch,
                 authorityEpoch: widget.artworkAuthorityEpoch,
                 allowManualGeneration: false,
+                compactPlaceholder: true,
                 prefetchedResult:
                     _artworkWithQueueReadState(_dayArtwork?.items[memory.id], widget.artworkQueueReadUnavailable),
                 prefetchResolved: _dayBatchResolved,
@@ -897,7 +902,7 @@ class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
   Widget _dayArtworkRetry(BuildContext context, {bool compact = false}) => Align(
         alignment: Alignment.bottomRight,
         child: DecoratedBox(
-          decoration: BoxDecoration(color: EllaColors.card, borderRadius: BorderRadius.circular(12)),
+          decoration: BoxDecoration(color: EllaColors.card, borderRadius: BorderRadius.circular(8)),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -905,8 +910,7 @@ class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
                 Flexible(
                   child: Padding(
                     padding: const EdgeInsets.only(left: 8),
-                    child: Text(context.l10n.memoryArtworkUnavailableLabel,
-                        maxLines: 2, overflow: TextOverflow.ellipsis, style: EllaTextStyles.secondary),
+                    child: Text(context.l10n.memoryArtworkUnavailableLabel, style: EllaTextStyles.secondary),
                   ),
                 ),
               IconButton(
@@ -933,23 +937,16 @@ class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
                 children: [
                   Text(
                     widget.dayLabel,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: compact
-                        ? EllaTextStyles.body.copyWith(fontSize: 18, fontWeight: FontWeight.w700)
-                        : EllaTextStyles.display,
+                    style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w700),
                   ),
                   const SizedBox(height: 4),
                   Text(
                     context.l10n.memoryDayCount(widget.memories.length),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
                     style: EllaTextStyles.secondary,
                   ),
-                  if (titles.isNotEmpty && (!compact || MediaQuery.textScalerOf(context).scale(12) <= 18)) ...[
+                  if (titles.isNotEmpty) ...[
                     const SizedBox(height: 6),
-                    Text(titles,
-                        maxLines: compact ? 1 : 2, overflow: TextOverflow.ellipsis, style: EllaTextStyles.body),
+                    Text(titles, style: EllaTextStyles.secondary),
                   ],
                 ],
               ),
@@ -988,6 +985,7 @@ class _MemoryDayArtworkCollage extends StatelessWidget {
         authorityEpoch: artworkAuthorityEpoch,
         enqueueIfMissing: automaticRepairMemoryIds.contains(memory.id),
         allowManualGeneration: true,
+        compactPlaceholder: true,
         prefetchedResult: _artworkWithQueueReadState(prefetchedArtwork[memory.id], artworkQueueReadUnavailable),
         prefetchResolved: dayBatchResolved,
         deferRemoteFetch: (artworkApi ?? MemoryArtworkApi()).supportsDayArtworkBatch && !dayBatchResolved,
@@ -1238,82 +1236,92 @@ class MemoryGalleryCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final details = _MemoryDetails(conversation: conversation, title: _title);
-    final child = layout == MemoryGalleryLayout.list
-        ? Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              SizedBox(
-                width: 112,
-                height: 112,
-                child: MemoryArtworkImage(
-                  conversation: conversation,
-                  api: artworkApi,
-                  refreshEpoch: artworkRefreshEpoch,
-                  authorityEpoch: artworkAuthorityEpoch,
-                  allowManualGeneration: true,
-                  enqueueIfMissing: enqueueArtworkIfMissing,
-                  prefetchedResult: artworkQueueReadUnavailable ? _queueReadUnavailableArtwork : null,
-                ),
-              ),
-              Expanded(
-                child: Padding(padding: const EdgeInsets.all(14), child: details),
-              ),
-            ],
-          )
-        : Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              AspectRatio(
-                aspectRatio: layout == MemoryGalleryLayout.journal ? 2.1 : 1.45,
-                child: MemoryArtworkImage(
-                  conversation: conversation,
-                  api: artworkApi,
-                  refreshEpoch: artworkRefreshEpoch,
-                  authorityEpoch: artworkAuthorityEpoch,
-                  allowManualGeneration: true,
-                  enqueueIfMissing: enqueueArtworkIfMissing,
-                  prefetchedResult: artworkQueueReadUnavailable ? _queueReadUnavailableArtwork : null,
-                ),
-              ),
-              Padding(padding: const EdgeInsets.all(16), child: details),
-            ],
-          );
+    final largeText = MediaQuery.textScalerOf(context).scale(1) >= 2;
+    final details = _MemoryDetails(conversation: conversation, title: _title, showTime: !largeText);
+    final artwork = ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: SizedBox(
+        width: 64,
+        height: 64,
+        child: MemoryArtworkImage(
+          conversation: conversation,
+          api: artworkApi,
+          refreshEpoch: artworkRefreshEpoch,
+          authorityEpoch: artworkAuthorityEpoch,
+          compactPlaceholder: true,
+          allowManualGeneration: true,
+          enqueueIfMissing: enqueueArtworkIfMissing,
+          prefetchedResult: artworkQueueReadUnavailable ? _queueReadUnavailableArtwork : null,
+        ),
+      ),
+    );
+    final child = Padding(
+      padding: const EdgeInsets.symmetric(vertical: 16),
+      child: largeText
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(children: [
+                  artwork,
+                  const SizedBox(width: 12),
+                  Expanded(child: _MemoryTime(conversation: conversation)),
+                  const Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep)
+                ]),
+                const SizedBox(height: 12),
+                details,
+              ],
+            )
+          : Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                artwork,
+                const SizedBox(width: 12),
+                Expanded(child: details),
+                const SizedBox(width: 6),
+                const Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep),
+              ],
+            ),
+    );
     final card = Material(
-      color: EllaColors.card,
-      borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(8),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onOpen,
         child: ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: 112),
+          constraints: const BoxConstraints(minHeight: EllaSizes.minTouchTarget),
           child: KeyedSubtree(key: Key('memory-layout-${layout.name}-${conversation.id}'), child: child),
         ),
       ),
     );
-    return Dismissible(
-      key: Key('memory-card-${conversation.id}'),
-      direction: onDelete == null ? DismissDirection.startToEnd : DismissDirection.horizontal,
-      confirmDismiss: (direction) async {
-        if (direction == DismissDirection.startToEnd) {
-          onOpen();
-          return false;
-        }
-        final delete = onDelete;
-        if (delete == null) return false;
-        return delete();
+    return Semantics(
+      customSemanticsActions: {
+        if (onDelete != null) CustomSemanticsAction(label: context.l10n.delete): () => onDelete!(),
       },
-      background: const _MemorySwipeBackground(
-        alignment: AlignmentDirectional.centerStart,
-        icon: Icons.edit_outlined,
-        color: EllaColors.tealDeep,
+      child: Dismissible(
+        key: Key('memory-card-${conversation.id}'),
+        direction: onDelete == null ? DismissDirection.startToEnd : DismissDirection.horizontal,
+        confirmDismiss: (direction) async {
+          if (direction == DismissDirection.startToEnd) {
+            onOpen();
+            return false;
+          }
+          final delete = onDelete;
+          if (delete == null) return false;
+          return delete();
+        },
+        background: const _MemorySwipeBackground(
+          alignment: AlignmentDirectional.centerStart,
+          icon: Icons.edit_outlined,
+          color: EllaColors.tealDeep,
+        ),
+        secondaryBackground: const _MemorySwipeBackground(
+          alignment: AlignmentDirectional.centerEnd,
+          icon: Icons.delete_outline_rounded,
+          color: EllaColors.error,
+        ),
+        child: card,
       ),
-      secondaryBackground: const _MemorySwipeBackground(
-        alignment: AlignmentDirectional.centerEnd,
-        icon: Icons.delete_outline_rounded,
-        color: EllaColors.error,
-      ),
-      child: card,
     );
   }
 }
@@ -1341,10 +1349,11 @@ class _MemorySwipeBackground extends StatelessWidget {
 }
 
 class _MemoryDetails extends StatelessWidget {
-  const _MemoryDetails({required this.conversation, required this.title});
+  const _MemoryDetails({required this.conversation, required this.title, this.showTime = true});
 
   final ServerConversation conversation;
   final String title;
+  final bool showTime;
 
   @override
   Widget build(BuildContext context) {
@@ -1360,26 +1369,70 @@ class _MemoryDetails extends StatelessWidget {
               EllaSourceText(
                 title,
                 isEllaGenerated: titleIsEllaGenerated,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
                 style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 4),
               EllaSourceText(
                 conversation.structured.overview,
-                maxLines: 2,
+                maxLines: 3,
                 overflow: TextOverflow.ellipsis,
                 style: EllaTextStyles.secondary,
               ),
+              const SizedBox(height: 6),
+              if (showTime) _MemoryTime(conversation: conversation),
             ],
           ),
         ),
-        const SizedBox(width: 6),
-        const Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep),
       ],
     );
   }
 }
+
+class _MemoryTime extends StatelessWidget {
+  const _MemoryTime({required this.conversation});
+
+  final ServerConversation conversation;
+
+  @override
+  Widget build(BuildContext context) => Text(
+        MaterialLocalizations.of(context).formatTimeOfDay(
+          TimeOfDay.fromDateTime((conversation.startedAt ?? conversation.createdAt).toLocal()),
+        ),
+        style: EllaTextStyles.caption,
+      );
+}
+
+/// Phone layouts stay list-first; a wide grid grows naturally with the text.
+Widget memoryGalleryFeedSliver({
+  required MemoryGalleryLayout layout,
+  required int itemCount,
+  required IndexedWidgetBuilder itemBuilder,
+}) =>
+    SliverLayoutBuilder(
+      builder: (context, constraints) {
+        final columns = layout == MemoryGalleryLayout.grid &&
+                constraints.crossAxisExtent >= 640 &&
+                MediaQuery.textScalerOf(context).scale(1) < 2
+            ? 2
+            : 1;
+        return SliverList.separated(
+          itemCount: (itemCount / columns).ceil(),
+          separatorBuilder: (_, __) => const Divider(height: 1, color: EllaColors.cardDeep),
+          itemBuilder: (context, row) => columns == 1
+              ? itemBuilder(context, row)
+              : Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(child: itemBuilder(context, row * columns)),
+                    const SizedBox(width: 20),
+                    Expanded(
+                        child:
+                            row * columns + 1 < itemCount ? itemBuilder(context, row * columns + 1) : const SizedBox()),
+                  ],
+                ),
+        );
+      },
+    );
 
 Map<String, List<ServerConversation>> groupMemoryConversationsByDay(
   BuildContext context,

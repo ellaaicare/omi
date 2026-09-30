@@ -3629,6 +3629,51 @@ void main() {
     expect(find.byIcon(Icons.brush_outlined), findsNothing);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('list thumbnail pending and failed loads stay compact without a permanent spinner', (tester) async {
+    final api = _DelayedArtworkApi();
+    final conversation = ServerConversation(
+      id: 'compact-pending',
+      createdAt: DateTime(2026, 9, 30),
+      structured: Structured('Coffee with Rose', 'We enjoyed catching up.'),
+      artwork: const MemoryArtworkState(status: MemoryArtworkStatus.generating),
+    );
+    final semantics = tester.ensureSemantics();
+    await tester.pumpWidget(MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: MediaQuery(
+        data: const MediaQueryData(textScaler: TextScaler.linear(3)),
+        child: Center(
+          child: SizedBox(
+            width: 64,
+            height: 64,
+            child: MemoryArtworkImage(
+              conversation: conversation,
+              api: api,
+              compactPlaceholder: true,
+              cachedFileLookup: (_) async => null,
+            ),
+          ),
+        ),
+      ),
+    ));
+    await tester.pump();
+    final placeholder = find.byKey(const Key('memory-artwork-placeholder-compact-pending'));
+    expect(tester.getSize(placeholder), const Size(64, 64));
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.text('Coffee with Rose'), findsNothing, reason: 'the readable title belongs to the row, not its icon');
+    expect(tester.getSemantics(placeholder).label, contains('preparing'));
+    api.remoteResult.complete(const MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.unavailable,
+      failureCode: 'memory_artwork_provider_failed',
+    ));
+    await tester.pump();
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(tester.getSize(placeholder), const Size(64, 64));
+    expect(tester.takeException(), isNull);
+    semantics.dispose();
+  });
   for (final failure in ['generating', 'exception', 'enrichment']) {
     testWidgets('terminal poll $failure exhaustion stops progress and explicit retry only reads', (tester) async {
       final api = _TerminalPollArtworkApi(read: (_) async {
