@@ -322,6 +322,8 @@ Rules:
 - overview must start with "[Ella] ".
 - Keep the overview warm, specific, and useful for the account holder to reread later.
 - Write the overview in the third person, describing what happened. Never address the account holder directly, use a greeting or salutation, or invent a persona for them.
+- title and overview must contain only descriptive summary content, not an acknowledgment, reply to the correction, or message to a person.
+- Do not begin any sentence with a single capitalized word followed by a comma. Do not end a sentence with a comma followed by a standalone capitalized word. Keep time and weekday details inside the descriptive sentence instead.
 - Use the correction as authoritative when it resolves identity, topic, title, or media attribution.
 - Re-read the entire transcript and current summary, then produce one coherent corrected summary. Do not append or splice the correction text verbatim.
 - Correction text may contain dictation errors, rough phrasing, homophones, or ASR artifacts. Infer the intended correction only when strongly supported by the transcript, current summary, or the correction text itself. For example, in a transcript context, "Trang script" likely means "transcript"; when discussing a young person, "team" may mean "teen".
@@ -1483,6 +1485,26 @@ def _has_vocative_or_salutation(text: str) -> bool:
     )
 
 
+def _correction_identity_gate_diagnostic(corrected: Optional[dict[str, Any]]) -> dict[str, str]:
+    """Classify the existing rejection pattern without retaining generated text."""
+    if not isinstance(corrected, dict):
+        return {}
+    fields = (
+        ("title", str(corrected.get("title") or "")),
+        ("overview", _ELLA_OVERVIEW_PREFIX_RE.sub("", str(corrected.get("overview") or ""))),
+    )
+    patterns = (
+        ("greeting", _VOCATIVE_GREETING_RE),
+        ("leading_address", _VOCATIVE_LEADING_ADDRESS_RE),
+        ("trailing_address", _VOCATIVE_TRAILING_ADDRESS_RE),
+    )
+    for field, text in fields:
+        for pattern, expression in patterns:
+            if expression.search(text):
+                return {"identity_gate_field": field, "identity_gate_pattern": pattern}
+    return {}
+
+
 def _correction_grounded_name_tokens(
     *,
     uid: str,
@@ -1567,6 +1589,7 @@ async def _run_direct_correction_apply(
     active_summary_version_id: Optional[str],
     proposal_id: Optional[str],
 ) -> ConversationCorrectionResponse:
+    corrected_summary = None
     try:
         corrected_summary = await _generate_corrected_summary(
             uid=uid,
@@ -1629,6 +1652,11 @@ async def _run_direct_correction_apply(
     except CorrectionIdentityGateError as exc:
         # Fail closed: keep the prior summary version and report a generic,
         # non-leaky status rather than the rejected title/overview text.
+        diagnostic = (
+            _correction_identity_gate_diagnostic(corrected_summary)
+            if exc.reason == "vocative_or_salutation_detected"
+            else {}
+        )
         logger.warning(
             "Direct conversation correction blocked by identity gate",
             extra={
@@ -1636,6 +1664,7 @@ async def _run_direct_correction_apply(
                 "conversation_id": conversation_id,
                 "correction_id": correction_id,
                 "reason": exc.reason,
+                **diagnostic,
             },
         )
         blocked_at = _now_iso()
@@ -1649,6 +1678,7 @@ async def _run_direct_correction_apply(
                 "at": blocked_at,
                 "trace_id": trace_id,
                 "reason": exc.reason,
+                **diagnostic,
             },
         )
         _persist_correction_audit(
@@ -1659,6 +1689,7 @@ async def _run_direct_correction_apply(
                 "status": "correction_blocked_identity_gate",
                 "updated_at": blocked_at,
                 "direct_apply_blocked_reason": exc.reason,
+                **diagnostic,
             },
         )
         _update_conversation_correction_state(
