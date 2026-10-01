@@ -3,6 +3,13 @@ name: Hermes Cloud Runtime Tests
 on:
   pull_request:
     paths:
+      - "backend/database/mcp_oauth_refresh.py"
+      - "backend/ella/services/mcp_oauth_refresh.py"
+      - "backend/ella/routers/mcp_onboarding.py"
+      - "backend/migrations/021_create_mcp_oauth_refresh_families.sql"
+      - "backend/ella/docs/MCP_OAUTH_REFRESH_CONTRACT.md"
+      - "backend/tests/unit/test_mcp_oauth_refresh.py"
+      - "backend/tests/postgres/test_mcp_oauth_refresh_postgres.py"
       - "app/ios/Runner.xcodeproj/project.pbxproj"
       - "app/ios/Runner/GuardianMode/GuardianAuthenticatedTransport.swift"
       - "app/ios/Runner/GuardianMode/GuardianModeManager.swift"
@@ -196,6 +203,13 @@ on:
   push:
     branches: [main]
     paths:
+      - "backend/database/mcp_oauth_refresh.py"
+      - "backend/ella/services/mcp_oauth_refresh.py"
+      - "backend/ella/routers/mcp_onboarding.py"
+      - "backend/migrations/021_create_mcp_oauth_refresh_families.sql"
+      - "backend/ella/docs/MCP_OAUTH_REFRESH_CONTRACT.md"
+      - "backend/tests/unit/test_mcp_oauth_refresh.py"
+      - "backend/tests/postgres/test_mcp_oauth_refresh_postgres.py"
       - "app/ios/Runner.xcodeproj/project.pbxproj"
       - "app/ios/Runner/GuardianMode/GuardianAuthenticatedTransport.swift"
       - "app/ios/Runner/GuardianMode/GuardianModeManager.swift"
@@ -755,6 +769,46 @@ jobs:
           done
           pytest "${summary_contract_suites[@]}" -v | tee /tmp/main-chat-summary-contract-pytest.log
           ! grep -Eq '[0-9]+ skipped' /tmp/main-chat-summary-contract-pytest.log
+
+      - name: Run dormant OAuth refresh authority and real rotation contracts
+        run: |
+          set -euo pipefail
+          refresh_files=(
+            database/mcp_oauth_refresh.py ella/services/mcp_oauth_refresh.py
+            ella/services/mcp_identity.py ella/routers/mcp_onboarding.py
+            ella/routers/mcp_well_known.py ella/routers/plato_mcp.py
+            tests/unit/test_mcp_oauth_refresh.py tests/postgres/test_mcp_oauth_refresh_postgres.py
+          )
+          python -m py_compile "${refresh_files[@]}"
+          black --check --line-length 120 --skip-string-normalization "${refresh_files[@]}"
+          refresh_suites=(tests/unit/test_mcp_oauth_refresh.py tests/postgres/test_mcp_oauth_refresh_postgres.py)
+          refresh_ids="$(pytest --collect-only -q "${refresh_suites[@]}")"
+          test "$(grep -c '::' <<<"$refresh_ids")" -eq 54
+          required_refresh_ids=(
+            "tests/unit/test_mcp_oauth_refresh.py::test_default_off_no_database_or_refresh_metadata"
+            "tests/unit/test_mcp_oauth_refresh.py::test_offline_code_invalid_verifier_shape_is_clean_400[utf]"
+            "tests/unit/test_mcp_oauth_refresh.py::test_offline_code_invalid_verifier_shape_is_clean_400[nonascii]"
+            "tests/unit/test_mcp_oauth_refresh.py::test_offline_code_invalid_verifier_shape_is_clean_400[short]"
+            "tests/unit/test_mcp_oauth_refresh.py::test_offline_code_invalid_verifier_shape_is_clean_400[long]"
+            "tests/unit/test_mcp_oauth_refresh.py::test_replay_burns_family_and_all_renewable_access"
+            "tests/unit/test_mcp_oauth_refresh.py::test_authority_change_burns_refresh_and_old_access[grant_aba]"
+            "tests/unit/test_mcp_oauth_refresh.py::test_authority_change_burns_refresh_and_old_access[consent_aba]"
+            "tests/unit/test_mcp_oauth_refresh.py::test_postcommit_authority_drift_discards_response_and_burns_family"
+            "tests/unit/test_mcp_oauth_refresh.py::test_final_authority_read_failure_does_not_return_token"
+            "tests/unit/test_mcp_oauth_refresh.py::test_ambiguous_rotation_has_no_automatic_replay"
+            "tests/unit/test_mcp_oauth_refresh.py::test_authorization_code_original_scope_and_tool_ceiling_cannot_expand"
+            "tests/unit/test_mcp_oauth_refresh.py::test_read_transaction_uses_same_snapshot_for_grant_pointer_and_receipt"
+            "tests/unit/test_mcp_oauth_refresh.py::test_changed_renewal_jwt_requires_fresh_mcp_initialize"
+            "tests/postgres/test_mcp_oauth_refresh_postgres.py::test_two_connections_concurrent_rotation_one_commit_then_replay_burn"
+            "tests/postgres/test_mcp_oauth_refresh_postgres.py::test_expiry_while_blocked_is_checked_after_shared_owner_lock"
+            "tests/postgres/test_mcp_oauth_refresh_postgres.py::test_delete_recreate_same_owner_cannot_restore_old_family"
+          )
+          for required_id in "${required_refresh_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$refresh_ids"
+          done
+          pytest "${refresh_suites[@]}" -v | tee /tmp/mcp-refresh-contract-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/mcp-refresh-contract-pytest.log
+          pytest tests/unit/test_ella_mcp_onboarding.py tests/unit/test_ella_mcp_well_known.py -v
 
       - name: Run capture buffer persistence regression
         run: |

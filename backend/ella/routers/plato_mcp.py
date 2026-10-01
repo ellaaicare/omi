@@ -35,6 +35,7 @@ import database.memories as memories_db
 from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
 from ella.services import proposal_ingest
 from ella.services import summary_tool_registry
+from ella.services.mcp_oauth_refresh import validate_renewable_session
 from ella.services.mcp_identity import (
     SUMMARY_OPERATION_TOOLS,
     SUMMARY_READ_TOOL,
@@ -1444,7 +1445,19 @@ def _summary_tool_enabled(auth_context: MCPAuthContext | None, tool_name: str) -
     return True
 
 
+async def _validate_renewable_auth(auth_context: MCPAuthContext) -> None:
+    try:
+        await validate_renewable_session(auth_context.session_claims)
+    except Exception:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired MCP renewable session",
+            headers={"WWW-Authenticate": _WWW_AUTHENTICATE},
+        ) from None
+
+
 async def _require_summary_tool_runtime(auth_context: MCPAuthContext, tool_name: str):
+    await _validate_renewable_auth(auth_context)
     uid = require_summary_tool_grant(auth_context.session_claims, tool_name)
     assert_current_ai_consent(uid)
     runtime = await require_summary_runtime(uid)
@@ -1462,10 +1475,12 @@ async def _require_summary_tool_runtime(auth_context: MCPAuthContext, tool_name:
         runtime_binding_id=runtime.binding_id,
         profile_user_id=runtime.profile_user_id,
     )
+    await _validate_renewable_auth(auth_context)
     return runtime
 
 
 async def _discovered_tools(auth_context: MCPAuthContext) -> list[dict[str, Any]]:
+    await _validate_renewable_auth(auth_context)
     tools = []
     for tool in _visible_tools(auth_context):
         if tool["name"] in SUMMARY_OPERATION_TOOLS:
@@ -1474,6 +1489,7 @@ async def _discovered_tools(auth_context: MCPAuthContext) -> list[dict[str, Any]
             except (ValueError, HTTPException, ProvisioningError, ToolExecutionError):
                 continue
         tools.append(tool)
+    await _validate_renewable_auth(auth_context)
     return tools
 
 
@@ -1902,6 +1918,7 @@ async def _handle_mcp_message(
     message: dict[str, Any],
     session: Optional[MCPSession] = None,
 ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    await _validate_renewable_auth(auth_context)
     token_fingerprint = auth_context.token_fingerprint
     msg_id = message.get("id")
     method = message.get("method")
@@ -1953,6 +1970,7 @@ async def _handle_mcp_message(
                 result = await _companion_submit_observation(arguments, auth_context=auth_context)
             else:
                 result = await _TOOL_HANDLERS[tool_name](arguments)
+            await _validate_renewable_auth(auth_context)
             _audit_tool_call(
                 trace_id=trace_id,
                 token_fingerprint=token_fingerprint,
@@ -2004,6 +2022,7 @@ async def plato_mcp_streamable_http(
     accept: Optional[str] = Header(None, alias="Accept"),
 ):
     auth_context = _authenticate(authorization)
+    await _validate_renewable_auth(auth_context)
     token_fingerprint = auth_context.token_fingerprint
     try:
         body = await request.json()
@@ -2045,6 +2064,7 @@ async def plato_mcp_streamable_http(
 
         async def event_generator():
             for response in responses:
+                await _validate_renewable_auth(auth_context)
                 yield f"event: message\ndata: {json.dumps(response, default=str)}\n\n"
 
         return StreamingResponse(
@@ -2053,6 +2073,7 @@ async def plato_mcp_streamable_http(
             headers={**headers, "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
         )
 
+    await _validate_renewable_auth(auth_context)
     content: Any = responses[0] if len(responses) == 1 else responses
     return JSONResponse(content=content, headers=headers)
 
@@ -2063,6 +2084,7 @@ async def plato_mcp_sse_keepalive(
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     auth_context = _authenticate(authorization)
+    await _validate_renewable_auth(auth_context)
     token_fingerprint = auth_context.token_fingerprint
     session_id = str(uuid.uuid4())
     session = MCPSession(
@@ -2086,6 +2108,7 @@ async def plato_mcp_sse_keepalive(
                     continue
                 if response is None:
                     break
+                await _validate_renewable_auth(auth_context)
                 yield f"event: message\ndata: {json.dumps(response, default=str)}\n\n"
         except asyncio.CancelledError:
             pass
@@ -2106,6 +2129,7 @@ async def plato_mcp_sse_message(
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     auth_context = _authenticate(authorization)
+    await _validate_renewable_auth(auth_context)
     token_fingerprint = auth_context.token_fingerprint
     session = _active_sessions.get(session_id)
     if not session:
@@ -2134,6 +2158,7 @@ async def plato_mcp_delete_session(
     mcp_session_id: Optional[str] = Header(None, alias="Mcp-Session-Id"),
 ):
     auth_context = _authenticate(authorization)
+    await _validate_renewable_auth(auth_context)
     token_fingerprint = auth_context.token_fingerprint
     if not mcp_session_id:
         raise HTTPException(status_code=400, detail="Mcp-Session-Id header required")
