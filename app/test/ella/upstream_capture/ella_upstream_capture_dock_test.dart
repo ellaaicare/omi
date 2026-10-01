@@ -15,6 +15,7 @@ import 'package:omi/ella/services/guardian_mode_service.dart' as guardian_native
 import 'package:omi/ella/upstream_capture/ella_capture_authority.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_dock.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
+import 'package:omi/ella/widgets/ella_breathing_dot.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/pages/capture/connect.dart';
 import 'package:omi/pages/onboarding/find_device/page.dart';
@@ -48,10 +49,18 @@ class _NonlinearWhisperTextScaler extends TextScaler {
 }
 
 final _testNecklace = BtDevice(id: 'necklace-a', name: 'Compass', type: DeviceType.omi, rssi: -40);
-final _pickerNecklace =
-    legacy_device.BtDevice(id: 'necklace-a', name: 'Compass', type: legacy_device.DeviceType.fieldy, rssi: -40);
-final _pickerFriend =
-    legacy_device.BtDevice(id: 'friend-a', name: 'Friend', type: legacy_device.DeviceType.friendPendant, rssi: -40);
+final _pickerNecklace = legacy_device.BtDevice(
+  id: 'necklace-a',
+  name: 'Compass',
+  type: legacy_device.DeviceType.fieldy,
+  rssi: -40,
+);
+final _pickerFriend = legacy_device.BtDevice(
+  id: 'friend-a',
+  name: 'Friend',
+  type: legacy_device.DeviceType.friendPendant,
+  rssi: -40,
+);
 
 class _WhisperTestAuthority implements ExactAccountAuthorityVerifier {
   _WhisperTestAuthority(this.uid, this.current);
@@ -177,12 +186,7 @@ class _DockRuntime extends EllaUpstreamCaptureRuntime {
 }
 
 class _DockFixture {
-  _DockFixture({
-    required this.connectivity,
-    required this.provider,
-    required this.authority,
-    required this.runtime,
-  });
+  _DockFixture({required this.connectivity, required this.provider, required this.authority, required this.runtime});
 
   final StreamController<bool> connectivity;
   final CaptureProvider provider;
@@ -240,48 +244,52 @@ class _DockFixture {
     EllaCaptureConsentRequester? consentRequester,
     String Function()? authenticatedUid,
     OnboardingProvider? onboarding,
+    bool reduceMotion = false,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
     await tester.pumpWidget(
       ChangeNotifierProvider<OnboardingProvider>.value(
-          value: onboarding ?? OnboardingProvider(),
-          child: MaterialApp(
-            debugShowCheckedModeBanner: false,
-            theme: ellaThemeData(),
-            locale: locale,
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            builder: (context, child) => MediaQuery(
-              data: MediaQuery.of(context).copyWith(textScaler: textScaler ?? TextScaler.linear(textScale)),
-              child: child!,
-            ),
-            home: Scaffold(
-              body: Align(
-                alignment: Alignment.bottomCenter,
-                child: Padding(
-                  padding: const EdgeInsets.all(14),
-                  child: EllaUpstreamCaptureDock(
-                    runtime: runtime,
-                    authenticatedUid: authenticatedUid ?? () => _uid,
-                    consentRequester: consentRequester,
-                    guardianAvailability: () => guardianAvailable,
-                    guardianAuthorityProvider: guardianAuthorityProvider ??
-                        () {
-                          final uid = authenticatedUid?.call() ?? _uid;
-                          return _WhisperTestAuthority(uid, () => (authenticatedUid?.call() ?? _uid) == uid);
-                        },
-                    guardianModeLoader: guardianModeLoader,
-                    guardianModeSetter: guardianModeSetter,
-                    guardianNativeStart: guardianNativeStart,
-                    guardianNativeStop: guardianNativeStop,
-                    guardianNativeState: guardianNativeState,
-                    guardianNativeStates: guardianNativeStates,
-                  ),
+        value: onboarding ?? OnboardingProvider(),
+        child: MaterialApp(
+          debugShowCheckedModeBanner: false,
+          theme: ellaThemeData(),
+          locale: locale,
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: textScaler ?? TextScaler.linear(textScale), disableAnimations: reduceMotion),
+            child: child!,
+          ),
+          home: Scaffold(
+            body: Align(
+              alignment: Alignment.bottomCenter,
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: EllaUpstreamCaptureDock(
+                  runtime: runtime,
+                  authenticatedUid: authenticatedUid ?? () => _uid,
+                  consentRequester: consentRequester,
+                  guardianAvailability: () => guardianAvailable,
+                  guardianAuthorityProvider: guardianAuthorityProvider ??
+                      () {
+                        final uid = authenticatedUid?.call() ?? _uid;
+                        return _WhisperTestAuthority(uid, () => (authenticatedUid?.call() ?? _uid) == uid);
+                      },
+                  guardianModeLoader: guardianModeLoader,
+                  guardianModeSetter: guardianModeSetter,
+                  guardianNativeStart: guardianNativeStart,
+                  guardianNativeStop: guardianNativeStop,
+                  guardianNativeState: guardianNativeState,
+                  guardianNativeStates: guardianNativeStates,
                 ),
               ),
             ),
-          )),
+          ),
+        ),
+      ),
     );
     await tester.pump();
     await tester.pump();
@@ -336,10 +344,243 @@ void main() {
       flutterCache = flutterCache.parent;
     }
     final materialIcons = File('${flutterCache.path}/artifacts/material_fonts/MaterialIcons-Regular.otf');
-    await (FontLoader('MaterialIcons')
-          ..addFont(materialIcons.readAsBytes().then((bytes) => ByteData.sublistView(Uint8List.fromList(bytes)))))
+    await (FontLoader(
+      'MaterialIcons',
+    )..addFont(materialIcons.readAsBytes().then((bytes) => ByteData.sublistView(Uint8List.fromList(bytes)))))
         .load();
   });
+
+  List<String> captureHaptics(WidgetTester tester, {bool fail = false}) {
+    final calls = <String>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'HapticFeedback.vibrate') {
+        calls.add(call.arguments as String);
+        if (fail) throw PlatformException(code: 'feedback-unavailable');
+      }
+      return null;
+    });
+    addTearDown(() => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null));
+    return calls;
+  }
+
+  testWidgets('accepted phone tap gives one light feedback, never boot background or double tap', (tester) async {
+    final calls = captureHaptics(tester);
+    final fixture = await _DockFixture.create(tester);
+    final start = Completer<EllaCaptureStartOutcome>();
+    addTearDown(() {
+      if (!start.isCompleted) start.complete(EllaCaptureStartOutcome.unavailable);
+    });
+    fixture.runtime.startPhoneOverride = (_) => start.future;
+    await fixture.pump(tester, reduceMotion: true);
+    expect(calls, isEmpty);
+    final button = find.byKey(const Key('upstream-capture-record-phone'));
+    await tester.tap(button);
+    await tester.pump();
+    await tester.tap(button);
+    await tester.pump();
+    expect(calls, ['HapticFeedbackType.lightImpact']);
+    fixture.runtime.protocolUnavailable.value = true;
+    await tester.pump();
+    expect(calls, hasLength(1));
+    start.complete(EllaCaptureStartOutcome.unavailable);
+    await tester.pump();
+    await tester.pump();
+    expect(calls, hasLength(1));
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final action in ['stop-phone', 'disconnect-necklace', 'finish']) {
+    testWidgets('accepted $action provides feedback once without claiming completion', (tester) async {
+      final calls = captureHaptics(tester);
+      final fixture = await _DockFixture.create(tester);
+      final completion = Completer<void>();
+      addTearDown(() {
+        if (!completion.isCompleted) completion.complete();
+      });
+      fixture.runtime.stopPhoneOverride = () => completion.future;
+      fixture.runtime.disconnectNecklaceOverride = () => completion.future;
+      fixture.runtime.finishOverride = () => completion.future;
+      await fixture.pump(tester, reduceMotion: true);
+      action == 'stop-phone' ? fixture.makePhoneLive() : fixture.makeNecklaceLive();
+      await tester.pump();
+      expect(calls, isEmpty);
+      await tester.tap(find.byKey(Key('upstream-capture-$action')));
+      await tester.pump();
+      expect(calls, ['HapticFeedbackType.lightImpact']);
+      expect(find.text('Recording with necklace'), findsNothing);
+      completion.completeError(StateError('synthetic operation failure'));
+      await tester.pump();
+      await tester.pump();
+      expect(calls, hasLength(1));
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('a rejected platform haptic cannot fail phone capture or create another feedback', (tester) async {
+    final calls = captureHaptics(tester, fail: true);
+    final fixture = await _DockFixture.create(tester);
+    var starts = 0;
+    fixture.runtime.startPhoneOverride = (_) async {
+      starts++;
+      return EllaCaptureStartOutcome.started;
+    };
+    await fixture.pump(tester, reduceMotion: true);
+    await tester.tap(find.byKey(const Key('upstream-capture-record-phone')));
+    await tester.pump();
+    await tester.pump();
+    expect(starts, 1);
+    expect(calls, hasLength(1));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('user transcript and Connect navigation give feedback; provider updates do not', (tester) async {
+    final calls = captureHaptics(tester);
+    final fixture = await _DockFixture.create(tester);
+    final picker = _PickerHarness([]);
+    await fixture.pump(tester, reduceMotion: true, onboarding: picker.onboarding);
+    await tester.tap(find.byKey(const Key('upstream-capture-connect-necklace')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(calls, hasLength(1));
+    Navigator.of(tester.element(find.byType(FindDevicesPage))).pop();
+    await tester.pumpAndSettle();
+    expect(find.byType(FindDevicesPage), findsNothing);
+    fixture.makePhoneLive();
+    await tester.pump();
+    expect(calls, hasLength(1));
+    final openTranscript =
+        tester.widget<OutlinedButton>(find.byKey(const Key('upstream-capture-view-transcript'))).onPressed!;
+    openTranscript();
+    openTranscript();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(calls, hasLength(2));
+    expect(find.byKey(const Key('upstream-capture-transcript-close')), findsOneWidget);
+    final closeTranscript =
+        tester.widget<IconButton>(find.byKey(const Key('upstream-capture-transcript-close'))).onPressed!;
+    closeTranscript();
+    closeTranscript();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(calls, hasLength(3));
+    closeTranscript();
+    await tester.pump();
+    expect(calls, hasLength(3));
+    expect(find.byKey(const Key('upstream-capture-view-transcript')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('boot Retry feedback is user-only and empty account gives no feedback', (tester) async {
+    final calls = captureHaptics(tester);
+    final fixture = await _DockFixture.create(tester);
+    fixture.runtime.bootOverride = () => Future.error(StateError('synthetic boot failure'));
+    var uid = _uid;
+    await fixture.pump(tester, reduceMotion: true, authenticatedUid: () => uid);
+    expect(calls, isEmpty);
+    fixture.runtime.bootOverride = () async => fixture.provider;
+    final retryBoot = tester.widget<FilledButton>(find.byKey(const Key('upstream-capture-retry-boot'))).onPressed!;
+    retryBoot();
+    retryBoot();
+    await tester.pump();
+    await tester.pump();
+    expect(calls, hasLength(1));
+    uid = '';
+    await tester.tap(find.byKey(const Key('upstream-capture-record-phone')));
+    await tester.pump();
+    expect(calls, hasLength(1));
+  });
+
+  testWidgets('retired transcript close dismisses once without buzzing replacement authority', (tester) async {
+    final calls = captureHaptics(tester);
+    final fixture = await _DockFixture.create(tester);
+    var current = true;
+    await fixture.pump(tester,
+        reduceMotion: true, guardianAuthorityProvider: () => _WhisperTestAuthority(_uid, () => current));
+    fixture.makePhoneLive();
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('upstream-capture-view-transcript')));
+    await tester.pumpAndSettle();
+    expect(calls, hasLength(1));
+    current = false;
+    await tester.tap(find.byKey(const Key('upstream-capture-transcript-close')));
+    await tester.pumpAndSettle();
+    expect(calls, hasLength(1));
+    expect(find.byKey(const Key('upstream-capture-transcript-close')), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Whispers feedback occurs only for admitted user choice and Retry', (tester) async {
+    final calls = captureHaptics(tester);
+    final fixture = await _DockFixture.create(tester);
+    final save = Completer<bool>();
+    addTearDown(() {
+      if (!save.isCompleted) save.complete(false);
+    });
+    var current = true;
+    await fixture.pump(
+      tester,
+      reduceMotion: true,
+      guardianAvailable: true,
+      guardianAuthorityProvider: () => _WhisperTestAuthority(_uid, () => current),
+      guardianModeLoader: () async =>
+          const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState()),
+      guardianModeSetter: (_) => save.future,
+      guardianNativeStart: () async => throw StateError('synthetic native unavailable'),
+      guardianNativeStop: () async {},
+      guardianNativeState: () => guardian_native.GuardianModeState.idle,
+    );
+    expect(calls, isEmpty);
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+    await tester.pump();
+    expect(calls, hasLength(1));
+    expect(find.byKey(const Key('upstream-capture-whispers-switch')), findsNothing);
+    save.complete(true);
+    await tester.pump();
+    await tester.pump();
+    expect(calls, hasLength(1));
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-retry')));
+    await tester.pump();
+    await tester.pump();
+    expect(calls, hasLength(2));
+    current = false;
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-retry')));
+    await tester.pump();
+    expect(calls, hasLength(2));
+  });
+
+  for (final caller in ['dock', 'memory', 'voice']) {
+    testWidgets('$caller breathing-dot configuration obeys motion changes without a hidden ticker', (tester) async {
+      Future<void> pumpDot({required bool reduceMotion, bool active = true}) async {
+        await tester.pumpWidget(
+          Directionality(
+            textDirection: TextDirection.ltr,
+            child: MediaQuery(
+              data: MediaQueryData(disableAnimations: reduceMotion),
+              child: EllaBreathingDot(active: active, live: caller != 'voice', size: caller == 'dock' ? 12 : 10),
+            ),
+          ),
+        );
+        await tester.pump();
+      }
+
+      await pumpDot(reduceMotion: true);
+      expect(find.byType(FadeTransition), findsNothing);
+      expect(tester.binding.transientCallbackCount, 0);
+      await pumpDot(reduceMotion: false);
+      final fade = tester.widget<FadeTransition>(find.byType(FadeTransition));
+      final before = fade.opacity.value;
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(fade.opacity.value, isNot(before));
+      expect(tester.binding.transientCallbackCount, greaterThan(0));
+      await pumpDot(reduceMotion: true);
+      expect(find.byType(FadeTransition), findsNothing);
+      expect(tester.binding.transientCallbackCount, 0);
+      await pumpDot(reduceMotion: false, active: false);
+      expect(find.byType(FadeTransition), findsNothing);
+      expect(tester.binding.transientCallbackCount, 0);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
 
   testWidgets('actual Ella theme gives every idle action an AA palette and a 48 point target', (tester) async {
     final fixture = await _DockFixture.create(tester);
@@ -363,10 +604,7 @@ void main() {
     expect(_contrastRatio(secondaryForeground, secondaryBackground), greaterThanOrEqualTo(4.5));
     expect(tester.getSize(primaryFinder).height, greaterThanOrEqualTo(EllaSizes.minTouchTarget));
     expect(tester.getSize(secondaryFinder).height, greaterThanOrEqualTo(EllaSizes.minTouchTarget));
-    expect(
-      secondary.style!.backgroundColor!.resolve({WidgetState.pressed}),
-      isNot(secondaryBackground),
-    );
+    expect(secondary.style!.backgroundColor!.resolve({WidgetState.pressed}), isNot(secondaryBackground));
     expect(
       secondary.style!.side!.resolve({WidgetState.focused})!.width,
       greaterThan(secondary.style!.side!.resolve({})!.width),
@@ -389,14 +627,16 @@ void main() {
         <WidgetState>{},
         {WidgetState.pressed},
         {WidgetState.focused},
-        {WidgetState.disabled}
+        {WidgetState.disabled},
       ]) {
         final foreground = style.foregroundColor!.resolve(states)!;
         final background = style.backgroundColor!.resolve(states)!;
         expect(_contrastRatio(foreground, background), greaterThanOrEqualTo(4.5));
       }
-      expect(tester.getSize(find.byKey(const Key('upstream-capture-connect-necklace'))).height,
-          greaterThanOrEqualTo(EllaSizes.minTouchTarget));
+      expect(
+        tester.getSize(find.byKey(const Key('upstream-capture-connect-necklace'))).height,
+        greaterThanOrEqualTo(EllaSizes.minTouchTarget),
+      );
     }
     await tester.tap(find.byKey(const Key('upstream-capture-record-phone')));
     await tester.pump();
@@ -405,11 +645,7 @@ void main() {
     await tester.pump();
   });
 
-  const renderSizes = <String, Size>{
-    '320x568': Size(320, 568),
-    '390x844': Size(390, 844),
-    '430x932': Size(430, 932),
-  };
+  const renderSizes = <String, Size>{'320x568': Size(320, 568), '390x844': Size(390, 844), '430x932': Size(430, 932)};
   const renderScales = [1.0, 1.5, 2.0, 3.0];
   for (final sizeEntry in renderSizes.entries) {
     for (final scale in renderScales) {
@@ -446,27 +682,34 @@ void main() {
     expect(find.text('Friend'), findsOneWidget);
     final artwork = tester.widgetList<Image>(find.byType(Image)).map((image) => image.image).whereType<AssetImage>();
     expect(
-        artwork.map((image) => image.assetName),
-        contains(DeviceUtils.getDeviceImagePath(
+      artwork.map((image) => image.assetName),
+      contains(
+        DeviceUtils.getDeviceImagePath(
           deviceType: _pickerNecklace.type,
           modelNumber: _pickerNecklace.modelNumber,
           deviceName: _pickerNecklace.name,
-        )));
+        ),
+      ),
+    );
     expect(
-        artwork.map((image) => image.assetName),
-        contains(DeviceUtils.getDeviceImagePath(
+      artwork.map((image) => image.assetName),
+      contains(
+        DeviceUtils.getDeviceImagePath(
           deviceType: _pickerFriend.type,
           modelNumber: _pickerFriend.modelNumber,
           deviceName: _pickerFriend.name,
-        )));
+        ),
+      ),
+    );
     expect(picker.service.discovers, 1);
     expect(picker.provider.connects, 0);
     expect(tester.takeException(), isNull);
   });
 
   for (final useEllaTheme in [true, false]) {
-    testWidgets('picker support and Connect Later inherit ${useEllaTheme ? 'Ella' : 'default'} button foreground',
-        (tester) async {
+    testWidgets('picker support and Connect Later inherit ${useEllaTheme ? 'Ella' : 'default'} button foreground', (
+      tester,
+    ) async {
       SharedPreferences.setMockInitialValues({});
       await fork.SharedPreferencesUtil.init();
       final picker = _PickerHarness([]);
@@ -480,21 +723,23 @@ void main() {
       tester.view.physicalSize = const Size(320, 568);
       tester.view.devicePixelRatio = 1;
       final theme = useEllaTheme ? ellaThemeData() : ThemeData();
-      await tester.pumpWidget(ChangeNotifierProvider<OnboardingProvider>.value(
-        value: picker.onboarding,
-        child: MaterialApp(
-          theme: theme,
-          localizationsDelegates: AppLocalizations.localizationsDelegates,
-          supportedLocales: AppLocalizations.supportedLocales,
-          builder: (context, child) => MediaQuery(
-            data: MediaQuery.of(context).copyWith(textScaler: const TextScaler.linear(2)),
-            child: child!,
-          ),
-          home: Scaffold(
-            body: SingleChildScrollView(child: FindDevicesPage(goNext: () {})),
+      await tester.pumpWidget(
+        ChangeNotifierProvider<OnboardingProvider>.value(
+          value: picker.onboarding,
+          child: MaterialApp(
+            theme: theme,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(textScaler: const TextScaler.linear(2)),
+              child: child!,
+            ),
+            home: Scaffold(
+              body: SingleChildScrollView(child: FindDevicesPage(goNext: () {})),
+            ),
           ),
         ),
-      ));
+      );
       await tester.pump();
       await tester.pump(const Duration(seconds: 10));
       for (final label in ['Contact Support?', 'Connect Later']) {
@@ -717,11 +962,14 @@ void main() {
     await tester.pump();
     expect(find.text('Ella could not search for necklaces. Try again.'), findsOneWidget);
     expect(find.text('Searching for devices...'), findsNothing);
-    final retry =
-        tester.widget<TextButton>(find.ancestor(of: find.text('Try Again'), matching: find.byType(TextButton)));
+    final retry = tester.widget<TextButton>(
+      find.ancestor(of: find.text('Try Again'), matching: find.byType(TextButton)),
+    );
     expect(retry.style!.foregroundColor!.resolve({}), EllaColors.tealDeep);
-    expect(tester.getSize(find.ancestor(of: find.text('Try Again'), matching: find.byType(TextButton))).height,
-        greaterThanOrEqualTo(EllaSizes.minTouchTarget));
+    expect(
+      tester.getSize(find.ancestor(of: find.text('Try Again'), matching: find.byType(TextButton))).height,
+      greaterThanOrEqualTo(EllaSizes.minTouchTarget),
+    );
     picker.service.failDiscovery = false;
     await tester.tap(find.text('Try Again'));
     await tester.pump();
@@ -842,10 +1090,8 @@ void main() {
     await fixture.pump(
       tester,
       guardianAvailable: true,
-      guardianModeLoader: () async => const GuardianModeInfo(
-        currentMode: GuardianModeKey.off,
-        twoTierState: GuardianModeState(),
-      ),
+      guardianModeLoader: () async =>
+          const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState()),
       guardianModeSetter: (state) async {
         savedState = state;
         return save.future;
@@ -881,10 +1127,8 @@ void main() {
         final captured = epoch;
         return _WhisperTestAuthority(_uid, () => epoch == captured);
       },
-      guardianModeLoader: () async => const GuardianModeInfo(
-        currentMode: GuardianModeKey.off,
-        twoTierState: GuardianModeState(),
-      ),
+      guardianModeLoader: () async =>
+          const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState()),
       guardianModeSetter: (_) async => true,
       guardianNativeStart: () => started.future,
       guardianNativeStop: () async {},
@@ -1154,10 +1398,12 @@ void main() {
       }
       final newer = fence.choose(authority, false)!;
       fence.publish(newer, (enabled: false, modeVerified: true, nativeReconciled: true));
-      readback.complete(const GuardianModeInfo(
-        currentMode: GuardianModeKey.custom,
-        twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
-      ));
+      readback.complete(
+        const GuardianModeInfo(
+          currentMode: GuardianModeKey.custom,
+          twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
+        ),
+      );
       await tester.pump();
       await tester.pump();
       expect(starts, 0);
@@ -1172,10 +1418,8 @@ void main() {
     await fixture.pump(
       tester,
       guardianAvailable: true,
-      guardianModeLoader: () async => const GuardianModeInfo(
-        currentMode: GuardianModeKey.off,
-        twoTierState: GuardianModeState(),
-      ),
+      guardianModeLoader: () async =>
+          const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState()),
       guardianModeSetter: (_) async => false,
       guardianNativeStart: () async {},
       guardianNativeStop: () async {},
@@ -1200,7 +1444,9 @@ void main() {
       tester,
       guardianAvailable: true,
       guardianModeLoader: () async => const GuardianModeInfo(
-          currentMode: GuardianModeKey.custom, twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT'])),
+        currentMode: GuardianModeKey.custom,
+        twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
+      ),
       guardianModeSetter: (_) async {
         writes++;
         return true;
@@ -1233,8 +1479,9 @@ void main() {
   });
 
   for (final locale in [const Locale('en'), const Locale('ar')]) {
-    testWidgets('gentle Whispers recovery is actionable with ${locale.languageCode} nonlinear large text',
-        (tester) async {
+    testWidgets('gentle Whispers recovery is actionable with ${locale.languageCode} nonlinear large text', (
+      tester,
+    ) async {
       final fixture = await _DockFixture.create(tester);
       final semantics = tester.ensureSemantics();
       var reads = 0;
@@ -1361,8 +1608,11 @@ void main() {
         .whereType<String>()
         .where((text) => text.contains('Whispers'))
         .toList();
-    expect(find.text('Whispers are on — Ella can speak up when she can help.'), findsOneWidget,
-        reason: '$visibleWhisperCopy');
+    expect(
+      find.text('Whispers are on — Ella can speak up when she can help.'),
+      findsOneWidget,
+      reason: '$visibleWhisperCopy',
+    );
   });
 
   testWidgets('empty transcript stops saying listening after capture retires', (tester) async {

@@ -11258,5 +11258,13 @@
   "upstreamCaptureWhispersPlaybackStopFailed": "Whispers are set to off, but Ella couldn't pause spoken help.",
   "@upstreamCaptureWhispersPlaybackStopFailed": {
     "description": "Whispers native playback stop error"
+  },
+  "hermesSummarySource": "Hermes summary",
+  "@hermesSummarySource": {
+    "description": "Source label only for the current canonically confirmed Hermes-enriched summary"
+  },
+  "hermesSummarySourceDescription": "This memory's current summary was enriched by Hermes.",
+  "@hermesSummarySourceDescription": {
+    "description": "Accessible source attribution for a version-matched, canonically confirmed Hermes summary"
   }
 }
