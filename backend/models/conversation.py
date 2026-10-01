@@ -1,8 +1,9 @@
+import re
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from models.chat import Message
 from models.other import Person
@@ -218,6 +219,48 @@ class SummaryVersion(BaseModel):
     is_active: bool = Field(default=False, description="Whether this version is currently active")
 
 
+class EnrichmentPresentationState(BaseModel):
+    """Non-sensitive persisted summary provenance exposed to owner-facing clients."""
+
+    model_config = ConfigDict(extra='ignore')
+
+    result_summary_version_id: Optional[str] = None
+    status: Optional[str] = None
+    pending: Optional[bool] = None
+    canonical_status: Optional[str] = None
+    kind: Optional[str] = None
+    source: Optional[str] = None
+
+    @field_validator('result_summary_version_id', mode='before')
+    @classmethod
+    def unknown_invalid_version_id(cls, value):
+        return value if type(value) is str and re.fullmatch(r'[A-Za-z0-9_-]{1,128}', value) else None
+
+    @field_validator('status', 'canonical_status', 'kind', 'source', mode='before')
+    @classmethod
+    def unknown_invalid_metadata(cls, value, info: ValidationInfo):
+        allowed = {
+            'status': {'writeback_applied', 'writeback_pending_canonical', 'failed', 'terminal', 'superseded'},
+            'canonical_status': {'completed', 'pending', 'failed', 'unconfirmed', 'superseded', 'supersession_pending'},
+            'kind': {
+                'hermes_enriched',
+                'observer_enriched',
+                'omi_enriched',
+                'corrected_enriched',
+                'voice_reinterpreted',
+                'correction_undo',
+                'correction_propagation_undo',
+            },
+            'source': {'hermes_parallel', 'hermes_cloud', 'observer', 'omi', 'ios', 'voice-memory-reinterpretation'},
+        }
+        return value if type(value) is str and value in allowed[info.field_name] else None
+
+    @field_validator('pending', mode='before')
+    @classmethod
+    def unknown_invalid_pending(cls, value):
+        return value if type(value) is bool else None
+
+
 class CorrectionState(BaseModel):
     correction_id: Optional[str] = Field(default=None, description="Latest correction event identifier")
     status: Optional[str] = Field(default=None, description="Correction lifecycle status")
@@ -381,6 +424,7 @@ class Conversation(BaseModel):
     structured: Structured
     summary_versions: List[SummaryVersion] = []
     active_summary_version_id: Optional[str] = None
+    enrichment_state: Optional[EnrichmentPresentationState] = None
     correction_state: Optional[CorrectionState] = None
     internal_assessment: Optional[InternalAssessment] = None
     ella_tags: List[str] = Field(default_factory=list)
@@ -439,6 +483,11 @@ class Conversation(BaseModel):
     is_locked: bool = False
     data_protection_level: Optional[str] = None
     folder_id: Optional[str] = Field(default=None, description="ID of the folder this conversation belongs to")
+
+    @field_validator('enrichment_state', mode='before')
+    @classmethod
+    def unknown_invalid_enrichment_state(cls, value):
+        return value if isinstance(value, (dict, EnrichmentPresentationState)) else None
 
     def __init__(self, **data):
         super().__init__(**data)

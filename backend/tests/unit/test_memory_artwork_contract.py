@@ -19,6 +19,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from PIL import Image
+from models.conversation import Conversation
 
 
 @pytest.fixture(autouse=True)
@@ -6118,8 +6119,6 @@ def test_conversation_deletion_marker_fences_inflight_artwork_finalize():
 
 
 def test_public_conversation_model_omits_private_object_metadata():
-    from models.conversation import Conversation
-
     payload = _terminal_memory("memory-1")
     payload.update(
         {
@@ -6140,6 +6139,107 @@ def test_public_conversation_model_omits_private_object_metadata():
     assert serialized["artwork"]["status"] == "ready"
     assert "object_key" not in serialized["artwork"]
     assert "authority_digest" not in serialized["artwork"]
+
+
+@pytest.mark.parametrize("as_list", [False, True])
+@pytest.mark.parametrize(
+    "state",
+    [
+        None,
+        "invalid-container",
+        [],
+        {},
+        {
+            "result_summary_version_id": "summary-memory-1",
+            "status": "writeback_applied",
+            "pending": False,
+            "canonical_status": "completed",
+            "kind": "hermes_enriched",
+            "source": "hermes_parallel",
+            "error": "private-error",
+            "request_fingerprint_input": {"private": "not-public"},
+            "authority_digest": "private-authority",
+        },
+        {
+            "result_summary_version_id": 42,
+            "status": [],
+            "pending": "false",
+            "canonical_status": True,
+            "kind": {},
+            "source": 1,
+        },
+        {"pending": 0},
+        {"result_summary_version_id": "older-version", "pending": True, "canonical_status": "pending"},
+    ],
+)
+def test_public_conversation_response_sanitizes_summary_provenance(state, as_list):
+    payload = _terminal_memory("memory-1")
+    payload.update({"created_at": "2026-10-01T00:00:00Z", "started_at": None, "finished_at": None})
+    if state is not None:
+        payload["enrichment_state"] = state
+    else:
+        payload.pop("enrichment_state", None)
+    app = FastAPI()
+
+    @app.get("/conversation", response_model=list[Conversation] if as_list else Conversation)
+    def response():
+        return [payload] if as_list else payload
+
+    with TestClient(app) as client:
+        response = client.get("/conversation")
+    assert response.status_code == 200
+    record = response.json()[0] if as_list else response.json()
+    assert record["active_summary_version_id"] == payload["active_summary_version_id"]
+    serialized = record["enrichment_state"]
+    if not isinstance(state, dict):
+        assert serialized is None
+        return
+    assert set(serialized) == {"result_summary_version_id", "status", "pending", "canonical_status", "kind", "source"}
+    for field, value in serialized.items():
+        original = state.get(field)
+        expected_type = bool if field == "pending" else str
+        assert value == (original if type(original) is expected_type else None)
+    assert payload.get("enrichment_state") == state
+
+
+@pytest.mark.parametrize("as_list", [False, True])
+def test_public_summary_provenance_matches_shared_app_wire_fixture(as_list):
+    fixture_path = BACKEND_ROOT.parent / "app/test/ella/widgets/fixtures/hermes_summary_api_response.json"
+    fixture = json.loads(fixture_path.read_text())
+    payload = {}
+    app = FastAPI()
+
+    @app.get("/conversation", response_model=list[Conversation] if as_list else Conversation)
+    def response():
+        return [payload] if as_list else payload
+
+    with TestClient(app) as client:
+        for case in fixture["cases"]:
+            payload.clear()
+            payload.update(copy.deepcopy(fixture["base_response"]))
+            if case["stored_enrichment_state"] is not None:
+                payload["enrichment_state"] = copy.deepcopy(case["stored_enrichment_state"])
+            before = copy.deepcopy(payload)
+            response = client.get("/conversation")
+            assert response.status_code == 200, case["case"]
+            record = response.json()[0] if as_list else response.json()
+            assert record == {**fixture["base_response"], "enrichment_state": case["wire_enrichment_state"]}, case[
+                "case"
+            ]
+            assert payload == before
+
+
+@pytest.mark.parametrize("pending", [False, True])
+def test_public_summary_provenance_retains_real_pending_and_terminal_metadata(pending):
+    for status in ("writeback_applied", "writeback_pending_canonical", "failed", "terminal", "superseded"):
+        for canonical in ("completed", "pending", "failed", "unconfirmed", "superseded", "supersession_pending"):
+            payload = _terminal_memory("memory-1")
+            payload.update({"started_at": None, "finished_at": None})
+            payload["enrichment_state"] = {"status": status, "canonical_status": canonical, "pending": pending}
+            public = Conversation(**payload).model_dump(mode="json")["enrichment_state"]
+            assert public["status"] == status
+            assert public["canonical_status"] == canonical
+            assert public["pending"] is pending
 
 
 def test_automatic_generation_is_durably_one_shot_but_manual_retry_remains_available():
