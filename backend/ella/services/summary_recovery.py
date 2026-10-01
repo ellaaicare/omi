@@ -307,6 +307,7 @@ async def generate_summary_from_prompt(
     required_tags: tuple[str, ...],
     config: SummaryProviderConfig,
     async_client_factory: Any = httpx.AsyncClient,
+    require_generated_summary_fields: bool = False,
 ) -> dict[str, Any]:
     if config.provider == 'hermes-api':
         if config.cloud_authority is None and not config.hermes_api_key:
@@ -351,7 +352,12 @@ async def generate_summary_from_prompt(
     response.raise_for_status()
     body = response.json()
     content = body['choices'][0]['message']['content']
-    return normalize_summary(extract_json_object(content), fallback, required_tags=required_tags)
+    generated = extract_json_object(content)
+    if require_generated_summary_fields and any(
+        not isinstance(generated.get(key), str) or not generated[key].strip() for key in ('title', 'overview')
+    ):
+        raise ValueError('Summary model response missing generated title or overview')
+    return normalize_summary(generated, fallback, required_tags=required_tags)
 
 
 async def apply_summary_update(
@@ -372,6 +378,7 @@ async def apply_summary_update(
     today_card_grounding: Optional[dict[str, Any]] = None,
     replay_request_fingerprint_input: Optional[dict[str, Any]] = None,
     canonical_retry_recorder: Optional[Callable[[str], Awaitable[bool]]] = None,
+    summary_operation: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     return await write_conversation_summary(
         uid=uid,
@@ -396,6 +403,7 @@ async def apply_summary_update(
         today_card_grounding=today_card_grounding,
         replay_request_fingerprint_input=replay_request_fingerprint_input,
         canonical_retry_recorder=canonical_retry_recorder,
+        summary_operation=summary_operation,
     )
 
 

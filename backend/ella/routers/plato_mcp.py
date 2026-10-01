@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -33,11 +34,19 @@ import database.conversations as conversations_db
 import database.memories as memories_db
 from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
 from ella.services import proposal_ingest
-from ella.services.mcp_identity import validate_mcp_session_token
+from ella.services import summary_tool_registry
+from ella.services.mcp_identity import (
+    SUMMARY_OPERATION_TOOLS,
+    SUMMARY_READ_TOOL,
+    require_summary_tool_grant,
+    validate_mcp_session_token,
+)
+from ella.services.ai_consent import assert_current_ai_consent
 from ella.services.mcp_startup import build_startup_context
 from ella.services.mcp_surface_prompt import build_surface_prompt
 from ella.services.runtime_errors import ProvisioningError
-from ella.services.runtime_resolver import require_isolated_runtime
+from ella.services.runtime_resolver import require_isolated_runtime, runtime_authority_identity
+from ella.services.summary_runtime import require_summary_runtime
 from ella.utils.provision_authority import ProvisionAuthorityError, legacy_provision_authority
 from utils.ella.canonical_auth import canonical_event_service_headers
 from utils.ella.time_context import annotate_event_time, build_time_context, local_time_fields, timezone_name
@@ -189,7 +198,7 @@ def _fingerprint(token: str) -> str:
 
 _WWW_AUTHENTICATE = (
     'Bearer resource_metadata="https://api.ella-ai-care.com/.well-known/oauth-protected-resource",'
-    ' scope="context:read memory:read observations:write profile:read startup:read timeline:read tools:read"'
+    ' scope="context:read memory:read summaries:write observations:write profile:read startup:read timeline:read tools:read"'
 )
 
 
@@ -1414,17 +1423,188 @@ async def _companion_recent_writes(arguments: dict[str, Any]) -> dict[str, Any]:
 _DEPRECATED_TOOLS = {"companion_propose_change", "companion_get_proposal_status"}
 
 
-def _visible_tools() -> list[dict[str, Any]]:
+def _summary_tool_enabled(auth_context: MCPAuthContext | None, tool_name: str) -> bool:
+    if (
+        tool_name not in SUMMARY_OPERATION_TOOLS
+        or summary_tool_registry.summary_operation_handler() is None
+        or auth_context is None
+        or auth_context.trusted_static_token
+        or not _env_bool("ELLA_MCP_SUMMARY_TOOLS_ENABLED")
+    ):
+        return False
+    enabled_uids = {
+        uid.strip() for uid in _env("ELLA_MCP_SUMMARY_TOOLS_UIDS").split(",") if uid.strip() and uid.strip() != "*"
+    }
+    if str(auth_context.session_claims.get("profile_uid") or "") not in enabled_uids:
+        return False
+    try:
+        require_summary_tool_grant(auth_context.session_claims, tool_name)
+    except ValueError:
+        return False
+    return True
+
+
+async def _require_summary_tool_runtime(auth_context: MCPAuthContext, tool_name: str):
+    uid = require_summary_tool_grant(auth_context.session_claims, tool_name)
+    assert_current_ai_consent(uid)
+    runtime = await require_summary_runtime(uid)
+    if (
+        runtime.uid != uid
+        or not runtime.binding_id
+        or not runtime.account_user_id
+        or not runtime.profile_user_id
+        or tool_name not in runtime.allowed_tools
+    ):
+        raise ToolExecutionError("summary_tool_runtime_registration_required", code=-32003)
+    require_summary_tool_grant(
+        auth_context.session_claims,
+        tool_name,
+        runtime_binding_id=runtime.binding_id,
+        profile_user_id=runtime.profile_user_id,
+    )
+    return runtime
+
+
+async def _discovered_tools(auth_context: MCPAuthContext) -> list[dict[str, Any]]:
+    tools = []
+    for tool in _visible_tools(auth_context):
+        if tool["name"] in SUMMARY_OPERATION_TOOLS:
+            try:
+                await _require_summary_tool_runtime(auth_context, tool["name"])
+            except (ValueError, HTTPException, ProvisioningError, ToolExecutionError):
+                continue
+        tools.append(tool)
+    return tools
+
+
+async def _companion_summary_operation(
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    auth_context: MCPAuthContext,
+) -> dict[str, Any]:
+    if not _summary_tool_enabled(auth_context, tool_name):
+        raise ToolExecutionError("summary_tool_grant_required", code=-32003)
+    required = {"conversation_id", "expected_active_summary_version_id", "idempotency_key"}
+    if tool_name == SUMMARY_READ_TOOL:
+        required = {"conversation_id"}
+    if tool_name == "companion_correct_conversation":
+        required.add("correction_text")
+    if set(arguments) != required or any(not isinstance(arguments[key], str) for key in required):
+        raise ToolExecutionError(
+            "Only exact conversation, expected version, idempotency key and intent fields are accepted", code=-32602
+        )
+    uid = require_summary_tool_grant(auth_context.session_claims, tool_name)
+    initial_authority = None
+
+    async def revalidate_grant() -> None:
+        nonlocal initial_authority
+        if (
+            not _summary_tool_enabled(auth_context, tool_name)
+            or require_summary_tool_grant(auth_context.session_claims, tool_name) != uid
+        ):
+            raise ToolExecutionError("summary_tool_grant_revoked", code=-32003)
+        runtime = await _require_summary_tool_runtime(auth_context, tool_name)
+        current_authority = runtime_authority_identity(runtime)
+        if initial_authority is None:
+            initial_authority = current_authority
+        elif not hmac.compare_digest(current_authority.digest, initial_authority.digest):
+            raise ToolExecutionError("summary_tool_runtime_authority_changed", code=-32003)
+
+    try:
+        await revalidate_grant()
+        if tool_name == SUMMARY_READ_TOOL:
+            conversation_id = arguments["conversation_id"]
+            if not conversation_id or re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", conversation_id) is None:
+                raise ToolExecutionError("Explicit conversation_id is required", code=-32602)
+            conversation = conversations_db.get_conversation(uid, conversation_id)
+            if conversation is None or conversation.get("discarded"):
+                raise ToolExecutionError("Conversation not found", code=-32004)
+            if conversation.get("is_locked"):
+                raise ToolExecutionError("Conversation locked", code=-32003)
+            if not conversation.get("active_summary_version_id"):
+                raise ToolExecutionError("Active summary version is unavailable", code=-32009)
+            enrichment = conversation.get("enrichment_state") or {}
+            if enrichment.get("canonical_status") in {"pending", "failed"} or enrichment.get("pending"):
+                raise ToolExecutionError("Canonical summary confirmation is pending", code=-32009)
+            return {
+                "conversation_id": conversation_id,
+                "active_summary_version_id": conversation["active_summary_version_id"],
+                "summary": conversation.get("structured") or {},
+            }
+        handler = summary_tool_registry.summary_operation_handler()
+        if handler is None:
+            raise ToolExecutionError("summary_tool_registration_required", code=-32003)
+        return await handler(
+            uid=uid,
+            tool_name=tool_name,
+            arguments=arguments,
+            revalidate_tool_grant=revalidate_grant,
+        )
+    except ValueError as exc:
+        raise ToolExecutionError("Invalid or revoked summary operation authority", code=-32003) from exc
+    except HTTPException as exc:
+        raise ToolExecutionError(str(exc.detail), code=-32009 if exc.status_code == 409 else -32003) from exc
+
+
+def _visible_tools(auth_context: MCPAuthContext | None = None) -> list[dict[str, Any]]:
+    if auth_context is not None and not auth_context.trusted_static_token:
+        # Legacy handlers bind the configured Plato profile, not signed callers.
+        # Per-user sessions must never inherit their discovery or dispatch surface.
+        return [tool for tool in MCP_TOOLS if _summary_tool_enabled(auth_context, tool["name"])]
     allowed = set(_legacy_plato_onboarding()["session_claims"].get("allowed_tools") or [])
     return [
         tool
         for tool in MCP_TOOLS
-        if (tool["name"] in allowed or tool["name"] == "plato_get_scanner_rules")
+        if (
+            tool["name"] in allowed
+            or tool["name"] == "plato_get_scanner_rules"
+            or _summary_tool_enabled(auth_context, tool["name"])
+        )
         and tool["name"] not in _DEPRECATED_TOOLS
     ]
 
 
 MCP_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "companion_get_conversation_summary",
+        "description": "Read one explicit conversation's summary and exact active version before requesting correction or re-summary. Never select a latest conversation implicitly.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"conversation_id": {"type": "string", "minLength": 1, "maxLength": 160}},
+            "required": ["conversation_id"],
+        },
+    },
+    {
+        "name": "companion_correct_conversation",
+        "description": "Apply the user's supplied correction to one explicit conversation summary, preserving its transcript and prior versions. Returns the durable receipt and Undo path. Never select an implicit latest memory.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "conversation_id": {"type": "string", "minLength": 1, "maxLength": 160},
+                "correction_text": {"type": "string", "minLength": 1, "maxLength": 4000},
+                "expected_active_summary_version_id": {"type": "string", "minLength": 1, "maxLength": 160},
+                "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 128},
+            },
+            "required": ["conversation_id", "correction_text", "expected_active_summary_version_id", "idempotency_key"],
+        },
+    },
+    {
+        "name": "companion_resummarize_conversation",
+        "description": "Re-summarize one explicit conversation from its immutable transcript and owner-bound Hermes context. No factual correction is implied. Preserves previous versions and returns the durable receipt and Undo path.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "conversation_id": {"type": "string", "minLength": 1, "maxLength": 160},
+                "expected_active_summary_version_id": {"type": "string", "minLength": 1, "maxLength": 160},
+                "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 128},
+            },
+            "required": ["conversation_id", "expected_active_summary_version_id", "idempotency_key"],
+        },
+    },
     {
         "name": "companion_start_here",
         "description": "Return the safe startup context packet for this authenticated companion profile.",
@@ -1638,6 +1818,9 @@ MCP_TOOLS: list[dict[str, Any]] = [
 ]
 
 _TOOL_HANDLERS = {
+    "companion_get_conversation_summary": _companion_summary_operation,
+    "companion_correct_conversation": _companion_summary_operation,
+    "companion_resummarize_conversation": _companion_summary_operation,
     "companion_start_here": _companion_start_here,
     "companion_surface_prompt": _companion_surface_prompt,
     "companion_recent_writes": _companion_recent_writes,
@@ -1692,6 +1875,7 @@ def _audit_tool_call(
     started: float,
     status: str,
     error: str = "",
+    profile_uid: Optional[str] = None,
 ) -> None:
     log = logger.warning if status != "ok" or tool_name == "companion_submit_observation" else logger.info
     log(
@@ -1701,7 +1885,7 @@ def _audit_tool_call(
                 "trace_id": trace_id,
                 "caller": "grok_mcp",
                 "token_fingerprint": token_fingerprint,
-                "uid": _plato_uid(),
+                "uid": profile_uid if profile_uid is not None else _plato_uid(),
                 "tool": tool_name,
                 "arguments": _argument_summary(arguments),
                 "latency_ms": int((time.monotonic() - started) * 1000),
@@ -1747,20 +1931,25 @@ async def _handle_mcp_message(
         return None, None
 
     if method == "tools/list":
-        return _mcp_response(msg_id, {"tools": _visible_tools()}), None
+        return _mcp_response(msg_id, {"tools": await _discovered_tools(auth_context)}), None
 
     if method == "tools/call":
         tool_name = params.get("name")
         arguments = params.get("arguments") or {}
         trace_id = str(uuid.uuid4())
         started = time.monotonic()
+        audit_profile_uid = (
+            str(auth_context.session_claims.get("profile_uid") or "") if tool_name in SUMMARY_OPERATION_TOOLS else None
+        )
         if not isinstance(arguments, dict):
             return _mcp_error(msg_id, -32602, "Tool arguments must be an object"), None
-        visible_tool_names = {tool["name"] for tool in _visible_tools()}
+        visible_tool_names = {tool["name"] for tool in _visible_tools(auth_context)}
         if tool_name not in _TOOL_HANDLERS or tool_name not in visible_tool_names:
             return _mcp_error(msg_id, -32601, f"Unknown tool: {tool_name}"), None
         try:
-            if tool_name == "companion_submit_observation":
+            if tool_name in SUMMARY_OPERATION_TOOLS:
+                result = await _companion_summary_operation(tool_name, arguments, auth_context=auth_context)
+            elif tool_name == "companion_submit_observation":
                 result = await _companion_submit_observation(arguments, auth_context=auth_context)
             else:
                 result = await _TOOL_HANDLERS[tool_name](arguments)
@@ -1771,6 +1960,7 @@ async def _handle_mcp_message(
                 arguments=arguments,
                 started=started,
                 status="ok",
+                profile_uid=audit_profile_uid,
             )
             result = {"trace_id": trace_id, **result}
             return _mcp_response(msg_id, {"content": [{"type": "text", "text": json.dumps(result, default=str)}]}), None
@@ -1783,6 +1973,7 @@ async def _handle_mcp_message(
                 started=started,
                 status="error",
                 error=exc.message,
+                profile_uid=audit_profile_uid,
             )
             return _mcp_error(msg_id, exc.code, exc.message), None
         except Exception as exc:
@@ -1795,6 +1986,7 @@ async def _handle_mcp_message(
                 started=started,
                 status="error",
                 error=str(exc),
+                profile_uid=audit_profile_uid,
             )
             return _mcp_error(msg_id, -32000, "Internal Plato MCP tool error"), None
 

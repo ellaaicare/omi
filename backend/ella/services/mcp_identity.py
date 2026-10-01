@@ -48,7 +48,11 @@ OBSERVATION_WRITE_SCOPES = {
     "observations:write",
 }
 
-PROFILE_GRANT_SCOPES = READ_ONLY_SCOPES | OBSERVATION_WRITE_SCOPES
+SUMMARY_WRITE_SCOPE = "summaries:write"
+SUMMARY_WRITE_TOOLS = frozenset({"companion_correct_conversation", "companion_resummarize_conversation"})
+SUMMARY_READ_TOOL = "companion_get_conversation_summary"
+SUMMARY_OPERATION_TOOLS = SUMMARY_WRITE_TOOLS | {SUMMARY_READ_TOOL}
+PROFILE_GRANT_SCOPES = READ_ONLY_SCOPES | OBSERVATION_WRITE_SCOPES | {SUMMARY_WRITE_SCOPE}
 
 PROPOSAL_SCOPES = {
     "proposals:read",
@@ -85,7 +89,11 @@ def _profile_grant_scopes(scopes: Iterable[Any], role: str) -> list[str]:
     requested = [_clean_string(scope) for scope in scopes if _clean_string(scope)]
     if not requested:
         requested = DEFAULT_ROLE_SCOPES.get(role, DEFAULT_ROLE_SCOPES[ROLE_SELF])
-    return sorted(scope for scope in set(requested) if scope in PROFILE_GRANT_SCOPES)
+    return sorted(
+        scope
+        for scope in set(requested)
+        if scope in PROFILE_GRANT_SCOPES and (scope != SUMMARY_WRITE_SCOPE or role == ROLE_SELF)
+    )
 
 
 @dataclass(frozen=True)
@@ -466,6 +474,50 @@ def validate_mcp_session_token(token: str) -> dict[str, Any]:
     if not claims.get("profile_uid") or not claims.get("role") or not isinstance(claims.get("allowed_tools"), list):
         raise ValueError("MCP session token missing required claims")
     return claims
+
+
+def require_summary_tool_grant(
+    claims: dict[str, Any],
+    tool_name: str,
+    *,
+    runtime_binding_id: Optional[str] = None,
+    profile_user_id: Optional[str] = None,
+) -> str:
+    """Recheck a signed, explicit self-profile grant; static credentials cannot opt in."""
+    uid = _clean_string(claims.get("profile_uid"))
+    provider = _clean_string(claims.get("external_provider"))
+    subject = _clean_string(claims.get("sub"))
+    grant_id = _clean_string(claims.get("grant_id"))
+    required_scope = "memory:read" if tool_name == SUMMARY_READ_TOOL else SUMMARY_WRITE_SCOPE
+    if (
+        tool_name not in SUMMARY_OPERATION_TOOLS
+        or not uid
+        or not provider
+        or provider == "static_bearer"
+        or not subject.startswith(f"{provider}:")
+        or not grant_id
+        or claims.get("role") != ROLE_SELF
+        or required_scope not in set(claims.get("scopes") or [])
+        or tool_name not in set(claims.get("allowed_tools") or [])
+        or not isinstance(claims.get("exp"), (int, float))
+        or claims["exp"] <= time.time()
+    ):
+        raise ValueError("summary_tool_grant_required")
+    identity = ExternalConnectorIdentity(provider=provider, subject=subject[len(provider) + 1 :])
+    grants = load_identity_grants(identity)
+    if not any(
+        grant.grant_id == grant_id
+        and grant.profile_uid == uid
+        and grant.role == ROLE_SELF
+        and grant.active
+        and required_scope in grant.scopes
+        and tool_name in grant.allowed_tools
+        and (runtime_binding_id is None or grant.metadata.get("runtime_binding_id") == runtime_binding_id)
+        and (profile_user_id is None or grant.metadata.get("profile_user_id") == profile_user_id)
+        for grant in grants
+    ):
+        raise ValueError("summary_tool_grant_revoked")
+    return uid
 
 
 def session_claims_to_public_resolution(claims: dict[str, Any]) -> dict[str, Any]:

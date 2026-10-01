@@ -49,6 +49,7 @@ on:
       - "backend/ella/__init__.py"
       - "backend/ella/routers/auto_provision.py"
       - "backend/ella/routers/callbacks.py"
+      - "backend/ella/routers/corrections.py"
       - "backend/ella/routers/canonical_events.py"
       - "backend/ella/routers/today_cards.py"
       - "backend/ella/routers/debug_metadata.py"
@@ -81,6 +82,11 @@ on:
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/services/invitation_authority.py"
       - "backend/ella/services/memory_reinterpretation.py"
+      - "backend/ella/services/mcp_identity.py"
+      - "backend/ella/services/summary_tool_registry.py"
+      - "backend/ella/services/summary_runtime.py"
+      - "backend/ella/routers/mcp_well_known.py"
+      - "backend/tests/unit/test_ella_summary_runtime.py"
       - "backend/ella/services/observer_extractor.py"
       - "backend/ella/services/hermes_cloud_photon.py"
       - "backend/ella/services/hermes_cloud_runtime.py"
@@ -125,6 +131,7 @@ on:
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
       - "backend/ella/docs/HERMES_PRODUCT_FIT_CANARY.md"
       - "backend/ella/docs/SUMMARY_CAS_ROLLOUT.md"
+      - "backend/ella/docs/MAIN_CHAT_SUMMARY_TOOLS.md"
       - "backend/ella/docs/UNIFIED_MEMORY_CONTEXT.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
       - "backend/tests/fixtures/hermes_product_fit_callback_v1.json"
@@ -151,6 +158,8 @@ on:
       - "backend/tests/unit/test_conversation_summary_cas.py"
       - "backend/tests/unit/test_conversation_processing_callers.py"
       - "backend/tests/unit/test_ella_conversation_corrections.py"
+      - "backend/tests/unit/test_ella_main_chat_summary_tools.py"
+      - "backend/tests/unit/test_ella_mcp_identity.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
       - "backend/tests/unit/test_ella_canonical_context.py"
       - "backend/tests/unit/test_ella_canonical_omi.py"
@@ -233,6 +242,7 @@ on:
       - "backend/ella/__init__.py"
       - "backend/ella/routers/auto_provision.py"
       - "backend/ella/routers/callbacks.py"
+      - "backend/ella/routers/corrections.py"
       - "backend/ella/routers/canonical_events.py"
       - "backend/ella/routers/today_cards.py"
       - "backend/ella/routers/debug_metadata.py"
@@ -265,6 +275,11 @@ on:
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/services/invitation_authority.py"
       - "backend/ella/services/memory_reinterpretation.py"
+      - "backend/ella/services/mcp_identity.py"
+      - "backend/ella/services/summary_tool_registry.py"
+      - "backend/ella/services/summary_runtime.py"
+      - "backend/ella/routers/mcp_well_known.py"
+      - "backend/tests/unit/test_ella_summary_runtime.py"
       - "backend/ella/services/observer_extractor.py"
       - "backend/ella/services/hermes_cloud_photon.py"
       - "backend/ella/services/hermes_cloud_runtime.py"
@@ -309,6 +324,7 @@ on:
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
       - "backend/ella/docs/HERMES_PRODUCT_FIT_CANARY.md"
       - "backend/ella/docs/SUMMARY_CAS_ROLLOUT.md"
+      - "backend/ella/docs/MAIN_CHAT_SUMMARY_TOOLS.md"
       - "backend/ella/docs/UNIFIED_MEMORY_CONTEXT.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
       - "backend/tests/fixtures/hermes_product_fit_callback_v1.json"
@@ -335,6 +351,8 @@ on:
       - "backend/tests/unit/test_conversation_summary_cas.py"
       - "backend/tests/unit/test_conversation_processing_callers.py"
       - "backend/tests/unit/test_ella_conversation_corrections.py"
+      - "backend/tests/unit/test_ella_main_chat_summary_tools.py"
+      - "backend/tests/unit/test_ella_mcp_identity.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
       - "backend/tests/unit/test_ella_canonical_context.py"
       - "backend/tests/unit/test_ella_canonical_omi.py"
@@ -428,6 +446,7 @@ jobs:
           "Jinja2==3.1.4"
           "jsonschema==4.23.0"
           "numpy==1.26.4"
+          "Pillow==10.4.0"
           "PyJWT==2.9.0"
           "pytest==8.3.2"
           "openapi-spec-validator==0.7.1"
@@ -511,6 +530,11 @@ jobs:
           ella/services/hermes_cloud_policy.py
           ella/services/invitation_authority.py
           ella/services/memory_reinterpretation.py
+          ella/services/mcp_identity.py
+          ella/services/summary_tool_registry.py
+          ella/services/summary_runtime.py
+          ella/routers/mcp_well_known.py
+          tests/unit/test_ella_summary_runtime.py
           ella/services/observer_extractor.py
           ella/services/hermes_cloud_runtime.py
           ella/routers/photon.py
@@ -545,6 +569,8 @@ jobs:
           tests/unit/test_capture_buffer_retention.py
           tests/unit/test_capture_incident_1210_regressions.py
           tests/unit/test_ella_reviewed_route_integration.py
+          tests/unit/test_ella_main_chat_summary_tools.py
+          tests/unit/test_ella_mcp_identity.py
 
       - name: Validate formatting and OpenAPI contract
         run: >-
@@ -590,6 +616,11 @@ jobs:
           ella/services/consent_authority.py ella/services/invitation_authority.py
           ella/services/correction_honcho_contract.py
           ella/services/memory_reinterpretation.py
+          ella/services/mcp_identity.py
+          ella/services/summary_tool_registry.py
+          ella/services/summary_runtime.py
+          ella/routers/mcp_well_known.py
+          tests/unit/test_ella_summary_runtime.py
           ella/services/observer_extractor.py
           ella/services/provisioning.py ella/services/runtime_resolver.py
           ella/services/summary_recovery.py
@@ -625,6 +656,8 @@ jobs:
           tests/unit/test_ella_app_settings.py
           tests/unit/test_ella_auth_authority_contract.py
           tests/unit/test_ella_conversation_corrections.py
+          tests/unit/test_ella_main_chat_summary_tools.py
+          tests/unit/test_ella_mcp_identity.py
           tests/unit/test_ella_canonical_context.py
           tests/unit/test_ella_debug_metadata.py
           tests/unit/test_ella_incident_1182_callback_auth.py
@@ -671,6 +704,57 @@ jobs:
           ella/routers/voice.py
           &&
           python -c "import yaml; from openapi_spec_validator import validate; validate(yaml.safe_load(open('ella/docs/hermes-cloud-runtime-targets.openapi.yaml', encoding='utf-8')))"
+
+      - name: Run main-chat summary authority and canonical receipt contracts
+        run: |
+          set -euo pipefail
+          summary_contract_suites=(
+            tests/unit/test_ella_main_chat_summary_tools.py
+            tests/unit/test_ella_conversation_corrections.py
+            tests/unit/test_ella_plato_mcp.py
+            tests/unit/test_ella_mcp_identity.py
+            tests/unit/test_ella_summary_runtime.py
+          )
+          summary_contract_ids="$(pytest --collect-only -q "${summary_contract_suites[@]}")"
+          # Preserve all 194 prior contracts plus 20 composed strict Hermes lane cases.
+          test "$(grep -c '::' <<<"$summary_contract_ids")" -eq 214
+          required_summary_contract_ids=(
+            "tests/unit/test_ella_main_chat_summary_tools.py::test_exact_success_receipt_and_undo_preserve_transcript_history[True]"
+            "tests/unit/test_ella_main_chat_summary_tools.py::test_exact_success_receipt_and_undo_preserve_transcript_history[False]"
+            "tests/unit/test_ella_main_chat_summary_tools.py::test_concurrent_duplicate_commits_one_version"
+            "tests/unit/test_ella_main_chat_summary_tools.py::test_idempotency_payload_change_rejected"
+            "tests/unit/test_ella_main_chat_summary_tools.py::test_canonical_failure_replay_repairs_receipt_without_provider_or_new_version[True]"
+            "tests/unit/test_ella_main_chat_summary_tools.py::test_canonical_failure_replay_repairs_receipt_without_provider_or_new_version[False]"
+            "tests/unit/test_ella_main_chat_summary_tools.py::test_strict_undo_canonical_failure_is_pending_and_replay_repairs_same_version[True]"
+            "tests/unit/test_ella_main_chat_summary_tools.py::test_strict_undo_canonical_failure_is_pending_and_replay_repairs_same_version[False]"
+            "tests/unit/test_ella_main_chat_summary_tools.py::test_confirmed_previous_operation_receipt_survives_newer_pending_version"
+            "tests/unit/test_ella_main_chat_summary_tools.py::test_fail_closed_without_summary_or_receipt_write[wrong-owner]"
+            "tests/unit/test_ella_main_chat_summary_tools.py::test_fail_closed_without_summary_or_receipt_write[no-binding]"
+            "tests/unit/test_ella_main_chat_summary_tools.py::test_fail_closed_without_summary_or_receipt_write[provider]"
+            "tests/unit/test_ella_main_chat_summary_tools.py::test_fail_closed_without_summary_or_receipt_write[transcript-race]"
+            "tests/unit/test_ella_main_chat_summary_tools.py::test_fail_closed_without_summary_or_receipt_write[version-race]"
+            "tests/unit/test_ella_main_chat_summary_tools.py::test_consent_revoked_while_provider_runs_blocks_write"
+            "tests/unit/test_ella_main_chat_summary_tools.py::test_strict_provider_response_cannot_turn_fallback_into_generated_summary[generated0]"
+            "tests/unit/test_ella_mcp_identity.py::test_summary_write_scope_requires_explicit_self_grant"
+            "tests/unit/test_ella_mcp_identity.py::test_summary_tool_revalidates_durable_grant_and_exact_runtime"
+            "tests/unit/test_ella_mcp_identity.py::test_summary_tool_rejects_wrong_or_expired_session[external_provider-static_bearer]"
+            "tests/unit/test_ella_plato_mcp.py::test_summary_tools_discovery_requires_runtime_registration"
+            "tests/unit/test_ella_plato_mcp.py::test_summary_tool_dispatch_uses_session_owner_and_rejects_model_uid"
+            "tests/unit/test_ella_plato_mcp.py::test_signed_summary_lane_never_lists_or_dispatches_global_legacy_tools"
+            "tests/unit/test_ella_summary_runtime.py::test_real_runtime_lane_signed_discovery_and_write[False]"
+            "tests/unit/test_ella_summary_runtime.py::test_real_runtime_lane_signed_discovery_and_write[True]"
+            "tests/unit/test_ella_summary_runtime.py::test_real_runtime_lane_rejects_wrong_observed_authority[runtime_target_mode-hermes-voice]"
+            "tests/unit/test_ella_summary_runtime.py::test_real_runtime_lane_rejects_wrong_observed_authority[provider-hermes_cloud]"
+            "tests/unit/test_ella_summary_runtime.py::test_real_runtime_consent_revoked_during_resolution_is_rejected"
+            "tests/unit/test_ella_summary_runtime.py::test_real_runtime_authority_change_during_provider_blocks_publication[binding]"
+            "tests/unit/test_ella_summary_runtime.py::test_real_runtime_writer_rejects_binding_replacement_without_mcp"
+            "tests/unit/test_ella_summary_runtime.py::test_real_cloud_authority_is_not_a_summary_lane"
+          )
+          for required_id in "${required_summary_contract_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$summary_contract_ids"
+          done
+          pytest "${summary_contract_suites[@]}" -v | tee /tmp/main-chat-summary-contract-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/main-chat-summary-contract-pytest.log
 
       - name: Run capture buffer persistence regression
         run: |
@@ -1238,7 +1322,8 @@ jobs:
               tests/unit/test_ella_plato_mcp.py |
               sed '/^$/d'
           )"
-          test "$(grep -c '::' <<<"$authority_split_ids")" -eq 449
+          # Prior 449 tests plus seven explicit-summary MCP regression cases.
+          test "$(grep -c '::' <<<"$authority_split_ids")" -eq 456
           required_authority_split_ids=(
             "tests/unit/test_ella_provision_authority_split.py::test_new_user_auto_provision_posts_only_to_hermes_authority"
             "tests/unit/test_ella_provision_authority_split.py::test_real_provision_client_and_coordinator_reject_before_http_or_repository_side_effect[two_way_url_swap]"
@@ -1267,6 +1352,13 @@ jobs:
             "tests/unit/test_ella_provision_authority_split.py::test_retained_history_consumers_remain_on_legacy_authority_pair"
             "tests/unit/test_ella_plato_mcp.py::test_plato_workspace_search_uses_retained_authority_pair"
             "tests/unit/test_ella_plato_mcp.py::test_plato_workspace_authority_conflict_fails_before_http"
+            "tests/unit/test_ella_plato_mcp.py::test_summary_tools_discovery_requires_runtime_registration"
+            "tests/unit/test_ella_plato_mcp.py::test_summary_tools_static_defaultoff_and_missing_handler_are_hidden"
+            "tests/unit/test_ella_plato_mcp.py::test_summary_tool_dispatch_uses_session_owner_and_rejects_model_uid"
+            "tests/unit/test_ella_plato_mcp.py::test_explicit_summary_read_exposes_chosen_owner_version"
+            "tests/unit/test_ella_plato_mcp.py::test_explicit_summary_read_refuses_unconfirmed_active_version[pending]"
+            "tests/unit/test_ella_plato_mcp.py::test_explicit_summary_read_refuses_unconfirmed_active_version[failed]"
+            "tests/unit/test_ella_plato_mcp.py::test_signed_summary_lane_never_lists_or_dispatches_global_legacy_tools"
           )
           for required_id in "${required_authority_split_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$authority_split_ids"

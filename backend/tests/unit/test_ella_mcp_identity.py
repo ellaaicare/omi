@@ -1,6 +1,7 @@
 import pytest
 import sys
 import types
+from ella.services import mcp_identity
 
 from ella.services.mcp_identity import (
     ExternalConnectorIdentity,
@@ -184,3 +185,71 @@ def test_provision_identity_grant_writes_durable_record(monkeypatch):
     assert write["merge"] is True
     assert write["data"]["provider_subject"] == "google:google-sub-1"
     assert write["data"]["created_at"] == write["data"]["updated_at"]
+
+
+def test_summary_write_scope_requires_explicit_self_grant():
+    assert "summaries:write" not in _grant().scopes
+    assert "summaries:write" not in _grant(role="caregiver", scopes=["summaries:write"]).scopes
+    assert "summaries:write" in _grant(scopes=["summaries:write"]).scopes
+
+
+def test_summary_tool_revalidates_durable_grant_and_exact_runtime(monkeypatch):
+    tool = "companion_correct_conversation"
+    grant = _grant(
+        scopes=["summaries:write"],
+        allowed_tools=[tool],
+        metadata={"runtime_binding_id": "binding-1", "profile_user_id": "profile-1"},
+    )
+    claims = {
+        "profile_uid": "user-1",
+        "role": "self",
+        "external_provider": "google",
+        "sub": "google:google-sub-1",
+        "grant_id": grant.grant_id,
+        "scopes": grant.scopes,
+        "allowed_tools": grant.allowed_tools,
+        "exp": 9999999999,
+    }
+    monkeypatch.setattr(mcp_identity, "load_identity_grants", lambda identity: [grant])
+    assert (
+        mcp_identity.require_summary_tool_grant(
+            claims, tool, runtime_binding_id="binding-1", profile_user_id="profile-1"
+        )
+        == "user-1"
+    )
+    with pytest.raises(ValueError, match="revoked"):
+        mcp_identity.require_summary_tool_grant(
+            claims, tool, runtime_binding_id="different-binding", profile_user_id="profile-1"
+        )
+    monkeypatch.setattr(mcp_identity, "load_identity_grants", lambda identity: [])
+    with pytest.raises(ValueError, match="revoked"):
+        mcp_identity.require_summary_tool_grant(claims, tool)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("profile_uid", "other-owner"),
+        ("role", "caregiver"),
+        ("external_provider", "static_bearer"),
+        ("exp", 0),
+        ("allowed_tools", []),
+    ],
+)
+def test_summary_tool_rejects_wrong_or_expired_session(monkeypatch, field, value):
+    tool = "companion_resummarize_conversation"
+    grant = _grant(scopes=["summaries:write"], allowed_tools=[tool])
+    claims = {
+        "profile_uid": "user-1",
+        "role": "self",
+        "external_provider": "google",
+        "sub": "google:google-sub-1",
+        "grant_id": grant.grant_id,
+        "scopes": grant.scopes,
+        "allowed_tools": grant.allowed_tools,
+        "exp": 9999999999,
+    }
+    claims[field] = value
+    monkeypatch.setattr(mcp_identity, "load_identity_grants", lambda identity: [grant])
+    with pytest.raises(ValueError):
+        mcp_identity.require_summary_tool_grant(claims, tool)
