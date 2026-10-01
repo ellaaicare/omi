@@ -208,7 +208,7 @@ struct GuardianPlaybackEvent {
 }
 
 enum GuardianPlaybackReportOutcome: Equatable {
-    case accepted
+    case accepted(statusCode: Int)
     case rejected(statusCode: Int)
     case invalidResponse
     case transportFailed
@@ -229,10 +229,14 @@ enum GuardianPlaybackReportOutcome: Equatable {
     }
 
     var diagnosticHTTPStatus: Int {
-        if case .rejected(let statusCode) = self, (100...599).contains(statusCode) {
+        switch self {
+        case .accepted(let statusCode) where (200...299).contains(statusCode):
             return statusCode
+        case .rejected(let statusCode) where (100...599).contains(statusCode):
+            return statusCode
+        default:
+            return 0
         }
-        return 0
     }
 }
 
@@ -365,7 +369,8 @@ final class GuardianPlaybackReporter: @unchecked Sendable {
             guard !Task.isCancelled else { return .cancelled }
             guard GuardianModeAvailability.shared.isCurrent(lease) else { return .authorityChanged }
             guard let http = response as? HTTPURLResponse else { return .invalidResponse }
-            return (200..<300).contains(http.statusCode) ? .accepted : .rejected(statusCode: http.statusCode)
+            return (200..<300).contains(http.statusCode)
+                ? .accepted(statusCode: http.statusCode) : .rejected(statusCode: http.statusCode)
         } catch is CancellationError {
             return .cancelled
         } catch GuardianCredentialError.ownerChanged {

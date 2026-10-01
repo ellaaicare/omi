@@ -559,7 +559,7 @@ private func testNativeAuthDenialsDoNotStartGETOrPOST() async throws {
             }
         )
         let outcome = await reporter.report(playbackEvent(), lease: lease)
-        try expect(outcome != .accepted, "\(name) native credential reported playback")
+        try expect(outcome != .accepted(statusCode: 200), "\(name) native credential reported playback")
         try expect(recorder.requestCount == 0, "\(name) native credential started POST")
     }
 }
@@ -579,7 +579,7 @@ private func testAuthenticatedPlaybackReporterUsesExactLeaseOwner() async throws
         }
     )
     let outcome = await reporter.report(playbackEvent(), lease: lease)
-    try expect(outcome == .accepted, "current authenticated playback report was denied")
+    try expect(outcome == .accepted(statusCode: 200), "current authenticated playback report was denied")
     let request = try require(recorder.lastRequest, "playback POST was not recorded")
     try expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer firebase-token-a", "POST bearer missing")
     let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any]
@@ -591,7 +591,7 @@ private func playbackHTTPResponse(_ request: URLRequest, statusCode: Int) -> HTT
 }
 
 private func testPlaybackReporterRequiresHTTPAcknowledgement() async throws {
-    for statusCode in [200, 201, 204, 401, 403, 404, 500] {
+    for statusCode in [199, 200, 201, 204, 299, 300, 401, 403, 404, 500, 599] {
         configure(nil)
         configure("uid-a")
         let lease = try require(GuardianModeAvailability.shared.captureLease(), "missing ACK lease")
@@ -608,9 +608,31 @@ private func testPlaybackReporterRequiresHTTPAcknowledgement() async throws {
         let outcome = await reporter.report(playbackEvent(), lease: lease)
         let expected: GuardianPlaybackReportOutcome =
             (200..<300).contains(statusCode)
-            ? .accepted : .rejected(statusCode: statusCode)
+            ? .accepted(statusCode: statusCode) : .rejected(statusCode: statusCode)
         try expect(outcome == expected, "HTTP \(statusCode) was not classified truthfully")
+        try expect(outcome.diagnosticHTTPStatus == statusCode, "HTTP \(statusCode) was lost from diagnostics")
+        try expect(
+            outcome.diagnosticCategory == ((200..<300).contains(statusCode) ? "http_accepted" : "http_rejected"),
+            "HTTP \(statusCode) changed diagnostic category"
+        )
         try expect(recorder.requestCount == 1, "HTTP \(statusCode) caused an automatic retry")
+    }
+    for statusCode in [-1, 0, 100, 199, 300, 599, 600] {
+        try expect(
+            GuardianPlaybackReportOutcome.accepted(statusCode: statusCode).diagnosticHTTPStatus == 0,
+            "out-of-range accepted HTTP status escaped diagnostics"
+        )
+    }
+    for statusCode in [-1, 0, 99, 600] {
+        try expect(
+            GuardianPlaybackReportOutcome.rejected(statusCode: statusCode).diagnosticHTTPStatus == 0,
+            "out-of-range rejected HTTP status escaped diagnostics"
+        )
+    }
+    for outcome in [
+        GuardianPlaybackReportOutcome.invalidResponse, .transportFailed, .cancelled, .authorityChanged, .unavailable,
+    ] {
+        try expect(outcome.diagnosticHTTPStatus == 0, "non-HTTP outcome manufactured a diagnostic status")
     }
 }
 
@@ -682,7 +704,7 @@ private func testPlaybackReporterWaitsForACKAndRejectsRetiredLease() async throw
         release.open()
         let outcome = await task.value
         try expect(
-            outcome == (transition == "current" ? .accepted : .authorityChanged),
+            outcome == (transition == "current" ? .accepted(statusCode: 200) : .authorityChanged),
             "late ACK bypassed exact lease after \(transition)")
         try expect(recorder.requestCount == 1, "held POST was resubmitted")
     }
@@ -734,7 +756,7 @@ private func testFailedPlaybackReceiptACKIsNotAudibleSuccess() async throws {
     )
     let outcome = await reporter.report(playbackEvent(eventType: "failed"), lease: lease)
     let body = try JSONSerialization.jsonObject(with: recorder.lastRequest?.httpBody ?? Data()) as? [String: Any]
-    try expect(outcome == .accepted, "server acceptance of failure receipt was lost")
+    try expect(outcome == .accepted(statusCode: 200), "server acceptance of failure receipt was lost")
     try expect(body?["event_type"] as? String == "failed", "failure receipt was converted to playback success")
 }
 
@@ -788,7 +810,10 @@ private func testPlaybackReporterDuplicateReceiptKeepsOriginalIdentity() async t
     let first = await reporter.report(playbackEvent(), lease: lease)
     let originalBody = recorder.lastRequest?.httpBody
     let duplicate = await reporter.report(playbackEvent(), lease: lease)
-    try expect(first == .accepted && duplicate == .accepted, "idempotent server ACK was not accepted")
+    try expect(
+        first == .accepted(statusCode: 200) && duplicate == .accepted(statusCode: 200),
+        "idempotent server ACK was not accepted"
+    )
     let original = try JSONSerialization.jsonObject(with: originalBody ?? Data()) as? NSDictionary
     let repeated = try JSONSerialization.jsonObject(with: recorder.lastRequest?.httpBody ?? Data()) as? NSDictionary
     try expect(original == repeated, "duplicate receipt manufactured a new playback identity")
