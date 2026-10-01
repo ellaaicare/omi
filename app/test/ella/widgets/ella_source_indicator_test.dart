@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -149,6 +150,25 @@ void main() {
     expect(hasCurrentHermesSummary(_memory(enrichment: _confirmedEnrichment(), deleted: true)), isFalse);
     for (final status in ConversationStatus.values.where((value) => value != ConversationStatus.completed)) {
       expect(hasCurrentHermesSummary(_memory(enrichment: _confirmedEnrichment(), status: status)), isFalse);
+    }
+  });
+
+  test('FastAPI list and detail wire fixtures retain only confirmed current Hermes attribution', () {
+    // The backend public model test verifies these exact shared response records through FastAPI serialization.
+    final fixture = jsonDecode(File('test/ella/widgets/fixtures/hermes_summary_api_response.json').readAsStringSync())
+        as Map<String, dynamic>;
+    for (final rawCase in fixture['cases'] as List) {
+      final testCase = rawCase as Map<String, dynamic>;
+      final response = <String, dynamic>{
+        ...fixture['base_response'] as Map<String, dynamic>,
+        'enrichment_state': testCase['wire_enrichment_state'],
+      };
+      final memory = ServerConversation.fromJson(response);
+      expect(hasCurrentHermesSummary(memory), testCase['expected_hermes'], reason: testCase['case'] as String);
+      expect(memory.activeSummaryVersionId, 'summary-1');
+      for (final privateField in ['error', 'authority_digest', 'request_fingerprint_input']) {
+        expect(memory.enrichmentState?.containsKey(privateField) ?? false, isFalse);
+      }
     }
   });
 
