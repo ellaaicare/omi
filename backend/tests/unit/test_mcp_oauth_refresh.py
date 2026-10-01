@@ -360,6 +360,40 @@ def test_s256_code_exact_registered_client_redirect_and_offline_marker(setup, mo
         assert client.get("/v1/ella/mcp/authorize", params={**params, **changes}).status_code == 400
 
 
+@pytest.mark.parametrize(
+    "verifier", ["\U0001f512" * 43, "\u00e9" * 43, "v" * 42, "v" * 129], ids=["utf", "nonascii", "short", "long"]
+)
+def test_offline_code_invalid_verifier_shape_is_clean_400(setup, monkeypatch, caplog, verifier):
+    module = _load_module(monkeypatch)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    code = module._store_authorization_code(
+        setup[2],
+        challenge,
+        "S256",
+        dict(
+            client_id="client",
+            redirect_uri="https://client.test/callback",
+            scope="tools:read memory:read offline_access",
+        ),
+    )
+    response = _client(module).post(
+        "/v1/ella/mcp/token",
+        data=dict(
+            grant_type="authorization_code",
+            client_id="client",
+            redirect_uri="https://client.test/callback",
+            code=code,
+            code_verifier=verifier,
+        ),
+    )
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Invalid code_verifier (PKCE)"}
+    assert verifier not in response.text
+    assert verifier not in caplog.text
+    assert not setup[0].rows
+    assert code not in module._auth_codes
+
+
 @pytest.mark.parametrize("binding", ["client_id", "redirect_uri", "code_verifier"])
 def test_offline_code_wrong_binding_is_consumed_without_family_creation(setup, monkeypatch, binding):
     module = _load_module(monkeypatch)

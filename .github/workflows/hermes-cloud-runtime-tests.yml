@@ -783,9 +783,13 @@ jobs:
           black --check --line-length 120 --skip-string-normalization "${refresh_files[@]}"
           refresh_suites=(tests/unit/test_mcp_oauth_refresh.py tests/postgres/test_mcp_oauth_refresh_postgres.py)
           refresh_ids="$(pytest --collect-only -q "${refresh_suites[@]}")"
-          test "$(grep -c '::' <<<"$refresh_ids")" -eq 50
+          test "$(grep -c '::' <<<"$refresh_ids")" -eq 54
           required_refresh_ids=(
             "tests/unit/test_mcp_oauth_refresh.py::test_default_off_no_database_or_refresh_metadata"
+            "tests/unit/test_mcp_oauth_refresh.py::test_offline_code_invalid_verifier_shape_is_clean_400[utf]"
+            "tests/unit/test_mcp_oauth_refresh.py::test_offline_code_invalid_verifier_shape_is_clean_400[nonascii]"
+            "tests/unit/test_mcp_oauth_refresh.py::test_offline_code_invalid_verifier_shape_is_clean_400[short]"
+            "tests/unit/test_mcp_oauth_refresh.py::test_offline_code_invalid_verifier_shape_is_clean_400[long]"
             "tests/unit/test_mcp_oauth_refresh.py::test_replay_burns_family_and_all_renewable_access"
             "tests/unit/test_mcp_oauth_refresh.py::test_authority_change_burns_refresh_and_old_access[grant_aba]"
             "tests/unit/test_mcp_oauth_refresh.py::test_authority_change_burns_refresh_and_old_access[consent_aba]"

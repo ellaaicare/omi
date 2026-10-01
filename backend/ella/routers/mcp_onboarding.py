@@ -6,6 +6,7 @@ import hashlib
 import html
 import json
 import os
+import re
 import time
 import urllib.parse
 import uuid
@@ -295,6 +296,8 @@ def _consume_authorization_code_context(
         refresh_context["client_id"] != client_id or refresh_context["redirect_uri"] != redirect_uri
     ):
         raise HTTPException(status_code=400, detail="Invalid authorization code binding")
+    if refresh_context and not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", code_verifier):
+        raise HTTPException(status_code=400, detail="Invalid code_verifier (PKCE)")
     stored_challenge = item.get("code_challenge") or ""
     stored_method = item.get("code_challenge_method") or ""
     if stored_challenge:
