@@ -207,12 +207,91 @@ struct GuardianPlaybackEvent {
     let metadata: [String: Any]?
 }
 
-/// Authenticated native playback reporter used by the production manager and
-/// the standalone production-source harness. URLSession resume (the report
-/// effect) executes inside the exact lease+UID authorization boundary.
+enum GuardianPlaybackReportOutcome: Equatable {
+    case accepted
+    case rejected(statusCode: Int)
+    case invalidResponse
+    case transportFailed
+    case cancelled
+    case authorityChanged
+    case unavailable
+
+    var diagnosticCategory: String {
+        switch self {
+        case .accepted: return "http_accepted"
+        case .rejected: return "http_rejected"
+        case .invalidResponse: return "invalid_response"
+        case .transportFailed: return "transport_failed"
+        case .cancelled: return "cancelled"
+        case .authorityChanged: return "authority_changed"
+        case .unavailable: return "unavailable"
+        }
+    }
+
+    var diagnosticHTTPStatus: Int {
+        if case .rejected(let statusCode) = self, (100...599).contains(statusCode) {
+            return statusCode
+        }
+        return 0
+    }
+}
+
+/// Holds the completion and cancellation together so cancellation finishes
+/// even if a transport never calls back, and a late callback is harmless.
+private final class GuardianPlaybackReportAttempt: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<URLResponse, Error>?
+    private var cancellation: (() -> Void)?
+    private var completed = false
+    private var cancelled = false
+
+    func install(_ continuation: CheckedContinuation<URLResponse, Error>) {
+        lock.lock()
+        if completed {
+            lock.unlock()
+            continuation.resume(throwing: CancellationError())
+        } else {
+            self.continuation = continuation
+            lock.unlock()
+        }
+    }
+
+    func finish(_ result: Result<URLResponse, Error>) {
+        lock.lock()
+        guard !completed else { lock.unlock(); return }
+        completed = true
+        let continuation = self.continuation
+        self.continuation = nil
+        cancellation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+    }
+
+    func setCancellation(_ cancellation: @escaping () -> Void) {
+        lock.lock()
+        let shouldCancel = cancelled
+        if !completed { self.cancellation = cancellation }
+        lock.unlock()
+        if shouldCancel { cancellation() }
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let cancellation = self.cancellation
+        self.cancellation = nil
+        lock.unlock()
+        finish(.failure(CancellationError()))
+        cancellation?()
+    }
+}
+
+/// Transport starts inside the exact lease+UID lock, as in native polling.
+/// Success means an HTTP ACK under the same lease, never merely scheduling.
 final class GuardianPlaybackReporter: @unchecked Sendable {
     typealias TokenProvider = (GuardianWorkLease) async throws -> GuardianBearerCredential
-    typealias Transport = (URLRequest) -> Void
+    typealias TransportCompletion = (Result<URLResponse, Error>) -> Void
+    typealias Transport = (URLRequest, @escaping TransportCompletion) -> (() -> Void)
 
     private let backendURL: () -> String
     private let tokenProvider: TokenProvider
@@ -229,15 +308,18 @@ final class GuardianPlaybackReporter: @unchecked Sendable {
     }
 
     @discardableResult
-    func report(_ event: GuardianPlaybackEvent, lease: GuardianWorkLease) async -> Bool {
+    func report(_ event: GuardianPlaybackEvent, lease: GuardianWorkLease) async -> GuardianPlaybackReportOutcome {
         do {
+            guard !Task.isCancelled else { return .cancelled }
             let credential = try await tokenProvider(lease)
             guard credential.uid == lease.uid,
-                  !Task.isCancelled,
-                  GuardianModeAvailability.shared.isCurrent(lease),
-                  let url = URL(string: "\(backendURL())/v1/ella/guardian/playback-event") else {
-                return false
+                !credential.token.isEmpty,
+                GuardianModeAvailability.shared.isCurrent(lease)
+            else {
+                return .authorityChanged
             }
+            guard !Task.isCancelled else { return .cancelled }
+            guard let url = URL(string: "\(backendURL())/v1/ella/guardian/playback-event") else { return .unavailable }
 
             var eventMetadata = event.metadata ?? [:]
             if let triggerType = event.triggerType {
@@ -254,7 +336,7 @@ final class GuardianPlaybackReporter: @unchecked Sendable {
             if let queueItemId = event.queueItemId { body["queue_item_id"] = queueItemId }
             if let traceId = event.traceId { body["trace_id"] = traceId }
             if !eventMetadata.isEmpty { body["metadata"] = eventMetadata }
-            guard let data = try? JSONSerialization.data(withJSONObject: body) else { return false }
+            guard let data = try? JSONSerialization.data(withJSONObject: body) else { return .unavailable }
 
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
@@ -263,12 +345,37 @@ final class GuardianPlaybackReporter: @unchecked Sendable {
             request.timeoutInterval = 3.0
             request.httpBody = data
 
-            return GuardianModeAvailability.shared.performIfCurrent(lease) {
-                transport(request)
-                return true
+            let attempt = GuardianPlaybackReportAttempt()
+            let response = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    attempt.install(continuation)
+                    let started = GuardianModeAvailability.shared.performIfCurrent(lease) {
+                        guard !Task.isCancelled else { return false }
+                        let cancellation = transport(request, attempt.finish)
+                        attempt.setCancellation(cancellation)
+                        return true
+                    }
+                    if !started {
+                        attempt.finish(.failure(GuardianCredentialError.ownerChanged))
+                    }
+                }
+            } onCancel: {
+                attempt.cancel()
             }
+            guard !Task.isCancelled else { return .cancelled }
+            guard GuardianModeAvailability.shared.isCurrent(lease) else { return .authorityChanged }
+            guard let http = response as? HTTPURLResponse else { return .invalidResponse }
+            return (200..<300).contains(http.statusCode) ? .accepted : .rejected(statusCode: http.statusCode)
+        } catch is CancellationError {
+            return .cancelled
+        } catch GuardianCredentialError.ownerChanged {
+            return .authorityChanged
+        } catch GuardianCredentialError.unavailable {
+            return .unavailable
         } catch {
-            return false
+            if Task.isCancelled { return .cancelled }
+            if !GuardianModeAvailability.shared.isCurrent(lease) { return .authorityChanged }
+            return .transportFailed
         }
     }
 }
