@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -4613,6 +4614,144 @@ def test_correction_prompt_has_no_hard_coded_account_persona():
     assert "warm companion summary correction writer" not in prompt
 
 
+def test_correction_prompt_requires_nonconversational_guard_compatible_output():
+    prompt = corrections._build_direct_correction_prompt(
+        request=corrections.ConversationCorrectionRequest(correction_text="Fix the summary.", source="ios"),
+        structured={},
+        transcript="The family shared tea today.",
+        segment_count=1,
+    )
+    assert "title and overview must contain only descriptive summary content" in prompt
+    assert "not an acknowledgment, reply to the correction, or message to a person" in prompt
+    assert "Do not begin any sentence with a single capitalized word followed by a comma" in prompt
+    assert "Do not end a sentence with a comma followed by a standalone capitalized word" in prompt
+    assert "Keep time and weekday details inside the descriptive sentence" in prompt
+    assert "Never address the account holder directly" in prompt
+    assert "Only use a person's name if it appears in the transcript" in prompt
+
+
+@pytest.mark.parametrize(
+    "overview,blocked",
+    [
+        ("[Ella] The family shared tea today.", False),
+        ("[Ella] Morgan shared tea with the family.", False),
+        ("[Ella] Today, the family shared tea.", True),
+        ("[Ella] The family shared tea, Saturday.", True),
+        ("[Ella] Hello Morgan, the family shared tea.", True),
+        ("[Ella] Morgan, the family shared tea.", True),
+    ],
+)
+def test_correction_descriptive_output_and_ambiguous_comma_forms_keep_original_guard(monkeypatch, overview, blocked):
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    arguments = {
+        "uid": "synthetic-owner",
+        "transcript": "Today the family shared tea. Morgan joined them on Saturday.",
+        "structured": {},
+        "correction_text": "Keep the tea with the family.",
+        "corrected": corrections._normalize_direct_summary(
+            {"title": "tea with the family", "overview": overview.removeprefix("[Ella] ")}, {}
+        ),
+    }
+    if blocked:
+        with pytest.raises(corrections.CorrectionIdentityGateError) as error:
+            corrections._enforce_correction_identity_gate(**arguments)
+        assert error.value.reason == "vocative_or_salutation_detected"
+    else:
+        corrections._enforce_correction_identity_gate(**arguments)
+
+
+@pytest.mark.parametrize("field", ["title", "overview"])
+@pytest.mark.parametrize(
+    "pattern,text",
+    [
+        ("greeting", "Hello Morgan, the family shared tea."),
+        ("leading_address", "Today, the family shared tea."),
+        ("trailing_address", "The family shared tea, Saturday."),
+    ],
+)
+def test_blocked_correction_diagnostics_are_fixed_enums_without_candidate_content(
+    monkeypatch, caplog, field, pattern, text
+):
+    private_marker = "synthetic-private-token-abcdef"
+    private_url = "https://synthetic-private.example.test/provider-error"
+    candidate = {
+        "title": "tea with the family",
+        "overview": "[Ella] The family shared tea.",
+        "identity_gate_field": private_marker,
+        "identity_gate_pattern": private_url,
+    }
+    candidate[field] = ("[Ella] " if field == "overview" else "") + text + " " + private_marker + " " + private_url
+    audits, events, updates, apply_calls = [], [], [], []
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    monkeypatch.setattr(corrections, "_persist_correction_audit", lambda uid, cid, rid, value: audits.append(value))
+    monkeypatch.setattr(corrections, "_append_correction_event", lambda uid, cid, rid, value: events.append(value))
+    monkeypatch.setattr(
+        corrections, "_update_conversation_correction_state", lambda uid, cid, value: updates.append(value)
+    )
+
+    async def generate(**kwargs):
+        return candidate
+
+    async def apply(**kwargs):
+        apply_calls.append(kwargs)
+        return {}
+
+    monkeypatch.setattr(corrections, "_generate_corrected_summary", generate)
+    monkeypatch.setattr(corrections, "_apply_corrected_summary", apply)
+    with caplog.at_level("WARNING", logger=corrections.logger.name):
+        response = asyncio.run(
+            corrections._run_direct_correction_apply(
+                uid="synthetic-owner",
+                conversation_id="synthetic-memory",
+                correction_id="synthetic-correction",
+                trace_id="synthetic-trace",
+                request=corrections.ConversationCorrectionRequest(correction_text="Keep the tea."),
+                structured={"title": "tea with the family", "overview": "[Ella] The family shared tea."},
+                transcript="Today the family shared tea. Morgan joined them on Saturday.",
+                segment_count=1,
+                submitted_at="2026-10-01T00:00:00Z",
+                active_summary_version_id="original-version",
+                proposal_id=None,
+            )
+        )
+    assert response.status == "correction_blocked_identity_gate"
+    assert apply_calls == []
+    for payload in (audits[-1], events[-1]):
+        assert payload["identity_gate_field"] == field
+        assert payload["identity_gate_pattern"] == pattern
+        assert "direct_apply_summary" not in payload
+    assert events[-1]["reason"] == "vocative_or_salutation_detected"
+    assert updates[-1]["correction_state"]["pending"] is False
+    assert "identity_gate_field" not in response.model_dump()
+    assert "identity_gate_pattern" not in updates[-1]["correction_state"]
+    assert corrections._correction_identity_gate_diagnostic(candidate) == {
+        "identity_gate_field": field,
+        "identity_gate_pattern": pattern,
+    }
+    logged = [record.__dict__ for record in caplog.records if record.name == corrections.logger.name]
+    assert logged[-1]["identity_gate_field"] == field
+    assert logged[-1]["identity_gate_pattern"] == pattern
+    serialized = json.dumps([audits, events, updates, response.model_dump(), logged], default=str)
+    assert private_marker not in serialized
+    assert private_url not in serialized
+    assert candidate[field] not in serialized
+
+
+def test_missing_or_ungrounded_correction_diagnostic_does_not_invent_pattern(monkeypatch):
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    for value in (None, {}, {"title": "quiet tea", "overview": "[Ella] Rowan shared tea."}):
+        assert corrections._correction_identity_gate_diagnostic(value) == {}
+
+
+def test_correction_diagnostic_uses_the_original_field_and_pattern_priority():
+    assert corrections._correction_identity_gate_diagnostic(
+        {"title": "Today, tea was shared.", "overview": "[Ella] Hello Morgan, tea was shared."}
+    ) == {"identity_gate_field": "title", "identity_gate_pattern": "leading_address"}
+    assert corrections._correction_identity_gate_diagnostic(
+        {"title": "Hello Morgan, tea was shared.", "overview": "[Ella] Today, tea was shared."}
+    ) == {"identity_gate_field": "title", "identity_gate_pattern": "greeting"}
+
+
 def test_identity_gate_allows_name_grounded_in_transcript():
     corrected = {"title": "coffee chat", "overview": "[Ella] Margaret stopped by for coffee."}
 
@@ -4921,6 +5060,8 @@ def test_direct_correction_apply_blocks_and_keeps_prior_version_on_gate_rejectio
     assert result.queued is False
     assert apply_calls == []  # the ungrounded name was never written back
     assert audits[-1]["status"] == "correction_blocked_identity_gate"
+    assert "identity_gate_field" not in audits[-1]
+    assert "identity_gate_pattern" not in events[-1]
     assert events[-1]["stage"] == "direct_apply_blocked_identity_gate"
     assert events[-1]["reason"] == "ungrounded_name_detected"
     assert conversation_updates[-1]["correction_state"]["status"] == "correction_blocked_identity_gate"
