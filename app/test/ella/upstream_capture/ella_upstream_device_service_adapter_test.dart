@@ -112,7 +112,7 @@ class _FakeUpstreamDeviceService extends upstream_service.DeviceService {
   Future<void> stopDiscoverers() async {
     stopDiscovererCalls++;
     final gate = discoveryGate;
-    if (gate != null && !gate.isCompleted) gate.complete();
+    if (discoverCalls > 0 && gate != null && !gate.isCompleted) gate.complete();
   }
 
   @override
@@ -269,10 +269,11 @@ void main() {
     while (service.discoverCalls == 0) {
       await Future<void>.delayed(Duration.zero);
     }
+    final stopsBeforeDispose = service.stopDiscovererCalls;
     onboarding.dispose();
     await scan;
 
-    expect(service.stopDiscovererCalls, 1);
+    expect(service.stopDiscovererCalls, stopsBeforeDispose + 1);
     expect(onboarding.deviceList, isEmpty);
   });
 

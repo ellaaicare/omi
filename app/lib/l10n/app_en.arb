@@ -10612,7 +10612,7 @@
   "ellaChatUnavailableTitle": "Ella could not connect",
   "ellaChatUnavailableBody": "Your message was not sent. Check your connection and try again.",
   "ellaSafetyDataUnavailable": "Ella could not verify this information. Try again before making changes.",
-  "todayWhispersUnavailable": "Whisper status couldn't be verified. Pull down to try again.",
+  "todayWhispersUnavailable": "Whispers are unavailable right now.",
   "todayWhispersTitle": "Whispers",
   "todayWhispersOnDescription": "Whispers are on — Ella can speak up when she can help.",
   "todayWhispersOffDescription": "Whispers are off — open this section to see what Ella has said.",
@@ -11243,7 +11243,7 @@
   "@upstreamCaptureWhispersSaveFailed": {
     "description": "Recoverable Whispers setting save error"
   },
-  "upstreamCaptureWhispersPlaybackUnavailable": "Whispers are on, but spoken playback is not available right now.",
+  "upstreamCaptureWhispersPlaybackUnavailable": "Whispers are on. Spoken help is unavailable right now.",
   "@upstreamCaptureWhispersPlaybackUnavailable": {
     "description": "Whispers configuration is on while native spoken playback is unavailable"
   },
@@ -11251,11 +11251,11 @@
   "@upstreamCaptureWhispersOffDescription": {
     "description": "Whispers configuration is off without claiming capture is active"
   },
-  "upstreamCaptureWhispersPlaybackFailed": "Whispers was saved, but spoken playback could not start. Try again.",
+  "upstreamCaptureWhispersPlaybackFailed": "Whispers are on, but Ella couldn't start spoken help.",
   "@upstreamCaptureWhispersPlaybackFailed": {
     "description": "Whispers native playback start error"
   },
-  "upstreamCaptureWhispersPlaybackStopFailed": "Whispers was saved off, but spoken playback could not stop. Try again.",
+  "upstreamCaptureWhispersPlaybackStopFailed": "Whispers are set to off, but Ella couldn't pause spoken help.",
   "@upstreamCaptureWhispersPlaybackStopFailed": {
     "description": "Whispers native playback stop error"
   }

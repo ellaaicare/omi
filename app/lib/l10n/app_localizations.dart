@@ -16974,7 +16974,7 @@ abstract class AppLocalizations {
   /// No description provided for @todayWhispersUnavailable.
   ///
   /// In en, this message translates to:
-  /// **'Whisper status couldn\'t be verified. Pull down to try again.'**
+  /// **'Whispers are unavailable right now.'**
   String get todayWhispersUnavailable;
 
   /// No description provided for @todayWhispersTitle.
@@ -18924,7 +18924,7 @@ abstract class AppLocalizations {
   /// Whispers configuration is on while native spoken playback is unavailable
   ///
   /// In en, this message translates to:
-  /// **'Whispers are on, but spoken playback is not available right now.'**
+  /// **'Whispers are on. Spoken help is unavailable right now.'**
   String get upstreamCaptureWhispersPlaybackUnavailable;
 
   /// Whispers configuration is off without claiming capture is active
@@ -18936,13 +18936,13 @@ abstract class AppLocalizations {
   /// Whispers native playback start error
   ///
   /// In en, this message translates to:
-  /// **'Whispers was saved, but spoken playback could not start. Try again.'**
+  /// **'Whispers are on, but Ella couldn\'t start spoken help.'**
   String get upstreamCaptureWhispersPlaybackFailed;
 
   /// Whispers native playback stop error
   ///
   /// In en, this message translates to:
-  /// **'Whispers was saved off, but spoken playback could not stop. Try again.'**
+  /// **'Whispers are set to off, but Ella couldn\'t pause spoken help.'**
   String get upstreamCaptureWhispersPlaybackStopFailed;
 }
 

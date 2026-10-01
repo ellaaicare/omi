@@ -23,6 +23,7 @@ import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
 import 'package:omi/ella/services/memory_artwork_api.dart';
+import 'package:omi/ella/services/guardian_mode_service.dart' as guardian_native;
 import 'package:omi/ella/services/today_card_repository.dart';
 import 'package:omi/ella/widgets/memory_artwork_image.dart';
 import 'package:omi/l10n/app_localizations.dart';
@@ -78,8 +79,16 @@ void main() {
   });
 
   setUp(() async {
+    guardian_native.GuardianModeService.whisperStateFence.resetForTesting();
     SharedPreferences.setMockInitialValues({'givenName': 'Margaret'});
     await SharedPreferencesUtil.init();
+  });
+
+  test('Today clearances retain defaults and grow with the shared navigation height', () {
+    expect(todayDockScrollClearance(textScale: 1, safeBottom: 34), 328);
+    expect(todayBackToRecentBottomOffset(textScale: 1, safeBottom: 34), 280);
+    expect(todayDockScrollClearance(textScale: 1, safeBottom: 34, navHeight: 140), 388);
+    expect(todayBackToRecentBottomOffset(textScale: 1, safeBottom: 34, navHeight: 140), 340);
   });
 
   test('recent Home artwork recovery selects today and yesterday only, newest first and bounded', () {
@@ -192,6 +201,132 @@ void main() {
 
     await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/ella_home_memory_mosaic.png'));
   });
+
+  for (final art in ['none', 'mixed', 'all']) {
+    testWidgets('memory rows keep $art artwork proportionate and actions readable at 320 and 3x', (tester) async {
+      final data = await rootBundle.load('assets/images/onboarding-bg-1.webp');
+      final photo = base64Encode(data.buffer.asUint8List());
+      final memories = _ConversationFixtures.withMemories(photoBase64: art == 'none' ? '' : photo);
+      if (art == 'all') {
+        final memory = memories[1];
+        memories[1] = ServerConversation(
+          id: memory.id,
+          createdAt: memory.createdAt,
+          structured: memory.structured,
+          photos: memories[0].photos,
+        );
+      }
+      var opens = 0;
+      var deletes = 0;
+      tester.view.physicalSize = const Size(320, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: ellaThemeData(),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MediaQuery(
+          data: const MediaQueryData(textScaler: TextScaler.linear(3), disableAnimations: true),
+          child: Scaffold(
+            body: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: CustomScrollView(slivers: [
+                memoryGalleryFeedSliver(
+                  layout: MemoryGalleryLayout.grid,
+                  itemCount: memories.length,
+                  itemBuilder: (_, index) => MemoryGalleryCard(
+                    conversation: memories[index],
+                    layout: MemoryGalleryLayout.grid,
+                    artworkApi: _FakeMemoryArtworkApi(),
+                    onOpen: () => opens++,
+                    onDelete: () async {
+                      deletes++;
+                      return false;
+                    },
+                  ),
+                ),
+              ]),
+            ),
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.text('Coffee by the window'), findsOneWidget);
+      expect(tester.getSize(find.byType(MemoryArtworkImage).first), const Size(64, 64));
+      expect(find.byKey(const Key('memory-source-photo')), art == 'none' ? findsNothing : findsWidgets);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(tester.takeException(), isNull);
+      await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/ella_memory_rows_${art}_320_300.png'));
+      await tester.tap(find.text('Coffee by the window'));
+      expect(opens, 1);
+      final deleteAction = tester
+          .widgetList<Semantics>(find.byType(Semantics))
+          .firstWhere((widget) => widget.properties.customSemanticsActions?.isNotEmpty ?? false)
+          .properties
+          .customSemanticsActions!
+          .values
+          .first;
+      deleteAction();
+      expect(deletes, 1);
+      semantics.dispose();
+    });
+  }
+
+  testWidgets('actual Home at 320 and 3x keeps list-first memory content scrollable above navigation', (tester) async {
+    final harness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.withMemories(photoBase64: ''),
+      viewport: const Size(320, 844),
+      textScaler: const TextScaler.linear(3),
+      disableAnimations: true,
+      includeBottomNav: true,
+    );
+    addTearDown(harness.dispose);
+    final scrollable = tester.state<ScrollableState>(
+      find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
+    );
+    for (var offset = 0.0; offset <= scrollable.position.maxScrollExtent; offset += 150) {
+      scrollable.position.jumpTo(offset);
+      await tester.pump();
+      if (find.byKey(const Key('memory-card-memory-2')).evaluate().isNotEmpty) break;
+    }
+    expect(find.byKey(const Key('memory-card-memory-2')), findsOneWidget);
+    expect(tester.getSize(find.byType(MemoryArtworkImage).first), const Size(64, 64));
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(tester.takeException(), isNull);
+    await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/ella_home_memory_rows_320_300.png'));
+  });
+
+  for (final scale in [1.0, 3.0]) {
+    testWidgets('Daily Note actions scroll clear of the fixed capture dock at ${scale}x', (tester) async {
+      final harness = await _pumpHome(tester,
+          conversations: _ConversationFixtures.withMemories(photoBase64: ''),
+          viewport: const Size(320, 844),
+          textScaler: TextScaler.linear(scale),
+          includeBottomNav: true);
+      addTearDown(harness.dispose);
+      final scrollable = tester.state<ScrollableState>(
+        find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
+      );
+      final action = find.byKey(const Key('today-card-read-more'));
+      for (var offset = 0.0; offset <= scrollable.position.maxScrollExtent; offset += 100) {
+        scrollable.position.jumpTo(offset);
+        await tester.pump();
+        if (action.hitTestable().evaluate().isNotEmpty && tester.getBottomLeft(action).dy < 360) break;
+      }
+      expect(action.hitTestable(), findsOneWidget);
+      expect(tester.getSize(action).height, greaterThanOrEqualTo(48));
+      await expectLater(find.byType(MaterialApp),
+          matchesGoldenFile('goldens/ella_home_daily_note_clearance_320_${scale.toInt()}00.png'));
+      await tester.tap(action);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('today-card-detail-scroll')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets('necklace dock routes connect through the provider and the open controls sheet stays live', (
     tester,
@@ -3111,6 +3246,7 @@ void main() {
       conversations: const [],
       viewport: const Size(320, 568),
       textScaler: const TextScaler.linear(3),
+      includeBottomNav: true,
     );
     addTearDown(harness.dispose);
 
@@ -3122,7 +3258,9 @@ void main() {
     await tester.ensureVisible(find.text('Dock controls'));
     await tester.pump();
     expect(find.text('Dock controls'), findsOneWidget);
-    expect(tester.getBottomLeft(find.text('Dock controls')).dy, lessThan(568 - EllaSizes.navBarHeight - 34));
+    final navHeight = BottomNavBar.navigationHeight(tester.element(find.byType(BottomNavBar)));
+    expect(navHeight, greaterThan(EllaSizes.navBarHeight));
+    expect(tester.getBottomLeft(find.text('Dock controls')).dy, lessThan(568 - navHeight - 34));
     expect(tester.takeException(), isNull);
   });
 
@@ -3132,6 +3270,7 @@ void main() {
       conversations: _ConversationFixtures.withMemories(photoBase64: ''),
       viewport: const Size(320, 568),
       textScaler: const TextScaler.linear(3),
+      includeBottomNav: true,
     );
     addTearDown(harness.dispose);
 
@@ -3145,7 +3284,9 @@ void main() {
     final backToRecent = find.byKey(const Key('home-back-to-recent'));
     expect(backToRecent, findsOneWidget);
     expect(tester.getTopLeft(backToRecent).dy, greaterThanOrEqualTo(47));
-    expect(tester.getBottomLeft(backToRecent).dy, lessThan(568 - EllaSizes.navBarHeight - 34));
+    final navHeight = BottomNavBar.navigationHeight(tester.element(find.byType(BottomNavBar)));
+    expect(navHeight, greaterThan(EllaSizes.navBarHeight));
+    expect(tester.getBottomLeft(backToRecent).dy, lessThan(568 - navHeight - 34));
     expect(tester.takeException(), isNull);
   });
 
@@ -3168,10 +3309,14 @@ void main() {
         runtime: runtime,
         authenticatedUid: () => 'test-user',
         guardianAvailability: () => true,
+        guardianAuthorityProvider: () => _MutableExactAuthority('test-user'),
         guardianModeLoader: () async => const GuardianModeInfo(
           currentMode: GuardianModeKey.custom,
           twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
         ),
+        guardianNativeStart: () async => throw StateError('HTTP 503 provider detail'),
+        guardianNativeStop: () async {},
+        guardianNativeState: () => guardian_native.GuardianModeState.idle,
       ),
     );
     addTearDown(() async {
@@ -3212,6 +3357,11 @@ void main() {
       tester.getBottomLeft(find.byKey(const Key('upstream-capture-dock'))).dy,
       lessThan(tester.getTopLeft(find.byType(MemoryGalleryCard).first).dy),
     );
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-retry')));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text("Whispers are on, but Ella couldn't start spoken help."), findsOneWidget);
+    expect(find.textContaining('HTTP'), findsNothing);
     await expectLater(
       find.byType(MaterialApp),
       matchesGoldenFile('goldens/ella_home_upstream_capture_live_390_100_full_shell.png'),
@@ -3232,6 +3382,864 @@ void main() {
     expect(disconnectButton.style!.backgroundColor!.resolve({}), EllaColors.elevatedCard);
     expect(find.byType(BottomNavBar), findsOneWidget);
     expect(tester.takeException(), isNull);
+
+    final largeHarness = await _pumpHome(
+      tester,
+      conversations: _ConversationFixtures.withMemories(photoBase64: ''),
+      viewport: const Size(320, 844),
+      textScaler: const TextScaler.linear(3),
+      includeBottomNav: true,
+      disableAnimations: true,
+    );
+    addTearDown(largeHarness.dispose);
+    final scrollable = tester.state<ScrollableState>(
+      find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
+    );
+    final whisperControl = find.byKey(const Key('upstream-capture-whispers-switch'));
+    for (var offset = 0.0; offset <= scrollable.position.maxScrollExtent; offset += 100) {
+      scrollable.position.jumpTo(offset);
+      await tester.pump();
+      if (whisperControl.hitTestable().evaluate().isNotEmpty && tester.getTopLeft(whisperControl).dy < 150) break;
+    }
+    expect(whisperControl.hitTestable(), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await expectLater(
+        find.byType(MaterialApp), matchesGoldenFile('goldens/ella_home_upstream_whispers_320_300_full_shell.png'));
+    final dailyNoteAction = find.byKey(const Key('today-card-read-more'));
+    for (var offset = scrollable.position.pixels; offset <= scrollable.position.maxScrollExtent; offset += 100) {
+      scrollable.position.jumpTo(offset);
+      await tester.pump();
+      if (dailyNoteAction.hitTestable().evaluate().isNotEmpty && tester.getBottomLeft(dailyNoteAction).dy < 600) break;
+    }
+    expect(dailyNoteAction.hitTestable(), findsOneWidget);
+    await expectLater(
+        find.byType(MaterialApp), matchesGoldenFile('goldens/ella_home_upstream_daily_note_320_300_full_shell.png'));
+    final backToRecent = find.byKey(const Key('home-back-to-recent'));
+    for (var offset = scrollable.position.pixels; offset <= scrollable.position.maxScrollExtent; offset += 100) {
+      scrollable.position.jumpTo(offset);
+      await tester.pump();
+      if (backToRecent.hitTestable().evaluate().isNotEmpty && tester.getBottomLeft(backToRecent).dy < 650) break;
+    }
+    scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
+    await tester.pump();
+    expect(tester.widget(backToRecent), isA<TextButton>());
+    expect(backToRecent.hitTestable(), findsOneWidget);
+    expect(tester.getSize(backToRecent).height, greaterThanOrEqualTo(48));
+    expect(tester.getBottomLeft(backToRecent).dy,
+        lessThan(844 - BottomNavBar.navigationHeight(tester.element(find.byType(BottomNavBar))) - 34));
+    expect(find.byType(FloatingActionButton), findsNothing);
+    await expectLater(
+        find.byType(MaterialApp), matchesGoldenFile('goldens/ella_home_upstream_inline_back_320_300_full_shell.png'));
+    await tester.tap(backToRecent);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(scrollable.position.pixels, 0);
+    for (var offset = 0.0; offset <= scrollable.position.maxScrollExtent; offset += 100) {
+      scrollable.position.jumpTo(offset);
+      await tester.pump();
+      if (dailyNoteAction.hitTestable().evaluate().isNotEmpty && tester.getBottomLeft(dailyNoteAction).dy < 600) break;
+    }
+    await tester.tap(dailyNoteAction);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byKey(const Key('today-card-detail-scroll')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final replacement in ['account', 'same_uid_profile', 'same_uid_profile_aba']) {
+    for (final trigger in ['authority_notification', 'lifecycle_resume']) {
+      testWidgets('mounted Today admits $replacement after shutdown through $trigger without another surface',
+          (tester) async {
+        var authority = _MutableExactAuthority('test-user');
+        final outgoing = authority;
+        final reads = <ExactAccountAuthorityVerifier>[];
+        var starts = 0;
+        var writes = 0;
+        final harness = await _pumpHome(
+          tester,
+          conversations: const [],
+          guardianAvailability: () => true,
+          guardianAuthorityProvider: () => authority,
+          guardianModeLoader: () async {
+            reads.add(authority);
+            final enabled = !identical(authority, outgoing);
+            return GuardianModeInfo(
+              currentMode: enabled ? GuardianModeKey.custom : GuardianModeKey.off,
+              twoTierState: enabled ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
+            );
+          },
+          guardianModeSetter: (_) async {
+            writes++;
+            return true;
+          },
+          guardianNativeStart: () async => starts++,
+          guardianNativeStop: () async {},
+        );
+        addTearDown(harness.dispose);
+        expect(find.byKey(const Key('upstream-capture-whispers-switch')), findsNothing);
+        await tester.tap(find.byKey(const Key('today-dock-status')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 250));
+        final toggle =
+            find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch));
+        expect(tester.widget<Switch>(toggle).onChanged, isNotNull);
+        final fence = guardian_native.GuardianModeService.whisperStateFence;
+        await fence.stopAfterInFlight(() async {}, authorityProvider: () => outgoing);
+        harness.authorityChanges.value++;
+        await tester.pump();
+        expect(reads, [outgoing], reason: 'repeated outgoing notifications cannot reopen shutdown admission');
+        expect(fence.choicePending, isTrue);
+        expect(fence.snapshot, isNull);
+        outgoing.current = false;
+        if (replacement == 'same_uid_profile_aba') {
+          authority = _MutableExactAuthority('test-user')..current = false;
+          harness.authorityChanges.value++;
+          await tester.pump();
+          expect(reads, [outgoing], reason: 'a revoked intermediate same-UID profile cannot read');
+        }
+        authority = _MutableExactAuthority(replacement == 'account' ? 'replacement-user' : 'test-user');
+        if (trigger == 'authority_notification') {
+          harness.authorityChanges.value++;
+        } else {
+          tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+          tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        }
+        await tester.pump();
+        await tester.pump();
+        expect(reads, [outgoing, authority]);
+        expect(starts, 1);
+        expect(writes, 0, reason: 'authority recovery reads current truth without changing durable mode');
+        expect(fence.choicePending, isFalse);
+        expect(fence.snapshot, (enabled: true, modeVerified: true, nativeReconciled: true));
+        if (toggle.evaluate().isEmpty) {
+          await tester.tap(find.byKey(const Key('today-dock-status')));
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 250));
+        }
+        expect(tester.widget<Switch>(toggle).value, isTrue);
+        expect(tester.widget<Switch>(toggle).onChanged, isNotNull);
+        expect(outgoing.isExactCurrent(), isFalse);
+        expect(tester.takeException(), isNull);
+      });
+    }
+  }
+
+  testWidgets('mounted Today replacement read waits for the outgoing native shutdown drain', (tester) async {
+    var authority = _MutableExactAuthority('test-user');
+    final outgoing = authority;
+    final drain = Completer<void>();
+    var reads = 0;
+    var starts = 0;
+    var writes = 0;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      guardianAvailability: () => true,
+      guardianAuthorityProvider: () => authority,
+      guardianModeLoader: () async {
+        reads++;
+        final enabled = !identical(authority, outgoing);
+        return GuardianModeInfo(
+          currentMode: enabled ? GuardianModeKey.custom : GuardianModeKey.off,
+          twoTierState: enabled ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
+        );
+      },
+      guardianModeSetter: (_) async {
+        writes++;
+        return true;
+      },
+      guardianNativeStart: () async => starts++,
+      guardianNativeStop: () async {},
+    );
+    addTearDown(harness.dispose);
+    final fence = guardian_native.GuardianModeService.whisperStateFence;
+    final shutdown = fence.stopAfterInFlight(() => drain.future, authorityProvider: () => outgoing);
+    outgoing.current = false;
+    authority = _MutableExactAuthority('test-user');
+    harness.authorityChanges.value++;
+    await tester.pump();
+    expect(reads, 2);
+    expect(starts, 0, reason: 'replacement native ON cannot overtake the outgoing OFF drain');
+    expect(fence.snapshot, isNull);
+    drain.complete();
+    await shutdown;
+    await tester.pump();
+    await tester.pump();
+    expect(starts, 1);
+    expect(writes, 0);
+    expect(fence.snapshot, (enabled: true, modeVerified: true, nativeReconciled: true));
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final staleRead in ['on', 'off', 'null', 'error', 'retry']) {
+    testWidgets('cross-surface stale Today $staleRead read cannot override a newer dock choice', (tester) async {
+      await upstream.SharedPreferencesUtil.init();
+      final delayedRead = Completer<GuardianModeInfo?>();
+      final starts = <String>[];
+      final stops = <String>[];
+      final initialOn = staleRead == 'on' || staleRead == 'retry';
+      final whisperAuthority = _MutableExactAuthority('test-user');
+      var nativeOn = initialOn;
+      final connectivity = StreamController<bool>.broadcast();
+      final capture = upstream_capture.CaptureProvider(
+        connectivity: upstream_capture.CaptureConnectivityBoundary(
+          initiallyConnected: true,
+          changes: connectivity.stream,
+          isConnected: () => true,
+        ),
+        bleListeners: const _IntegratedHomeDockBleListeners(),
+        preferences: upstream.SharedPreferencesUtil(),
+      );
+      final authority = EllaCaptureAuthority(authenticatedUid: () => 'test-user', sessionStartAllowed: (_) => false);
+      final runtime = _IntegratedHomeDockRuntime(authority: authority, capture: capture);
+      EllaCaptureHost.installForTesting(
+        homeCaptureDockBuilder: (_) => EllaUpstreamCaptureDock(
+          runtime: runtime,
+          authenticatedUid: () => 'test-user',
+          guardianAvailability: () => true,
+          guardianAuthorityProvider: () => whisperAuthority,
+          guardianModeLoader: () async => GuardianModeInfo(
+            currentMode: initialOn ? GuardianModeKey.custom : GuardianModeKey.off,
+            twoTierState: initialOn ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
+          ),
+          guardianModeSetter: (_) async => true,
+          guardianNativeStart: () async {
+            starts.add('dock');
+            nativeOn = true;
+          },
+          guardianNativeStop: () async {
+            stops.add('dock');
+            nativeOn = false;
+          },
+          guardianNativeState: () =>
+              nativeOn ? guardian_native.GuardianModeState.active : guardian_native.GuardianModeState.idle,
+        ),
+      );
+      addTearDown(() async {
+        EllaCaptureHost.resetForTesting();
+        await tester.pumpWidget(const SizedBox.shrink());
+        capture.dispose();
+        authority.dispose();
+        await connectivity.close();
+      });
+      final harness = await _pumpHome(
+        tester,
+        conversations: const [],
+        guardianAvailability: () => true,
+        guardianAuthorityProvider: () => whisperAuthority,
+        guardianModeLoader: () => staleRead == 'retry'
+            ? Future.value(const GuardianModeInfo(
+                currentMode: GuardianModeKey.custom,
+                twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
+              ))
+            : delayedRead.future,
+        guardianNativeStart: () async {
+          starts.add('today');
+          if (staleRead == 'retry') throw StateError('native unavailable');
+          nativeOn = true;
+        },
+        guardianNativeStop: () async {
+          stops.add('today');
+          nativeOn = false;
+        },
+      );
+      addTearDown(harness.dispose);
+      expect(tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch'))).onChanged, isNotNull);
+      final beforeChoice = guardian_native.GuardianModeService.whisperStateFence.revision;
+      await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(guardian_native.GuardianModeService.whisperStateFence.revision, beforeChoice + 1);
+      expect(guardian_native.GuardianModeService.whisperStateFence.choicePending, isFalse);
+      expect(nativeOn, !initialOn);
+      if (staleRead == 'retry') {
+        await tester.pump(const Duration(seconds: 15));
+      } else if (staleRead == 'error') {
+        delayedRead.completeError(StateError('read unavailable'));
+      } else {
+        delayedRead.complete(staleRead == 'null'
+            ? null
+            : GuardianModeInfo(
+                currentMode: initialOn ? GuardianModeKey.custom : GuardianModeKey.off,
+                twoTierState:
+                    initialOn ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
+              ));
+      }
+      await tester.pump();
+      await tester.pump();
+      expect(starts.where((source) => source == 'today'), staleRead == 'retry' ? ['today'] : isEmpty);
+      expect(stops.where((source) => source == 'today'), isEmpty);
+      expect(nativeOn, !initialOn);
+      expect(tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch'))).value, !initialOn);
+    });
+  }
+
+  for (final phase in ['put', 'native', 'availability']) {
+    testWidgets('Today disposed during pending $phase permits a same-authority remount', (tester) async {
+      final pending = Completer<void>();
+      var nativeStarts = 0;
+      var available = true;
+      final harness = await _pumpHome(
+        tester,
+        conversations: const [],
+        guardianAvailability: () => available,
+        guardianModeLoader: () async =>
+            const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState()),
+        guardianModeSetter: (_) async {
+          if (phase != 'native') await pending.future;
+          return true;
+        },
+        guardianNativeStart: () async {
+          nativeStarts++;
+          if (phase == 'native') await pending.future;
+        },
+        guardianNativeStop: () async {},
+      );
+      addTearDown(harness.dispose);
+      await tester.tap(find.byKey(const Key('today-dock-status')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.descendant(
+        of: find.byKey(const Key('guardian-whispers-control')),
+        matching: find.byType(Switch),
+      ));
+      await tester.pump();
+      expect(guardian_native.GuardianModeService.whisperStateFence.choicePending, isTrue);
+      if (phase == 'availability') {
+        available = false;
+      } else {
+        await tester.pumpWidget(const SizedBox.shrink());
+        expect(guardian_native.GuardianModeService.whisperStateFence.choicePending, isTrue);
+      }
+      pending.complete();
+      await tester.pump();
+      await tester.pump();
+      expect(guardian_native.GuardianModeService.whisperStateFence.choicePending, isFalse);
+      if (phase != 'native') expect(nativeStarts, 0);
+      await tester.pumpWidget(const SizedBox.shrink());
+      var freshReads = 0;
+      final replacement = await _pumpHome(
+        tester,
+        conversations: const [],
+        guardianAvailability: () => true,
+        guardianModeLoader: () async {
+          freshReads++;
+          return const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState());
+        },
+        guardianNativeStop: () async {},
+      );
+      addTearDown(replacement.dispose);
+      expect(freshReads, greaterThan(0));
+      expect(guardian_native.GuardianModeService.whisperStateFence.choicePending, isFalse);
+      expect(guardian_native.GuardianModeService.whisperStateFence.snapshot!.modeVerified, isTrue);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('Today remounted before abandoned ON write settles refreshes committed truth and native', (tester) async {
+    final pending = Completer<void>();
+    var serverOn = false;
+    var reads = 0;
+    var staleNativeStarts = 0;
+    Future<GuardianModeInfo?> read() async {
+      reads++;
+      return GuardianModeInfo(
+        currentMode: serverOn ? GuardianModeKey.custom : GuardianModeKey.off,
+        twoTierState: serverOn ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
+      );
+    }
+
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      guardianAvailability: () => true,
+      guardianModeLoader: read,
+      guardianModeSetter: (_) async {
+        await pending.future;
+        serverOn = true;
+        return true;
+      },
+      guardianNativeStart: () async => staleNativeStarts++,
+      guardianNativeStop: () async {},
+    );
+    addTearDown(harness.dispose);
+    await tester.tap(find.byKey(const Key('today-dock-status')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.descendant(
+      of: find.byKey(const Key('guardian-whispers-control')),
+      matching: find.byType(Switch),
+    ));
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox.shrink());
+    final beforeReads = reads;
+    var currentNativeStarts = 0;
+    final replacement = await _pumpHome(
+      tester,
+      conversations: const [],
+      guardianAvailability: () => true,
+      guardianModeLoader: read,
+      guardianNativeStart: () async => currentNativeStarts++,
+      guardianNativeStop: () async {},
+    );
+    addTearDown(replacement.dispose);
+    expect(reads, beforeReads);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot, isNull);
+    pending.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(reads, beforeReads + 1);
+    expect(staleNativeStarts, 0);
+    expect(currentNativeStarts, 1);
+    expect(guardian_native.GuardianModeService.whisperStateFence.choicePending, isFalse);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot!.enabled, isTrue);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot!.nativeReconciled, isTrue);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final source in ['explicit_off', 'get_off', 'explicit_off_retry_superseded']) {
+    testWidgets('Today $source native stop failure remains recoverable and never paused in dock', (tester) async {
+      await upstream.SharedPreferencesUtil.init();
+      final delayedRead = Completer<GuardianModeInfo?>();
+      final whisperAuthority = _MutableExactAuthority('test-user');
+      var nativeOn = true;
+      var todayStops = 0;
+      var writes = 0;
+      final connectivity = StreamController<bool>.broadcast();
+      final capture = upstream_capture.CaptureProvider(
+        connectivity: upstream_capture.CaptureConnectivityBoundary(
+          initiallyConnected: true,
+          changes: connectivity.stream,
+          isConnected: () => true,
+        ),
+        bleListeners: const _IntegratedHomeDockBleListeners(),
+        preferences: upstream.SharedPreferencesUtil(),
+      );
+      final authority = EllaCaptureAuthority(authenticatedUid: () => 'test-user', sessionStartAllowed: (_) => false);
+      final runtime = _IntegratedHomeDockRuntime(authority: authority, capture: capture);
+      Widget dockBuilder(BuildContext context) => EllaUpstreamCaptureDock(
+            runtime: runtime,
+            authenticatedUid: () => 'test-user',
+            guardianAvailability: () => true,
+            guardianAuthorityProvider: () => whisperAuthority,
+            guardianModeLoader: () async => const GuardianModeInfo(
+              currentMode: GuardianModeKey.custom,
+              twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
+            ),
+            guardianModeSetter: (_) async {
+              writes++;
+              return true;
+            },
+            guardianNativeStart: () async => nativeOn = true,
+            guardianNativeStop: () async => nativeOn = false,
+            guardianNativeState: () =>
+                nativeOn ? guardian_native.GuardianModeState.active : guardian_native.GuardianModeState.idle,
+          );
+      if (source == 'get_off') {
+        EllaCaptureHost.installForTesting(homeCaptureDockBuilder: dockBuilder);
+      } else {
+        EllaCaptureHost.resetForTesting();
+      }
+      addTearDown(() async {
+        EllaCaptureHost.resetForTesting();
+        await tester.pumpWidget(const SizedBox.shrink());
+        capture.dispose();
+        authority.dispose();
+        await connectivity.close();
+      });
+      final harness = await _pumpHome(
+        tester,
+        conversations: const [],
+        guardianAvailability: () => true,
+        guardianAuthorityProvider: () => whisperAuthority,
+        guardianModeLoader: () => source == 'get_off'
+            ? delayedRead.future
+            : Future.value(const GuardianModeInfo(
+                currentMode: GuardianModeKey.custom,
+                twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
+              )),
+        guardianModeSetter: (_) async {
+          writes++;
+          return true;
+        },
+        guardianNativeStart: () async {},
+        guardianNativeStop: () async {
+          todayStops++;
+          throw StateError('native could not stop');
+        },
+      );
+      addTearDown(harness.dispose);
+      if (source == 'get_off') {
+        delayedRead
+            .complete(const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState()));
+      } else {
+        await tester.tap(find.byKey(const Key('today-dock-status')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 250));
+        EllaCaptureHost.installForTesting(homeCaptureDockBuilder: dockBuilder);
+        tester.state<TodayPageState>(find.byType(TodayPage)).didChangeAppLifecycleState(AppLifecycleState.resumed);
+        await tester.pump();
+        await tester.pump();
+        await tester.tap(find.descendant(
+          of: find.byKey(const Key('guardian-whispers-control')),
+          matching: find.byType(Switch),
+        ));
+      }
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(nativeOn, isTrue);
+      expect(find.text('Whispers are off. Spoken responses are paused.'), findsNothing);
+      expect(find.text("Whispers are set to off, but Ella couldn't pause spoken help."), findsOneWidget);
+      expect(find.byKey(const Key('upstream-capture-whispers-retry')), findsOneWidget);
+      if (source == 'explicit_off_retry_superseded') {
+        final beforeStops = todayStops;
+        await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 30));
+        expect(todayStops, beforeStops, reason: 'the retired Today OFF retry must not stop the newer dock ON');
+        expect(writes, 2, reason: 'only the two explicit choices may write the mode');
+        expect(nativeOn, isTrue);
+        expect(guardian_native.GuardianModeService.whisperStateFence.snapshot!.enabled, isTrue);
+        expect(guardian_native.GuardianModeService.whisperStateFence.snapshot!.nativeReconciled, isTrue);
+        expect(tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch'))).value, isTrue);
+        expect(tester.takeException(), isNull);
+        return;
+      }
+      await tester.tap(find.byKey(const Key('upstream-capture-whispers-retry')));
+      await tester.pump();
+      await tester.pump();
+      expect(nativeOn, isFalse);
+      expect(find.text('Whispers are off. Spoken responses are paused.'), findsOneWidget);
+      expect(find.byKey(const Key('upstream-capture-whispers-retry')), findsNothing);
+    });
+  }
+
+  for (final source in ['explicit_off', 'get_off']) {
+    for (final recovers in [false, true]) {
+      testWidgets('Today $source native OFF retries are bounded without mode writes, recovers $recovers',
+          (tester) async {
+        var serverOn = source == 'explicit_off';
+        var writes = 0;
+        var stops = 0;
+        final harness = await _pumpHome(
+          tester,
+          conversations: const [],
+          guardianAvailability: () => true,
+          guardianModeLoader: () async => GuardianModeInfo(
+            currentMode: serverOn ? GuardianModeKey.custom : GuardianModeKey.off,
+            twoTierState: serverOn ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
+          ),
+          guardianModeSetter: (state) async {
+            writes++;
+            serverOn = !state.isOff;
+            return true;
+          },
+          guardianNativeStart: () async {},
+          guardianNativeStop: () async {
+            stops++;
+            if (!recovers || stops == 1) throw StateError('native could not stop');
+          },
+        );
+        addTearDown(harness.dispose);
+        await tester.tap(find.byKey(const Key('today-dock-status')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 250));
+        final toggle =
+            find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch));
+        if (source == 'explicit_off') {
+          await tester.tap(toggle);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 250));
+          await tester.tap(find.byKey(const Key('today-dock-status')));
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 250));
+        }
+        expect(stops, 1);
+        expect(guardian_native.GuardianModeService.whisperStateFence.snapshot!.nativeReconciled, isFalse);
+        expect(tester.widget<Switch>(toggle).onChanged, isNull);
+        expect(find.text('Whispers are off'), findsNothing);
+        await tester.pump(const Duration(seconds: 2));
+        await tester.pump();
+        expect(stops, 2);
+        if (recovers) {
+          expect(tester.widget<Switch>(toggle).onChanged, isNotNull);
+          expect(find.text('Whispers are off'), findsOneWidget);
+          expect(guardian_native.GuardianModeService.whisperStateFence.snapshot!.nativeReconciled, isTrue);
+        } else {
+          await tester.pump(const Duration(seconds: 4));
+          await tester.pump();
+          await tester.pump(const Duration(seconds: 8));
+          await tester.pump();
+          expect(stops, 4);
+          expect(tester.widget<Switch>(toggle).onChanged, isNull);
+        }
+        await tester.pump(const Duration(seconds: 30));
+        expect(stops, recovers ? 2 : 4);
+        expect(writes, source == 'explicit_off' ? 1 : 0);
+        expect(serverOn, isFalse);
+        expect(tester.takeException(), isNull);
+      });
+    }
+  }
+
+  for (final readbackAvailable in [false, true]) {
+    testWidgets('Today lost ON response uses canonical readback without compensating PUT, available $readbackAvailable',
+        (tester) async {
+      var serverOn = false;
+      var reads = 0;
+      var writes = 0;
+      var starts = 0;
+      final harness = await _pumpHome(
+        tester,
+        conversations: const [],
+        guardianAvailability: () => true,
+        guardianModeLoader: () async {
+          reads++;
+          if (reads > 1 && !readbackAvailable) return null;
+          return GuardianModeInfo(
+            currentMode: serverOn ? GuardianModeKey.custom : GuardianModeKey.off,
+            twoTierState: serverOn ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
+          );
+        },
+        guardianModeSetter: (_) async {
+          writes++;
+          serverOn = true;
+          throw StateError('response lost after commit');
+        },
+        guardianNativeStart: () async => starts++,
+        guardianNativeStop: () async {},
+      );
+      addTearDown(harness.dispose);
+      await tester.tap(find.byKey(const Key('today-dock-status')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      final toggle =
+          find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch));
+      await tester.tap(toggle);
+      await tester.pump();
+      await tester.pump();
+      expect(reads, 2);
+      expect(writes, 1);
+      expect(serverOn, isTrue);
+      expect(starts, readbackAvailable ? 1 : 0);
+      final snapshot = guardian_native.GuardianModeService.whisperStateFence.snapshot!;
+      expect(snapshot.modeVerified, readbackAvailable);
+      expect(snapshot.nativeReconciled, readbackAvailable);
+      expect(tester.widget<Switch>(toggle).onChanged, readbackAvailable ? isNotNull : isNull);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  for (final supersededBy in ['newer_choice', 'authority_replacement', 'account_shutdown']) {
+    testWidgets('Today pending OFF retry cannot stop native after $supersededBy', (tester) async {
+      var authority = _MutableExactAuthority('test-user');
+      var stops = 0;
+      final harness = await _pumpHome(
+        tester,
+        conversations: const [],
+        guardianAvailability: () => true,
+        guardianAuthorityProvider: () => authority,
+        guardianModeLoader: () async => const GuardianModeInfo(
+          currentMode: GuardianModeKey.custom,
+          twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
+        ),
+        guardianModeSetter: (_) async => true,
+        guardianNativeStart: () async {},
+        guardianNativeStop: () async {
+          stops++;
+          throw StateError('native could not stop');
+        },
+      );
+      addTearDown(harness.dispose);
+      await tester.tap(find.byKey(const Key('today-dock-status')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester
+          .tap(find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)));
+      await tester.pump();
+      expect(stops, 1);
+      final fence = guardian_native.GuardianModeService.whisperStateFence;
+      if (supersededBy == 'account_shutdown') {
+        await fence.stopAfterInFlight(() async {}, authorityProvider: () => authority);
+      } else {
+        if (supersededBy == 'authority_replacement') {
+          authority.current = false;
+          authority = _MutableExactAuthority('test-user');
+          fence.invalidate();
+        }
+        final newer = fence.choose(() => authority, true)!;
+        fence.publish(newer, (enabled: true, modeVerified: true, nativeReconciled: true));
+      }
+      await tester.pump(const Duration(seconds: 30));
+      expect(stops, 1);
+      expect(fence.snapshot?.enabled, supersededBy == 'account_shutdown' ? isNull : isTrue);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  for (final initialOn in [false, true]) {
+    testWidgets('actual Home and dock share canonical state after lost ${!initialOn} write response', (tester) async {
+      await upstream.SharedPreferencesUtil.init();
+      var serverOn = initialOn;
+      var nativeOn = initialOn;
+      var reads = 0;
+      var writes = 0;
+      final whisperAuthority = _MutableExactAuthority('test-user');
+      Future<GuardianModeInfo?> read() async {
+        reads++;
+        return GuardianModeInfo(
+          currentMode: serverOn ? GuardianModeKey.custom : GuardianModeKey.off,
+          twoTierState: serverOn ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
+        );
+      }
+
+      Future<void> start() async => nativeOn = true;
+      Future<void> stop() async => nativeOn = false;
+      final connectivity = StreamController<bool>.broadcast();
+      final capture = upstream_capture.CaptureProvider(
+        connectivity: upstream_capture.CaptureConnectivityBoundary(
+          initiallyConnected: true,
+          changes: connectivity.stream,
+          isConnected: () => true,
+        ),
+        bleListeners: const _IntegratedHomeDockBleListeners(),
+        preferences: upstream.SharedPreferencesUtil(),
+      );
+      final authority = EllaCaptureAuthority(authenticatedUid: () => 'test-user', sessionStartAllowed: (_) => false);
+      final runtime = _IntegratedHomeDockRuntime(authority: authority, capture: capture);
+      EllaCaptureHost.installForTesting(
+        homeCaptureDockBuilder: (_) => EllaUpstreamCaptureDock(
+          runtime: runtime,
+          authenticatedUid: () => 'test-user',
+          guardianAvailability: () => true,
+          guardianAuthorityProvider: () => whisperAuthority,
+          guardianModeLoader: read,
+          guardianModeSetter: (state) async {
+            writes++;
+            serverOn = !state.isOff;
+            return false;
+          },
+          guardianNativeStart: start,
+          guardianNativeStop: stop,
+          guardianNativeState: () =>
+              nativeOn ? guardian_native.GuardianModeState.active : guardian_native.GuardianModeState.idle,
+        ),
+      );
+      addTearDown(() async {
+        EllaCaptureHost.resetForTesting();
+        await tester.pumpWidget(const SizedBox.shrink());
+        capture.dispose();
+        authority.dispose();
+        await connectivity.close();
+      });
+      final harness = await _pumpHome(
+        tester,
+        conversations: const [],
+        guardianAvailability: () => true,
+        guardianAuthorityProvider: () => whisperAuthority,
+        guardianModeLoader: read,
+        guardianNativeStart: start,
+        guardianNativeStop: stop,
+      );
+      addTearDown(harness.dispose);
+      final beforeReads = reads;
+      await tester.ensureVisible(find.byKey(const Key('upstream-capture-whispers-switch')));
+      await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+      await tester.pump();
+      await tester.pump();
+      final snapshot = guardian_native.GuardianModeService.whisperStateFence.snapshot!;
+      expect(reads, beforeReads + 1);
+      expect(writes, 1);
+      expect(snapshot.enabled, !initialOn);
+      expect(snapshot.modeVerified, isTrue);
+      expect(snapshot.nativeReconciled, isTrue);
+      expect(nativeOn, !initialOn);
+      expect(tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch'))).value, !initialOn);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('a Today read requested during a pending ON cannot cancel its completion', (tester) async {
+    final save = Completer<bool>();
+    var reads = 0;
+    var starts = 0;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      guardianAvailability: () => true,
+      guardianModeLoader: () async {
+        reads++;
+        return const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState());
+      },
+      guardianModeSetter: (_) => save.future,
+      guardianNativeStart: () async => starts++,
+      guardianNativeStop: () async {},
+    );
+    addTearDown(harness.dispose);
+    await tester.tap(find.byKey(const Key('today-dock-status')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.descendant(
+      of: find.byKey(const Key('guardian-whispers-control')),
+      matching: find.byType(Switch),
+    ));
+    await tester.pump();
+    final before = reads;
+    tester.state<TodayPageState>(find.byType(TodayPage)).didChangeAppLifecycleState(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(reads, before);
+    save.complete(true);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(starts, 1);
+    expect(guardian_native.GuardianModeService.whisperStateFence.choicePending, isFalse);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot!.enabled, isTrue);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot!.nativeReconciled, isTrue);
+  });
+
+  testWidgets('a failed Today write after authority drift cannot roll back or read another account', (tester) async {
+    final save = Completer<bool>();
+    final authority = _MutableExactAuthority('test-user');
+    var reads = 0;
+    var writes = 0;
+    var nativeCalls = 0;
+    final harness = await _pumpHome(
+      tester,
+      conversations: const [],
+      guardianAvailability: () => true,
+      guardianAuthorityProvider: () => authority,
+      guardianModeLoader: () async {
+        reads++;
+        return const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState());
+      },
+      guardianModeSetter: (_) {
+        writes++;
+        return save.future;
+      },
+      guardianNativeStart: () async => nativeCalls++,
+      guardianNativeStop: () async => nativeCalls++,
+    );
+    addTearDown(harness.dispose);
+    await tester.tap(find.byKey(const Key('today-dock-status')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.descendant(
+      of: find.byKey(const Key('guardian-whispers-control')),
+      matching: find.byType(Switch),
+    ));
+    await tester.pump();
+    final previousReads = reads;
+    final previousNativeCalls = nativeCalls;
+    authority.current = false;
+    guardian_native.GuardianModeService.whisperStateFence.invalidate();
+    save.complete(false);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(writes, 1);
+    expect(reads, previousReads);
+    expect(nativeCalls, previousNativeCalls);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot, isNull);
   });
 
   testWidgets('a successful 200 ON write is never rolled back by a native start failure', (tester) async {
@@ -3272,7 +4280,9 @@ void main() {
     await tester.tap(find.byKey(const Key('today-dock-status')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 250));
-    expect(find.text('Whispers are on'), findsOneWidget);
+    final l10n = AppLocalizations.of(tester.element(find.byType(TodayPage)));
+    expect(find.text(l10n.todayWhispersUnavailable), findsOneWidget);
+    expect(find.byKey(const Key('guardian-whispers-reconnecting-hint')), findsOneWidget);
     expect(
       tester
           .widget<Switch>(
@@ -3998,6 +5008,7 @@ Future<_HomeHarness> _pumpHome(
   GuardianModeSetter? guardianModeSetter,
   GuardianNativeLifecycle? guardianNativeStart,
   GuardianNativeLifecycle? guardianNativeStop,
+  guardian_native.GuardianWhisperAuthorityProvider? guardianAuthorityProvider,
 }) async {
   tester.view.physicalSize = viewport;
   tester.view.devicePixelRatio = 1;
@@ -4074,6 +5085,7 @@ Future<_HomeHarness> _pumpHome(
                   todayCardAuthorityChanges: authorityChanges,
                   todayCardTalkRouteOpener: todayCardTalkRouteOpener,
                   guardianAvailability: guardianAvailability ?? () => false,
+                  guardianAuthorityProvider: guardianAuthorityProvider ?? () => _MutableExactAuthority('test-user'),
                   guardianModeLoader: guardianModeLoader,
                   guardianModeSetter: guardianModeSetter,
                   guardianNativeStart: guardianNativeStart,

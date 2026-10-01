@@ -21,6 +21,12 @@ class MemoryCorrectionReceiptChip extends StatelessWidget {
       ConversationCorrectionReceipt(isUndone: true) => (Icons.undo_rounded, context.l10n.memoryCorrectionUndone),
       _ => (Icons.error_outline_rounded, context.l10n.memoryCorrectionFailed),
     };
+    final largeText = MediaQuery.textScalerOf(context).scale(14) > 21;
+    final review = TextButton(
+      style: TextButton.styleFrom(foregroundColor: EllaColors.textPrimary, minimumSize: const Size(48, 48)),
+      onPressed: onReview,
+      child: Text(context.l10n.memoryCorrectionReview),
+    );
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 24),
@@ -30,27 +36,30 @@ class MemoryCorrectionReceiptChip extends StatelessWidget {
         borderRadius: BorderRadius.circular(EllaSizes.radiusCircular),
         border: Border.all(color: EllaColors.cardDeep),
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (receipt.isPending)
-            const SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.primary),
-            )
-          else
-            Icon(icon, size: 19, color: EllaColors.primary),
-          const SizedBox(width: 8),
-          Flexible(
-            child: Text(label, style: EllaTextStyles.caption.copyWith(fontWeight: FontWeight.w600)),
-          ),
-          if (receipt.isApplied) ...[
+      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (receipt.isPending)
+              const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.primary),
+              )
+            else
+              Icon(icon, size: 19, color: EllaColors.primary),
             const SizedBox(width: 8),
-            TextButton(onPressed: onReview, child: Text(context.l10n.memoryCorrectionReview)),
+            Flexible(
+              child: Text(label, style: EllaTextStyles.caption.copyWith(fontWeight: FontWeight.w600)),
+            ),
+            if (receipt.isApplied && !largeText) ...[
+              const SizedBox(width: 8),
+              review,
+            ],
           ],
-        ],
-      ),
+        ),
+        if (receipt.isApplied && largeText) Align(alignment: Alignment.centerRight, child: review)
+      ]),
     );
   }
 }
@@ -81,15 +90,29 @@ class _MemoryCorrectionReceiptSheet extends StatefulWidget {
 class _MemoryCorrectionReceiptSheetState extends State<_MemoryCorrectionReceiptSheet> {
   late ConversationCorrectionReceipt _receipt = widget.receipt;
   bool _undoing = false;
+  bool _undoFailed = false;
 
   Future<void> _undo() async {
     if (_undoing) return;
-    setState(() => _undoing = true);
-    final updated = await widget.onUndo();
+    setState(() {
+      _undoing = true;
+      _undoFailed = false;
+    });
+    ConversationCorrectionReceipt? updated;
+    try {
+      updated = await widget.onUndo();
+    } catch (_) {
+      // Keep the original receipt and allow an explicit retry.
+    }
     if (!mounted) return;
     setState(() {
       _undoing = false;
-      if (updated != null) _receipt = updated;
+      final matches = updated != null &&
+          updated.isUndone &&
+          updated.conversationId == _receipt.conversationId &&
+          updated.correctionId == _receipt.correctionId;
+      _undoFailed = !matches;
+      if (matches) _receipt = updated;
     });
   }
 
@@ -125,6 +148,10 @@ class _MemoryCorrectionReceiptSheetState extends State<_MemoryCorrectionReceiptS
                 SizedBox(
                   width: double.infinity,
                   child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: EllaColors.textPrimary,
+                      minimumSize: const Size(48, 48),
+                    ),
                     onPressed: _undoing ? null : _undo,
                     icon: _undoing
                         ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
@@ -132,6 +159,12 @@ class _MemoryCorrectionReceiptSheetState extends State<_MemoryCorrectionReceiptS
                     label: Text(context.l10n.memoryCorrectionUndo),
                   ),
                 ),
+              ],
+              if (_undoFailed) ...[
+                const SizedBox(height: 12),
+                Text(context.l10n.memoryCorrectionServiceUnavailable,
+                    key: const ValueKey('memory-correction-undo-error'),
+                    style: EllaTextStyles.body.copyWith(color: EllaColors.textPrimary)),
               ],
               if (_receipt.isUndone) ...[
                 const SizedBox(height: 18),

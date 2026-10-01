@@ -26,6 +26,24 @@ class _EllaConnectState extends State<EllaConnect> with SingleTickerProviderStat
   bool _deviceFound = false;
   bool _showTrouble = false;
   Timer? _troubleTimer;
+  OnboardingProvider? _provider;
+  bool _routeCurrent = true;
+  bool _resumeAfterCover = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final current = ModalRoute.isCurrentOf(context) ?? true;
+    if (current == _routeCurrent) return;
+    _routeCurrent = current;
+    if (!current) {
+      _resumeAfterCover = _provider?.isDiscoveringFor(this) ?? false;
+      unawaited(_provider?.cancelDeviceDiscovery(owner: this));
+    } else if (_resumeAfterCover && !_deviceFound) {
+      _resumeAfterCover = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _startScanning());
+    }
+  }
 
   @override
   void initState() {
@@ -50,24 +68,34 @@ class _EllaConnectState extends State<EllaConnect> with SingleTickerProviderStat
   }
 
   void _startScanning() {
-    final provider = context.read<OnboardingProvider>();
-    provider.scanDevices(onShowDialog: () {});
+    if (!mounted || !_routeCurrent) return;
+    final provider = _provider = context.read<OnboardingProvider>();
+    unawaited(provider.scanDevices(onShowDialog: () {}, owner: this, canScan: () => mounted && _routeCurrent));
   }
 
   @override
   void dispose() {
+    unawaited(_provider?.cancelDeviceDiscovery(owner: this));
     _pulseController.dispose();
     _troubleTimer?.cancel();
     super.dispose();
   }
 
-  void _onDeviceFound(BtDevice device) {
-    if (_deviceFound) return;
+  bool get _canAdmitCandidate =>
+      mounted && _routeCurrent && (ModalRoute.of(context)?.isCurrent ?? true) && !_deviceFound;
+
+  void _onDeviceFound(BtDevice device, Object lease) {
+    if (!_canAdmitCandidate) return;
+    final provider = _provider;
+    if (provider == null ||
+        !identical(provider.discoveryLeaseFor(this), lease) ||
+        !provider.deviceList.any((candidate) => candidate.id == device.id)) {
+      return;
+    }
     setState(() => _deviceFound = true);
     _pulseController.stop();
     _troubleTimer?.cancel();
 
-    final provider = context.read<OnboardingProvider>();
     provider.handleTap(
       device: device,
       isFromOnboarding: false,
@@ -227,9 +255,11 @@ class _EllaConnectState extends State<EllaConnect> with SingleTickerProviderStat
                         }
 
                         // Check if a device was found in the list
-                        if (provider.deviceList.isNotEmpty && !_deviceFound) {
+                        final lease = provider.discoveryLeaseFor(this);
+                        if (_canAdmitCandidate && lease != null && provider.deviceList.isNotEmpty) {
+                          final candidate = provider.deviceList.first;
                           WidgetsBinding.instance.addPostFrameCallback((_) {
-                            _onDeviceFound(provider.deviceList.first);
+                            _onDeviceFound(candidate, lease);
                           });
                         }
 

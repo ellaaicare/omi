@@ -15,6 +15,7 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/schema/action_item.dart';
 import 'package:omi/ella/demo/ella_access_demo_fixtures.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/guardian_mode.dart' as guardian_model;
 import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/pages/ella_entitlement_gate_page.dart';
@@ -51,9 +52,30 @@ import 'package:omi/providers/voice_recorder_provider.dart';
 import 'package:omi/services/notifications.dart';
 import 'package:omi/services/notifications/ella_notification_handler.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/ella_pilot_locale_policy.dart';
+import 'package:omi/widgets/bottom_nav_bar.dart';
 
 const bool _isConfiguredCallPathRun = bool.fromEnvironment('ELLA_CALL_PATH_CONFIG_TEST');
+
+class _NonlinearNavigationTextScaler extends TextScaler {
+  const _NonlinearNavigationTextScaler();
+
+  @override
+  double scale(double fontSize) => fontSize * (fontSize <= 14 ? 3 : 2);
+
+  @override
+  double get textScaleFactor => 3;
+}
+
+class _GuardianFixtureAuthority implements ExactAccountAuthorityVerifier {
+  _GuardianFixtureAuthority(this.uid, this.current);
+  @override
+  final String uid;
+  final bool Function() current;
+  @override
+  bool isExactCurrent() => current();
+}
 
 class _TestConnectivityPlatform extends ConnectivityPlatform {
   @override
@@ -169,6 +191,7 @@ void main() {
   });
 
   setUp(() async {
+    GuardianModeService.whisperStateFence.resetForTesting();
     SharedPreferences.setMockInitialValues({});
     await SharedPreferencesUtil.init();
     NotificationUtil.debugNavigationDispatcher = null;
@@ -470,6 +493,10 @@ void main() {
                   todayCardAuthoritySnapshotProvider: () => authoritySnapshot,
                   todayCardAuthorityChanges: authorityChanges,
                   guardianAvailability: () => guardianAvailable,
+                  guardianAuthorityProvider: () {
+                    final captured = authoritySnapshot;
+                    return _GuardianFixtureAuthority(captured.uid, () => authoritySnapshot == captured);
+                  },
                   guardianModeLoader: () async {
                     guardianModeReads++;
                     return guardianReadbackSucceeds
@@ -735,6 +762,191 @@ void main() {
     expect(observer.pushes, SharedPreferencesUtil.isPublicBuild ? 1 : 2);
     expect(tester.takeException(), isNull);
   });
+
+  for (final viewport in const [Size(320, 568), Size(390, 844)]) {
+    testWidgets('Home navigation keeps all destinations accessible at 3x on $viewport', (tester) async {
+      tester.view.physicalSize = viewport;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final home = HomeProvider();
+      final semantics = tester.ensureSemantics();
+
+      await tester.pumpWidget(
+        MultiProvider(
+          providers: [
+            ChangeNotifierProvider<HomeProvider>.value(value: home),
+            ChangeNotifierProvider(create: (_) => ConnectivityProvider()),
+          ],
+          child: MaterialApp(
+            theme: ellaThemeData(),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context)
+                  .copyWith(textScaler: const TextScaler.linear(3), padding: const EdgeInsets.only(bottom: 34)),
+              child: child!,
+            ),
+            home: const HomePage(
+              runtimeSideEffectsEnabled: false,
+              pagesOverride: [_Marker('today'), _Marker('chat'), _Marker('voice'), _Marker('settings')],
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+
+      final nav = find.byType(BottomNavBar);
+      final labels = ['Home', 'Chat', 'Talk', 'Settings'];
+      final navBounds = tester.getRect(find.descendant(of: nav, matching: find.byType(Row)).first);
+      for (var index = 0; index < labels.length; index++) {
+        final label = find.descendant(of: nav, matching: find.text(labels[index]));
+        final target = find.ancestor(of: label, matching: find.byType(InkWell));
+        final bounds = tester.getRect(target);
+        expect(bounds.width, greaterThanOrEqualTo(48));
+        expect(bounds.height, greaterThanOrEqualTo(48));
+        expect(navBounds.contains(tester.getRect(label).topLeft), isTrue);
+        expect(navBounds.contains(tester.getRect(label).bottomRight - const Offset(0.01, 0.01)), isTrue);
+        final icon = find.descendant(of: target, matching: find.byType(Icon));
+        expect(tester.getRect(icon).bottom, lessThanOrEqualTo(tester.getRect(label).top));
+        expect(tester.widget<Text>(label).textScaler, isNull);
+        expect(MediaQuery.textScalerOf(tester.element(label)).scale(10), 30);
+        expect(
+          tester.getSemantics(label),
+          // Supported by the repository's Flutter SDK baseline as well as current SDKs.
+          // ignore: deprecated_member_use
+          containsSemantics(
+            label: labels[index],
+            isButton: true,
+            hasSelectedState: true,
+            isSelected: home.selectedIndex == index,
+            hasTapAction: true,
+          ),
+        );
+        await tester.tap(target);
+        await tester.pump();
+        expect(home.selectedIndex, index);
+        // ignore: deprecated_member_use
+        expect(tester.getSemantics(label), containsSemantics(isSelected: true));
+        expect(tester.takeException(), isNull);
+      }
+      expect(tester.getRect(find.byType(IndexedStack)).bottom, lessThanOrEqualTo(navBounds.top));
+      await tester.pumpWidget(const SizedBox.shrink());
+      home.dispose();
+      semantics.dispose();
+    });
+  }
+
+  for (final useEllaTheme in [true, false]) {
+    for (final scale in [1.0, 2.0, 3.0]) {
+      testWidgets('Navigation height matches scaled labels with Ella theme $useEllaTheme at ${scale}x', (tester) async {
+        tester.view.physicalSize = const Size(320, 568);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        var measuredHeight = 0.0;
+        await tester.pumpWidget(
+          ChangeNotifierProvider(
+            create: (_) => HomeProvider(),
+            child: MaterialApp(
+              theme: useEllaTheme ? ellaThemeData() : ThemeData(),
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              builder: (context, child) => MediaQuery(
+                data: MediaQuery.of(context).copyWith(
+                  textScaler: TextScaler.linear(scale),
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 34),
+                ),
+                child: child!,
+              ),
+              home: Scaffold(
+                body: Builder(builder: (context) {
+                  measuredHeight = BottomNavBar.navigationHeight(context);
+                  return BottomNavBar(onTabTap: (_, __) {});
+                }),
+              ),
+            ),
+          ),
+        );
+        expect(tester.takeException(), isNull);
+        final row = find.descendant(of: find.byType(BottomNavBar), matching: find.byType(Row)).first;
+        final bounds = tester.getRect(row);
+        expect(bounds.height, measuredHeight);
+        expect(measuredHeight, greaterThanOrEqualTo(EllaSizes.navBarHeight));
+        if (scale == 1) expect(measuredHeight, lessThan(96));
+        if (scale == 3) expect(measuredHeight, greaterThan(EllaSizes.navBarHeight));
+        for (final label in ['Home', 'Chat', 'Talk', 'Settings']) {
+          final text = find.descendant(of: row, matching: find.text(label));
+          expect(bounds.contains(tester.getRect(text).topLeft), isTrue);
+          expect(bounds.contains(tester.getRect(text).bottomRight - const Offset(0.01, 0.01)), isTrue);
+          expect(MediaQuery.textScalerOf(tester.element(text)).scale(10), 10 * scale);
+        }
+      });
+    }
+  }
+
+  for (final scenario in const [
+    (locale: Locale('de'), scaler: TextScaler.linear(3)),
+    (locale: Locale('ar'), scaler: _NonlinearNavigationTextScaler()),
+  ]) {
+    testWidgets('Navigation fits localized labels with actual scaling in ${scenario.locale}', (tester) async {
+      tester.view.physicalSize = const Size(320, 568);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      var measuredHeight = 0.0;
+      await tester.pumpWidget(
+        ChangeNotifierProvider(
+          create: (_) => HomeProvider(),
+          child: MaterialApp(
+            theme: ellaThemeData(),
+            locale: scenario.locale,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                textScaler: scenario.scaler,
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 34),
+              ),
+              child: child!,
+            ),
+            home: Scaffold(
+              body: Builder(builder: (context) {
+                measuredHeight = BottomNavBar.navigationHeight(context);
+                return BottomNavBar(onTabTap: (_, __) {});
+              }),
+            ),
+          ),
+        ),
+      );
+      expect(tester.takeException(), isNull);
+      final nav = find.byType(BottomNavBar);
+      final context = tester.element(nav);
+      final labels = AppLocalizations.of(context);
+      expect(Localizations.localeOf(context).languageCode, scenario.locale.languageCode);
+      expect(Directionality.of(context), scenario.locale.languageCode == 'ar' ? TextDirection.rtl : TextDirection.ltr);
+      final row = find.descendant(of: nav, matching: find.byType(Row)).first;
+      final bounds = tester.getRect(row);
+      expect(bounds.height, measuredHeight);
+      for (final label in [
+        labels.bottomNavHome,
+        labels.bottomNavChat,
+        labels.bottomNavTalk,
+        labels.bottomNavSettings
+      ]) {
+        final text = find.descendant(of: row, matching: find.text(label));
+        final target = find.ancestor(of: text, matching: find.byType(InkWell));
+        expect(tester.getRect(target).width, greaterThanOrEqualTo(48));
+        expect(tester.getRect(target).height, greaterThanOrEqualTo(48));
+        expect(bounds.contains(tester.getRect(text).topLeft), isTrue);
+        expect(bounds.contains(tester.getRect(text).bottomRight - const Offset(0.01, 0.01)), isTrue);
+        expect(tester.widget<Text>(text).maxLines, isNull);
+        expect(tester.widget<Text>(text).textScaler, isNull);
+        expect(MediaQuery.textScalerOf(tester.element(text)).scale(10), scenario.scaler.scale(10));
+      }
+    });
+  }
 
   testWidgets('Settings does not construct developer provider before Advanced Settings is opened', (tester) async {
     var providerConstructions = 0;

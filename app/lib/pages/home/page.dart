@@ -51,7 +51,6 @@ import 'package:omi/utils/platform/platform_service.dart';
 import 'package:omi/widgets/freemium_switch_dialog.dart';
 import 'package:omi/widgets/upgrade_alert.dart';
 import 'package:omi/widgets/bottom_nav_bar.dart';
-import 'package:omi/ella/ella_theme.dart';
 import 'today_page.dart';
 
 class HomePageWrapper extends StatefulWidget {
@@ -617,7 +616,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                         ),
                         // Settings and other non-home tabs just need nav bar clearance
                         if (context.watch<HomeProvider>().selectedIndex == 3)
-                          SizedBox(height: EllaSizes.navBarHeight + MediaQuery.of(context).padding.bottom),
+                          SizedBox(
+                              height: BottomNavBar.navigationHeight(context) + MediaQuery.of(context).padding.bottom),
                       ],
                     ),
                     Consumer<HomeProvider>(

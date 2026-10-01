@@ -266,6 +266,7 @@ void main() {
     ConversationProvider provider, {
     MemoryArtworkApi? artworkApi,
     bool settle = true,
+    TextScaler textScaler = TextScaler.noScaling,
   }) async {
     await tester.pumpWidget(
       MultiProvider(
@@ -277,6 +278,10 @@ void main() {
           theme: ellaThemeData(),
           localizationsDelegates: AppLocalizations.localizationsDelegates,
           supportedLocales: AppLocalizations.supportedLocales,
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+            child: child!,
+          ),
           home: EllaMemoriesPage(artworkApi: artworkApi),
         ),
       ),
@@ -301,12 +306,95 @@ void main() {
     await pumpPage(tester, provider, artworkApi: api, settle: false);
   }
 
+  for (final scale in [1.0, 3.0]) {
+    testWidgets('actual Memories keeps saved grid as an honest compact phone list at ${scale}x', (tester) async {
+      tester.view.physicalSize = const Size(320, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await SharedPreferencesUtil().saveMemoryArchiveGalleryLayout('grid');
+      final longOverview =
+          List.filled(20, 'Rose and I talked about the garden and our plans for the weekend.').join(' ');
+      final provider = _QueueConversationProvider()
+        ..conversations = [memory('long-preview', title: 'Coffee and a conversation with Rose', overview: longOverview)]
+        ..hasLoadedConversations = true
+        ..hasFreshConversations = true
+        ..hasMoreConversations = false;
+      addTearDown(provider.dispose);
+      await pumpPage(tester, provider, artworkApi: _FakeArtworkApi(), textScaler: TextScaler.linear(scale));
+      expect(tester.getSize(find.byType(MemoryArtworkImage)), const Size(64, 64));
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      if (scale == 1) {
+        expect(tester.getSize(find.byKey(const Key('memory-card-long-preview'))).height, lessThan(240));
+      }
+      final preview = tester.widget<Text>(find.text(longOverview));
+      expect(preview.maxLines, 3);
+      expect(preview.overflow, TextOverflow.ellipsis);
+      expect(provider.conversations.single.structured.overview, longOverview);
+      final menu = tester.widget<PopupMenuButton<MemoryGalleryLayout>>(find.byKey(const Key('memory-layout-menu')));
+      expect(menu.initialValue, MemoryGalleryLayout.list);
+      await tester.tap(find.byKey(const Key('memory-layout-menu')));
+      await tester.pumpAndSettle();
+      expect(find.text('Compact list'), findsOneWidget);
+      expect(find.text('Days'), findsOneWidget);
+      expect(find.text('Large images'), findsNothing);
+      expect(find.text('Cards'), findsNothing);
+      expect(SharedPreferencesUtil().memoryArchiveGalleryLayout, 'grid');
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('wide Memories maps saved journal to List without hiding Cards or Days', (tester) async {
+    tester.view.physicalSize = const Size(800, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await SharedPreferencesUtil().saveMemoryArchiveGalleryLayout('journal');
+    final provider = _QueueConversationProvider()
+      ..conversations = [memory('wide-layout-one'), memory('wide-layout-two')]
+      ..hasLoadedConversations = true
+      ..hasFreshConversations = true
+      ..hasMoreConversations = false;
+    addTearDown(provider.dispose);
+    await pumpPage(tester, provider, artworkApi: _FakeArtworkApi());
+    final layoutMenu = find.byKey(const Key('memory-layout-menu'));
+    expect(tester.widget<PopupMenuButton<MemoryGalleryLayout>>(layoutMenu).initialValue, MemoryGalleryLayout.list);
+    await tester.tap(layoutMenu);
+    await tester.pumpAndSettle();
+    expect(find.text('Large images'), findsNothing);
+    expect(find.text('Compact list'), findsOneWidget);
+    expect(find.text('Cards'), findsOneWidget);
+    expect(find.text('Days'), findsOneWidget);
+    expect(SharedPreferencesUtil().memoryArchiveGalleryLayout, 'journal');
+    await tester.tap(find.text('Cards'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<PopupMenuButton<MemoryGalleryLayout>>(layoutMenu).initialValue, MemoryGalleryLayout.grid);
+    expect(SharedPreferencesUtil().memoryArchiveGalleryLayout, 'grid');
+    final first = tester.getRect(find.byKey(const Key('memory-card-wide-layout-one')));
+    final second = tester.getRect(find.byKey(const Key('memory-card-wide-layout-two')));
+    expect(first.top, second.top);
+    expect(first.right, lessThanOrEqualTo(second.left));
+    await tester.tap(layoutMenu);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Days'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<PopupMenuButton<MemoryGalleryLayout>>(layoutMenu).initialValue, MemoryGalleryLayout.days);
+    expect(SharedPreferencesUtil().memoryArchiveGalleryLayout, 'days');
+    expect(tester.takeException(), isNull);
+  });
+
   for (final layout in ['journal', 'grid', 'list', 'days']) {
     testWidgets('$layout stops pending artwork after terminal parent queue failure', (tester) async {
       final api = _QueueReadArtworkApi();
       api.queueReads.addAll([() async => null, () async => null, () async => null]);
       await pumpQueuePage(tester, api, layout: layout, at: DateTime.now());
-      expect(find.byKey(const Key('memory-artwork-generation-progress-queue-memory')), findsOneWidget);
+      expect(find.byKey(const Key('memory-artwork-placeholder-queue-memory')), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(
+          tester
+              .widgetList<Semantics>(find.byType(Semantics))
+              .any((widget) => widget.properties.label?.contains('preparing') ?? false),
+          isTrue);
       for (var i = 0; i < 2; i++) {
         await tester.pump(const Duration(seconds: 4));
         await tester.pump();
@@ -333,7 +421,13 @@ void main() {
         });
       }
       await pumpQueuePage(tester, api);
-      expect(find.byKey(const Key('memory-artwork-generation-progress-queue-memory')), findsOneWidget);
+      expect(find.byKey(const Key('memory-artwork-placeholder-queue-memory')), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(
+          tester
+              .widgetList<Semantics>(find.byType(Semantics))
+              .any((widget) => widget.properties.label?.contains('preparing') ?? false),
+          isTrue);
       final dayReads = api.dayReads;
       for (var i = 0; i < 3; i++) {
         await tester.pump(const Duration(seconds: 4));
@@ -1031,8 +1125,7 @@ void main() {
 
     await pumpPage(tester, provider, artworkApi: artworkApi);
 
-    final menu = tester.widget<PopupMenuButton<String>>(find.byKey(const Key('memory-artwork-style-menu')));
-    expect(menu.enabled, isFalse);
+    expect(find.byKey(const Key('memory-artwork-style-menu')), findsNothing);
     expect(artworkApi.backfillCalls, 0);
   });
 

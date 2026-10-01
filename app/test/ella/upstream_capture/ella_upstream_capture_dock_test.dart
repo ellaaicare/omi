@@ -23,6 +23,7 @@ import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/onboarding_provider.dart';
 import 'package:omi/services/devices.dart' as legacy_service;
 import 'package:omi/services/devices/device_connection.dart' as legacy_connection;
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/device.dart';
 import 'package:omi/upstream_capture/backend/preferences.dart' as upstream;
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart';
@@ -35,11 +36,31 @@ import 'ella_capture_protocol_socket_cases.dart';
 import 'upstream_capture_protocol_v2_cases.dart';
 
 const _uid = 'uid-a';
+
+class _NonlinearWhisperTextScaler extends TextScaler {
+  const _NonlinearWhisperTextScaler();
+
+  @override
+  double scale(double fontSize) => fontSize * (fontSize <= 14 ? 3 : 2);
+
+  @override
+  double get textScaleFactor => 3;
+}
+
 final _testNecklace = BtDevice(id: 'necklace-a', name: 'Compass', type: DeviceType.omi, rssi: -40);
 final _pickerNecklace =
     legacy_device.BtDevice(id: 'necklace-a', name: 'Compass', type: legacy_device.DeviceType.fieldy, rssi: -40);
 final _pickerFriend =
     legacy_device.BtDevice(id: 'friend-a', name: 'Friend', type: legacy_device.DeviceType.friendPendant, rssi: -40);
+
+class _WhisperTestAuthority implements ExactAccountAuthorityVerifier {
+  _WhisperTestAuthority(this.uid, this.current);
+  @override
+  final String uid;
+  final bool Function() current;
+  @override
+  bool isExactCurrent() => current();
+}
 
 class _PickerService implements legacy_service.IDeviceService {
   _PickerService(this.devices);
@@ -206,6 +227,8 @@ class _DockFixture {
     WidgetTester tester, {
     Size size = const Size(390, 844),
     double textScale = 1,
+    TextScaler? textScaler,
+    Locale? locale,
     bool guardianAvailable = false,
     GuardianModeLoader? guardianModeLoader,
     GuardianModeSetter? guardianModeSetter,
@@ -213,6 +236,7 @@ class _DockFixture {
     GuardianNativeLifecycle? guardianNativeStop,
     GuardianNativeStateReader? guardianNativeState,
     Stream<guardian_native.GuardianModeState>? guardianNativeStates,
+    guardian_native.GuardianWhisperAuthorityProvider? guardianAuthorityProvider,
     EllaCaptureConsentRequester? consentRequester,
     String Function()? authenticatedUid,
     OnboardingProvider? onboarding,
@@ -225,10 +249,11 @@ class _DockFixture {
           child: MaterialApp(
             debugShowCheckedModeBanner: false,
             theme: ellaThemeData(),
+            locale: locale,
             localizationsDelegates: AppLocalizations.localizationsDelegates,
             supportedLocales: AppLocalizations.supportedLocales,
             builder: (context, child) => MediaQuery(
-              data: MediaQuery.of(context).copyWith(textScaler: TextScaler.linear(textScale)),
+              data: MediaQuery.of(context).copyWith(textScaler: textScaler ?? TextScaler.linear(textScale)),
               child: child!,
             ),
             home: Scaffold(
@@ -241,6 +266,11 @@ class _DockFixture {
                     authenticatedUid: authenticatedUid ?? () => _uid,
                     consentRequester: consentRequester,
                     guardianAvailability: () => guardianAvailable,
+                    guardianAuthorityProvider: guardianAuthorityProvider ??
+                        () {
+                          final uid = authenticatedUid?.call() ?? _uid;
+                          return _WhisperTestAuthority(uid, () => (authenticatedUid?.call() ?? _uid) == uid);
+                        },
                     guardianModeLoader: guardianModeLoader,
                     guardianModeSetter: guardianModeSetter,
                     guardianNativeStart: guardianNativeStart,
@@ -291,6 +321,7 @@ double _contrastRatio(Color foreground, Color background) {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  setUp(() => guardian_native.GuardianModeService.whisperStateFence.resetForTesting());
   registerEllaCaptureProtocolSocketCases();
   registerUpstreamCaptureProtocolV2Cases();
 
@@ -489,7 +520,7 @@ void main() {
         await press.cancel();
         await tester.pumpAndSettle();
       }
-      expect(picker.service.discovers, 1);
+      expect(picker.service.discovers, 2);
       expect(picker.provider.connects, 0);
       expect(tester.takeException(), isNull);
     });
@@ -833,13 +864,310 @@ void main() {
     await tester.pump();
 
     expect(savedState?.features, ['MEMORY_SUPPORT']);
-    expect(find.text('Whispers was saved, but spoken playback could not start. Try again.'), findsOneWidget);
-    expect(find.text('Whispers are on, but spoken playback is not available right now.'), findsOneWidget);
+    expect(find.text("Whispers are on, but Ella couldn't start spoken help."), findsOneWidget);
+    expect(find.byKey(const Key('upstream-capture-whispers-error')), findsNothing);
     expect(find.byKey(const Key('upstream-capture-whispers-retry')), findsOneWidget);
     expect(find.byKey(const Key('upstream-capture-whispers-switch')), findsOneWidget);
   });
 
-  testWidgets('Whispers save failure keeps the verified prior state', (tester) async {
+  testWidgets('awaited dock native start cannot publish ready after account profile ABA', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final started = Completer<void>();
+    var epoch = 0;
+    await fixture.pump(
+      tester,
+      guardianAvailable: true,
+      guardianAuthorityProvider: () {
+        final captured = epoch;
+        return _WhisperTestAuthority(_uid, () => epoch == captured);
+      },
+      guardianModeLoader: () async => const GuardianModeInfo(
+        currentMode: GuardianModeKey.off,
+        twoTierState: GuardianModeState(),
+      ),
+      guardianModeSetter: (_) async => true,
+      guardianNativeStart: () => started.future,
+      guardianNativeStop: () async {},
+      guardianNativeState: () => guardian_native.GuardianModeState.idle,
+    );
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+    await tester.pump();
+    epoch++;
+    guardian_native.GuardianModeService.whisperStateFence.invalidate();
+    started.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Whispers are on — Ella can speak up when she can help.'), findsNothing);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot, isNull);
+    expect(find.byKey(const Key('upstream-capture-whispers-switch')), findsNothing);
+    expect(find.byKey(const Key('upstream-capture-whispers-retry')), findsOneWidget);
+  });
+
+  testWidgets('a dock OFF save failure cannot restore native for an authority that changed', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final saved = Completer<bool>();
+    var current = true;
+    var starts = 0;
+    await fixture.pump(
+      tester,
+      guardianAvailable: true,
+      guardianAuthorityProvider: () => _WhisperTestAuthority(_uid, () => current),
+      guardianModeLoader: () async => const GuardianModeInfo(
+        currentMode: GuardianModeKey.custom,
+        twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
+      ),
+      guardianModeSetter: (_) => saved.future,
+      guardianNativeStart: () async => starts++,
+      guardianNativeStop: () async {},
+      guardianNativeState: () => guardian_native.GuardianModeState.active,
+    );
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+    await tester.pump();
+    current = false;
+    guardian_native.GuardianModeService.whisperStateFence.invalidate();
+    saved.complete(false);
+    await tester.pump();
+    await tester.pump();
+    expect(starts, 0);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot, isNull);
+  });
+
+  for (final phase in ['put', 'native', 'availability']) {
+    testWidgets('dock pending $phase releases its ticket and permits a same-authority remount', (tester) async {
+      final fixture = await _DockFixture.create(tester);
+      final pending = Completer<void>();
+      var reads = 0;
+      var nativeStarts = 0;
+      var serverOn = false;
+      var nativeOn = false;
+      Future<GuardianModeInfo?> read() async {
+        reads++;
+        return GuardianModeInfo(
+          currentMode: serverOn ? GuardianModeKey.custom : GuardianModeKey.off,
+          twoTierState: serverOn ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
+        );
+      }
+
+      await fixture.pump(
+        tester,
+        guardianAvailable: true,
+        guardianModeLoader: read,
+        guardianModeSetter: (_) async {
+          if (phase != 'native') await pending.future;
+          serverOn = true;
+          return true;
+        },
+        guardianNativeStart: () async {
+          nativeStarts++;
+          if (phase == 'native') await pending.future;
+          nativeOn = true;
+        },
+        guardianNativeStop: () async => nativeOn = false,
+        guardianNativeState: () =>
+            nativeOn ? guardian_native.GuardianModeState.active : guardian_native.GuardianModeState.idle,
+      );
+      await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+      await tester.pump();
+      expect(guardian_native.GuardianModeService.whisperStateFence.choicePending, isTrue);
+      if (phase == 'availability') {
+        await fixture.pump(tester, guardianAvailable: false);
+      } else {
+        await tester.pumpWidget(const SizedBox.shrink());
+        expect(guardian_native.GuardianModeService.whisperStateFence.choicePending, isTrue);
+      }
+      pending.complete();
+      await tester.pump();
+      await tester.pump();
+      expect(guardian_native.GuardianModeService.whisperStateFence.choicePending, isFalse);
+      if (phase != 'native') expect(nativeStarts, 0);
+      await tester.pumpWidget(const SizedBox.shrink());
+      final beforeReads = reads;
+      await fixture.pump(
+        tester,
+        guardianAvailable: true,
+        guardianModeLoader: read,
+        guardianNativeState: () =>
+            nativeOn ? guardian_native.GuardianModeState.active : guardian_native.GuardianModeState.idle,
+      );
+      expect(reads, beforeReads + 1);
+      expect(find.text('Saving Whispers…'), findsNothing);
+      expect(tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch'))).value, isTrue);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('dock remounted before abandoned ON write settles reads only the committed server state', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final pending = Completer<void>();
+    var serverOn = false;
+    var reads = 0;
+    var staleNativeStarts = 0;
+    Future<GuardianModeInfo?> read() async {
+      reads++;
+      return GuardianModeInfo(
+        currentMode: serverOn ? GuardianModeKey.custom : GuardianModeKey.off,
+        twoTierState: serverOn ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
+      );
+    }
+
+    await fixture.pump(
+      tester,
+      guardianAvailable: true,
+      guardianModeLoader: read,
+      guardianModeSetter: (_) async {
+        await pending.future;
+        serverOn = true;
+        return true;
+      },
+      guardianNativeStart: () async => staleNativeStarts++,
+      guardianNativeState: () => guardian_native.GuardianModeState.idle,
+    );
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox.shrink());
+    final beforeReads = reads;
+    await fixture.pump(
+      tester,
+      guardianAvailable: true,
+      guardianModeLoader: read,
+      guardianNativeState: () => guardian_native.GuardianModeState.idle,
+    );
+    expect(reads, beforeReads);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot, isNull);
+    pending.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(reads, beforeReads + 1);
+    expect(staleNativeStarts, 0);
+    expect(guardian_native.GuardianModeService.whisperStateFence.choicePending, isFalse);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot!.enabled, isTrue);
+    expect(tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch'))).value, isTrue);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final initialOn in [false, true]) {
+    testWidgets('ambiguous dock write reads committed ${!initialOn} before native reconciliation', (tester) async {
+      final fixture = await _DockFixture.create(tester);
+      var serverOn = initialOn;
+      var nativeOn = initialOn;
+      var reads = 0;
+      var writes = 0;
+      await fixture.pump(
+        tester,
+        guardianAvailable: true,
+        guardianModeLoader: () async {
+          reads++;
+          return GuardianModeInfo(
+            currentMode: serverOn ? GuardianModeKey.custom : GuardianModeKey.off,
+            twoTierState: serverOn ? const GuardianModeState(features: ['MEMORY_SUPPORT']) : const GuardianModeState(),
+          );
+        },
+        guardianModeSetter: (state) async {
+          writes++;
+          serverOn = !state.isOff;
+          throw StateError('response lost after commit');
+        },
+        guardianNativeStart: () async => nativeOn = true,
+        guardianNativeStop: () async => nativeOn = false,
+        guardianNativeState: () =>
+            nativeOn ? guardian_native.GuardianModeState.active : guardian_native.GuardianModeState.idle,
+      );
+      await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+      await tester.pump();
+      await tester.pump();
+      expect(reads, 2);
+      expect(writes, 1);
+      expect(nativeOn, !initialOn);
+      final snapshot = guardian_native.GuardianModeService.whisperStateFence.snapshot!;
+      expect(snapshot.enabled, !initialOn);
+      expect(snapshot.modeVerified, isTrue);
+      expect(snapshot.nativeReconciled, isTrue);
+      expect(tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch'))).value, !initialOn);
+    });
+  }
+
+  testWidgets('ambiguous dock write with failed readback remains unknown and Retry reads current mode', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    var reads = 0;
+    var starts = 0;
+    await fixture.pump(
+      tester,
+      guardianAvailable: true,
+      guardianModeLoader: () async {
+        reads++;
+        if (reads == 2) throw StateError('readback unavailable');
+        return GuardianModeInfo(
+          currentMode: reads == 1 ? GuardianModeKey.off : GuardianModeKey.custom,
+          twoTierState: reads == 1 ? const GuardianModeState() : const GuardianModeState(features: ['MEMORY_SUPPORT']),
+        );
+      },
+      guardianModeSetter: (_) async => false,
+      guardianNativeStart: () async => starts++,
+      guardianNativeStop: () async {},
+      guardianNativeState: () => guardian_native.GuardianModeState.idle,
+    );
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+    await tester.pump();
+    await tester.pump();
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot!.modeVerified, isFalse);
+    expect(starts, 0);
+    expect(find.text('Whispers are off. Spoken responses are paused.'), findsNothing);
+    expect(find.byKey(const Key('upstream-capture-whispers-retry')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-retry')));
+    await tester.pump();
+    await tester.pump();
+    expect(reads, 3);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot!.enabled, isTrue);
+  });
+
+  for (final supersededBy in ['newer_choice', 'authority_replacement']) {
+    testWidgets('ambiguous dock readback cannot reconcile after $supersededBy', (tester) async {
+      final fixture = await _DockFixture.create(tester);
+      final readback = Completer<GuardianModeInfo?>();
+      var reads = 0;
+      var starts = 0;
+      var epoch = 0;
+      ExactAccountAuthorityVerifier authority() {
+        final captured = epoch;
+        return _WhisperTestAuthority(_uid, () => epoch == captured);
+      }
+
+      await fixture.pump(
+        tester,
+        guardianAvailable: true,
+        guardianAuthorityProvider: authority,
+        guardianModeLoader: () => ++reads == 1
+            ? Future.value(const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState()))
+            : readback.future,
+        guardianModeSetter: (_) async => false,
+        guardianNativeStart: () async => starts++,
+        guardianNativeStop: () async {},
+        guardianNativeState: () => guardian_native.GuardianModeState.idle,
+      );
+      await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+      await tester.pump();
+      expect(reads, 2);
+      final fence = guardian_native.GuardianModeService.whisperStateFence;
+      if (supersededBy == 'authority_replacement') {
+        epoch++;
+        fence.invalidate();
+      }
+      final newer = fence.choose(authority, false)!;
+      fence.publish(newer, (enabled: false, modeVerified: true, nativeReconciled: true));
+      readback.complete(const GuardianModeInfo(
+        currentMode: GuardianModeKey.custom,
+        twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
+      ));
+      await tester.pump();
+      await tester.pump();
+      expect(starts, 0);
+      expect(fence.snapshot!.enabled, isFalse);
+      expect(fence.snapshot!.modeVerified, isTrue);
+      expect(fence.choicePending, isFalse);
+    });
+  }
+
+  testWidgets('Whispers save failure reads and keeps the verified prior state', (tester) async {
     final fixture = await _DockFixture.create(tester);
     await fixture.pump(
       tester,
@@ -858,10 +1186,95 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    expect(find.text('Whispers could not be updated. Try again.'), findsOneWidget);
+    expect(find.text('Whispers are off. Spoken responses are paused.'), findsOneWidget);
     final toggle = tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch')));
     expect(toggle.value, isFalse);
   });
+
+  testWidgets('unavailable saved-on playback retries without mode writes and waits for native success', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final nativeCompletion = Completer<void>();
+    var starts = 0;
+    var writes = 0;
+    await fixture.pump(
+      tester,
+      guardianAvailable: true,
+      guardianModeLoader: () async => const GuardianModeInfo(
+          currentMode: GuardianModeKey.custom, twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT'])),
+      guardianModeSetter: (_) async {
+        writes++;
+        return true;
+      },
+      guardianNativeStart: () async {
+        if (starts++ == 0) throw StateError('HTTP 503 technical provider detail');
+        await nativeCompletion.future;
+      },
+      guardianNativeState: () => guardian_native.GuardianModeState.idle,
+    );
+    final retry = find.byKey(const Key('upstream-capture-whispers-retry'));
+    expect(retry.hitTestable(), findsOneWidget);
+    expect(find.text('Whispers are on. Spoken help is unavailable right now.'), findsOneWidget);
+    await tester.tap(retry);
+    await tester.pump();
+    await tester.pump();
+    expect(find.text("Whispers are on, but Ella couldn't start spoken help."), findsOneWidget);
+    expect(find.textContaining('HTTP'), findsNothing);
+    await tester.tap(retry);
+    await tester.pump();
+    expect(find.text('Whispers are on — Ella can speak up when she can help.'), findsNothing);
+    expect(writes, 0);
+    nativeCompletion.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Whispers are on — Ella can speak up when she can help.'), findsOneWidget);
+    expect(starts, 2);
+    expect(writes, 0);
+    expect(retry, findsNothing);
+  });
+
+  for (final locale in [const Locale('en'), const Locale('ar')]) {
+    testWidgets('gentle Whispers recovery is actionable with ${locale.languageCode} nonlinear large text',
+        (tester) async {
+      final fixture = await _DockFixture.create(tester);
+      final semantics = tester.ensureSemantics();
+      var reads = 0;
+      var writes = 0;
+      await fixture.pump(
+        tester,
+        size: const Size(320, 1600),
+        textScaler: const _NonlinearWhisperTextScaler(),
+        locale: locale,
+        guardianAvailable: true,
+        guardianModeLoader: () async {
+          if (reads++ == 0) throw StateError('HTTP 503 provider secret diagnostic');
+          return const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState());
+        },
+        guardianModeSetter: (_) async {
+          writes++;
+          return true;
+        },
+        guardianNativeStop: () async {},
+        guardianNativeState: () => guardian_native.GuardianModeState.idle,
+      );
+      final row = find.byKey(const Key('upstream-capture-whispers-stacked'));
+      final retry = find.byKey(const Key('upstream-capture-whispers-retry'));
+      expect(find.textContaining('HTTP'), findsNothing);
+      expect(find.textContaining('provider secret'), findsNothing);
+      expect(tester.getSemantics(row).label, isNot(contains('503')));
+      expect(tester.getSize(retry).height, greaterThanOrEqualTo(48));
+      expect(retry.hitTestable(), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.tap(retry);
+      await tester.pump();
+      await tester.pump();
+      expect(reads, 2);
+      expect(writes, 0);
+      expect(find.byKey(const Key('upstream-capture-whispers-retry')), findsNothing);
+      expect(tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch'))).value, isFalse);
+      expect(tester.takeException(), isNull);
+      semantics.dispose();
+    });
+  }
 
   testWidgets('Whispers stop failure stays truthful and Retry stops native playback', (tester) async {
     final fixture = await _DockFixture.create(tester);
@@ -885,7 +1298,7 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(find.text('Whispers are off. Spoken responses are paused.'), findsNothing);
-    expect(find.text('Whispers was saved off, but spoken playback could not stop. Try again.'), findsOneWidget);
+    expect(find.text("Whispers are set to off, but Ella couldn't pause spoken help."), findsOneWidget);
 
     stopShouldFail = false;
     await tester.tap(find.byKey(const Key('upstream-capture-whispers-retry')));
@@ -918,7 +1331,7 @@ void main() {
     await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
     await tester.pump();
     await tester.pump();
-    expect(find.text('Whispers was saved off, but spoken playback could not stop. Try again.'), findsOneWidget);
+    expect(find.text("Whispers are set to off, but Ella couldn't pause spoken help."), findsOneWidget);
     expect(find.byKey(const Key('upstream-capture-whispers-retry')), findsOneWidget);
   });
 
@@ -937,7 +1350,7 @@ void main() {
       guardianNativeState: () => nativeState,
       guardianNativeStates: states.stream,
     );
-    expect(find.text('Whispers are on, but spoken playback is not available right now.'), findsOneWidget);
+    expect(find.text('Whispers are on. Spoken help is unavailable right now.'), findsOneWidget);
     nativeState = guardian_native.GuardianModeState.active;
     states.add(nativeState);
     await tester.pump();
