@@ -18,6 +18,7 @@ import os
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
+from ella.services.mcp_oauth_refresh import refresh_enabled
 
 router = APIRouter(tags=["MCP OAuth Discovery"])
 
@@ -86,7 +87,8 @@ async def get_oauth_authorization_server():
             "response_types_supported": ["code"],
             "grant_types_supported": [
                 "authorization_code",
-            ],
+            ]
+            + (["refresh_token"] if refresh_enabled() else []),
             "code_challenge_methods_supported": ["S256"],
             "scopes_supported": [
                 "context:read",
@@ -99,7 +101,8 @@ async def get_oauth_authorization_server():
                 "tools:read",
                 "proposals:read",
                 "proposals:write",
-            ],
+            ]
+            + (["offline_access"] if refresh_enabled() else []),
             "registration_endpoint": f"{base}/v1/ella/mcp/register",
             "token_endpoint_auth_methods_supported": ["none"],
             "client_id_metadata_document_supported": True,

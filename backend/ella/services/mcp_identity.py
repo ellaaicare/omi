@@ -445,12 +445,33 @@ def mcp_session_secret() -> str:
 
 
 def issue_mcp_session_token(
-    resolution: MCPIdentityResolution, *, ttl_seconds: int = 3600
+    resolution: MCPIdentityResolution,
+    *,
+    ttl_seconds: int = 3600,
+    refresh_family_id: Optional[str] = None,
+    refresh_authority_digest: Optional[str] = None,
+    access_expires_at: Optional[int] = None,
 ) -> tuple[str, dict[str, Any]]:
     secret = mcp_session_secret()
     if not secret:
         raise RuntimeError("ELLA_MCP_SESSION_SECRET or ELLA_SESSION_SECRET must be configured")
     claims = build_session_claims(resolution, ttl_seconds=ttl_seconds)
+    if any(value is not None for value in (refresh_family_id, refresh_authority_digest, access_expires_at)):
+        if (
+            not isinstance(refresh_family_id, str)
+            or str(uuid.UUID(refresh_family_id)) != refresh_family_id
+            or not isinstance(refresh_authority_digest, str)
+            or len(refresh_authority_digest) != 64
+            or any(char not in "0123456789abcdef" for char in refresh_authority_digest)
+            or type(access_expires_at) is not int
+            or not int(time.time()) < access_expires_at <= claims["exp"]
+        ):
+            raise ValueError("invalid_renewable_session_claims")
+        claims.update(
+            refresh_family_id=refresh_family_id,
+            refresh_authority_digest=refresh_authority_digest,
+            exp=access_expires_at,
+        )
     return jwt.encode(claims, secret, algorithm="HS256"), claims
 
 

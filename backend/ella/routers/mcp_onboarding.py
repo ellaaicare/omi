@@ -26,6 +26,7 @@ from ella.services.mcp_identity import (
 )
 from ella.services.mcp_startup import build_startup_context
 from ella.services.mcp_surface_prompt import build_public_surface_prompt, build_surface_prompt
+from ella.services import mcp_oauth_refresh
 
 router = APIRouter(prefix="/v1/ella/mcp", tags=["Ella MCP Onboarding"])
 
@@ -122,6 +123,8 @@ def _authenticate_connector_session(
 
     try:
         claims = validate_mcp_session_token(token)
+        if mcp_oauth_refresh.RENEWAL_CLAIMS.intersection(claims):
+            raise ValueError("Renewable sessions require the signed summary-tool resource")
         return session_claims_to_public_resolution(claims)
     except ValueError as session_error:
         tokens = _allowed_static_tokens()
@@ -253,6 +256,7 @@ def _store_authorization_code(
     resolution: MCPIdentityResolution,
     code_challenge: str = "",
     code_challenge_method: str = "",
+    refresh_context: Optional[dict[str, str]] = None,
 ) -> str:
     code = uuid.uuid4().hex
     _auth_codes[code] = {
@@ -260,6 +264,7 @@ def _store_authorization_code(
         "expires_at": time.time() + _oauth_code_ttl_seconds(),
         "code_challenge": code_challenge,
         "code_challenge_method": code_challenge_method,
+        "refresh_context": refresh_context,
     }
     return code
 
@@ -277,12 +282,19 @@ def _verify_pkce(code_verifier: str, code_challenge: str, method: str) -> bool:
     return False
 
 
-def _consume_authorization_code(code: str, code_verifier: str = "") -> MCPIdentityResolution:
+def _consume_authorization_code_context(
+    code: str, code_verifier: str = "", *, client_id: str = "", redirect_uri: str = ""
+) -> tuple[MCPIdentityResolution, Optional[dict[str, str]]]:
     item = _auth_codes.pop(code, None)
     if not item:
         raise HTTPException(status_code=400, detail="Invalid authorization code")
     if time.time() > float(item.get("expires_at") or 0):
         raise HTTPException(status_code=400, detail="Expired authorization code")
+    refresh_context = item.get("refresh_context")
+    if refresh_context and (
+        refresh_context["client_id"] != client_id or refresh_context["redirect_uri"] != redirect_uri
+    ):
+        raise HTTPException(status_code=400, detail="Invalid authorization code binding")
     stored_challenge = item.get("code_challenge") or ""
     stored_method = item.get("code_challenge_method") or ""
     if stored_challenge:
@@ -290,7 +302,12 @@ def _consume_authorization_code(code: str, code_verifier: str = "") -> MCPIdenti
             raise HTTPException(status_code=400, detail="code_verifier is required (PKCE)")
         if not _verify_pkce(code_verifier, stored_challenge, stored_method):
             raise HTTPException(status_code=400, detail="Invalid code_verifier (PKCE)")
-    return item["resolution"]
+    return item["resolution"], refresh_context
+
+
+def _consume_authorization_code(code: str, code_verifier: str = "") -> MCPIdentityResolution:
+    resolution, _ = _consume_authorization_code_context(code, code_verifier)
+    return resolution
 
 
 async def _parse_token_request(request: Request) -> dict[str, Any]:
@@ -518,7 +535,7 @@ async def post_mcp_oauth_onboarding(request: MCPOAuthOnboardingRequest):
 # starting the OAuth authorization code flow.
 # ---------------------------------------------------------------------------
 
-_registered_clients: dict[str, dict[str, Any]] = {}
+_registered_clients = mcp_oauth_refresh.registered_clients
 
 
 @router.post("/register")
@@ -603,6 +620,15 @@ async def get_mcp_authorize(
         raise HTTPException(status_code=400, detail="Invalid client_id")
     if code_challenge_method and code_challenge_method != "S256":
         raise HTTPException(status_code=400, detail="code_challenge_method must be S256")
+    refresh_context = None
+    if "offline_access" in (scope or "").split():
+        try:
+            mcp_oauth_refresh.require_refresh_authorization(
+                client_id, redirect_uri, code_challenge or "", code_challenge_method or ""
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Refresh authorization is unavailable or invalid") from exc
+        refresh_context = {"client_id": client_id, "redirect_uri": redirect_uri, "scope": scope or ""}
     if not firebase_id_token:
         return _render_mcp_oauth_page(
             response_type=response_type,
@@ -633,6 +659,7 @@ async def get_mcp_authorize(
         resolution,
         code_challenge=code_challenge or "",
         code_challenge_method=code_challenge_method or "S256" if code_challenge else "",
+        refresh_context=refresh_context,
     )
     return _redirect_with_params(redirect_uri, {"code": code, "state": state})
 
@@ -651,9 +678,40 @@ async def post_mcp_token(request: Request):
 
     ttl_seconds = _mcp_session_ttl_seconds(data.get("ttl_seconds") or data.get("expires_in"))
     grant_type = str(data.get("grant_type") or "").strip()
+    if grant_type == "refresh_token":
+        try:
+            return await mcp_oauth_refresh.renew_refresh_family(
+                token=data.get("refresh_token"),
+                client_id=client_id,
+                scope=str(data.get("scope") or ""),
+                ttl_seconds=ttl_seconds,
+            )
+        except ValueError as exc:
+            code = (
+                str(exc)
+                if str(exc) in {"invalid_grant", "invalid_client", "invalid_scope", "unsupported_grant_type"}
+                else "invalid_grant"
+            )
+            return JSONResponse(status_code=400, content={"error": code})
+        except Exception:
+            return JSONResponse(status_code=503, content={"error": "temporarily_unavailable"})
     if grant_type in {"authorization_code", ""} and data.get("code"):
         code_verifier = str(data.get("code_verifier") or "").strip()
-        resolution = _consume_authorization_code(str(data.get("code") or ""), code_verifier=code_verifier)
+        resolution, refresh_context = _consume_authorization_code_context(
+            str(data.get("code") or ""),
+            code_verifier=code_verifier,
+            client_id=client_id,
+            redirect_uri=str(data.get("redirect_uri") or ""),
+        )
+        if refresh_context:
+            try:
+                return await mcp_oauth_refresh.issue_refresh_family(
+                    resolution, client_id=client_id, scope=refresh_context["scope"], ttl_seconds=ttl_seconds
+                )
+            except ValueError:
+                return JSONResponse(status_code=400, content={"error": "invalid_grant"})
+            except Exception:
+                return JSONResponse(status_code=503, content={"error": "temporarily_unavailable"})
         return _issue_oauth_token_response(resolution, ttl_seconds=ttl_seconds)
 
     if grant_type in {
