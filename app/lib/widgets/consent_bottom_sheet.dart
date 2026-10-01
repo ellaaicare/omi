@@ -1,223 +1,114 @@
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:provider/provider.dart';
-
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/providers/auth_provider.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 class ConsentBottomSheet extends StatelessWidget {
-  final String authMethod; // 'google' or 'apple'
+  final String authMethod;
   final VoidCallback onContinue;
-
-  const ConsentBottomSheet({
-    super.key,
-    required this.authMethod,
-    required this.onContinue,
-  });
+  const ConsentBottomSheet({super.key, required this.authMethod, required this.onContinue});
 
   @override
   Widget build(BuildContext context) {
+    final legalStyle = TextButton.styleFrom(
+      minimumSize: const Size(48, 48),
+      foregroundColor: EllaColors.tealDeep,
+      textStyle: const TextStyle(fontFamily: 'Manrope', fontSize: 16, decoration: TextDecoration.underline),
+    );
     return Container(
       decoration: const BoxDecoration(
-        color: EllaColors.bgSecondary,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Handle bar
-          Container(
-            margin: const EdgeInsets.only(top: 12),
-            width: 36,
-            height: 4,
-            decoration: BoxDecoration(
-              color: EllaColors.textDisabled,
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-
-          Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Title
-                Text(
-                  context.l10n.dataAndPrivacy,
-                  style: const TextStyle(
-                    color: EllaColors.textPrimary,
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-
+          color: EllaColors.bgSecondary, borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height - MediaQuery.paddingOf(context).top),
+        child: SafeArea(
+            top: false,
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(24),
+              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Semantics(
+                    header: true,
+                    child: Text(context.l10n.dataAndPrivacy,
+                        style:
+                            const TextStyle(color: EllaColors.textPrimary, fontSize: 24, fontWeight: FontWeight.bold))),
                 const SizedBox(height: 16),
-
-                // Icon and auth method
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: authMethod == 'apple' ? EllaColors.textPrimary : const Color(0xFF4285F4),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Icon(
-                        authMethod == 'apple' ? FontAwesomeIcons.apple : FontAwesomeIcons.google,
-                        color: Colors.white,
-                        size: 18,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Text(
-                      authMethod == 'apple' ? context.l10n.signInWithApple : context.l10n.signInWithGoogle,
-                      style: const TextStyle(
-                        color: EllaColors.textPrimary,
-                        fontSize: 16,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ],
-                ),
-
+                Row(children: [
+                  Icon(authMethod == 'apple' ? FontAwesomeIcons.apple : FontAwesomeIcons.google,
+                      color: EllaColors.textPrimary, size: 24),
+                  const SizedBox(width: 12),
+                  Expanded(
+                      child: Text(authMethod == 'apple' ? context.l10n.signInWithApple : context.l10n.signInWithGoogle,
+                          style: const TextStyle(
+                              color: EllaColors.textPrimary, fontSize: 16, fontWeight: FontWeight.w500))),
+                ]),
                 const SizedBox(height: 20),
-
-                // Main message
-                Text(
-                  context.l10n.ellaAuthDataDisclosure,
-                  style: const TextStyle(
-                    color: EllaColors.textPrimary,
-                    fontSize: 16,
-                    height: 1.4,
-                  ),
-                ),
-
+                Text(context.l10n.ellaAuthDataDisclosure,
+                    style: const TextStyle(color: EllaColors.textPrimary, fontSize: 16, height: 1.4)),
                 const SizedBox(height: 16),
-
-                // Privacy notice with clickable links
-                RichText(
-                  text: TextSpan(
-                    style: const TextStyle(
-                      color: EllaColors.textSecondary,
-                      fontSize: 14,
-                      height: 1.4,
-                    ),
-                    children: [
-                      TextSpan(text: context.l10n.yourDataIsProtected),
-                      TextSpan(
-                        text: context.l10n.privacyPolicy,
-                        style: const TextStyle(
-                          color: EllaColors.primary,
-                          decoration: TextDecoration.underline,
-                        ),
-                        recognizer: TapGestureRecognizer()
-                          ..onTap = () {
-                            context.read<AuthenticationProvider>().openPrivacyPolicy();
-                          },
-                      ),
-                      TextSpan(text: context.l10n.and),
-                      TextSpan(
-                        text: context.l10n.termsOfService,
-                        style: const TextStyle(
-                          color: EllaColors.primary,
-                          decoration: TextDecoration.underline,
-                        ),
-                        recognizer: TapGestureRecognizer()
-                          ..onTap = () {
-                            context.read<AuthenticationProvider>().openTermsOfService();
-                          },
-                      ),
-                      const TextSpan(text: '.'),
-                    ],
-                  ),
-                ),
-
+                Text(
+                    '${context.l10n.yourDataIsProtected}${context.l10n.privacyPolicy}'
+                    '${context.l10n.and}${context.l10n.termsOfService}.',
+                    style: const TextStyle(color: EllaColors.textSecondary, fontSize: 16, height: 1.4)),
+                TextButton(
+                    key: const Key('consent-privacy'),
+                    style: legalStyle,
+                    onPressed: () => context.read<AuthenticationProvider>().openPrivacyPolicy(),
+                    child: Text(context.l10n.privacyPolicy)),
+                TextButton(
+                    key: const Key('consent-terms'),
+                    style: legalStyle,
+                    onPressed: () => context.read<AuthenticationProvider>().openTermsOfService(),
+                    child: Text(context.l10n.termsOfService)),
                 const SizedBox(height: 24),
-
-                // Buttons
-                Column(
-                  children: [
-                    // Continue button
-                    SizedBox(
-                      width: double.infinity,
-                      height: 50,
-                      child: ElevatedButton(
-                        onPressed: () {
-                          Navigator.of(context).pop();
-                          onContinue();
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: EllaColors.primary,
-                          foregroundColor: Colors.white,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          elevation: 0,
-                        ),
-                        child: Text(
+                SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      key: const Key('consent-continue'),
+                      onPressed: () {
+                        Navigator.of(context).pop();
+                        onContinue();
+                      },
+                      style: ElevatedButton.styleFrom(
+                        minimumSize: const Size(48, 52),
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                        backgroundColor: EllaColors.tealDeep,
+                        foregroundColor: EllaColors.paper,
+                        textStyle: const TextStyle(fontFamily: 'Manrope', fontSize: 16, fontWeight: FontWeight.w600),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        elevation: 0,
+                      ),
+                      child: Text(
                           authMethod == 'apple' ? context.l10n.continueWithApple : context.l10n.continueWithGoogle,
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
+                          textAlign: TextAlign.center),
+                    )),
+                const SizedBox(height: 12),
+                SizedBox(
+                    width: double.infinity,
+                    child: TextButton(
+                      key: const Key('consent-cancel'),
+                      onPressed: () => Navigator.of(context).pop(),
+                      style: TextButton.styleFrom(
+                        minimumSize: const Size(48, 52),
+                        foregroundColor: EllaColors.textSecondary,
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                        textStyle: const TextStyle(fontFamily: 'Manrope', fontSize: 16, fontWeight: FontWeight.w500),
                       ),
-                    ),
-
-                    const SizedBox(height: 12),
-
-                    // Cancel button
-                    SizedBox(
-                      width: double.infinity,
-                      height: 50,
-                      child: TextButton(
-                        onPressed: () {
-                          Navigator.of(context).pop();
-                        },
-                        style: TextButton.styleFrom(
-                          foregroundColor: EllaColors.textSecondary,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                        child: Text(
-                          context.l10n.cancel,
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-
-                // Bottom padding for safe area
-                SizedBox(height: MediaQuery.of(context).padding.bottom),
-              ],
-            ),
-          ),
-        ],
+                      child: Text(context.l10n.cancel, textAlign: TextAlign.center),
+                    )),
+              ]),
+            )),
       ),
     );
   }
 
-  static void show(
-    BuildContext context, {
-    required String authMethod,
-    required VoidCallback onContinue,
-  }) {
+  static void show(BuildContext context, {required String authMethod, required VoidCallback onContinue}) {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
-      builder: (context) => ConsentBottomSheet(
-        authMethod: authMethod,
-        onContinue: onContinue,
-      ),
+      useSafeArea: true,
+      builder: (context) => ConsentBottomSheet(authMethod: authMethod, onContinue: onContinue),
     );
   }
 }
