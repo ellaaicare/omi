@@ -907,7 +907,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   }
 
   void _handleImageLoadFailure(MemoryArtworkApi api, MemoryArtworkState? artwork, int generation, String cacheKey) {
-    if (!mounted || generation != _requestGeneration || _imageRetryScheduled) return;
+    if (!mounted || generation != _requestGeneration || cacheKey != _cacheKey || _imageRetryScheduled) return;
     if (_imageDownloadRetries >= widget.maxImageDownloadRetries) {
       setState(() {
         _remoteResult = const MemoryArtworkResult(
@@ -1126,8 +1126,9 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
 
   Widget _readyNetworkArtwork(BuildContext context, MemoryArtworkResult result) {
     final imageKey = Key('memory-generated-artwork-network-${widget.conversation.id}-${widget.authorityEpoch}');
-    if (MemoryArtworkCache.isNetworkOnlyDisplayCacheKey(_cacheKey)) {
-      final generation = _requestGeneration;
+    final generation = _requestGeneration;
+    final cacheKey = _cacheKey;
+    if (MemoryArtworkCache.isNetworkOnlyDisplayCacheKey(cacheKey)) {
       return Image.network(
         result.url.toString(),
         key: imageKey,
@@ -1142,7 +1143,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
               widget.api ?? MemoryArtworkApi(),
               widget.conversation.artwork,
               generation,
-              _cacheKey,
+              cacheKey,
             );
           });
           return _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing);
@@ -1152,7 +1153,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     return CachedNetworkImage(
       imageUrl: result.url.toString(),
       key: imageKey,
-      cacheKey: _cacheKey,
+      cacheKey: cacheKey,
       cacheManager: MemoryArtworkCache.manager,
       fit: widget.fit,
       memCacheWidth: result.selectedVariantWidth ?? result.pixelWidth,
@@ -1161,8 +1162,8 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       errorListener: (_) => _handleImageLoadFailure(
         widget.api ?? MemoryArtworkApi(),
         widget.conversation.artwork,
-        _requestGeneration,
-        _cacheKey,
+        generation,
+        cacheKey,
       ),
       errorWidget: (_, __, ___) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing),
     );

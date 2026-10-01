@@ -3418,6 +3418,62 @@ void main() {
     expect(api.loadCalls, 3, reason: 'the stable key must be able to download fresh bytes after corruption');
   });
 
+  for (final transition in ['refresh', 'authority', 'variant']) {
+    testWidgets('obsolete signed image error ignores a newer $transition render', (tester) async {
+      final api = _ResponsiveArtworkApi();
+      final evictedKeys = <String>[];
+      final conversation = ServerConversation(
+        id: 'memory-obsolete-image-error',
+        createdAt: DateTime(2026, 8, 31),
+        structured: Structured('A memory', 'A useful summary.'),
+      );
+      Widget buildArtwork({int refreshEpoch = 0, int authorityEpoch = 0, double width = 150}) => MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: MediaQuery(
+              data: const MediaQueryData(devicePixelRatio: 2),
+              child: Center(
+                child: SizedBox(
+                  width: width,
+                  height: 150,
+                  child: MemoryArtworkImage(
+                    conversation: conversation,
+                    api: api,
+                    refreshEpoch: refreshEpoch,
+                    authorityEpoch: authorityEpoch,
+                    cachedFileLookup: (_) async => null,
+                    cacheEvictor: (key) async => evictedKeys.add(key),
+                    retryDelay: const Duration(milliseconds: 10),
+                  ),
+                ),
+              ),
+            ),
+          );
+      await tester.pumpWidget(buildArtwork());
+      await tester.pump();
+      await tester.pump();
+      final oldImage = tester.widget<CachedNetworkImage>(find.byType(CachedNetworkImage));
+      await tester.pumpWidget(buildArtwork(
+        refreshEpoch: transition == 'refresh' ? 1 : 0,
+        authorityEpoch: transition == 'authority' ? 1 : 0,
+        width: transition == 'variant' ? 300 : 150,
+      ));
+      await tester.pump();
+      await tester.pump();
+      final currentImage = tester.widget<CachedNetworkImage>(find.byType(CachedNetworkImage));
+      if (transition == 'variant') expect(currentImage.cacheKey, isNot(oldImage.cacheKey));
+      final reads = api.loadCalls;
+      oldImage.errorListener!(Exception('obsolete signed URL'));
+      await tester.pump();
+      expect(find.byType(CachedNetworkImage), findsOneWidget);
+      expect(tester.widget<CachedNetworkImage>(find.byType(CachedNetworkImage)).cacheKey, currentImage.cacheKey);
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(api.loadCalls, reads, reason: 'retired render callbacks must not retry the current artwork');
+      expect(evictedKeys, isEmpty);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
   testWidgets('bounds repeated signed image recovery without enqueuing artwork work', (tester) async {
     final api = _RefreshingArtworkApi();
     final evictedKeys = <String>[];
