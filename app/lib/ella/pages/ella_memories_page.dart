@@ -1382,6 +1382,10 @@ class _MemoryDetails extends StatelessWidget {
               ),
               const SizedBox(height: 6),
               if (showTime) _MemoryTime(conversation: conversation),
+              if (hasCurrentHermesSummary(conversation)) ...[
+                const SizedBox(height: 6),
+                HermesSummarySource(conversation: conversation),
+              ],
             ],
           ),
         ),

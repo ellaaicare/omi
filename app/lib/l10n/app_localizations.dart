@@ -18944,6 +18944,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Whispers are set to off, but Ella couldn\'t pause spoken help.'**
   String get upstreamCaptureWhispersPlaybackStopFailed;
+
+  /// Source label only for the current canonically confirmed Hermes-enriched summary
+  ///
+  /// In en, this message translates to:
+  /// **'Hermes summary'**
+  String get hermesSummarySource;
+
+  /// Accessible source attribution for a version-matched, canonically confirmed Hermes summary
+  ///
+  /// In en, this message translates to:
+  /// **'This memory\'s current summary was enriched by Hermes.'**
+  String get hermesSummarySourceDescription;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {
