@@ -46,8 +46,18 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
     private lazy var playbackReporter = GuardianPlaybackReporter(
         backendURL: { GuardianModePollingService.shared.backendURL },
         tokenProvider: GuardianFirebaseTokenBridge.shared.credential,
-        transport: { request in
-            URLSession.shared.dataTask(with: request) { _, _, _ in }.resume()
+        transport: { request, completion in
+            let task = URLSession.shared.dataTask(with: request) { _, response, error in
+                if let error {
+                    completion(.failure(error))
+                } else if let response {
+                    completion(.success(response))
+                } else {
+                    completion(.failure(URLError(.badServerResponse)))
+                }
+            }
+            task.resume()
+            return task.cancel
         }
     )
 
@@ -331,7 +341,7 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
 
     // MARK: - Playback Route Reporting
 
-    /// Fire-and-forget POST to backend recording the current audio output route.
+    /// Reports the route asynchronously; logs acceptance only after HTTP ACK.
     /// Called on each audio injection and on route changes so backend knows echo risk.
     func reportPlaybackEvent(
         eventType: String = "started",
@@ -361,13 +371,14 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
             let taskId = UUID()
             let task = Task { [weak self] in
                 guard let self else { return }
-                let sent = await self.playbackReporter.report(event, lease: lease)
-                if sent {
-                    NSLog(
-                        "PLAYBACK_EVENT type=\(eventType) trace=\(traceId ?? "none") " +
-                        "item=\(queueItemId ?? "none") port=\(event.portType) uid=\(lease.uid)"
-                    )
-                }
+                let outcome = await self.playbackReporter.report(event, lease: lease)
+                let diagnosticType =
+                    ["started", "completed", "failed", "route_change"].contains(eventType)
+                    ? eventType : "unknown"
+                NSLog(
+                    "PLAYBACK_EVENT type=\(diagnosticType) delivery=\(outcome.diagnosticCategory) "
+                        + "http_status=\(outcome.diagnosticHTTPStatus)"
+                )
                 self.queue.async { [weak self] in
                     self?.reportTasks.removeValue(forKey: taskId)
                 }

@@ -552,10 +552,14 @@ private func testNativeAuthDenialsDoNotStartGETOrPOST() async throws {
         let reporter = GuardianPlaybackReporter(
             backendURL: { "https://api.ella-ai-care.com" },
             tokenProvider: bridge.credential,
-            transport: recorder.record
+            transport: { request, completion in
+                recorder.record(request: request)
+                completion(.success(playbackHTTPResponse(request, statusCode: 200)))
+                return {}
+            }
         )
-        let sent = await reporter.report(playbackEvent(), lease: lease)
-        try expect(!sent, "\(name) native credential reported playback")
+        let outcome = await reporter.report(playbackEvent(), lease: lease)
+        try expect(outcome != .accepted(statusCode: 200), "\(name) native credential reported playback")
         try expect(recorder.requestCount == 0, "\(name) native credential started POST")
     }
 }
@@ -568,19 +572,257 @@ private func testAuthenticatedPlaybackReporterUsesExactLeaseOwner() async throws
     let reporter = GuardianPlaybackReporter(
         backendURL: { "https://api.ella-ai-care.com" },
         tokenProvider: tokenBridge().credential,
-        transport: recorder.record
+        transport: { request, completion in
+            recorder.record(request: request)
+            completion(.success(playbackHTTPResponse(request, statusCode: 200)))
+            return {}
+        }
     )
-    let sent = await reporter.report(playbackEvent(), lease: lease)
-    try expect(sent, "current authenticated playback report was denied")
+    let outcome = await reporter.report(playbackEvent(), lease: lease)
+    try expect(outcome == .accepted(statusCode: 200), "current authenticated playback report was denied")
     let request = try require(recorder.lastRequest, "playback POST was not recorded")
     try expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer firebase-token-a", "POST bearer missing")
     let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any]
     try expect(body?["uid"] as? String == "uid-a", "POST did not carry lease UID")
 }
 
-private func playbackEvent() -> GuardianPlaybackEvent {
+private func playbackHTTPResponse(_ request: URLRequest, statusCode: Int) -> HTTPURLResponse {
+    HTTPURLResponse(url: request.url!, statusCode: statusCode, httpVersion: nil, headerFields: nil)!
+}
+
+private func testPlaybackReporterRequiresHTTPAcknowledgement() async throws {
+    for statusCode in [199, 200, 201, 204, 299, 300, 401, 403, 404, 500, 599] {
+        configure(nil)
+        configure("uid-a")
+        let lease = try require(GuardianModeAvailability.shared.captureLease(), "missing ACK lease")
+        let recorder = EffectRecorder()
+        let reporter = GuardianPlaybackReporter(
+            backendURL: { "https://api.ella-ai-care.com" },
+            tokenProvider: tokenBridge().credential,
+            transport: { request, completion in
+                recorder.record(request: request)
+                completion(.success(playbackHTTPResponse(request, statusCode: statusCode)))
+                return {}
+            }
+        )
+        let outcome = await reporter.report(playbackEvent(), lease: lease)
+        let expected: GuardianPlaybackReportOutcome =
+            (200..<300).contains(statusCode)
+            ? .accepted(statusCode: statusCode) : .rejected(statusCode: statusCode)
+        try expect(outcome == expected, "HTTP \(statusCode) was not classified truthfully")
+        try expect(outcome.diagnosticHTTPStatus == statusCode, "HTTP \(statusCode) was lost from diagnostics")
+        try expect(
+            outcome.diagnosticCategory == ((200..<300).contains(statusCode) ? "http_accepted" : "http_rejected"),
+            "HTTP \(statusCode) changed diagnostic category"
+        )
+        try expect(recorder.requestCount == 1, "HTTP \(statusCode) caused an automatic retry")
+    }
+    for statusCode in [-1, 0, 100, 199, 300, 599, 600] {
+        try expect(
+            GuardianPlaybackReportOutcome.accepted(statusCode: statusCode).diagnosticHTTPStatus == 0,
+            "out-of-range accepted HTTP status escaped diagnostics"
+        )
+    }
+    for statusCode in [-1, 0, 99, 600] {
+        try expect(
+            GuardianPlaybackReportOutcome.rejected(statusCode: statusCode).diagnosticHTTPStatus == 0,
+            "out-of-range rejected HTTP status escaped diagnostics"
+        )
+    }
+    for outcome in [
+        GuardianPlaybackReportOutcome.invalidResponse, .transportFailed, .cancelled, .authorityChanged, .unavailable,
+    ] {
+        try expect(outcome.diagnosticHTTPStatus == 0, "non-HTTP outcome manufactured a diagnostic status")
+    }
+}
+
+private func testPlaybackReporterRejectsMissingHTTPAndTransportFailure() async throws {
+    for failsTransport in [false, true] {
+        configure(nil)
+        configure("uid-a")
+        let lease = try require(GuardianModeAvailability.shared.captureLease(), "missing failure lease")
+        let recorder = EffectRecorder()
+        let reporter = GuardianPlaybackReporter(
+            backendURL: { "https://api.ella-ai-care.com" },
+            tokenProvider: tokenBridge().credential,
+            transport: { request, completion in
+                recorder.record(request: request)
+                if failsTransport {
+                    completion(.failure(URLError(.timedOut)))
+                } else {
+                    completion(
+                        .success(
+                            URLResponse(
+                                url: request.url!, mimeType: nil, expectedContentLength: 0,
+                                textEncodingName: nil)))
+                }
+                return {}
+            }
+        )
+        let outcome = await reporter.report(playbackEvent(), lease: lease)
+        try expect(outcome == (failsTransport ? .transportFailed : .invalidResponse), "invalid ACK was accepted")
+        try expect(recorder.requestCount == 1, "invalid ACK caused an automatic retry")
+    }
+}
+
+private func testPlaybackReporterWaitsForACKAndRejectsRetiredLease() async throws {
+    for transition in ["current", "account-aba", "disabled", "same-uid-reenabled"] {
+        configure(nil)
+        configure("uid-a")
+        let lease = try require(GuardianModeAvailability.shared.captureLease(), "missing held ACK lease")
+        let recorder = EffectRecorder()
+        let started = DispatchSemaphore(value: 0)
+        let release = AsyncGate()
+        let reporter = GuardianPlaybackReporter(
+            backendURL: { "https://api.ella-ai-care.com" },
+            tokenProvider: tokenBridge().credential,
+            transport: { request, completion in
+                recorder.record(request: request)
+                Task {
+                    await release.wait()
+                    completion(.success(playbackHTTPResponse(request, statusCode: 200)))
+                }
+                started.signal()
+                return {}
+            }
+        )
+        let task = Task {
+            let outcome = await reporter.report(playbackEvent(), lease: lease)
+            recorder.record("finished")
+            return outcome
+        }
+        try expect(started.wait(timeout: .now() + 2) == .success, "held POST did not start")
+        try await Task.sleep(nanoseconds: 20_000_000)
+        try expect(recorder.count("finished") == 0, "scheduled POST was treated as ACK")
+        if transition == "account-aba" {
+            configure("uid-b")
+            configure("uid-a")
+        } else if transition == "disabled" || transition == "same-uid-reenabled" {
+            GuardianModeAvailability.shared.disable()
+            if transition == "same-uid-reenabled" { configure("uid-a") }
+        }
+        release.open()
+        let outcome = await task.value
+        try expect(
+            outcome == (transition == "current" ? .accepted(statusCode: 200) : .authorityChanged),
+            "late ACK bypassed exact lease after \(transition)")
+        try expect(recorder.requestCount == 1, "held POST was resubmitted")
+    }
+}
+
+private func testPlaybackReporterTokenAwaitRejectsRetiredLease() async throws {
+    configure(nil)
+    configure("uid-a")
+    let lease = try require(GuardianModeAvailability.shared.captureLease(), "missing token-await lease")
+    let recorder = EffectRecorder()
+    let started = DispatchSemaphore(value: 0)
+    let release = AsyncGate()
+    let reporter = GuardianPlaybackReporter(
+        backendURL: { "https://api.ella-ai-care.com" },
+        tokenProvider: { lease in
+            started.signal()
+            await release.wait()
+            return GuardianBearerCredential(uid: lease.uid, token: "synthetic-token")
+        },
+        transport: { request, completion in
+            recorder.record(request: request)
+            completion(.success(playbackHTTPResponse(request, statusCode: 200)))
+            return {}
+        }
+    )
+    let task = Task { await reporter.report(playbackEvent(), lease: lease) }
+    try expect(started.wait(timeout: .now() + 2) == .success, "token lookup did not start")
+    configure("uid-b")
+    configure("uid-a")
+    release.open()
+    let outcome = await task.value
+    try expect(outcome == .authorityChanged, "token completion adopted replacement same-UID lease")
+    try expect(recorder.requestCount == 0, "retired token completion started a POST")
+}
+
+private func testFailedPlaybackReceiptACKIsNotAudibleSuccess() async throws {
+    configure(nil)
+    configure("uid-a")
+    let lease = try require(GuardianModeAvailability.shared.captureLease(), "missing failure receipt lease")
+    let recorder = EffectRecorder()
+    let reporter = GuardianPlaybackReporter(
+        backendURL: { "https://api.ella-ai-care.com" },
+        tokenProvider: tokenBridge().credential,
+        transport: { request, completion in
+            recorder.record(request: request)
+            completion(.success(playbackHTTPResponse(request, statusCode: 200)))
+            return {}
+        }
+    )
+    let outcome = await reporter.report(playbackEvent(eventType: "failed"), lease: lease)
+    let body = try JSONSerialization.jsonObject(with: recorder.lastRequest?.httpBody ?? Data()) as? [String: Any]
+    try expect(outcome == .accepted(statusCode: 200), "server acceptance of failure receipt was lost")
+    try expect(body?["event_type"] as? String == "failed", "failure receipt was converted to playback success")
+}
+
+private func testPlaybackReporterCancellationRetiresAwaitAndLateCallback() async throws {
+    configure(nil)
+    configure("uid-a")
+    let lease = try require(GuardianModeAvailability.shared.captureLease(), "missing cancelled ACK lease")
+    let recorder = EffectRecorder()
+    let started = DispatchSemaphore(value: 0)
+    let lateCallback = DispatchSemaphore(value: 0)
+    let release = AsyncGate()
+    let reporter = GuardianPlaybackReporter(
+        backendURL: { "https://api.ella-ai-care.com" },
+        tokenProvider: tokenBridge().credential,
+        transport: { request, completion in
+            recorder.record(request: request)
+            Task {
+                await release.wait()
+                completion(.success(playbackHTTPResponse(request, statusCode: 200)))
+                lateCallback.signal()
+            }
+            started.signal()
+            return { recorder.record("cancelled") }
+        }
+    )
+    let task = Task { await reporter.report(playbackEvent(), lease: lease) }
+    try expect(started.wait(timeout: .now() + 2) == .success, "cancelled POST did not start")
+    task.cancel()
+    let outcome = await task.value
+    try expect(outcome == .cancelled, "cancelled POST claimed ACK or retained its await")
+    try expect(recorder.count("cancelled") == 1, "cancellation did not cancel transport exactly once")
+    release.open()
+    try expect(lateCallback.wait(timeout: .now() + 2) == .success, "late callback did not execute")
+    try expect(recorder.requestCount == 1, "cancelled callback retried POST")
+}
+
+private func testPlaybackReporterDuplicateReceiptKeepsOriginalIdentity() async throws {
+    configure(nil)
+    configure("uid-a")
+    let lease = try require(GuardianModeAvailability.shared.captureLease(), "missing duplicate ACK lease")
+    let recorder = EffectRecorder()
+    let reporter = GuardianPlaybackReporter(
+        backendURL: { "https://api.ella-ai-care.com" },
+        tokenProvider: tokenBridge().credential,
+        transport: { request, completion in
+            recorder.record(request: request)
+            completion(.success(playbackHTTPResponse(request, statusCode: 200)))
+            return {}
+        }
+    )
+    let first = await reporter.report(playbackEvent(), lease: lease)
+    let originalBody = recorder.lastRequest?.httpBody
+    let duplicate = await reporter.report(playbackEvent(), lease: lease)
+    try expect(
+        first == .accepted(statusCode: 200) && duplicate == .accepted(statusCode: 200),
+        "idempotent server ACK was not accepted"
+    )
+    let original = try JSONSerialization.jsonObject(with: originalBody ?? Data()) as? NSDictionary
+    let repeated = try JSONSerialization.jsonObject(with: recorder.lastRequest?.httpBody ?? Data()) as? NSDictionary
+    try expect(original == repeated, "duplicate receipt manufactured a new playback identity")
+    try expect(recorder.requestCount == 2, "duplicate receipt caused hidden transport retries")
+}
+
+private func playbackEvent(eventType: String = "started") -> GuardianPlaybackEvent {
     GuardianPlaybackEvent(
-        eventType: "started",
+        eventType: eventType,
         queueItemId: "item-a",
         traceId: "trace-a",
         triggerType: "guardian",
@@ -654,6 +896,13 @@ private enum GuardianNativePolicyTests {
         try await testDuplicateScheduleSuppressionAndRetainedCancellation()
         try await testNativeAuthDenialsDoNotStartGETOrPOST()
         try await testAuthenticatedPlaybackReporterUsesExactLeaseOwner()
+        try await testPlaybackReporterRequiresHTTPAcknowledgement()
+        try await testPlaybackReporterRejectsMissingHTTPAndTransportFailure()
+        try await testPlaybackReporterWaitsForACKAndRejectsRetiredLease()
+        try await testPlaybackReporterTokenAwaitRejectsRetiredLease()
+        try await testFailedPlaybackReceiptACKIsNotAudibleSuccess()
+        try await testPlaybackReporterCancellationRetiresAwaitAndLateCallback()
+        try await testPlaybackReporterDuplicateReceiptKeepsOriginalIdentity()
         try testProductionNotificationBoundary()
         print("Guardian native production-boundary tests passed")
     }

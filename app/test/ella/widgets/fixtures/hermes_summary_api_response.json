@@ -1,0 +1,249 @@
+{
+  "contract": "ella.summary_provenance.presentation.v1",
+  "base_response": {
+    "id": "synthetic-memory",
+    "created_at": "2026-10-01T00:00:00Z",
+    "started_at": null,
+    "finished_at": null,
+    "source": "omi",
+    "language": null,
+    "structured": {
+      "title": "Synthetic title",
+      "overview": "Synthetic overview",
+      "emoji": "\ud83e\udde0",
+      "category": "other",
+      "action_items": [],
+      "events": []
+    },
+    "summary_versions": [],
+    "active_summary_version_id": "summary-1",
+    "correction_state": null,
+    "internal_assessment": null,
+    "ella_tags": [],
+    "ella_signal": null,
+    "transcript_segments": [],
+    "transcript_segments_compressed": false,
+    "geolocation": null,
+    "photos": [],
+    "audio_files": [],
+    "private_cloud_sync_enabled": false,
+    "apps_results": [],
+    "suggested_summarization_apps": [],
+    "plugins_results": [],
+    "external_data": null,
+    "app_id": null,
+    "postprocessing": null,
+    "discarded": false,
+    "discard_reason": null,
+    "discard_classifier_provenance": null,
+    "explicit_keep": false,
+    "explicit_keep_requested_at": null,
+    "visibility": "private",
+    "starred": false,
+    "processing_memory_id": null,
+    "processing_conversation_id": null,
+    "status": "completed",
+    "processing_error": null,
+    "processing_error_at": null,
+    "processing_retry_id": null,
+    "processing_retry_mode": null,
+    "processing_retry_started_at": null,
+    "processing_retry_lease_expires_at": null,
+    "processing_retry_completed_at": null,
+    "processing_retry_attempt_count": null,
+    "processing_retry_summary_version_id": null,
+    "processing_retry_enriched_version_id": null,
+    "processing_retry_generic_vector_status": null,
+    "processing_retry_enrichment_vector_status": null,
+    "processing_retry_enrichment_vector_version_id": null,
+    "processing_retry_enrichment_vector_sha256": null,
+    "processing_retry_transcript_sha256": null,
+    "processing_retry_generic_summary_sha256": null,
+    "processing_retry_source_request_id": null,
+    "artwork": null,
+    "capture_protocol_version": null,
+    "capture_state": null,
+    "is_locked": false,
+    "data_protection_level": null,
+    "folder_id": null
+  },
+  "cases": [
+    {
+      "case": "confirmed",
+      "stored_enrichment_state": {
+        "result_summary_version_id": "summary-1",
+        "status": "writeback_applied",
+        "pending": false,
+        "canonical_status": "completed",
+        "kind": "hermes_enriched",
+        "source": "hermes_parallel"
+      },
+      "wire_enrichment_state": {
+        "result_summary_version_id": "summary-1",
+        "status": "writeback_applied",
+        "pending": false,
+        "canonical_status": "completed",
+        "kind": "hermes_enriched",
+        "source": "hermes_parallel"
+      },
+      "expected_hermes": true
+    },
+    {
+      "case": "unknown_extras",
+      "stored_enrichment_state": {
+        "result_summary_version_id": "summary-1",
+        "status": "writeback_applied",
+        "pending": false,
+        "canonical_status": "completed",
+        "kind": "hermes_enriched",
+        "source": "hermes_parallel",
+        "error": "synthetic-private-error",
+        "authority_digest": "synthetic-private-authority",
+        "request_fingerprint_input": {
+          "private": "synthetic-private-input"
+        }
+      },
+      "wire_enrichment_state": {
+        "result_summary_version_id": "summary-1",
+        "status": "writeback_applied",
+        "pending": false,
+        "canonical_status": "completed",
+        "kind": "hermes_enriched",
+        "source": "hermes_parallel"
+      },
+      "expected_hermes": true
+    },
+    {
+      "case": "absent",
+      "stored_enrichment_state": null,
+      "wire_enrichment_state": null,
+      "expected_hermes": false
+    },
+    {
+      "case": "stale",
+      "stored_enrichment_state": {
+        "result_summary_version_id": "summary-older",
+        "status": "writeback_applied",
+        "pending": false,
+        "canonical_status": "completed",
+        "kind": "hermes_enriched",
+        "source": "hermes_parallel"
+      },
+      "wire_enrichment_state": {
+        "result_summary_version_id": "summary-older",
+        "status": "writeback_applied",
+        "pending": false,
+        "canonical_status": "completed",
+        "kind": "hermes_enriched",
+        "source": "hermes_parallel"
+      },
+      "expected_hermes": false
+    },
+    {
+      "case": "pending",
+      "stored_enrichment_state": {
+        "result_summary_version_id": "summary-1",
+        "status": "writeback_pending_canonical",
+        "pending": true,
+        "canonical_status": "pending",
+        "kind": "hermes_enriched",
+        "source": "hermes_parallel"
+      },
+      "wire_enrichment_state": {
+        "result_summary_version_id": "summary-1",
+        "status": "writeback_pending_canonical",
+        "pending": true,
+        "canonical_status": "pending",
+        "kind": "hermes_enriched",
+        "source": "hermes_parallel"
+      },
+      "expected_hermes": false
+    },
+    {
+      "case": "malformed",
+      "stored_enrichment_state": [],
+      "wire_enrichment_state": null,
+      "expected_hermes": false
+    },
+    {
+      "case": "wrong_types",
+      "stored_enrichment_state": {
+        "result_summary_version_id": 42,
+        "status": [],
+        "pending": "false",
+        "canonical_status": true,
+        "kind": {},
+        "source": 1
+      },
+      "wire_enrichment_state": {
+        "result_summary_version_id": null,
+        "status": null,
+        "pending": null,
+        "canonical_status": null,
+        "kind": null,
+        "source": null
+      },
+      "expected_hermes": false
+    },
+    {
+      "case": "malicious",
+      "stored_enrichment_state": {
+        "result_summary_version_id": "raw exception xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "status": "private-error-detail",
+        "pending": false,
+        "canonical_status": "https://private.example.test",
+        "kind": "secret diagnostic",
+        "source": "private-provider-token"
+      },
+      "wire_enrichment_state": {
+        "result_summary_version_id": null,
+        "status": null,
+        "pending": false,
+        "canonical_status": null,
+        "kind": null,
+        "source": null
+      },
+      "expected_hermes": false
+    },
+    {
+      "case": "failed",
+      "stored_enrichment_state": {
+        "result_summary_version_id": "summary-1",
+        "status": "failed",
+        "pending": false,
+        "canonical_status": "failed",
+        "kind": "hermes_enriched",
+        "source": "hermes_parallel"
+      },
+      "wire_enrichment_state": {
+        "result_summary_version_id": "summary-1",
+        "status": "failed",
+        "pending": false,
+        "canonical_status": "failed",
+        "kind": "hermes_enriched",
+        "source": "hermes_parallel"
+      },
+      "expected_hermes": false
+    },
+    {
+      "case": "terminal",
+      "stored_enrichment_state": {
+        "result_summary_version_id": "summary-1",
+        "status": "terminal",
+        "pending": false,
+        "canonical_status": null,
+        "kind": "hermes_enriched",
+        "source": "hermes_parallel"
+      },
+      "wire_enrichment_state": {
+        "result_summary_version_id": "summary-1",
+        "status": "terminal",
+        "pending": false,
+        "canonical_status": null,
+        "kind": "hermes_enriched",
+        "source": "hermes_parallel"
+      },
+      "expected_hermes": false
+    }
+  ]
+}

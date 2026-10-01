@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
@@ -77,6 +78,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   String? _message;
   bool _protocolMessageActive = false;
   bool _necklaceRetryAvailable = false;
+  bool _transcriptOpen = false;
   bool _whispersVerified = false;
   bool _whispersOn = false;
   bool _whispersBusy = false;
@@ -91,6 +93,12 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   String get _uid => widget.authenticatedUid?.call() ?? WalOwnerAuthority.authenticatedUid;
   bool get _busy => _operation != _DockOperation.idle;
   bool get _guardianAvailable => widget.guardianAvailability?.call() ?? allowsGuardianSurface();
+
+  void _actionFeedback() {
+    if (!mounted || _uid.isEmpty) return;
+    // Feedback acknowledges the tap, not successful capture or a server write.
+    unawaited(HapticFeedback.lightImpact().catchError((_) {}));
+  }
 
   @override
   void initState() {
@@ -262,6 +270,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
     final previousEnabled = _whispersOn;
     final operation = _whisperFence.choose(widget.guardianAuthorityProvider ?? WalOwnerAuthority.active, enabled);
     if (operation == null) return;
+    if (_isWhisperOperationCurrent(operation)) _actionFeedback();
     _pendingWhisperChoice = operation;
     try {
       final saveFailedMessage = context.l10n.upstreamCaptureWhispersSaveFailed;
@@ -359,6 +368,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
     if (!_whispersVerified) {
       final operation = _whisperFence.observe(widget.guardianAuthorityProvider ?? WalOwnerAuthority.active);
       if (operation == null) return;
+      if (_isWhisperOperationCurrent(operation)) _actionFeedback();
       setState(() => _whispersBusy = true);
       await _loadWhispersState();
       if (_isWhisperOperationCurrent(operation)) setState(() => _whispersBusy = false);
@@ -366,6 +376,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
     }
     final operation = _whisperFence.observe(widget.guardianAuthorityProvider ?? WalOwnerAuthority.active);
     if (operation == null) return;
+    if (_isWhisperOperationCurrent(operation)) _actionFeedback();
     final enabled = _whispersOn;
     final playbackFailedMessage = context.l10n.upstreamCaptureWhispersPlaybackFailed;
     final playbackStopFailedMessage = context.l10n.upstreamCaptureWhispersPlaybackStopFailed;
@@ -404,6 +415,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
     required String failureMessage,
   }) async {
     if (_busy) return;
+    _actionFeedback();
     setState(() {
       _operation = operation;
       _message = null;
@@ -464,6 +476,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
     if (_busy) return;
     final originUid = _uid;
     if (originUid.isEmpty) return;
+    _actionFeedback();
     setState(() {
       _operation = _DockOperation.searching;
       _message = null;
@@ -496,18 +509,35 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   }
 
   Future<void> _openTranscript(CaptureProvider provider, {required bool necklace}) async {
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: EllaColors.paper,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(EllaSizes.cardRadius)),
-      ),
-      builder: (context) => _TranscriptSheet(
-        provider: provider,
-        sourceLabel: necklace ? context.l10n.todayDockTranscriptNecklace : context.l10n.todayDockTranscriptPhone,
-      ),
-    );
+    if (!mounted || _transcriptOpen) return;
+    _transcriptOpen = true;
+    final originUid = _uid;
+    final originAuthority = (widget.guardianAuthorityProvider ?? WalOwnerAuthority.active)();
+    var closing = false;
+    _actionFeedback();
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: EllaColors.paper,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(EllaSizes.cardRadius)),
+        ),
+        builder: (sheetContext) => _TranscriptSheet(
+          provider: provider,
+          sourceLabel:
+              necklace ? sheetContext.l10n.todayDockTranscriptNecklace : sheetContext.l10n.todayDockTranscriptPhone,
+          onClose: () {
+            if (closing || !sheetContext.mounted || ModalRoute.of(sheetContext)?.isCurrent != true) return false;
+            closing = true;
+            if (mounted && _uid == originUid && originAuthority?.isExactCurrent() == true) _actionFeedback();
+            return true;
+          },
+        ),
+      );
+    } finally {
+      _transcriptOpen = false;
+    }
     if (mounted) _transcriptFocusNode.requestFocus();
   }
 
@@ -577,7 +607,11 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
               FilledButton.icon(
                 key: const Key('upstream-capture-retry-boot'),
                 style: _DockButtonStyles.primary(context),
-                onPressed: _boot,
+                onPressed: () {
+                  if (_busy) return;
+                  _actionFeedback();
+                  unawaited(_boot());
+                },
                 icon: const Icon(Icons.refresh_rounded),
                 label: Text(context.l10n.retry),
               ),
@@ -848,10 +882,11 @@ class _AdaptiveActionPair extends StatelessWidget {
 }
 
 class _TranscriptSheet extends StatelessWidget {
-  const _TranscriptSheet({required this.provider, required this.sourceLabel});
+  const _TranscriptSheet({required this.provider, required this.sourceLabel, required this.onClose});
 
   final CaptureProvider provider;
   final String sourceLabel;
+  final bool Function() onClose;
 
   @override
   Widget build(BuildContext context) {
@@ -888,7 +923,9 @@ class _TranscriptSheet extends StatelessWidget {
                       width: EllaSizes.minTouchTarget,
                       height: EllaSizes.minTouchTarget,
                     ),
-                    onPressed: () => Navigator.of(context).pop(),
+                    onPressed: () {
+                      if (onClose()) Navigator.of(context).pop();
+                    },
                     icon: const Icon(Icons.close_rounded, color: EllaColors.tealDeep),
                   ),
                 ],

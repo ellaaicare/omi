@@ -10296,4 +10296,10 @@ class AppLocalizationsCa extends AppLocalizations {
   @override
   String get upstreamCaptureWhispersPlaybackStopFailed =>
       'Whispers are set to off, but Ella couldn\'t pause spoken help.';
+
+  @override
+  String get hermesSummarySource => 'Hermes summary';
+
+  @override
+  String get hermesSummarySourceDescription => 'This memory\'s current summary was enriched by Hermes.';
 }

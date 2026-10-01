@@ -342,6 +342,10 @@ class GetSummaryWidgets extends StatelessWidget {
                     ],
                   ),
             const SizedBox(height: 16),
+            if (hasCurrentHermesSummary(conversation)) ...[
+              HermesSummarySource(conversation: conversation),
+              const SizedBox(height: 12),
+            ],
             _buildInfoChips(context, conversation),
             const SizedBox(height: 16),
             conversation.discarded ? const SizedBox.shrink() : const SizedBox(height: 8),

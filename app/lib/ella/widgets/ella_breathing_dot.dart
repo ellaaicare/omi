@@ -26,6 +26,7 @@ class _EllaBreathingDotState extends State<EllaBreathingDot> with SingleTickerPr
   late final AnimationController _controller;
   late final Animation<double> _scale;
   late final Animation<double> _opacity;
+  bool _reduceMotion = false;
 
   Duration get _duration => Duration(milliseconds: widget.live ? 1300 : 2600);
 
@@ -36,7 +37,21 @@ class _EllaBreathingDotState extends State<EllaBreathingDot> with SingleTickerPr
     final curved = CurvedAnimation(parent: _controller, curve: Curves.easeInOut);
     _scale = Tween<double>(begin: 1, end: 1.06).animate(curved);
     _opacity = Tween<double>(begin: 0.7, end: 1).animate(curved);
-    if (widget.active) _controller.repeat(reverse: true);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _reduceMotion = MediaQuery.disableAnimationsOf(context);
+    _syncMotion();
+  }
+
+  void _syncMotion() {
+    if (widget.active && !_reduceMotion) {
+      if (!_controller.isAnimating) _controller.repeat(reverse: true);
+    } else {
+      _controller.stop();
+    }
   }
 
   @override
@@ -46,9 +61,7 @@ class _EllaBreathingDotState extends State<EllaBreathingDot> with SingleTickerPr
       _controller.duration = _duration;
       if (_controller.isAnimating) _controller.repeat(reverse: true);
     }
-    if (oldWidget.active != widget.active) {
-      widget.active ? _controller.repeat(reverse: true) : _controller.stop();
-    }
+    _syncMotion();
   }
 
   @override
