@@ -71,21 +71,36 @@ class EllaCaptureMemoryBridge extends NoopCaptureExternalActions {
   }
 
   @override
-  void addProcessingConversation(upstream.ServerConversation conversation) => _reconcile(conversation.id);
+  void addProcessingConversation(upstream.ServerConversation conversation) =>
+      _reconcile(conversation.id, _MemoryPhase.processing);
 
   @override
-  void upsertConversation(upstream.ServerConversation conversation) => _reconcile(conversation.id);
+  void upsertConversation(upstream.ServerConversation conversation) =>
+      _reconcile(conversation.id, _MemoryPhase.completed);
 
   @override
   bool hasConversation(String conversationId) =>
       _provider?.conversations.any((conversation) => conversation.id == conversationId) ?? false;
 
-  void _reconcile(String id) {
-    if (id.isEmpty || id == OptimisticProcessingPlaceholder.id || _reads.containsKey(id)) return;
+  void _reconcile(String id, _MemoryPhase phase) {
+    if (id.isEmpty || id == OptimisticProcessingPlaceholder.id) return;
     final provider = _provider;
     final account = _accountAuthority();
     final uid = captureAuthority.boundUid;
-    if (provider == null || account == null || uid == null || uid != account.uid || !account.isExactCurrent()) return;
+    if (provider == null ||
+        !provider.canProjectCaptureConversation(id) ||
+        account == null ||
+        uid == null ||
+        uid != account.uid ||
+        !account.isExactCurrent()) {
+      return;
+    }
+    final previous = _reads[id];
+    if (previous != null) {
+      if (phase == _MemoryPhase.processing || previous.phase == _MemoryPhase.completed) return;
+      previous.phase = _MemoryPhase.completed;
+      if (previous.terminal || !previous.budgetExhausted) return;
+    }
     final epoch = _attachmentEpoch;
     final readEpoch = _readEpoch;
     final projection = provider.captureProjectionGeneration;
@@ -97,11 +112,12 @@ class EllaCaptureMemoryBridge extends NoopCaptureExternalActions {
           readEpoch == _readEpoch &&
           identical(provider, _provider) &&
           projection == provider.captureProjectionGeneration &&
+          provider.canProjectCaptureConversation(id) &&
           binding == captureAuthority.bindingEpoch &&
           captureAuthority.boundUid == uid &&
           captureAuthority.hasCurrentAuthority,
     );
-    final read = _MemoryRead(origin, provider);
+    final read = _MemoryRead(origin, provider, phase);
     _reads[id] = read;
     unawaited(_read(id, read));
   }
@@ -125,10 +141,14 @@ class EllaCaptureMemoryBridge extends NoopCaptureExternalActions {
           hasCurrentHermesSummary(result) ||
           enrichment?['status'] == 'failed' ||
           enrichment?['canonical_status'] == 'failed') {
+        read.terminal = true;
         return;
       }
     }
-    if (read.attempt >= retryDelays.length) return;
+    if (read.attempt >= retryDelays.length) {
+      read.budgetExhausted = true;
+      return;
+    }
     final delay = retryDelays[read.attempt++];
     read.timer = Timer(delay, () {
       read.timer = null;
@@ -137,12 +157,17 @@ class EllaCaptureMemoryBridge extends NoopCaptureExternalActions {
   }
 }
 
+enum _MemoryPhase { processing, completed }
+
 class _MemoryRead {
-  _MemoryRead(this.origin, this.provider);
+  _MemoryRead(this.origin, this.provider, this.phase);
   final _MemoryOrigin origin;
   final ConversationProvider provider;
   Timer? timer;
   int attempt = 0;
+  _MemoryPhase phase;
+  bool budgetExhausted = false;
+  bool terminal = false;
 }
 
 class _MemoryOrigin implements ExactAccountAuthorityVerifier {

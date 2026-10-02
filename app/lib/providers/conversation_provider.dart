@@ -103,6 +103,8 @@ class ConversationProvider extends ChangeNotifier {
   final Duration _failedConversationsFetchTimeout;
   int _operationGeneration = 0;
   int get captureProjectionGeneration => _operationGeneration;
+  final Set<String> _captureDeletedConversationIds = {};
+  bool canProjectCaptureConversation(String id) => !_captureDeletedConversationIds.contains(id);
 
   bool isFetchingConversations = false;
 
@@ -141,6 +143,7 @@ class ConversationProvider extends ChangeNotifier {
 
   void reset() {
     _operationGeneration++;
+    _captureDeletedConversationIds.clear();
     conversations = [];
     searchedConversations = [];
     groupedConversations = {};
@@ -1073,6 +1076,7 @@ class ConversationProvider extends ChangeNotifier {
   }
 
   void applyCanonicalCaptureConversation(ServerConversation conversation) {
+    if (!canProjectCaptureConversation(conversation.id)) return;
     if (conversation.status == ConversationStatus.processing) {
       processingConversations.removeWhere((item) => item.id == conversation.id);
       processingConversations.insert(0, conversation);
@@ -1240,6 +1244,8 @@ class ConversationProvider extends ChangeNotifier {
     try {
       final deleted = await _conversationDelete(conversation.id, lease);
       if (!deleted || generation != _operationGeneration || !lease.isCurrent) return false;
+
+      _captureDeletedConversationIds.add(conversation.id);
 
       final removedConsumedConversation = conversations.any((item) => item.id == conversation.id) ||
           processingConversations.any((item) => item.id == conversation.id);
