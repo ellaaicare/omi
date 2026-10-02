@@ -2921,13 +2921,27 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  for (final transition in ['authority', 'style', 'variant', 'dispose', 'malformed', 'codec error']) {
+  for (final transition in [
+    'authority',
+    'style',
+    'variant',
+    'variant early',
+    'variant early return',
+    'dispose',
+    'malformed',
+    'codec error',
+  ]) {
     testWidgets('delayed download cache validation respects $transition replacement', (tester) async {
       final authority = _MutableArtworkAuthority();
       final validation = Completer<bool>();
+      final largeRecoveryLookup = Completer<File?>();
       var style = memoryArtworkDefaultStyle;
       var persisted = false;
+      var holdLargeRecoveryLookup = false;
       final evicted = <String>[];
+      final lookupKeys = <String>[];
+      final isVariant = transition.startsWith('variant');
+      final earlyVariantFailure = transition.startsWith('variant early');
       final api = _TerminalPollArtworkApi(
         read: (_) async => MemoryArtworkResult(
           status: MemoryArtworkResultStatus.ready,
@@ -2964,7 +2978,14 @@ void main() {
                       artwork: MemoryArtworkState(status: MemoryArtworkStatus.ready, styleVersion: style),
                     ),
                     api: api,
-                    cachedFileLookup: (key) async => persisted && key == oldKey ? file : null,
+                    maxImageDownloadRetries: transition == 'variant early return' ? 3 : 2,
+                    cachedFileLookup: (key) async {
+                      lookupKeys.add(key);
+                      if (holdLargeRecoveryLookup && key == 'download-$style-768') {
+                        return largeRecoveryLookup.future;
+                      }
+                      return persisted && key == oldKey ? file : null;
+                    },
                     cachedFileValidator: (_) => validation.future,
                     cacheEvictor: (key) async => evicted.add(key),
                   ),
@@ -2981,23 +3002,44 @@ void main() {
       original.errorListener!(Exception('current download failure'));
       await tester.pump();
       String? replacementKey;
+      CachedNetworkImage? currentRetryImage;
       if (transition == 'authority') {
         authority.current = false;
         // The API may already belong to a new valid same-UID lease. The
         // original result authority must still reject the retired file.
-      } else if (transition == 'style' || transition == 'variant') {
+      } else if (transition == 'style' || isVariant) {
         // A new style must not reuse the old disk object on its own lookup.
         if (transition == 'style') {
           style = memoryArtworkPaperCollageStyle;
           persisted = false;
         }
-        await tester.pumpWidget(buildArtwork(width: transition == 'variant' ? 300 : 150));
+        await tester.pumpWidget(buildArtwork(width: isVariant ? 300 : 150));
         await tester.pump();
         await tester.pump();
         replacementKey = tester.widget<CachedNetworkImage>(find.byType(CachedNetworkImage)).cacheKey;
+        currentRetryImage = tester.widget<CachedNetworkImage>(find.byType(CachedNetworkImage));
         expect(replacementKey, isNot(oldKey));
       } else if (transition == 'dispose') {
         await tester.pumpWidget(const SizedBox.shrink());
+      }
+      if (earlyVariantFailure) {
+        final lookupsBeforeFailure = lookupKeys.where((key) => key == replacementKey).length;
+        holdLargeRecoveryLookup = transition == 'variant early return';
+        currentRetryImage!.errorListener!(Exception('B failed early'));
+        await tester.pump();
+        expect(lookupKeys.where((key) => key == replacementKey).length, lookupsBeforeFailure + 1,
+            reason: 'B recovery must start while A validation is still pending');
+        if (transition == 'variant early return') {
+          persisted = false;
+          await tester.pumpWidget(buildArtwork());
+          await tester.pump();
+          await tester.pump();
+          replacementKey = tester.widget<CachedNetworkImage>(find.byType(CachedNetworkImage)).cacheKey;
+          currentRetryImage = tester.widget<CachedNetworkImage>(find.byType(CachedNetworkImage));
+          expect(replacementKey, oldKey);
+          currentRetryImage.errorListener!(Exception('A failed anew'));
+          await tester.pump();
+        }
       }
       final reads = api.readCalls;
       if (transition == 'codec error') {
@@ -3005,21 +3047,25 @@ void main() {
       } else {
         validation.complete(transition != 'malformed');
       }
+      largeRecoveryLookup.complete(null);
       await tester.pump();
       await tester.pump();
       expect(find.byKey(const Key('memory-cached-artwork-memory-download-validation')), findsNothing);
-      if (replacementKey != null) {
+      if (replacementKey != null && !earlyVariantFailure) {
         expect(tester.widget<CachedNetworkImage>(find.byType(CachedNetworkImage)).cacheKey, replacementKey);
       }
       expect(api.readCalls, reads);
       expect(api.enqueueRequests.every((enqueue) => !enqueue), isTrue);
       expect(api.generationCalls, 0);
       expect(evicted, transition == 'malformed' ? [oldKey] : isEmpty);
-      if (transition == 'variant') {
-        tester
-            .widget<CachedNetworkImage>(find.byType(CachedNetworkImage))
-            .errorListener!(Exception('new variant failed'));
+      if (isVariant) {
+        final lookupsBeforeDuplicate = lookupKeys.length;
+        currentRetryImage!.errorListener!(Exception('new variant failed'));
         await tester.pump();
+        if (earlyVariantFailure) {
+          expect(lookupKeys.length, lookupsBeforeDuplicate,
+              reason: 'retired A must not clear the current B or replacement A retry ownership');
+        }
         await tester.pump(const Duration(seconds: 5));
         await tester.pump();
         expect(api.readCalls, reads + 1, reason: 'retired validation must not strand the current recovery lease');
