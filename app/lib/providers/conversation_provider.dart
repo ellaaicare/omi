@@ -462,7 +462,7 @@ class ConversationProvider extends ChangeNotifier {
       if (requestId != _fetchRequestId) return;
       if (!result.succeeded) return;
 
-      final newConversations = result.conversations;
+      final newConversations = result.conversations.where((item) => canProjectCaptureConversation(item.id)).toList();
       failedConversations = _mergeRetryableFailures(failedConversations, [
         ...conversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
         ...newConversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
@@ -546,7 +546,9 @@ class ConversationProvider extends ChangeNotifier {
           if (conversations.isEmpty && selectedFolderId == null) {
             conversations = SharedPreferencesUtil()
                 .cachedConversations
-                .where((conversation) => conversation.status == ConversationStatus.completed)
+                .where((conversation) =>
+                    conversation.status == ConversationStatus.completed &&
+                    canProjectCaptureConversation(conversation.id))
                 .toList();
           }
           isShowingCachedConversations = conversations.isNotEmpty;
@@ -554,10 +556,10 @@ class ConversationProvider extends ChangeNotifier {
           _groupConversationsByDateWithoutNotify();
           return;
         }
-        fetchedConversations = result.conversations;
-        hasMoreConversations = fetchedConversations.length >= _conversationPageSize;
+        fetchedConversations = result.conversations.where((item) => canProjectCaptureConversation(item.id)).toList();
+        hasMoreConversations = result.conversations.length >= _conversationPageSize;
         loadMoreConversationsFailed = false;
-        _conversationPageOffset = fetchedConversations.length;
+        _conversationPageOffset = result.conversations.length;
       }
 
       if (requestId != _fetchRequestId) return;
@@ -931,8 +933,10 @@ class ConversationProvider extends ChangeNotifier {
     Iterable<ServerConversation> enrichmentFailures,
   ) {
     final byId = <String, ServerConversation>{
-      for (final conversation in processingFailures) conversation.id: conversation,
-      for (final conversation in enrichmentFailures) conversation.id: conversation,
+      for (final conversation in processingFailures)
+        if (canProjectCaptureConversation(conversation.id)) conversation.id: conversation,
+      for (final conversation in enrichmentFailures)
+        if (canProjectCaptureConversation(conversation.id)) conversation.id: conversation,
     };
     final merged = byId.values.toList();
     merged.sort((a, b) {
@@ -1006,9 +1010,9 @@ class ConversationProvider extends ChangeNotifier {
         loadMoreConversationsFailed = true;
         return;
       }
-      final newConversations = result.conversations;
-      _conversationPageOffset += newConversations.length;
-      hasMoreConversations = newConversations.length >= _conversationPageSize;
+      final newConversations = result.conversations.where((item) => canProjectCaptureConversation(item.id)).toList();
+      _conversationPageOffset += result.conversations.length;
+      hasMoreConversations = result.conversations.length >= _conversationPageSize;
       failedConversations = _mergeRetryableFailures(
         failedConversations,
         newConversations.where((conversation) => conversation.isRetryableEnrichmentFailure),

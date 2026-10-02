@@ -380,6 +380,144 @@ void main() {
     expect(SharedPreferencesUtil().cachedConversations.first.activeSummaryVersionId, 'version-2');
   });
 
+  for (final incremental in [true, false]) {
+    final refreshName = incremental ? 'incremental' : 'primary';
+    for (final deleteSucceeds in [true, false]) {
+      test('deferred $refreshName list respects ${deleteSucceeds ? 'successful' : 'failed'} permanent deletion',
+          () async {
+        SharedPreferencesUtil().uid = 'uid-a';
+        final authority = _MutableAuthority('uid-a');
+        final deleted = conversation('deleted');
+        final response = Completer<ConversationsFetchResult>();
+        final provider = ConversationProvider(
+          activeAuthority: () => authority,
+          conversationsFetchCall: () => response.future,
+          failedConversationsFetchCall: () async => const ConversationsFetchResult.success([]),
+          conversationDeleteCall: (_, __) async => deleteSucceeds,
+        )..conversations = [deleted, conversation('retained')];
+        addTearDown(provider.dispose);
+        SharedPreferencesUtil().cachedConversations = provider.conversations;
+
+        final refresh = incremental ? provider.forceRefreshConversations() : provider.fetchConversations();
+        await pumpEventQueue();
+        expect(await provider.deleteConversationPermanently(deleted), deleteSucceeds);
+        response.complete(ConversationsFetchResult.success([deleted, conversation('unrelated')]));
+        await refresh;
+
+        final expected = deleteSucceeds ? ['unrelated'] : ['deleted', 'unrelated'];
+        if (incremental) expected.insert(deleteSucceeds ? 0 : 1, 'retained');
+        expect(provider.conversations.map((item) => item.id), unorderedEquals(expected));
+        expect(SharedPreferencesUtil().cachedConversations.map((item) => item.id), unorderedEquals(expected));
+        expect(provider.canProjectCaptureConversation('deleted'), !deleteSucceeds);
+      });
+    }
+
+    test('$refreshName list from before account reset cannot restore deleted state or cache', () async {
+      SharedPreferencesUtil().uid = 'uid-a';
+      var authority = _MutableAuthority('uid-a');
+      final deleted = conversation('same-id');
+      final oldResponse = Completer<ConversationsFetchResult>();
+      var requests = 0;
+      final provider = ConversationProvider(
+        activeAuthority: () => authority,
+        conversationsFetchCall: () => ++requests == 1
+            ? oldResponse.future
+            : Future.value(ConversationsFetchResult.success([conversation('same-id')])),
+        failedConversationsFetchCall: () async => const ConversationsFetchResult.success([]),
+        conversationDeleteCall: (_, __) async => true,
+      )..conversations = [deleted];
+      addTearDown(provider.dispose);
+
+      final refresh = incremental ? provider.forceRefreshConversations() : provider.fetchConversations();
+      await pumpEventQueue();
+      expect(await provider.deleteConversationPermanently(deleted), isTrue);
+      authority.current = false;
+      provider.reset();
+      SharedPreferencesUtil().uid = 'uid-b';
+      authority = _MutableAuthority('uid-b');
+      provider.conversations = [conversation('replacement')];
+      SharedPreferencesUtil().cachedConversations = provider.conversations;
+      oldResponse.complete(ConversationsFetchResult.success([deleted, conversation('old-account')]));
+      await refresh;
+      expect(provider.conversations.map((item) => item.id), ['replacement']);
+      expect(SharedPreferencesUtil().cachedConversations.map((item) => item.id), ['replacement']);
+
+      await provider.fetchConversations();
+      expect(provider.conversations.map((item) => item.id), ['same-id']);
+      expect(provider.canProjectCaptureConversation('same-id'), isTrue);
+    });
+  }
+
+  test('later page excludes confirmed deleted records without changing raw server offsets', () async {
+    final authority = _MutableAuthority('uid-a');
+    final deleted = conversation('deleted');
+    final offsets = <int>[];
+    final stalePage = [deleted, ...List.generate(49, (index) => conversation('page-$index'))];
+    final provider = ConversationProvider(
+      activeAuthority: () => authority,
+      conversationDeleteCall: (_, __) async => true,
+      conversationsPageFetchCall: ({required limit, required offset}) async {
+        offsets.add(offset);
+        return ConversationsFetchResult.success(offsets.length == 1 ? stalePage : [conversation('last')]);
+      },
+    )..conversations = [deleted, conversation('retained')];
+    addTearDown(provider.dispose);
+
+    expect(await provider.deleteConversationPermanently(deleted), isTrue);
+    await provider.getMoreConversationsFromServer();
+    expect(provider.conversations.map((item) => item.id), isNot(contains('deleted')));
+    expect(provider.hasMoreConversations, isTrue);
+    await provider.getMoreConversationsFromServer();
+    expect(offsets, [1, 51]);
+  });
+
+  test('deferred failed-summary list cannot restore a confirmed deleted failure', () async {
+    final authority = _MutableAuthority('uid-a');
+    final deleted = ServerConversation(
+      id: 'deleted-failure',
+      createdAt: DateTime.parse('2026-07-08T19:00:00Z'),
+      structured: Structured('Failed memory', ''),
+      status: ConversationStatus.failed,
+      processingError: 'conversation_summary_failed',
+    );
+    final response = Completer<ConversationsFetchResult>();
+    final provider = ConversationProvider(
+      activeAuthority: () => authority,
+      conversationsFetchCall: () async => const ConversationsFetchResult.success([]),
+      failedConversationsFetchCall: () => response.future,
+      conversationDeleteCall: (_, __) async => true,
+    )..failedConversations = [deleted];
+    addTearDown(provider.dispose);
+
+    await provider.forceRefreshConversations();
+    expect(await provider.deleteConversationPermanently(deleted), isTrue);
+    response.complete(ConversationsFetchResult.success([deleted]));
+    await pumpEventQueue();
+    expect(provider.failedConversations, isEmpty);
+  });
+
+  test('primary failure excludes confirmed deletion from a retained cache snapshot', () async {
+    SharedPreferencesUtil().uid = 'uid-a';
+    final authority = _MutableAuthority('uid-a');
+    final deleted = conversation('deleted');
+    final response = Completer<ConversationsFetchResult>();
+    final provider = ConversationProvider(
+      activeAuthority: () => authority,
+      conversationsFetchCall: () => response.future,
+      failedConversationsFetchCall: () async => const ConversationsFetchResult.success([]),
+      conversationDeleteCall: (_, __) async => true,
+    )..conversations = [deleted];
+    addTearDown(provider.dispose);
+
+    final refresh = provider.fetchConversations();
+    expect(await provider.deleteConversationPermanently(deleted), isTrue);
+    SharedPreferencesUtil().cachedConversations = [deleted, conversation('retained')];
+    response.complete(const ConversationsFetchResult.failure());
+    await refresh;
+    expect(provider.conversations.map((item) => item.id), ['retained']);
+    expect(provider.searchedConversations.map((item) => item.id), ['retained']);
+  });
+
   test('memory pagination deduplicates shifted pages and records the terminal page', () async {
     final authority = _MutableAuthority('uid-a');
     final initial = List.generate(50, (index) => conversation('memory-$index'));
