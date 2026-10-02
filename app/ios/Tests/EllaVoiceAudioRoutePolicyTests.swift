@@ -1,5 +1,62 @@
 import Foundation
 
+#if !os(iOS) && ELLA_VOICE_AUDIO_ROUTE_POLICY_TESTS
+  // Records the real system adapter's arguments without activating device audio.
+  final class AVAudioSession {
+    enum Category { case playback, playAndRecord }
+    enum Mode { case `default` }
+    struct CategoryOptions: OptionSet {
+      let rawValue: UInt
+      static let mixWithOthers = Self(rawValue: 1)
+      static let allowBluetoothHFP = Self(rawValue: 4)
+      static let defaultToSpeaker = Self(rawValue: 8)
+      static let allowBluetoothA2DP = Self(rawValue: 32)
+      static let allowAirPlay = Self(rawValue: 64)
+    }
+    enum Port {
+      case builtInSpeaker, builtInReceiver, bluetoothHFP, bluetoothA2DP, bluetoothLE
+      case headphones, lineOut, usbAudio, airPlay, other
+    }
+    enum PortOverride { case none, speaker }
+    struct Route { var outputs: [AVAudioSessionPortDescription] = [] }
+    struct Configuration: Equatable {
+      let category: Category
+      let mode: Mode
+      let options: CategoryOptions
+    }
+
+    var currentRoute = Route()
+    var configurations: [Configuration] = []
+    static func sharedInstance() -> AVAudioSession { AVAudioSession() }
+    func setCategory(_ category: Category, mode: Mode, options: CategoryOptions) throws {
+      configurations.append(Configuration(category: category, mode: mode, options: options))
+    }
+    func setActive(_ active: Bool, options: CategoryOptions) throws {}
+    func overrideOutputAudioPort(_ port: PortOverride) throws {}
+  }
+
+  struct AVAudioSessionPortDescription {
+    let portType: AVAudioSession.Port
+  }
+
+  private func testSystemAdapterPassesSupportedPlaybackAndUnchangedInteractiveArguments() throws {
+    let session = AVAudioSession()
+    let adapter = SystemEllaVoiceAudioSession(audioSession: session)
+    try adapter.configure(for: .playback)
+    try adapter.configure(for: .interactive)
+    try expect(
+      session.configurations == [
+        .init(category: .playback, mode: .default, options: [.mixWithOthers]),
+        .init(
+          category: .playAndRecord, mode: .default,
+          options: [.defaultToSpeaker, .allowBluetoothHFP, .allowBluetoothA2DP, .allowAirPlay]
+        ),
+      ],
+      "system adapter category, mode, or options violate the audio session contract"
+    )
+  }
+#endif
+
 private enum TestFailure: Error, CustomStringConvertible {
   case failed(String)
 
@@ -135,6 +192,24 @@ private func testSpeakerSelectionFailureIsTypedAndFailsClosed() throws {
     outcome.classification == .receiver, "failure did not report the actual receiver route")
 }
 
+private func testPlaybackConfigurationAndActivationFailuresStayTypedAndFailClosed() throws {
+  for (operation, expectedFailure) in [
+    (
+      FakeAudioSession.Operation.configure(.playback),
+      EllaVoiceAudioRouteFailure.configurationFailed
+    ),
+    (.activate, .activationFailed),
+  ] {
+    let session = FakeAudioSession(outputs: [.speaker])
+    session.failingOperation = operation
+    let outcome = EllaVoiceAudioRoutePolicy().apply(usage: .playback, session: session)
+    try expect(!outcome.success, "playback setup failure did not fail closed")
+    try expect(outcome.failure == expectedFailure, "playback setup failure lost its typed stage")
+    try expect(
+      !session.operations.contains(.selectSpeaker), "playback failure forced a speaker override")
+  }
+}
+
 private func testPlaybackFallsBackToSpeakerWhenExternalRouteDisconnects() throws {
   let session = FakeAudioSession(outputs: [.bluetoothHFP])
   session.losesExternalDuringConfiguration = true
@@ -184,7 +259,7 @@ private func testInteractiveRestoreClearsOverrideAndReestablishesSpeaker() throw
 @main
 private enum EllaVoiceAudioRoutePolicyTests {
   static func main() throws {
-    let tests: [() throws -> Void] = [
+    var tests: [() throws -> Void] = [
       testPlaybackWithoutExternalOutputSelectsSpeaker,
       testBluetoothPlaybackPreservesExternalOutput,
       testInteractiveExternalRoutesRemainAuthoritative,
@@ -193,7 +268,11 @@ private enum EllaVoiceAudioRoutePolicyTests {
       testPlaybackFallsBackToSpeakerWhenExternalRouteDisconnects,
       testInteractiveExternalRouteLossIsTypedAndFailsClosed,
       testInteractiveRestoreClearsOverrideAndReestablishesSpeaker,
+      testPlaybackConfigurationAndActivationFailuresStayTypedAndFailClosed,
     ]
+    #if !os(iOS) && ELLA_VOICE_AUDIO_ROUTE_POLICY_TESTS
+      tests.append(testSystemAdapterPassesSupportedPlaybackAndUnchangedInteractiveArguments)
+    #endif
     for test in tests { try test() }
     print("EllaVoiceAudioRoutePolicyTests: \(tests.count) passed, 0 skipped")
   }
