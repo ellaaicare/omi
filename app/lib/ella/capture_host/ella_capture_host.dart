@@ -66,6 +66,59 @@ class EllaNativeDiscoveryDiagnostics {
   final int restoredCount;
 }
 
+enum EllaCaptureSocketFailureReason {
+  captureOriginRetired('capture_origin_retired'),
+  transportConnectFailed('transport_connect_failed'),
+  captureProtocolReadyUnavailable('capture_protocol_ready_unavailable'),
+  invalidCaptureProtocolReady('invalid_capture_protocol_ready'),
+  captureSocketClosed('capture_socket_closed'),
+  captureSocketClosedBeforeReady('capture_socket_closed_before_ready'),
+  captureSocketError('capture_socket_error');
+
+  const EllaCaptureSocketFailureReason(this.code);
+  final String code;
+}
+
+/// Content-free support metadata. Unknown reasons and invalid codes are omitted.
+class EllaCaptureSocketFailure {
+  const EllaCaptureSocketFailure(this.reason, this.closeCode, this.at);
+  final EllaCaptureSocketFailureReason reason;
+  final int? closeCode;
+  final DateTime at;
+
+  static EllaCaptureSocketFailure? fromReason(String reason, int? closeCode, DateTime at) {
+    final matches = EllaCaptureSocketFailureReason.values.where((value) => value.code == reason);
+    if (matches.isEmpty) return null;
+    return EllaCaptureSocketFailure(
+      matches.single,
+      closeCode != null && closeCode >= 1000 && closeCode <= 4999 ? closeCode : null,
+      at.toUtc(),
+    );
+  }
+}
+
+class EllaCaptureDiagnosticsSnapshot {
+  const EllaCaptureDiagnosticsSnapshot.uninitialized()
+      : initialized = false,
+        ready = false,
+        receivedBytes = null,
+        sentBytes = null,
+        lastFailure = null;
+
+  const EllaCaptureDiagnosticsSnapshot.upstream({
+    required this.ready,
+    required this.receivedBytes,
+    required this.sentBytes,
+    this.lastFailure,
+  }) : initialized = true;
+
+  final bool initialized;
+  final bool ready;
+  final int? receivedBytes;
+  final int? sentBytes;
+  final EllaCaptureSocketFailure? lastFailure;
+}
+
 class EllaCaptureHost {
   EllaCaptureHost._();
 
@@ -77,6 +130,15 @@ class EllaCaptureHost {
   static IDeviceService? _deviceService;
 
   static Future<EllaNativeDiscoveryDiagnostics> Function()? _nativeDiscoveryDiagnosticsLoader;
+  static EllaCaptureDiagnosticsSnapshot Function()? _captureDiagnosticsReader;
+
+  /// Reading this seam must never initialize capture or open a transport.
+  static EllaCaptureDiagnosticsSnapshot get captureDiagnostics =>
+      _captureDiagnosticsReader?.call() ?? const EllaCaptureDiagnosticsSnapshot.uninitialized();
+
+  static void installCaptureDiagnosticsReader(EllaCaptureDiagnosticsSnapshot Function() reader) {
+    _captureDiagnosticsReader = reader;
+  }
 
   /// True only in the flag-ON graph after the upstream capture entry point
   /// installed itself. The legacy necklace auto-connect and legacy WAL/device
@@ -131,5 +193,6 @@ class EllaCaptureHost {
     _homeCaptureDockBuilder = null;
     _deviceService = null;
     _nativeDiscoveryDiagnosticsLoader = null;
+    _captureDiagnosticsReader = null;
   }
 }
