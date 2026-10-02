@@ -35,6 +35,37 @@ void main() {
     expect(h.authority.isBound, isFalse);
   });
 
+  test('diagnostic snapshot never boots capture and reports actual imported counters', () async {
+    var boots = 0;
+    final uninitialized = EllaUpstreamCaptureRuntime(
+        authority: h.authority,
+        bootForTesting: () async {
+          boots++;
+          return h.provider;
+        });
+    expect(uninitialized.captureDiagnostics.initialized, isFalse);
+    expect(uninitialized.captureDiagnostics.receivedBytes, isNull);
+    expect(boots, 0);
+    expect(await h.bind(), isTrue);
+    final snapshot = h.runtime.captureDiagnostics;
+    expect(snapshot.initialized, isTrue);
+    expect(snapshot.receivedBytes, h.provider.lifetimeBleBytesReceived);
+    expect(snapshot.sentBytes, h.provider.lifetimeWsSocketBytesSent);
+    expect(snapshot.ready, isFalse);
+    final link = await h.connectPendant();
+    for (var i = 0; i < 3; i++) {
+      link.emitAudio();
+    }
+    await h.settle();
+    expect(h.provider.lifetimeBleBytesReceived, greaterThan(0));
+    expect(h.provider.lifetimeWsSocketBytesSent, greaterThan(0));
+    expect(h.runtime.captureDiagnostics.sentBytes, h.provider.lifetimeWsSocketBytesSent);
+    h.authority.release();
+    expect(h.runtime.captureDiagnostics.receivedBytes, isNull);
+    expect(h.runtime.captureDiagnostics.sentBytes, isNull);
+    expect(h.runtime.captureDiagnostics.lastFailure, isNull);
+  });
+
   test('real runtime rejects an A start after boot resumes under B without prompting consent', () async {
     final boot = Completer<CaptureProvider>();
     final runtime = EllaUpstreamCaptureRuntime(authority: h.authority, bootForTesting: () => boot.future);

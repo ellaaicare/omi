@@ -10077,6 +10077,27 @@ class AppLocalizationsRu extends AppLocalizations {
   String get ellaRuntimeDiagnostics => 'Runtime Diagnostics';
 
   @override
+  String get diagnosticsCapturePipeline => 'Capture pipeline';
+
+  @override
+  String get diagnosticsLegacyCapture => 'Legacy capture';
+
+  @override
+  String get diagnosticsUpstreamCapture => 'Upstream capture';
+
+  @override
+  String get diagnosticsCaptureUninitialized => 'Capture not initialized';
+
+  @override
+  String get diagnosticsAudioReceived => 'Necklace audio received this process';
+
+  @override
+  String get diagnosticsAudioSent => 'Necklace audio sent to transcription this process';
+
+  @override
+  String get diagnosticsSocketAdmission => 'Last socket admission failure';
+
+  @override
   String get ellaRuntimeDiagnosticsSubtitle => 'Internal connection, consent, and audio state';
 
   @override

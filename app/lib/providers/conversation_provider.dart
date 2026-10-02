@@ -102,6 +102,9 @@ class ConversationProvider extends ChangeNotifier {
   final Duration _conversationsFetchTimeout;
   final Duration _failedConversationsFetchTimeout;
   int _operationGeneration = 0;
+  int get captureProjectionGeneration => _operationGeneration;
+  final Set<String> _captureDeletedConversationIds = {};
+  bool canProjectCaptureConversation(String id) => !_captureDeletedConversationIds.contains(id);
 
   bool isFetchingConversations = false;
 
@@ -140,6 +143,7 @@ class ConversationProvider extends ChangeNotifier {
 
   void reset() {
     _operationGeneration++;
+    _captureDeletedConversationIds.clear();
     conversations = [];
     searchedConversations = [];
     groupedConversations = {};
@@ -458,7 +462,7 @@ class ConversationProvider extends ChangeNotifier {
       if (requestId != _fetchRequestId) return;
       if (!result.succeeded) return;
 
-      final newConversations = result.conversations;
+      final newConversations = result.conversations.where((item) => canProjectCaptureConversation(item.id)).toList();
       failedConversations = _mergeRetryableFailures(failedConversations, [
         ...conversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
         ...newConversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
@@ -480,6 +484,15 @@ class ConversationProvider extends ChangeNotifier {
         processingConversations.insertAll(0, upsertConvos);
       }
 
+      // Existing rows can receive a later canonical summary/version without
+      // becoming a new conversation. Preserve older paginated history.
+      final completedById = {
+        for (final conversation in newConversations)
+          if (conversation.status == ConversationStatus.completed) conversation.id: conversation,
+      };
+      conversations = [for (final conversation in conversations) completedById[conversation.id] ?? conversation];
+      processingConversations.removeWhere((conversation) => completedById.containsKey(conversation.id));
+
       // completed convos
       upsertConvos = newConversations
           .where(
@@ -499,6 +512,7 @@ class ConversationProvider extends ChangeNotifier {
       }
 
       _groupConversationsByDateWithoutNotify();
+      if (selectedFolderId == null) SharedPreferencesUtil().cachedConversations = conversations;
       notifyListeners();
     } finally {
       if (requestId == _fetchRequestId) {
@@ -532,7 +546,9 @@ class ConversationProvider extends ChangeNotifier {
           if (conversations.isEmpty && selectedFolderId == null) {
             conversations = SharedPreferencesUtil()
                 .cachedConversations
-                .where((conversation) => conversation.status == ConversationStatus.completed)
+                .where((conversation) =>
+                    conversation.status == ConversationStatus.completed &&
+                    canProjectCaptureConversation(conversation.id))
                 .toList();
           }
           isShowingCachedConversations = conversations.isNotEmpty;
@@ -540,10 +556,10 @@ class ConversationProvider extends ChangeNotifier {
           _groupConversationsByDateWithoutNotify();
           return;
         }
-        fetchedConversations = result.conversations;
-        hasMoreConversations = fetchedConversations.length >= _conversationPageSize;
+        fetchedConversations = result.conversations.where((item) => canProjectCaptureConversation(item.id)).toList();
+        hasMoreConversations = result.conversations.length >= _conversationPageSize;
         loadMoreConversationsFailed = false;
-        _conversationPageOffset = fetchedConversations.length;
+        _conversationPageOffset = result.conversations.length;
       }
 
       if (requestId != _fetchRequestId) return;
@@ -917,8 +933,10 @@ class ConversationProvider extends ChangeNotifier {
     Iterable<ServerConversation> enrichmentFailures,
   ) {
     final byId = <String, ServerConversation>{
-      for (final conversation in processingFailures) conversation.id: conversation,
-      for (final conversation in enrichmentFailures) conversation.id: conversation,
+      for (final conversation in processingFailures)
+        if (canProjectCaptureConversation(conversation.id)) conversation.id: conversation,
+      for (final conversation in enrichmentFailures)
+        if (canProjectCaptureConversation(conversation.id)) conversation.id: conversation,
     };
     final merged = byId.values.toList();
     merged.sort((a, b) {
@@ -992,9 +1010,9 @@ class ConversationProvider extends ChangeNotifier {
         loadMoreConversationsFailed = true;
         return;
       }
-      final newConversations = result.conversations;
-      _conversationPageOffset += newConversations.length;
-      hasMoreConversations = newConversations.length >= _conversationPageSize;
+      final newConversations = result.conversations.where((item) => canProjectCaptureConversation(item.id)).toList();
+      _conversationPageOffset += result.conversations.length;
+      hasMoreConversations = result.conversations.length >= _conversationPageSize;
       failedConversations = _mergeRetryableFailures(
         failedConversations,
         newConversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
@@ -1059,6 +1077,28 @@ class ConversationProvider extends ChangeNotifier {
     } else {
       updateConversation(conversation, idx);
     }
+  }
+
+  void applyCanonicalCaptureConversation(ServerConversation conversation) {
+    if (!canProjectCaptureConversation(conversation.id)) return;
+    if (conversation.status == ConversationStatus.processing) {
+      processingConversations.removeWhere((item) => item.id == conversation.id);
+      processingConversations.insert(0, conversation);
+    } else if (conversation.status == ConversationStatus.completed) {
+      processingConversations.removeWhere((item) => item.id == conversation.id);
+      final index = conversations.indexWhere((item) => item.id == conversation.id);
+      if (index < 0) {
+        conversations.insert(0, conversation);
+      } else {
+        conversations[index] = conversation;
+      }
+      conversations.sort((a, b) => (b.startedAt ?? b.createdAt).compareTo(a.startedAt ?? a.createdAt));
+      _groupConversationsByDateWithoutNotify();
+      if (selectedFolderId == null) SharedPreferencesUtil().cachedConversations = conversations;
+    } else {
+      return;
+    }
+    notifyListeners();
   }
 
   void updateConversationInSortedList(ServerConversation conversation) {
@@ -1209,6 +1249,8 @@ class ConversationProvider extends ChangeNotifier {
       final deleted = await _conversationDelete(conversation.id, lease);
       if (!deleted || generation != _operationGeneration || !lease.isCurrent) return false;
 
+      _captureDeletedConversationIds.add(conversation.id);
+
       final removedConsumedConversation = conversations.any((item) => item.id == conversation.id) ||
           processingConversations.any((item) => item.id == conversation.id);
       conversations.removeWhere((item) => item.id == conversation.id);
@@ -1238,6 +1280,7 @@ class ConversationProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _operationGeneration++;
     _processingConversationWatchTimer?.cancel();
     _refreshDebounceTimer?.cancel();
     for (final poll in _processingRetryPolls.values) {

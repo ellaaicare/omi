@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:omi/ella/capture_host/ella_capture_host.dart';
 import 'package:omi/services/sockets/transcription_service.dart' as ella_socket;
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/upstream_capture/backend/schema/geolocation.dart';
@@ -225,6 +226,7 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
   void _fail(String reason, [int? closeCode]) {
     if (_failed || _stopping) return;
     _failed = true;
+    _lastAdmissionFailure = EllaCaptureSocketFailure.fromReason(reason, closeCode, DateTime.now());
     _ready = false;
     _completeWaiters();
     unawaited(
@@ -235,6 +237,9 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
     );
     _onAdmissionFailure?.call(reason, closeCode);
   }
+
+  EllaCaptureSocketFailure? _lastAdmissionFailure;
+  EllaCaptureSocketFailure? get lastAdmissionFailure => _lastAdmissionFailure;
 
   static ella_socket.CaptureProtocolAuthority? _readAuthority(Map<dynamic, dynamic> message) {
     final conversationId = message['conversation_id'];

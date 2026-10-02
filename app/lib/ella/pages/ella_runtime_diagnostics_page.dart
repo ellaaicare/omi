@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/capture_host/ella_capture_host.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/pages/settings/device_diagnostics_page.dart';
 import 'package:omi/providers/capture_provider.dart';
@@ -34,6 +35,7 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    if (EllaCaptureHost.upstreamCaptureActive) return;
     final capture = context.read<CaptureProvider>();
     if (identical(capture, _capture)) return;
     _capture?.removeMetricsListener();
@@ -60,6 +62,7 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
   Widget build(BuildContext context) {
     final connectivity = ConnectivityService();
     final capture = context.watch<CaptureProvider>();
+    final upstream = EllaCaptureHost.upstreamCaptureActive ? EllaCaptureHost.captureDiagnostics : null;
     final bleConnected = context.watch<DeviceProvider>().presentationIsConnected;
     return Scaffold(
       backgroundColor: EllaColors.bgPrimary,
@@ -107,15 +110,32 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
                 value: '$leaseDetail\n${_time(lease.lastConfirmedAt)}',
               ),
               _DiagnosticRow(
-                label: context.l10n.diagnosticsBleRate,
-                value:
-                    '${bleConnected ? context.l10n.yes : context.l10n.no} · ${capture.bleBytesPerSecond.toStringAsFixed(0)} B/s',
+                label: context.l10n.diagnosticsCapturePipeline,
+                value: upstream == null
+                    ? context.l10n.diagnosticsLegacyCapture
+                    : upstream.initialized
+                        ? context.l10n.diagnosticsUpstreamCapture
+                        : context.l10n.diagnosticsCaptureUninitialized,
               ),
               _DiagnosticRow(
-                label: context.l10n.diagnosticsWsRate,
-                value:
-                    '${_transcriptionSocketState(capture.transcriptionSocketState)} · ${capture.wsSendRateKbps.toStringAsFixed(2)} kbps',
+                label: upstream == null ? context.l10n.diagnosticsBleRate : context.l10n.diagnosticsAudioReceived,
+                value: upstream == null
+                    ? '${bleConnected ? context.l10n.yes : context.l10n.no} · ${capture.bleBytesPerSecond.toStringAsFixed(0)} B/s'
+                    : '${bleConnected ? context.l10n.yes : context.l10n.no} · ${upstream.receivedBytes ?? context.l10n.unknown} B',
               ),
+              _DiagnosticRow(
+                label: upstream == null ? context.l10n.diagnosticsWsRate : context.l10n.diagnosticsAudioSent,
+                value: upstream == null
+                    ? '${_transcriptionSocketState(capture.transcriptionSocketState)} · ${capture.wsSendRateKbps.toStringAsFixed(2)} kbps'
+                    : '${upstream.initialized ? (upstream.ready ? context.l10n.connected : context.l10n.disconnected) : context.l10n.unknown} · ${upstream.sentBytes ?? context.l10n.unknown} B',
+              ),
+              if (upstream != null)
+                _DiagnosticRow(
+                  label: context.l10n.diagnosticsSocketAdmission,
+                  value: upstream.lastFailure == null
+                      ? context.l10n.unknown
+                      : '${upstream.lastFailure!.reason.code} · ${upstream.lastFailure!.closeCode ?? '-'}\n${_time(upstream.lastFailure!.at)}',
+                ),
               const SizedBox(height: 6),
               _DeviceDiagnosticsEntryRow(
                 onTap: () {
