@@ -8,6 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:omi/backend/http/api/conversations.dart' as ella_api;
 import 'package:omi/ella/capture_host/ella_capture_host.dart';
 import 'package:omi/ella/upstream_capture/ella_capture_authority.dart';
+import 'package:omi/ella/upstream_capture/ella_capture_memory_bridge.dart';
 import 'package:omi/ella/upstream_capture/ella_capture_protocol_socket.dart';
 import 'package:omi/ella/upstream_capture/ella_capture_protocol_finalization.dart';
 import 'package:omi/ella/upstream_capture/ella_gated_capture_seams.dart';
@@ -239,13 +240,33 @@ Future<EllaNativeDiscoveryDiagnostics> loadNativeDiscoveryDiagnostics([BleHostAp
 /// (sources, sockets, WAL, sessions) stays in upstream's CaptureController /
 /// CaptureCoordinator.
 class EllaUpstreamCaptureRuntime {
+  late final memoryBridge = EllaCaptureMemoryBridge(
+    captureAuthority: authority,
+    loader: _memoryLoader,
+    accountAuthority: _memoryAccountAuthority,
+    retryDelays: _memoryRetryDelays,
+  );
+
   EllaUpstreamCaptureRuntime({
     required this.authority,
     EllaCaptureProtocolSocket? Function()? activeProtocolSocket,
     EllaCaptureFinalizationRequest? finalizationRequest,
+    EllaCaptureMemoryLoader? memoryLoader,
+    AccountCommitAuthority? Function()? memoryAccountAuthority,
+    List<Duration> memoryRetryDelays = const [
+      Duration(seconds: 2),
+      Duration(seconds: 4),
+      Duration(seconds: 8),
+      Duration(seconds: 16),
+      Duration(seconds: 32),
+      Duration(seconds: 64),
+    ],
     @visibleForTesting Future<CaptureProvider> Function()? bootForTesting,
     @visibleForTesting Future<DeviceConnection?> Function(String deviceId)? connectDeviceForTesting,
-  })  : _activeProtocolSocket = activeProtocolSocket,
+  })  : _memoryLoader = memoryLoader,
+        _memoryAccountAuthority = memoryAccountAuthority,
+        _memoryRetryDelays = memoryRetryDelays,
+        _activeProtocolSocket = activeProtocolSocket,
         _finalizationRequest = finalizationRequest,
         _bootForTesting = bootForTesting,
         _connectDeviceForTesting = connectDeviceForTesting;
@@ -259,6 +280,9 @@ class EllaUpstreamCaptureRuntime {
   static final EllaUpstreamServicesBootstrap _servicesBootstrap = EllaUpstreamServicesBootstrap();
 
   final EllaCaptureAuthority authority;
+  final EllaCaptureMemoryLoader? _memoryLoader;
+  final AccountCommitAuthority? Function()? _memoryAccountAuthority;
+  final List<Duration> _memoryRetryDelays;
   final EllaCaptureProtocolSocket? Function()? _activeProtocolSocket;
   final EllaCaptureFinalizationRequest? _finalizationRequest;
   final Future<CaptureProvider> Function()? _bootForTesting;
@@ -437,6 +461,7 @@ class EllaUpstreamCaptureRuntime {
     final gatedSocket = ellaGatedConversationSocketOpen(wiring.openConversationSocket, authority);
     late final CaptureProvider provider;
     provider = CaptureProvider(
+      externalActions: memoryBridge,
       walService: wiring.wal,
       phoneMicRecorder: EllaGatedMicRecorderService(wiring.phoneMic, authority),
       phoneMicBatchSupported: wiring.batchSupported ?? (Platform.isIOS || Platform.isAndroid),
@@ -507,6 +532,7 @@ class EllaUpstreamCaptureRuntime {
   Future<void> get pendingTeardown => _teardown;
 
   void _onRevoked(EllaCaptureRevocation revocation) {
+    memoryBridge.cancel();
     lastRevocation.value = revocation;
     // Frames are already refused synchronously by the gate; this only stops
     // upstream capture through its public API, off the frame callback.

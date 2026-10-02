@@ -102,6 +102,7 @@ class ConversationProvider extends ChangeNotifier {
   final Duration _conversationsFetchTimeout;
   final Duration _failedConversationsFetchTimeout;
   int _operationGeneration = 0;
+  int get captureProjectionGeneration => _operationGeneration;
 
   bool isFetchingConversations = false;
 
@@ -480,6 +481,15 @@ class ConversationProvider extends ChangeNotifier {
         processingConversations.insertAll(0, upsertConvos);
       }
 
+      // Existing rows can receive a later canonical summary/version without
+      // becoming a new conversation. Preserve older paginated history.
+      final completedById = {
+        for (final conversation in newConversations)
+          if (conversation.status == ConversationStatus.completed) conversation.id: conversation,
+      };
+      conversations = [for (final conversation in conversations) completedById[conversation.id] ?? conversation];
+      processingConversations.removeWhere((conversation) => completedById.containsKey(conversation.id));
+
       // completed convos
       upsertConvos = newConversations
           .where(
@@ -499,6 +509,7 @@ class ConversationProvider extends ChangeNotifier {
       }
 
       _groupConversationsByDateWithoutNotify();
+      if (selectedFolderId == null) SharedPreferencesUtil().cachedConversations = conversations;
       notifyListeners();
     } finally {
       if (requestId == _fetchRequestId) {
@@ -1061,6 +1072,27 @@ class ConversationProvider extends ChangeNotifier {
     }
   }
 
+  void applyCanonicalCaptureConversation(ServerConversation conversation) {
+    if (conversation.status == ConversationStatus.processing) {
+      processingConversations.removeWhere((item) => item.id == conversation.id);
+      processingConversations.insert(0, conversation);
+    } else if (conversation.status == ConversationStatus.completed) {
+      processingConversations.removeWhere((item) => item.id == conversation.id);
+      final index = conversations.indexWhere((item) => item.id == conversation.id);
+      if (index < 0) {
+        conversations.insert(0, conversation);
+      } else {
+        conversations[index] = conversation;
+      }
+      conversations.sort((a, b) => (b.startedAt ?? b.createdAt).compareTo(a.startedAt ?? a.createdAt));
+      _groupConversationsByDateWithoutNotify();
+      if (selectedFolderId == null) SharedPreferencesUtil().cachedConversations = conversations;
+    } else {
+      return;
+    }
+    notifyListeners();
+  }
+
   void updateConversationInSortedList(ServerConversation conversation) {
     var effectiveDate = conversation.startedAt ?? conversation.createdAt;
     var date = DateTime(effectiveDate.year, effectiveDate.month, effectiveDate.day);
@@ -1238,6 +1270,7 @@ class ConversationProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _operationGeneration++;
     _processingConversationWatchTimer?.cancel();
     _refreshDebounceTimer?.cancel();
     for (final poll in _processingRetryPolls.values) {

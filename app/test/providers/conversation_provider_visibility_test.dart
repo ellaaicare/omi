@@ -359,6 +359,27 @@ void main() {
     expect(provider.visibleConversations.map((item) => item.id), ['current']);
   });
 
+  test('incremental refresh replaces a completed summary and preserves paginated history and cache', () async {
+    SharedPreferencesUtil().uid = 'uid-a';
+    final updated = ServerConversation(
+      id: 'current',
+      createdAt: DateTime.parse('2026-07-08T19:00:00Z'),
+      structured: Structured('Canonical title', 'Canonical overview'),
+      activeSummaryVersionId: 'version-2',
+      enrichmentState: {'status': 'writeback_applied'},
+    );
+    final provider = ConversationProvider(
+      conversationsFetchCall: () async => ConversationsFetchResult.success([updated]),
+      failedConversationsFetchCall: () async => const ConversationsFetchResult.success([]),
+    )..conversations = [conversation('current'), conversation('older-page')];
+    addTearDown(provider.dispose);
+    await provider.forceRefreshConversations();
+    expect(provider.conversations.map((item) => item.id), ['current', 'older-page']);
+    expect(provider.conversations.first.activeSummaryVersionId, 'version-2');
+    expect(provider.conversations.first.structured.title, 'Canonical title');
+    expect(SharedPreferencesUtil().cachedConversations.first.activeSummaryVersionId, 'version-2');
+  });
+
   test('memory pagination deduplicates shifted pages and records the terminal page', () async {
     final authority = _MutableAuthority('uid-a');
     final initial = List.generate(50, (index) => conversation('memory-$index'));
