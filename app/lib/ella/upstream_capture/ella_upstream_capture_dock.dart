@@ -204,7 +204,10 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   Future<void> _loadWhispersState() async {
     if (!_guardianAvailable) return;
     final operation = _whisperFence.observe(widget.guardianAuthorityProvider ?? WalOwnerAuthority.active);
-    if (operation == null) return;
+    if (operation == null) {
+      _showWhisperAuthorityUnavailable();
+      return;
+    }
     try {
       final info = await _readWhisperState(operation.authority);
       if (!_isWhisperOperationCurrent(operation)) return;
@@ -244,6 +247,14 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   bool _isWhisperOperationCurrent(guardian_native.GuardianWhisperOperation operation) =>
       mounted && _guardianAvailable && operation.isCurrent;
 
+  void _showWhisperAuthorityUnavailable() {
+    if (!mounted || !_guardianAvailable || _whisperFence.choicePending) return;
+    setState(() {
+      _whispersVerified = false;
+      _whisperError = context.l10n.todayWhispersUnavailable;
+    });
+  }
+
   void _onSharedWhisperStateChanged() {
     if (!mounted) return;
     final refreshRequired = _whisperRefreshRevision != _whisperFence.refreshRevision;
@@ -269,7 +280,10 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
     if (_whispersBusy || !_whispersVerified) return;
     final previousEnabled = _whispersOn;
     final operation = _whisperFence.choose(widget.guardianAuthorityProvider ?? WalOwnerAuthority.active, enabled);
-    if (operation == null) return;
+    if (operation == null) {
+      _showWhisperAuthorityUnavailable();
+      return;
+    }
     if (_isWhisperOperationCurrent(operation)) _actionFeedback();
     _pendingWhisperChoice = operation;
     try {
@@ -367,7 +381,10 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
     if (_whispersBusy) return;
     if (!_whispersVerified) {
       final operation = _whisperFence.observe(widget.guardianAuthorityProvider ?? WalOwnerAuthority.active);
-      if (operation == null) return;
+      if (operation == null) {
+        _showWhisperAuthorityUnavailable();
+        return;
+      }
       if (_isWhisperOperationCurrent(operation)) _actionFeedback();
       setState(() => _whispersBusy = true);
       await _loadWhispersState();
@@ -375,7 +392,10 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
       return;
     }
     final operation = _whisperFence.observe(widget.guardianAuthorityProvider ?? WalOwnerAuthority.active);
-    if (operation == null) return;
+    if (operation == null) {
+      _showWhisperAuthorityUnavailable();
+      return;
+    }
     if (_isWhisperOperationCurrent(operation)) _actionFeedback();
     final enabled = _whispersOn;
     final playbackFailedMessage = context.l10n.upstreamCaptureWhispersPlaybackFailed;
@@ -1014,7 +1034,9 @@ class _WhispersRow extends StatelessWidget {
     if (!enabled) {
       return playback == _WhisperPlaybackState.error
           ? context.l10n.upstreamCaptureWhispersPlaybackStopFailed
-          : context.l10n.upstreamCaptureWhispersOffDescription;
+          : error != null
+              ? context.l10n.upstreamCaptureWhispersSaveFailed
+              : context.l10n.upstreamCaptureWhispersOffDescription;
     }
     return playback == _WhisperPlaybackState.ready
         ? error == null

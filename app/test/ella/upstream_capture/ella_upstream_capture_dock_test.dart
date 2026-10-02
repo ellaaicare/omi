@@ -1415,13 +1415,19 @@ void main() {
 
   testWidgets('Whispers save failure reads and keeps the verified prior state', (tester) async {
     final fixture = await _DockFixture.create(tester);
+    var starts = 0;
+    var writes = 0;
+    var saveSucceeds = false;
     await fixture.pump(
       tester,
       guardianAvailable: true,
       guardianModeLoader: () async =>
           const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState()),
-      guardianModeSetter: (_) async => false,
-      guardianNativeStart: () async {},
+      guardianModeSetter: (_) async {
+        writes++;
+        return saveSucceeds;
+      },
+      guardianNativeStart: () async => starts++,
       guardianNativeStop: () async {},
       guardianNativeState: () => guardian_native.GuardianModeState.idle,
     );
@@ -1430,9 +1436,225 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    expect(find.text('Whispers are off. Spoken responses are paused.'), findsOneWidget);
+    expect(find.text('Whispers could not be updated. Try again.'), findsOneWidget);
+    expect(find.text('Whispers are off. Spoken responses are paused.'), findsNothing);
     final toggle = tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch')));
     expect(toggle.value, isFalse);
+    expect(starts, 0);
+    expect(writes, 1);
+    expect(find.byKey(const Key('upstream-capture-whispers-retry')), findsNothing);
+
+    saveSucceeds = true;
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+    await tester.pump();
+    await tester.pump();
+    expect(writes, 2);
+    expect(starts, 1);
+    expect(tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch'))).value, isTrue);
+    expect(find.text('Whispers could not be updated. Try again.'), findsNothing);
+  });
+
+  for (final denial in ['missing', 'stale']) {
+    testWidgets('Whispers $denial fresh authority gives read-only recovery after a denied tap', (tester) async {
+      final fixture = await _DockFixture.create(tester);
+      final haptics = captureHaptics(tester);
+      var available = true;
+      var current = true;
+      var reads = 0;
+      var writes = 0;
+      var starts = 0;
+      var stops = 0;
+      await fixture.pump(
+        tester,
+        reduceMotion: true,
+        guardianAvailable: true,
+        guardianAuthorityProvider: () => available ? _WhisperTestAuthority(_uid, () => current) : null,
+        guardianModeLoader: () async {
+          reads++;
+          return const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState());
+        },
+        guardianModeSetter: (_) async {
+          writes++;
+          return true;
+        },
+        guardianNativeStart: () async => starts++,
+        guardianNativeStop: () async => stops++,
+        guardianNativeState: () => guardian_native.GuardianModeState.idle,
+      );
+      expect(reads, 1);
+      if (denial == 'missing') {
+        // An established snapshot can remain current during transient revalidation.
+        available = false;
+      } else {
+        current = false;
+      }
+      await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+      await tester.pump();
+      expect(find.text('Whispers are unavailable right now.'), findsOneWidget);
+      expect(find.byKey(const Key('upstream-capture-whispers-switch')), findsNothing);
+      final retry = find.byKey(const Key('upstream-capture-whispers-retry'));
+      expect(retry.hitTestable(), findsOneWidget);
+      await tester.tap(retry);
+      await tester.pump();
+      expect(reads, 1);
+      expect(writes, 0);
+      expect(starts, 0);
+      expect(stops, 0);
+      expect(haptics, isEmpty);
+
+      available = true;
+      current = true;
+      await tester.tap(retry);
+      await tester.pump();
+      await tester.pump();
+      expect(reads, 2);
+      expect(writes, 0);
+      expect(starts, 0);
+      expect(stops, 0);
+      expect(haptics, hasLength(1));
+      expect(tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch'))).value, isFalse);
+      expect(find.text('Whispers are off. Spoken responses are paused.'), findsOneWidget);
+      expect(tester.binding.transientCallbackCount, 0);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('Whispers transient provisioning clear recovers read-only with real authority and large text',
+      (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final prefs = fork.SharedPreferencesUtil()..uid = _uid;
+    prefs.acceptAiConsent(
+      receiptId: 'aicr_test',
+      uid: _uid,
+      profileBindingId: 'profile-test',
+      serverDecidedAt: '2026-08-02T00:00:00Z',
+    );
+    await prefs.saveEllaProvisioningReceipt(_uid, {
+      'state': 'ready',
+      'binding_state': 'active',
+      'binding_revision': 3,
+      'effective_policy_revision': 'policy-3',
+    });
+    await prefs.markEllaProvisioningVerified(_uid);
+    prefs.markAiConsentServerVerified(
+      uid: _uid,
+      receiptId: 'aicr_test',
+      policyVersion: fork.SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: fork.SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile-test',
+      scopeVersion: fork.SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: fork.SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+    ExactAccountAuthorityVerifier? authority() {
+      final active = WalOwnerAuthority.active(preferences: prefs, authenticatedUid: _uid);
+      return active == null
+          ? null
+          : _WhisperTestAuthority(_uid, () => active.isCurrent(preferences: prefs, authenticatedUid: _uid));
+    }
+
+    final established = WalOwnerAuthority.active(preferences: prefs, authenticatedUid: _uid)!;
+    var reads = 0;
+    var writes = 0;
+    var nativeCalls = 0;
+    final semantics = tester.ensureSemantics();
+    await fixture.pump(
+      tester,
+      size: const Size(320, 1600),
+      textScaler: const _NonlinearWhisperTextScaler(),
+      reduceMotion: true,
+      guardianAvailable: true,
+      guardianAuthorityProvider: authority,
+      guardianModeLoader: () async {
+        reads++;
+        return const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState());
+      },
+      guardianModeSetter: (_) async {
+        writes++;
+        return true;
+      },
+      guardianNativeStart: () async => nativeCalls++,
+      guardianNativeStop: () async => nativeCalls++,
+      guardianNativeState: () => guardian_native.GuardianModeState.idle,
+    );
+    prefs.invalidateEllaProvisioningServerVerification();
+    expect(established.isCurrent(preferences: prefs, authenticatedUid: _uid), isTrue);
+    expect(authority(), isNull);
+    expect(guardian_native.GuardianModeService.whisperStateFence.snapshot!.modeVerified, isTrue);
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+    await tester.pump();
+    expect(find.text('Whispers are unavailable right now.'), findsOneWidget);
+    final retry = find.byKey(const Key('upstream-capture-whispers-retry'));
+    expect(retry.hitTestable(), findsOneWidget);
+    expect(tester.getSize(retry).height, greaterThanOrEqualTo(48));
+    expect(tester.getSemantics(retry).label, contains('Try Again'));
+    await tester.tap(retry);
+    await tester.pump();
+    expect(reads, 1);
+    expect(writes, 0);
+    expect(nativeCalls, 0);
+    await prefs.markEllaProvisioningVerified(_uid);
+    await tester.tap(retry);
+    await tester.pump();
+    await tester.pump();
+    expect(reads, 2);
+    expect(writes, 0);
+    expect(nativeCalls, 0);
+    expect(tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch'))).value, isFalse);
+    expect(tester.binding.transientCallbackCount, 0);
+    expect(tester.takeException(), isNull);
+    semantics.dispose();
+  });
+
+  testWidgets('Whispers denied-choice recovery cannot publish a read after account replacement', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final readback = Completer<GuardianModeInfo?>();
+    var epoch = 0;
+    var available = true;
+    var reads = 0;
+    var writes = 0;
+    var nativeCalls = 0;
+    ExactAccountAuthorityVerifier? authority() {
+      final captured = epoch;
+      return available ? _WhisperTestAuthority(_uid, () => captured == epoch) : null;
+    }
+
+    await fixture.pump(
+      tester,
+      guardianAvailable: true,
+      guardianAuthorityProvider: authority,
+      guardianModeLoader: () => ++reads == 1
+          ? Future.value(const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState()))
+          : readback.future,
+      guardianModeSetter: (_) async {
+        writes++;
+        return true;
+      },
+      guardianNativeStart: () async => nativeCalls++,
+      guardianNativeStop: () async => nativeCalls++,
+      guardianNativeState: () => guardian_native.GuardianModeState.idle,
+    );
+    available = false;
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-switch')));
+    await tester.pump();
+    available = true;
+    await tester.tap(find.byKey(const Key('upstream-capture-whispers-retry')));
+    await tester.pump();
+    expect(reads, 2);
+    epoch++;
+    final fence = guardian_native.GuardianModeService.whisperStateFence;
+    fence.invalidate();
+    readback.complete(const GuardianModeInfo(
+      currentMode: GuardianModeKey.custom,
+      twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
+    ));
+    await tester.pump();
+    await tester.pump();
+    expect(fence.snapshot, isNull);
+    expect(fence.choicePending, isFalse);
+    expect(find.text('Whispers are unavailable right now.'), findsOneWidget);
+    expect(find.byKey(const Key('upstream-capture-whispers-switch')), findsNothing);
+    expect(writes, 0);
+    expect(nativeCalls, 0);
   });
 
   testWidgets('unavailable saved-on playback retries without mode writes and waits for native success', (tester) async {
