@@ -312,7 +312,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          swiftc -warnings-as-errors \
+          swiftc -warnings-as-errors -D ELLA_VOICE_AUDIO_ROUTE_POLICY_TESTS \
             app/ios/Runner/EllaVoiceAudioRoutePolicy.swift \
             app/ios/Tests/EllaVoiceAudioRoutePolicyTests.swift \
             -o "$RUNNER_TEMP/ella-voice-audio-route-policy-tests"

@@ -146,7 +146,7 @@ struct EllaVoiceAudioRoutePolicy {
   }
 }
 
-#if os(iOS)
+#if os(iOS) || ELLA_VOICE_AUDIO_ROUTE_POLICY_TESTS
   final class SystemEllaVoiceAudioSession: EllaVoiceAudioSessionRouting {
     private let audioSession: AVAudioSession
 
@@ -170,7 +170,7 @@ struct EllaVoiceAudioRoutePolicy {
         try audioSession.setCategory(
           .playback,
           mode: .default,
-          options: [.mixWithOthers, .allowBluetoothA2DP, .allowAirPlay]
+          options: [.mixWithOthers]
         )
       case .interactive:
         try audioSession.setCategory(
