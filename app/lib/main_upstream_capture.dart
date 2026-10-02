@@ -2,6 +2,7 @@ import 'package:omi/ella/capture_host/ella_capture_host.dart';
 import 'package:omi/ella/services/ella_account_isolation_service.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_dock.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
+import 'package:omi/ella/upstream_capture/ella_capture_memory_bridge.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_device_service_adapter.dart';
 import 'package:omi/main.dart' as legacy;
 
@@ -18,7 +19,10 @@ void main() {
   final runtime = EllaUpstreamCaptureRuntime.instance;
   // Refuses unless the Dart define generated from the xcconfig is true.
   EllaCaptureHost.installUpstreamCapture(
-    homeCaptureDockBuilder: (context) => const EllaUpstreamCaptureDock(),
+    homeCaptureDockBuilder: (context) => EllaCaptureMemoryBinding(
+      bridge: runtime.memoryBridge,
+      child: const EllaUpstreamCaptureDock(),
+    ),
     deviceService: EllaUpstreamDeviceServiceAdapter.production(runtime),
   );
   // Device Diagnostics reads native BLE discovery diagnostics through this

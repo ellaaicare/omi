@@ -12,10 +12,13 @@ import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/upstream_capture/ella_capture_authority.dart';
+import 'package:omi/ella/upstream_capture/ella_capture_memory_bridge.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/ella/upstream_capture/ella_capture_protocol_socket.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
 import 'package:omi/upstream_capture/backend/preferences.dart' as upstream;
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart';
+import 'package:omi/upstream_capture/backend/schema/conversation.dart' as upstream_schema;
 import 'package:omi/upstream_capture/env/env.dart' as upstream_env;
 import 'package:omi/upstream_capture/gen/phone_mic_pigeon.g.dart';
 import 'package:omi/upstream_capture/providers/capture_provider.dart';
@@ -136,6 +139,10 @@ class EllaUpstreamCaptureHarness {
   bool connected = true;
   bool protocolV2 = false;
   EllaCaptureProtocolSocket? Function()? diagnosticSocket;
+  EllaCaptureMemoryLoader? memoryLoader;
+  AccountCommitAuthority? Function()? memoryAccountAuthority;
+  List<Duration>? memoryRetryDelays;
+  String? processedMemoryId;
   int processCalls = 0;
   int connectionAttempts = 0;
   final List<({String conversationId, int protocolVersion, String generation, String ownerToken})>
@@ -149,12 +156,20 @@ class EllaUpstreamCaptureHarness {
     bool grantConsent = true,
     bool protocolV2 = false,
     EllaCaptureProtocolSocket? Function()? diagnosticSocket,
+    EllaCaptureMemoryLoader? memoryLoader,
+    AccountCommitAuthority? Function()? memoryAccountAuthority,
+    List<Duration>? memoryRetryDelays,
+    String? processedMemoryId,
   }) async {
     TestWidgetsFlutterBinding.ensureInitialized();
     final harness = EllaUpstreamCaptureHarness._(tempDir);
     harness.connected = initiallyConnected;
     harness.protocolV2 = protocolV2;
     harness.diagnosticSocket = diagnosticSocket;
+    harness.memoryLoader = memoryLoader;
+    harness.memoryAccountAuthority = memoryAccountAuthority;
+    harness.memoryRetryDelays = memoryRetryDelays;
+    harness.processedMemoryId = processedMemoryId;
     await harness._boot(grantConsent: grantConsent);
     return harness;
   }
@@ -185,7 +200,11 @@ class EllaUpstreamCaptureHarness {
     uploads = ScriptedUploads(clock);
     hostApi = FakePhoneMicHostApi();
     mic = NativeMicRecorderService(
-        hostApi: hostApi, registerFlutterApi: false, now: clock.now, periodic: scheduler.periodic);
+      hostApi: hostApi,
+      registerFlutterApi: false,
+      now: clock.now,
+      periodic: scheduler.periodic,
+    );
     wal = WalService(
       phoneUploadGate: uploads.buildGate(),
       phoneNow: clock.now,
@@ -215,6 +234,9 @@ class EllaUpstreamCaptureHarness {
     );
     runtime = EllaUpstreamCaptureRuntime(
       authority: authority,
+      memoryLoader: memoryLoader,
+      memoryAccountAuthority: memoryAccountAuthority,
+      memoryRetryDelays: memoryRetryDelays ?? const [Duration(seconds: 2)],
       bootForTesting: () async => provider,
       connectDeviceForTesting: (_) async {
         connectionAttempts++;
@@ -296,6 +318,19 @@ class EllaUpstreamCaptureHarness {
             ? null
             : () async {
                 processCalls++;
+                if (processedMemoryId != null) {
+                  return upstream_schema.CreateConversationResponse.fromJson({
+                    'messages': const [],
+                    'conversation': {
+                      'id': processedMemoryId,
+                      'created_at': '2026-09-29T00:00:00Z',
+                      'started_at': '2026-09-29T00:00:00Z',
+                      'finished_at': '2026-09-29T00:10:00Z',
+                      'status': 'completed',
+                      'structured': {'title': 'Imported title', 'overview': '', 'emoji': '', 'category': 'other'},
+                    },
+                  });
+                }
                 return null;
               },
       ),

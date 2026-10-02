@@ -17,6 +17,7 @@ import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/capture_host/ella_capture_host.dart';
 import 'package:omi/ella/upstream_capture/ella_capture_authority.dart';
+import 'package:omi/ella/upstream_capture/ella_capture_memory_bridge.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_dock.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
@@ -38,12 +39,14 @@ import 'package:omi/services/services.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/upstream_capture/backend/preferences.dart' as upstream;
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart' as upstream_device;
+import 'package:omi/upstream_capture/backend/schema/conversation.dart' as upstream_schema;
 import 'package:omi/upstream_capture/providers/capture_provider.dart' as upstream_capture;
 import 'package:omi/upstream_capture/services/capture/capture_seams.dart' as upstream_capture;
 import 'package:omi/upstream_capture/utils/enums.dart' as upstream_capture;
 import 'package:omi/utils/enums.dart';
 import 'package:omi/widgets/bottom_nav_bar.dart';
 import 'package:omi/widgets/transcript.dart';
+import '../../ella/upstream_capture/support/ella_upstream_capture_harness.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -83,6 +86,280 @@ void main() {
     SharedPreferences.setMockInitialValues({'givenName': 'Margaret'});
     await SharedPreferencesUtil.init();
   });
+
+  for (final source in ['socket', 'finish', 'read failure']) {
+    testWidgets('production $source completion updates mounted Home and delayed canonical Hermes provenance',
+        (tester) async {
+      final directory = (await tester.runAsync(() => Directory.systemTemp.createTemp('ella-home-completion-')))!;
+      final owner = _MemoryCommitAuthority(accountA);
+      var reads = 0;
+      final requestedIds = <String>[];
+      final requestedOwners = <String?>[];
+      final requestedAuthority = <bool>[];
+      ServerConversation memory(bool enriched) => ServerConversation(
+            id: 'capture-completed',
+            createdAt: DateTime(2026, 9, 29, 12),
+            startedAt: DateTime(2026, 9, 29, 12),
+            finishedAt: DateTime(2026, 9, 29, 12, 10),
+            structured:
+                Structured(enriched ? 'Confirmed companion memory' : 'Canonical saved memory', 'Saved summary.'),
+            activeSummaryVersionId: enriched ? 'hermes-version' : 'generic-version',
+            enrichmentState: enriched
+                ? {
+                    'status': 'writeback_applied',
+                    'pending': false,
+                    'canonical_status': 'completed',
+                    'kind': 'hermes_enriched',
+                    'source': 'hermes_parallel',
+                    'result_summary_version_id': 'hermes-version',
+                  }
+                : {'status': 'pending', 'pending': true},
+          );
+      final capture = (await tester.runAsync(() => EllaUpstreamCaptureHarness.boot(
+            tempDir: directory,
+            memoryAccountAuthority: () => owner,
+            memoryRetryDelays: const [Duration(seconds: 2)],
+            processedMemoryId: 'capture-completed',
+            memoryLoader: (id, {expectedAuthenticatedUid, exactAuthority}) async {
+              requestedIds.add(id);
+              requestedOwners.add(expectedAuthenticatedUid);
+              requestedAuthority.add(exactAuthority!.isExactCurrent());
+              if (source == 'read failure' && reads++ > 0) throw const FormatException('Synthetic invalid response');
+              if (source == 'read failure') return memory(false);
+              return memory(reads++ > 0);
+            },
+          )))!;
+      addTearDown(() async {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.runAsync(capture.dispose);
+      });
+      expect(await capture.bind(), isTrue);
+      EllaCaptureHost.installForTesting(
+          homeCaptureDockBuilder: (_) => EllaCaptureMemoryBinding(
+                bridge: capture.runtime.memoryBridge,
+                child: EllaUpstreamCaptureDock(
+                    runtime: capture.runtime, authenticatedUid: () => accountA, guardianAvailability: () => false),
+              ));
+      addTearDown(EllaCaptureHost.resetForTesting);
+      final home = await _pumpHome(tester,
+          conversations: [],
+          nowProvider: () => DateTime(2026, 9, 29, 13),
+          memoryPresentationAuthorityProvider: () => owner,
+          memoryArtworkApi: _FakeMemoryArtworkApi());
+      addTearDown(home.dispose);
+      if (source != 'finish') {
+        await tester.runAsync(capture.startPhone);
+        capture.socket!.emitServerMessage(
+            jsonEncode({'type': 'memory_created', 'memory': memory(false).toJson(), 'messages': const []}));
+      } else {
+        await tester.runAsync(capture.startPhone);
+        await tester.runAsync(capture.runtime.finishConversation);
+      }
+      await tester.pump();
+      await tester.pump();
+      expect(home.conversations.conversations.single.activeSummaryVersionId, 'generic-version');
+      expect(find.text('Canonical saved memory'), findsOneWidget);
+      expect(find.byKey(const Key('hermes-summary-source-capture-completed')), findsNothing);
+      await tester.pump(const Duration(seconds: 3));
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 2100)));
+      await tester.pump();
+      expect(capture.authority.hasCurrentAuthority, isTrue);
+      expect(reads, 2);
+      expect(requestedIds, ['capture-completed', 'capture-completed']);
+      expect(requestedOwners, [accountA, accountA]);
+      expect(requestedAuthority, [true, true]);
+      if (source == 'read failure') {
+        expect(home.conversations.conversations.single.activeSummaryVersionId, 'generic-version');
+        expect(find.text('Canonical saved memory'), findsOneWidget);
+        expect(find.byKey(const Key('hermes-summary-source-capture-completed')), findsNothing);
+      } else {
+        expect(home.conversations.conversations.single.activeSummaryVersionId, 'hermes-version');
+        expect(find.text('Confirmed companion memory'), findsOneWidget);
+        expect(find.byKey(const Key('hermes-summary-source-capture-completed')), findsOneWidget);
+        expect(SharedPreferencesUtil().cachedConversations.single.activeSummaryVersionId, 'hermes-version');
+      }
+      capture.provider.externalActions.upsertConversation(_upstreamMemory(memory(false)));
+      await tester.pump(const Duration(seconds: 30));
+      expect(reads, 2);
+      expect(tester.takeException(), isNull);
+      capture.authority.release();
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.runAsync(capture.dispose);
+    });
+  }
+
+  for (final outcome in ['generic', 'hermes', 'discarded']) {
+    testWidgets('late processing completion advances one bounded canonical budget for $outcome', (tester) async {
+      final directory = (await tester.runAsync(() => Directory.systemTemp.createTemp('ella-home-late-complete-')))!;
+      final owner = _MemoryCommitAuthority(accountA);
+      var reads = 0;
+      final saved = ServerConversation(
+          id: 'late-completion',
+          createdAt: DateTime(2026, 9, 29),
+          structured: Structured('Late canonical memory', 'Confirmed durable summary.'),
+          discarded: outcome == 'discarded',
+          activeSummaryVersionId: outcome == 'hermes' ? 'hermes-version' : 'generic-version',
+          enrichmentState: outcome == 'hermes'
+              ? {
+                  'status': 'writeback_applied',
+                  'pending': false,
+                  'canonical_status': 'completed',
+                  'kind': 'hermes_enriched',
+                  'source': 'hermes_parallel',
+                  'result_summary_version_id': 'hermes-version',
+                }
+              : null);
+      final capture = (await tester.runAsync(() => EllaUpstreamCaptureHarness.boot(
+          tempDir: directory,
+          memoryAccountAuthority: () => owner,
+          memoryRetryDelays: const [Duration(seconds: 1)],
+          memoryLoader: (id, {expectedAuthenticatedUid, exactAuthority}) async => reads++ < 2 ? null : saved)))!;
+      final memories = ConversationProvider();
+      addTearDown(() async {
+        capture.runtime.memoryBridge.cancel();
+        memories.dispose();
+        await tester.runAsync(capture.dispose);
+      });
+      expect(await capture.bind(), isTrue);
+      capture.runtime.memoryBridge.attach(memories);
+      final event = _upstreamMemory(saved);
+      capture.provider.externalActions.addProcessingConversation(event);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump();
+      expect(reads, 2);
+      expect(memories.conversations, isEmpty);
+      capture.provider.externalActions.addProcessingConversation(event);
+      await tester.pump(const Duration(seconds: 5));
+      expect(reads, 2);
+      capture.provider.externalActions.upsertConversation(event);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump();
+      final boundedReads = outcome == 'generic' ? 4 : 3;
+      expect(reads, boundedReads);
+      expect(memories.conversations.isEmpty, outcome == 'discarded');
+      for (var duplicate = 0; duplicate < 3; duplicate++) {
+        capture.provider.externalActions.upsertConversation(event);
+        capture.provider.externalActions.addProcessingConversation(event);
+      }
+      await tester.pump(const Duration(seconds: 30));
+      expect(reads, boundedReads);
+      capture.authority.release();
+      await tester.runAsync(capture.dispose);
+    });
+  }
+
+  for (final deleted in [true, false]) {
+    testWidgets('canonical response after permanent delete $deleted preserves deletion and unrelated memory',
+        (tester) async {
+      final directory = (await tester.runAsync(() => Directory.systemTemp.createTemp('ella-home-delete-')))!;
+      final owner = _MemoryCommitAuthority(accountA);
+      final pending = <String, Completer<ServerConversation?>>{
+        'deleted-memory': Completer<ServerConversation?>(),
+        'unrelated-memory': Completer<ServerConversation?>(),
+      };
+      final reads = <String>[];
+      final capture = (await tester.runAsync(() => EllaUpstreamCaptureHarness.boot(
+          tempDir: directory,
+          memoryAccountAuthority: () => owner,
+          memoryRetryDelays: const [Duration(seconds: 1)],
+          memoryLoader: (id, {expectedAuthenticatedUid, exactAuthority}) {
+            reads.add(id);
+            return pending[id]!.future;
+          })))!;
+      final memories =
+          ConversationProvider(activeAuthority: () => owner, conversationDeleteCall: (id, authority) async => deleted);
+      addTearDown(() async {
+        capture.runtime.memoryBridge.cancel();
+        memories.dispose();
+        await tester.runAsync(capture.dispose);
+      });
+      expect(await capture.bind(), isTrue);
+      capture.runtime.memoryBridge.attach(memories);
+      ServerConversation value(String id, String title) => ServerConversation(
+          id: id,
+          createdAt: DateTime(2026, 9, 29),
+          structured: Structured(title, 'Retained canonical summary.'),
+          activeSummaryVersionId: title);
+      final original = value('deleted-memory', 'Original memory');
+      memories.applyCanonicalCaptureConversation(original);
+      capture.provider.externalActions.upsertConversation(_upstreamMemory(original));
+      capture.provider.externalActions.upsertConversation(_upstreamMemory(value('unrelated-memory', 'Other memory')));
+      expect(reads, ['deleted-memory', 'unrelated-memory']);
+      expect(await memories.deleteConversationPermanently(original), deleted);
+      pending['deleted-memory']!.complete(value('deleted-memory', 'Late saved memory'));
+      pending['unrelated-memory']!.complete(value('unrelated-memory', 'Updated other memory'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 5));
+      expect(memories.conversations.any((item) => item.id == 'deleted-memory'), !deleted);
+      expect(SharedPreferencesUtil().cachedConversations.any((item) => item.id == 'deleted-memory'), !deleted);
+      expect(memories.conversations.singleWhere((item) => item.id == 'unrelated-memory').structured.title,
+          'Updated other memory');
+      expect(reads, hasLength(deleted ? 3 : 4));
+      if (!deleted) {
+        expect(memories.conversations.singleWhere((item) => item.id == 'deleted-memory').structured.title,
+            'Late saved memory');
+      }
+      final readsBeforeRepeatedEvent = reads.length;
+      capture.provider.externalActions.upsertConversation(_upstreamMemory(original));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 30));
+      expect(reads.length, readsBeforeRepeatedEvent);
+      capture.authority.release();
+      await tester.runAsync(capture.dispose);
+    });
+  }
+
+  for (final retirement in ['account', 'capture binding', 'dispose', 'reset']) {
+    testWidgets('Home capture canonical read ignores a retired $retirement origin', (tester) async {
+      final directory = (await tester.runAsync(() => Directory.systemTemp.createTemp('ella-home-retired-')))!;
+      final owner = _MemoryCommitAuthority(accountA);
+      final pending = Completer<ServerConversation?>();
+      var reads = 0;
+      final capture = (await tester.runAsync(() => EllaUpstreamCaptureHarness.boot(
+          tempDir: directory,
+          memoryAccountAuthority: () => owner,
+          memoryRetryDelays: const [Duration(seconds: 1)],
+          memoryLoader: (id, {expectedAuthenticatedUid, exactAuthority}) {
+            reads++;
+            return pending.future;
+          })))!;
+      final memories = ConversationProvider();
+      addTearDown(() async {
+        capture.runtime.memoryBridge.cancel();
+        memories.dispose();
+        await tester.runAsync(capture.dispose);
+      });
+      expect(await capture.bind(), isTrue);
+      capture.runtime.memoryBridge.attach(memories);
+      final value = ServerConversation(
+          id: 'retired-memory',
+          createdAt: DateTime(2026, 9, 29),
+          structured: Structured('Retired private memory', 'Do not display.'));
+      capture.provider.externalActions.upsertConversation(_upstreamMemory(value));
+      expect(reads, 1);
+      if (retirement == 'account') {
+        capture.authenticatedUid = accountB;
+        capture.authority.release();
+      } else if (retirement == 'capture binding') {
+        capture.authority.release();
+        expect(await capture.bind(), isTrue);
+      } else if (retirement == 'reset') {
+        memories.reset();
+      } else {
+        capture.runtime.memoryBridge.detach(memories);
+      }
+      pending.complete(value);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 5));
+      expect(memories.conversations, isEmpty);
+      expect(reads, 1);
+      capture.authority.release();
+      await tester.runAsync(capture.dispose);
+    });
+  }
 
   test('Today clearances retain defaults and grow with the shared navigation height', () {
     expect(todayDockScrollClearance(textScale: 1, safeBottom: 34), 328);
@@ -4575,6 +4852,19 @@ class _MutableExactAuthority implements ExactAccountAuthorityVerifier {
   @override
   bool isExactCurrent() => current;
 }
+
+class _MemoryCommitAuthority implements AccountCommitAuthority {
+  _MemoryCommitAuthority(this.uid);
+  @override
+  final String uid;
+  @override
+  bool isCurrent() => true;
+  @override
+  bool isExactCurrent() => true;
+}
+
+upstream_schema.ServerConversation _upstreamMemory(ServerConversation value) =>
+    upstream_schema.ServerConversation.fromJson(value.toJson());
 
 Future<_MutableExactAuthority> _installArtworkAuthority({
   String uid = 'test-user',
