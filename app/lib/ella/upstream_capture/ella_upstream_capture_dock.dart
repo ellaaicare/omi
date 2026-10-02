@@ -251,7 +251,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
     if (!mounted || !_guardianAvailable || _whisperFence.choicePending) return;
     setState(() {
       _whispersVerified = false;
-      _whisperError = context.l10n.todayWhispersUnavailable;
+      _whisperError = null;
     });
   }
 

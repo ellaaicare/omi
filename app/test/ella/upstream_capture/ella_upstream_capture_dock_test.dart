@@ -1454,6 +1454,60 @@ void main() {
     expect(find.text('Whispers could not be updated. Try again.'), findsNothing);
   });
 
+  for (final initialAuthority in ['missing', 'stale']) {
+    testWidgets('initial $initialAuthority Whisper authority renders safe read-only recovery', (tester) async {
+      final fixture = await _DockFixture.create(tester);
+      final haptics = captureHaptics(tester);
+      var current = false;
+      var reads = 0;
+      var writes = 0;
+      var nativeCalls = 0;
+      await fixture.pump(
+        tester,
+        reduceMotion: true,
+        guardianAvailable: true,
+        guardianAuthorityProvider: () =>
+            initialAuthority == 'missing' && !current ? null : _WhisperTestAuthority(_uid, () => current),
+        guardianModeLoader: () async {
+          reads++;
+          return const GuardianModeInfo(currentMode: GuardianModeKey.off, twoTierState: GuardianModeState());
+        },
+        guardianModeSetter: (_) async {
+          writes++;
+          return true;
+        },
+        guardianNativeStart: () async => nativeCalls++,
+        guardianNativeStop: () async => nativeCalls++,
+        guardianNativeState: () => guardian_native.GuardianModeState.idle,
+      );
+      expect(tester.takeException(), isNull);
+      expect(find.text('Whispers are unavailable right now.'), findsOneWidget);
+      expect(find.byKey(const Key('upstream-capture-whispers-switch')), findsNothing);
+      final retry = find.byKey(const Key('upstream-capture-whispers-retry'));
+      expect(retry.hitTestable(), findsOneWidget);
+      expect(reads, 0);
+      expect(writes, 0);
+      expect(nativeCalls, 0);
+      expect(haptics, isEmpty);
+      await tester.tap(retry);
+      await tester.pump();
+      expect(reads, 0);
+      expect(writes, 0);
+      expect(nativeCalls, 0);
+      expect(haptics, isEmpty);
+      current = true;
+      await tester.tap(retry);
+      await tester.pump();
+      await tester.pump();
+      expect(reads, 1);
+      expect(writes, 0);
+      expect(nativeCalls, 0);
+      expect(haptics, hasLength(1));
+      expect(tester.widget<Switch>(find.byKey(const Key('upstream-capture-whispers-switch'))).value, isFalse);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   for (final denial in ['missing', 'stale']) {
     testWidgets('Whispers $denial fresh authority gives read-only recovery after a denied tap', (tester) async {
       final fixture = await _DockFixture.create(tester);
