@@ -135,6 +135,7 @@ class EllaUpstreamCaptureHarness {
   String authenticatedUid = accountA;
   bool connected = true;
   bool protocolV2 = false;
+  EllaCaptureProtocolSocket? Function()? diagnosticSocket;
   int processCalls = 0;
   int connectionAttempts = 0;
   final List<({String conversationId, int protocolVersion, String generation, String ownerToken})>
@@ -147,11 +148,13 @@ class EllaUpstreamCaptureHarness {
     bool initiallyConnected = true,
     bool grantConsent = true,
     bool protocolV2 = false,
+    EllaCaptureProtocolSocket? Function()? diagnosticSocket,
   }) async {
     TestWidgetsFlutterBinding.ensureInitialized();
     final harness = EllaUpstreamCaptureHarness._(tempDir);
     harness.connected = initiallyConnected;
     harness.protocolV2 = protocolV2;
+    harness.diagnosticSocket = diagnosticSocket;
     await harness._boot(grantConsent: grantConsent);
     return harness;
   }
@@ -217,7 +220,8 @@ class EllaUpstreamCaptureHarness {
         connectionAttempts++;
         return deviceConnection;
       },
-      activeProtocolSocket: () => sockets.isEmpty ? null : sockets.last.service as EllaCaptureProtocolSocket,
+      activeProtocolSocket: diagnosticSocket ??
+          () => !protocolV2 || sockets.isEmpty ? null : sockets.last.service as EllaCaptureProtocolSocket,
       finalizationRequest: ({
         required conversationId,
         required protocolVersion,

@@ -18567,6 +18567,48 @@ abstract class AppLocalizations {
   /// **'Runtime Diagnostics'**
   String get ellaRuntimeDiagnostics;
 
+  /// No description provided for @diagnosticsCapturePipeline.
+  ///
+  /// In en, this message translates to:
+  /// **'Capture pipeline'**
+  String get diagnosticsCapturePipeline;
+
+  /// No description provided for @diagnosticsLegacyCapture.
+  ///
+  /// In en, this message translates to:
+  /// **'Legacy capture'**
+  String get diagnosticsLegacyCapture;
+
+  /// No description provided for @diagnosticsUpstreamCapture.
+  ///
+  /// In en, this message translates to:
+  /// **'Upstream capture'**
+  String get diagnosticsUpstreamCapture;
+
+  /// No description provided for @diagnosticsCaptureUninitialized.
+  ///
+  /// In en, this message translates to:
+  /// **'Capture not initialized'**
+  String get diagnosticsCaptureUninitialized;
+
+  /// No description provided for @diagnosticsAudioReceived.
+  ///
+  /// In en, this message translates to:
+  /// **'Necklace audio received this process'**
+  String get diagnosticsAudioReceived;
+
+  /// No description provided for @diagnosticsAudioSent.
+  ///
+  /// In en, this message translates to:
+  /// **'Necklace audio sent to transcription this process'**
+  String get diagnosticsAudioSent;
+
+  /// No description provided for @diagnosticsSocketAdmission.
+  ///
+  /// In en, this message translates to:
+  /// **'Last socket admission failure'**
+  String get diagnosticsSocketAdmission;
+
   /// No description provided for @ellaRuntimeDiagnosticsSubtitle.
   ///
   /// In en, this message translates to:

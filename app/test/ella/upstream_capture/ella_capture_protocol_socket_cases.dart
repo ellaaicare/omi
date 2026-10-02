@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:omi/ella/upstream_capture/ella_capture_protocol_socket.dart';
+import 'package:omi/ella/capture_host/ella_capture_host.dart';
 import 'package:omi/ella/upstream_capture/ella_capture_protocol_finalization.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
 import 'package:omi/backend/schema/conversation.dart' as ella_schema;
@@ -107,6 +108,63 @@ void registerEllaCaptureProtocolSocketCases() {
     expect(captureProtocolRejectionIsPermanent('capture_protocol_ready_unavailable', null), isFalse);
   });
 
+  test('composed runtime snapshot follows exact protocol readiness and content-free failure', () async {
+    final dir = await Directory.systemTemp.createTemp('ella-capture-diagnostic-');
+    EllaCaptureProtocolSocket? socket;
+    final harness = await EllaUpstreamCaptureHarness.boot(tempDir: dir, diagnosticSocket: () => socket);
+    addTearDown(() async {
+      await socket?.stop();
+      await harness.dispose();
+      await dir.delete(recursive: true);
+    });
+    expect(await harness.bind(), isTrue);
+    final originEpoch = harness.authority.bindingEpoch;
+    final transport = _Transport();
+    socket = EllaCaptureProtocolSocket.withTransport(16000, BleAudioCodec.pcm16, 'multi', transport,
+        hasOriginAuthority: () =>
+            harness.authority.hasCurrentAuthority && harness.authority.bindingEpoch == originEpoch);
+    final start = socket.start();
+    await _tick();
+    expect(harness.runtime.captureDiagnostics.ready, isFalse);
+    transport.serverStatus('capture_protocol_ready', fields: _authority);
+    await start;
+    expect(harness.runtime.captureDiagnostics.ready, isTrue);
+    transport.serverClose(1011);
+    final failed = harness.runtime.captureDiagnostics;
+    expect(failed.ready, isFalse);
+    expect(failed.lastFailure?.reason, EllaCaptureSocketFailureReason.captureSocketClosed);
+    expect(failed.lastFailure?.closeCode, 1011);
+    harness.authority.release();
+    expect(harness.runtime.captureDiagnostics.lastFailure, isNull);
+    expect(await harness.bind(), isTrue);
+    expect(harness.runtime.captureDiagnostics.lastFailure, isNull);
+  });
+
+  test('composed diagnostics cannot report ready from a same-UID retired socket', () async {
+    final dir = await Directory.systemTemp.createTemp('ella-capture-diagnostic-aba-');
+    EllaCaptureProtocolSocket? socket;
+    final harness = await EllaUpstreamCaptureHarness.boot(tempDir: dir, diagnosticSocket: () => socket);
+    addTearDown(() async {
+      await socket?.stop();
+      await harness.dispose();
+      await dir.delete(recursive: true);
+    });
+    expect(await harness.bind(), isTrue);
+    final epoch = harness.authority.bindingEpoch;
+    final transport = _Transport();
+    socket = EllaCaptureProtocolSocket.withTransport(16000, BleAudioCodec.pcm16, 'multi', transport,
+        hasOriginAuthority: () => harness.authority.hasCurrentAuthority && harness.authority.bindingEpoch == epoch);
+    final start = socket.start();
+    await _tick();
+    transport.serverStatus('capture_protocol_ready', fields: _authority);
+    await start;
+    expect(harness.runtime.captureDiagnostics.ready, isTrue);
+    harness.authority.release();
+    expect(await harness.bind(), isTrue);
+    expect(socket.state, SocketServiceState.connected, reason: 'the old transport is still awaiting teardown');
+    expect(harness.runtime.captureDiagnostics.ready, isFalse);
+  });
+
   test('production factory replaces the upstream transport with a v2 backend URL', () async {
     final dir = await Directory.systemTemp.createTemp('ella-capture-v2-');
     final harness = await EllaUpstreamCaptureHarness.boot(tempDir: dir);
@@ -197,6 +255,9 @@ void registerEllaCaptureProtocolSocketCases() {
     expect(socket.state, SocketServiceState.disconnected);
     expect(transport.sent.whereType<List<int>>(), isEmpty);
     expect(failures, [('capture_socket_closed_before_ready', 1008)]);
+    expect(socket.lastAdmissionFailure?.reason, EllaCaptureSocketFailureReason.captureSocketClosedBeforeReady);
+    expect(socket.lastAdmissionFailure?.closeCode, 1008);
+    expect(socket.lastAdmissionFailure?.at.isUtc, isTrue);
   });
 
   test('invalid ready and missing ready both fail closed', () async {

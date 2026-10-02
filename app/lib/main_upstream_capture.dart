@@ -25,6 +25,7 @@ void main() {
   // seam instead of importing lib/upstream_capture/ directly, so the flag-OFF
   // graph never reaches it.
   EllaCaptureHost.installNativeDiscoveryDiagnosticsLoader(loadNativeDiscoveryDiagnostics);
+  EllaCaptureHost.installCaptureDiagnosticsReader(() => runtime.captureDiagnostics);
   // Account transitions (sign-out / switch) revoke the bound capture session
   // through the existing Ella account-isolation hook before the next account.
   EllaAccountIsolationService.registerCaptureProducer(runtime.releaseAccount);

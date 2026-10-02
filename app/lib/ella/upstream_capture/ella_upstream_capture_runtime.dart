@@ -259,6 +259,19 @@ class EllaUpstreamCaptureRuntime {
   static final EllaUpstreamServicesBootstrap _servicesBootstrap = EllaUpstreamServicesBootstrap();
 
   final EllaCaptureAuthority authority;
+  EllaCaptureDiagnosticsSnapshot get captureDiagnostics {
+    final provider = _provider;
+    if (provider == null) return const EllaCaptureDiagnosticsSnapshot.uninitialized();
+    final socket = _activeProtocolSocket?.call() ?? _protocolSocket;
+    final current = authority.hasCurrentAuthority;
+    return EllaCaptureDiagnosticsSnapshot.upstream(
+      ready: current && socket?.hasOriginAuthority == true && socket?.state == SocketServiceState.connected,
+      receivedBytes: current ? provider.lifetimeBleBytesReceived : null,
+      sentBytes: current ? provider.lifetimeWsSocketBytesSent : null,
+      lastFailure: current && socket?.hasOriginAuthority == true ? socket?.lastAdmissionFailure : null,
+    );
+  }
+
   final EllaCaptureProtocolSocket? Function()? _activeProtocolSocket;
   final EllaCaptureFinalizationRequest? _finalizationRequest;
   final Future<CaptureProvider> Function()? _bootForTesting;
