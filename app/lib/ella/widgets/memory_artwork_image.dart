@@ -891,6 +891,8 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     _resetResponsiveVariantPublication();
     _transientRetries = 0;
     _visibleEnrichmentRetries = 0;
+    _imageDownloadRetries = 0;
+    _imageRetryScheduled = false;
     final generation = ++_requestGeneration;
     setState(() {
       _displayReadRetryAvailable = false;
@@ -910,6 +912,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     if (!mounted || generation != _requestGeneration || cacheKey != _cacheKey || _imageRetryScheduled) return;
     if (_imageDownloadRetries >= widget.maxImageDownloadRetries) {
       setState(() {
+        _displayReadRetryAvailable = api.isDisplayAuthorityCurrent() && _remoteResult?.isAuthorityCurrent == true;
         _remoteResult = const MemoryArtworkResult(
           status: MemoryArtworkResultStatus.unavailable,
           failureCode: 'memory_artwork_download_unavailable',
@@ -928,10 +931,35 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     int generation,
     String cacheKey,
   ) async {
+    if (!mounted || generation != _requestGeneration || cacheKey != _cacheKey) return;
+    final authority = _remoteResult?.authority;
+    bool retireIfAuthorityChanged() {
+      if (authority == null || (authority.isExactCurrent() && api.isDisplayAuthorityCurrent())) return false;
+      _imageRetryScheduled = false;
+      setState(() {
+        _cachedFile = null;
+        _displayReadRetryAvailable = false;
+        _remoteResult = const MemoryArtworkResult(
+          status: MemoryArtworkResultStatus.unavailable,
+          failureCode: 'memory_artwork_authority_changed',
+        );
+      });
+      return true;
+    }
+
+    final validFile = await _discardProviderCacheFileIfCorrupted(cacheKey, generation);
     if (!mounted || generation != _requestGeneration) return;
-    await _discardProviderCacheFileIfCorrupted(cacheKey, generation);
-    if (!mounted || generation != _requestGeneration) return;
+    if (cacheKey != _cacheKey) {
+      _imageRetryScheduled = false;
+      return;
+    }
+    if (retireIfAuthorityChanged()) return;
     setState(() {
+      // The first download may have persisted after the initial disk lookup.
+      // Publish those validated bytes only under the original exact authority.
+      if (validFile != null && authority?.isExactCurrent() == true && api.isDisplayAuthorityCurrent()) {
+        _cachedFile = validFile;
+      }
       _remoteResult = null;
     });
     _retryTimer?.cancel();
@@ -939,33 +967,36 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       _retryTimer = null;
       if (!mounted || generation != _requestGeneration) return;
       _imageRetryScheduled = false;
-      unawaited(_loadRemoteResult(api, artwork, generation));
+      if (cacheKey != _cacheKey) return;
+      if (retireIfAuthorityChanged()) return;
+      unawaited(_loadRemoteResult(api, artwork, generation, readOnly: true));
     });
   }
 
-  Future<void> _discardProviderCacheFileIfCorrupted(String cacheKey, int generation) async {
-    if (cacheKey.isEmpty || MemoryArtworkCache.isNetworkOnlyDisplayCacheKey(cacheKey)) return;
+  Future<File?> _discardProviderCacheFileIfCorrupted(String cacheKey, int generation) async {
+    if (cacheKey.isEmpty || MemoryArtworkCache.isNetworkOnlyDisplayCacheKey(cacheKey)) return null;
     File? file;
     try {
       final lookup = widget.cachedFileLookup ?? _defaultCachedFileLookup;
       file = await lookup(cacheKey);
     } catch (_) {
-      return;
+      return null;
     }
-    if (file == null || !file.existsSync()) return;
+    if (file == null || !file.existsSync()) return null;
     bool isValid;
     try {
       final validator = widget.cachedFileValidator ?? _defaultCachedFileValidator;
       isValid = await validator(file);
     } catch (_) {
-      return;
+      return null;
     }
     // CachedNetworkImage reports transport and decode failures through the
     // same callback. Remove bytes only after the local codec proves that an
     // existing persisted file is unreadable; network/runtime failures keep it.
-    if (isValid) return;
-    if (!mounted || generation != _requestGeneration || cacheKey != _cacheKey) return;
+    if (isValid) return file;
+    if (!mounted || generation != _requestGeneration || cacheKey != _cacheKey) return null;
     await _discardCorruptedCachedFile(cacheKey, generation);
+    return null;
   }
 
   Future<bool> _defaultCachedFileValidator(File file) async {

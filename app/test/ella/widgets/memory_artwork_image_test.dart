@@ -2805,6 +2805,229 @@ void main() {
     expect(find.byKey(const Key('memory-generated-artwork-memory-style-refresh')), findsOneWidget);
   });
 
+  for (final revokeBeforeRetry in [false, true]) {
+    testWidgets(
+        'valid newly downloaded cache stays visible during signed image recovery${revokeBeforeRetry ? ' and fences later revocation' : ''}',
+        (tester) async {
+      final authority = _MutableArtworkAuthority();
+      final api = _TerminalPollArtworkApi(
+        read: (_) async => MemoryArtworkResult(
+          status: MemoryArtworkResultStatus.ready,
+          url: Uri.parse('https://private-storage.example/downloaded.png'),
+          cacheKey: 'downloaded-ready-cache-key',
+          authority: authority,
+        ),
+      );
+      final file = File('assets/images/onboarding-bg-1.webp');
+      var downloadPersisted = false;
+      final evicted = <String>[];
+      final conversation = ServerConversation(
+        id: 'memory-download-cache-recovery',
+        createdAt: DateTime(2026, 9, 30),
+        structured: Structured('A memory', 'A useful summary.'),
+      );
+      await tester.pumpWidget(MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: MemoryArtworkImage(
+          conversation: conversation,
+          api: api,
+          cachedFileLookup: (_) async => downloadPersisted ? file : null,
+          cachedFileValidator: (_) async => true,
+          cacheEvictor: (key) async => evicted.add(key),
+        ),
+      ));
+      await tester.pump();
+      await tester.pump();
+      final image = tester.widget<CachedNetworkImage>(find.byType(CachedNetworkImage));
+      downloadPersisted = true;
+      image.errorListener!(Exception('current signed download failed'));
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const Key('memory-cached-artwork-memory-download-cache-recovery')), findsOneWidget);
+      expect(find.byKey(const Key('memory-artwork-placeholder-memory-download-cache-recovery')), findsNothing);
+      expect(api.readCalls, 1, reason: 'cached bytes must display before the five-second metadata retry');
+      expect(api.enqueueRequests, [false]);
+      expect(api.generationCalls, 0);
+      expect(evicted, isEmpty);
+      if (revokeBeforeRetry) {
+        authority.current = false;
+        api.current = false;
+        await tester.pump(const Duration(seconds: 5));
+        await tester.pump();
+        expect(find.byKey(const Key('memory-cached-artwork-memory-download-cache-recovery')), findsNothing);
+        expect(api.readCalls, 1, reason: 'the retired authority must not start a read under its replacement');
+      }
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('exhausted signed image recovery exposes read-only retry', (tester) async {
+    final authority = _MutableArtworkAuthority();
+    final api = _TerminalPollArtworkApi(
+      read: (_) async => MemoryArtworkResult(
+        status: MemoryArtworkResultStatus.ready,
+        url: Uri.parse('https://private-storage.example/downloaded.png'),
+        cacheKey: 'downloaded-ready-cache-key',
+        authority: authority,
+      ),
+    );
+    final conversation = ServerConversation(
+      id: 'memory-download-terminal-retry',
+      createdAt: DateTime(2026, 9, 30),
+      structured: Structured('A memory', 'A useful summary.'),
+    );
+    await tester.pumpWidget(MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: MemoryArtworkImage(
+        conversation: conversation,
+        api: api,
+        cachedFileLookup: (_) async => null,
+        maxImageDownloadRetries: 1,
+        retryDelay: const Duration(milliseconds: 10),
+      ),
+    ));
+    await tester.pump();
+    await tester.pump();
+    tester.widget<CachedNetworkImage>(find.byType(CachedNetworkImage)).errorListener!(Exception('download failed'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+    tester
+        .widget<CachedNetworkImage>(find.byType(CachedNetworkImage))
+        .errorListener!(Exception('download failed again'));
+    await tester.pump();
+    final retry = find.byKey(const Key('memory-artwork-read-retry-memory-download-terminal-retry'));
+    expect(retry, findsOneWidget);
+    await tester.tap(retry);
+    await tester.pump();
+    await tester.pump();
+    expect(api.readCalls, 3);
+    tester
+        .widget<CachedNetworkImage>(find.byType(CachedNetworkImage))
+        .errorListener!(Exception('retry download failed'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+    expect(api.readCalls, 4, reason: 'one deliberate retry grants one bounded download recovery');
+    tester.widget<CachedNetworkImage>(find.byType(CachedNetworkImage)).errorListener!(Exception('retry exhausted'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(retry, findsOneWidget);
+    expect(api.readCalls, 4, reason: 'exhaustion must remain idle until another deliberate retry');
+    expect(api.enqueueRequests, [false, false, false, false]);
+    expect(api.generationCalls, 0);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  for (final transition in ['authority', 'style', 'variant', 'dispose', 'malformed', 'codec error']) {
+    testWidgets('delayed download cache validation respects $transition replacement', (tester) async {
+      final authority = _MutableArtworkAuthority();
+      final validation = Completer<bool>();
+      var style = memoryArtworkDefaultStyle;
+      var persisted = false;
+      final evicted = <String>[];
+      final api = _TerminalPollArtworkApi(
+        read: (_) async => MemoryArtworkResult(
+          status: MemoryArtworkResultStatus.ready,
+          url: Uri.parse('https://private-storage.example/original.png'),
+          cacheKey: 'download-$style-original',
+          authority: authority,
+          variants: [
+            for (final width in [384, 768])
+              MemoryArtworkVariant(
+                width: width,
+                url: Uri.parse('https://private-storage.example/$width.png'),
+                cacheKey: 'download-$style-$width',
+                bytes: 1024,
+              ),
+          ],
+        ),
+      );
+      final file = File('assets/images/onboarding-bg-1.webp');
+      const oldKey = 'download-$memoryArtworkDefaultStyle-384';
+      Widget buildArtwork({double width = 150}) => MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: MediaQuery(
+              data: const MediaQueryData(devicePixelRatio: 2),
+              child: Center(
+                child: SizedBox(
+                  width: width,
+                  height: 150,
+                  child: MemoryArtworkImage(
+                    conversation: ServerConversation(
+                      id: 'memory-download-validation',
+                      createdAt: DateTime(2026, 9, 30),
+                      structured: Structured('A memory', 'A useful summary.'),
+                      artwork: MemoryArtworkState(status: MemoryArtworkStatus.ready, styleVersion: style),
+                    ),
+                    api: api,
+                    cachedFileLookup: (key) async => persisted && key == oldKey ? file : null,
+                    cachedFileValidator: (_) => validation.future,
+                    cacheEvictor: (key) async => evicted.add(key),
+                  ),
+                ),
+              ),
+            ),
+          );
+      await tester.pumpWidget(buildArtwork());
+      await tester.pump();
+      await tester.pump();
+      final original = tester.widget<CachedNetworkImage>(find.byType(CachedNetworkImage));
+      expect(original.cacheKey, oldKey);
+      persisted = true;
+      original.errorListener!(Exception('current download failure'));
+      await tester.pump();
+      String? replacementKey;
+      if (transition == 'authority') {
+        authority.current = false;
+        // The API may already belong to a new valid same-UID lease. The
+        // original result authority must still reject the retired file.
+      } else if (transition == 'style' || transition == 'variant') {
+        // A new style must not reuse the old disk object on its own lookup.
+        if (transition == 'style') {
+          style = memoryArtworkPaperCollageStyle;
+          persisted = false;
+        }
+        await tester.pumpWidget(buildArtwork(width: transition == 'variant' ? 300 : 150));
+        await tester.pump();
+        await tester.pump();
+        replacementKey = tester.widget<CachedNetworkImage>(find.byType(CachedNetworkImage)).cacheKey;
+        expect(replacementKey, isNot(oldKey));
+      } else if (transition == 'dispose') {
+        await tester.pumpWidget(const SizedBox.shrink());
+      }
+      final reads = api.readCalls;
+      if (transition == 'codec error') {
+        validation.completeError(const FileSystemException('fixture codec failure'));
+      } else {
+        validation.complete(transition != 'malformed');
+      }
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const Key('memory-cached-artwork-memory-download-validation')), findsNothing);
+      if (replacementKey != null) {
+        expect(tester.widget<CachedNetworkImage>(find.byType(CachedNetworkImage)).cacheKey, replacementKey);
+      }
+      expect(api.readCalls, reads);
+      expect(api.enqueueRequests.every((enqueue) => !enqueue), isTrue);
+      expect(api.generationCalls, 0);
+      expect(evicted, transition == 'malformed' ? [oldKey] : isEmpty);
+      if (transition == 'variant') {
+        tester
+            .widget<CachedNetworkImage>(find.byType(CachedNetworkImage))
+            .errorListener!(Exception('new variant failed'));
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 5));
+        await tester.pump();
+        expect(api.readCalls, reads + 1, reason: 'retired validation must not strand the current recovery lease');
+      }
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
   testWidgets('failed signed image load preserves cache and refreshes the signed URL', (tester) async {
     final api = _RefreshingArtworkApi();
     final evictedKeys = <String>[];
