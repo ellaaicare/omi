@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
@@ -538,6 +539,46 @@ class ConversationProvider extends ChangeNotifier {
     }
   }
 
+  void _acquireCacheProjectionLease() {
+    if (_cachedProjectionLease != null || SharedPreferencesUtil().demoMode) return;
+    EllaAccountCommitLease? lease;
+    try {
+      final uid = _authenticatedUid();
+      if (uid.isEmpty || SharedPreferencesUtil().uid != uid) return;
+      lease = EllaAccountCommitBarrier.begin(authorityProvider: _activeAuthority, onInvalidated: reset);
+      if (lease == null || lease.uid != uid || !_cachedOwnerIsCurrent(lease)) return;
+      _cachedProjectionLease = lease;
+      lease = null;
+    } catch (_) {
+      // Cache reads require a verified originating account; the GET is unchanged.
+    } finally {
+      lease?.close();
+    }
+  }
+
+  List<ServerConversation> _readOwnedCurrentCache(EllaAccountCommitLease? lease) {
+    final prefs = SharedPreferencesUtil();
+    try {
+      if (lease == null || !_cachedOwnerIsCurrent(lease) || prefs.getString('cachedConversationsUid') != lease.uid) {
+        return [];
+      }
+      // The preferences getter can migrate cachedMemories. This path is read-only.
+      final cached = prefs
+          .getStringList('cachedConversations')
+          .map((raw) {
+            final json = jsonDecode(raw) as Map<String, dynamic>;
+            if (json['status'] != ConversationStatus.completed.name) return null;
+            return ServerConversation.fromJson(json);
+          })
+          .whereType<ServerConversation>()
+          .where((item) => !item.deleted && canProjectCaptureConversation(item.id))
+          .toList();
+      return _cachedOwnerIsCurrent(lease) ? cached : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
   void _hydrateOwnedInitialCache() {
     final prefs = SharedPreferencesUtil();
     if (prefs.demoMode ||
@@ -551,28 +592,11 @@ class ConversationProvider extends ChangeNotifier {
       return;
     }
 
-    EllaAccountCommitLease? lease;
-    try {
-      final uid = _authenticatedUid();
-      if (uid.isEmpty || prefs.uid != uid || prefs.getString('cachedConversationsUid') != uid) return;
-      lease = EllaAccountCommitBarrier.begin(authorityProvider: _activeAuthority, onInvalidated: reset);
-      if (lease == null || lease.uid != uid || !_cachedOwnerIsCurrent(lease)) return;
-      final cached = prefs.cachedConversations
-          .where((item) =>
-              item.status == ConversationStatus.completed && !item.deleted && canProjectCaptureConversation(item.id))
-          .toList();
-      if (cached.isEmpty || !_cachedOwnerIsCurrent(lease)) return;
-      _cachedProjectionLease?.close();
-      _cachedProjectionLease = lease;
-      lease = null;
-      conversations = cached;
-      isShowingCachedConversations = true;
-      _groupConversationsByDateWithoutNotify();
-    } catch (_) {
-      // An unreadable cache must not prevent the canonical request.
-    } finally {
-      lease?.close();
-    }
+    final cached = _readOwnedCurrentCache(_cachedProjectionLease);
+    if (cached.isEmpty) return;
+    conversations = cached;
+    isShowingCachedConversations = true;
+    _groupConversationsByDateWithoutNotify();
   }
 
   Future fetchConversations() async {
@@ -585,6 +609,7 @@ class ConversationProvider extends ChangeNotifier {
 
     final operationGeneration = _operationGeneration;
     final requestId = ++_fetchRequestId;
+    _acquireCacheProjectionLease();
     _hydrateOwnedInitialCache();
     final cacheLease = _cachedProjectionLease;
     bool requestIsCurrent() =>
@@ -610,14 +635,10 @@ class ConversationProvider extends ChangeNotifier {
         }
         if (!result.succeeded) {
           if (conversations.isEmpty && selectedFolderId == null) {
-            conversations = SharedPreferencesUtil()
-                .cachedConversations
-                .where((conversation) =>
-                    conversation.status == ConversationStatus.completed &&
-                    canProjectCaptureConversation(conversation.id))
-                .toList();
+            conversations = _readOwnedCurrentCache(cacheLease);
           }
-          isShowingCachedConversations = conversations.isNotEmpty;
+          isShowingCachedConversations =
+              cacheLease != null && _cachedOwnerIsCurrent(cacheLease) && conversations.isNotEmpty;
           if (searchedConversations.isEmpty) searchedConversations = conversations;
           _groupConversationsByDateWithoutNotify();
           return;
