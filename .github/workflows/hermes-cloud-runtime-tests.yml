@@ -1647,7 +1647,7 @@ jobs:
           test "$(pytest --collect-only -q tests/unit/test_memory_artwork_contract.py -k 'not (stored_artwork_consent or queue_isolation)' | grep -c '::')" -eq 219
           test "$(pytest --collect-only -q tests/unit/test_memory_artwork_contract.py -k 'not queue_isolation' | grep -c '::')" -eq 239
           artwork_ids="$(pytest --collect-only -q tests/unit/test_memory_artwork_contract.py | sed '/^$/d')"
-          test "$(grep -c '::' <<<"$artwork_ids")" -eq 258
+          test "$(grep -c '::' <<<"$artwork_ids")" -eq 260
           required_style_ids=(
             "tests/unit/test_memory_artwork_contract.py::test_style_only_rejects_unaccepted_consent_without_reaccepting[declined]"
             "tests/unit/test_memory_artwork_contract.py::test_style_only_rejects_unaccepted_consent_without_reaccepting[not_set]"
@@ -1703,7 +1703,7 @@ jobs:
           for required_id in "${required_stored_consent_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$artwork_ids"
           done
-          test "$(pytest --collect-only -q tests/unit/test_memory_artwork_contract.py -k queue_isolation | grep -c '::')" -eq 19
+          test "$(pytest --collect-only -q tests/unit/test_memory_artwork_contract.py -k queue_isolation | grep -c '::')" -eq 21
           for stage in preferences consent control jobs reconciliation; do
             grep -Fqx "tests/unit/test_memory_artwork_contract.py::test_queue_isolation_mounted_status_keeps_event_loop_responsive_and_complete[$stage]" <<<"$artwork_ids"
           done
@@ -1712,8 +1712,11 @@ jobs:
               grep -Fqx "tests/unit/test_memory_artwork_contract.py::test_queue_isolation_revalidates_after_io_before_pause_and_before_response[$change-$stage]" <<<"$artwork_ids"
             done
           done
+          for stage in pre_cas final; do
+            grep -Fqx "tests/unit/test_memory_artwork_contract.py::test_queue_isolation_binding_change_during_last_preflight_cannot_mutate_or_publish[$stage]" <<<"$artwork_ids"
+          done
           pytest tests/unit/test_memory_artwork_contract.py -v | tee /tmp/artwork-style-consent-pytest.log
-          grep -Eq '258 passed' /tmp/artwork-style-consent-pytest.log
+          grep -Eq '260 passed' /tmp/artwork-style-consent-pytest.log
           ! grep -Eq '[0-9]+ skipped|[0-9]+ failed' /tmp/artwork-style-consent-pytest.log
 
       - name: Run real Firestore summary CAS contention gate

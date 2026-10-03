@@ -1168,10 +1168,11 @@ class MemoryArtworkService:
         if authority.uid != uid:
             raise MemoryArtworkError("memory_artwork_authority_changed")
         style_version, control = await asyncio.to_thread(self._read_queue_control, uid, authority)
+        await asyncio.to_thread(self._queue_preferences, uid, authority, style_version=style_version)
         await self._revalidate_queue_authority(uid, authority)
         result = await asyncio.to_thread(self._queue_status_snapshot, uid, authority, style_version, control)
-        await self._revalidate_queue_authority(uid, authority)
         await asyncio.to_thread(self._queue_preferences, uid, authority, style_version=style_version)
+        await self._revalidate_queue_authority(uid, authority)
         return result
 
     async def _revalidate_queue_authority(self, uid: str, authority: ArtworkRuntimeAuthority) -> None:
@@ -1203,8 +1204,6 @@ class MemoryArtworkService:
         style_version: str,
         control: dict[str, Any],
     ) -> dict[str, Any]:
-        # Control IO may have blocked while consent, binding or style changed.
-        self._queue_preferences(uid, authority, style_version=style_version)
         generation_id = artwork_db.reconciliation_job_id(uid, authority.authority_digest, style_version)
         control_is_current = bool(
             control.get("generation_id") == generation_id

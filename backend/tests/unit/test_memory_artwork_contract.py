@@ -1301,6 +1301,95 @@ def test_queue_isolation_revalidates_after_io_before_pause_and_before_response(s
     assert repository.jobs == {}
 
 
+@pytest.mark.parametrize("preference_read", [2, 3], ids=["pre_cas", "final"])
+def test_queue_isolation_binding_change_during_last_preflight_cannot_mutate_or_publish(preference_read):
+    entered = threading.Event()
+    release = threading.Event()
+    released = []
+    pause_calls = []
+    current_authority = _authority()
+
+    class BlockingPreferencesRepository(FakeRepository):
+        preference_reads = 0
+
+        def get_preferences(self, uid):
+            self.preference_reads += 1
+            observed = super().get_preferences(uid)
+            if self.preference_reads == preference_read:
+                entered.set()
+                released.append(release.wait(timeout=0.5))
+            return observed
+
+        def pause_observed_legacy_auto_continue_control(self, uid, **kwargs):
+            pause_calls.append(uid)
+            return super().pause_observed_legacy_auto_continue_control(uid, **kwargs)
+
+        def reserve_generation(self, *args, **kwargs):
+            pytest.fail("queue reads must never reserve generation")
+
+    repository = BlockingPreferencesRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(current_authority)
+    generation_id = artwork.artwork_db.reconciliation_job_id("owner-a", "digest-a", artwork.DEFAULT_STYLE_VERSION)
+    repository.backfill_controls["owner-a"] = {
+        "generation_id": generation_id,
+        "authority_digest": "digest-a",
+        "style_version": artwork.DEFAULT_STYLE_VERSION,
+        "state": "running",
+        "auto_continue": True,
+        "batch_size": 10,
+        "batch_remaining": 0,
+    }
+    before_control = copy.deepcopy(repository.backfill_controls["owner-a"])
+
+    async def resolver(uid):
+        return current_authority
+
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=resolver,
+        config=_enabled_config(),
+        provider_factory=lambda: pytest.fail("queue reads must never construct a provider"),
+    )
+
+    async def exercise():
+        async def replace_binding():
+            nonlocal current_authority
+            while not entered.is_set():
+                await asyncio.sleep(0.001)
+            current_authority = artwork.ArtworkRuntimeAuthority(
+                uid="owner-a",
+                binding_id="replacement",
+                profile_id="replacement",
+                revision=8,
+                authority_digest="replacement-digest",
+            )
+            release.set()
+
+        read = asyncio.create_task(service.queue_status("owner-a"))
+        replacement = asyncio.create_task(replace_binding())
+        try:
+            with pytest.raises(artwork.MemoryArtworkError, match="memory_artwork_authority_changed"):
+                await asyncio.wait_for(read, timeout=2)
+            await asyncio.wait_for(replacement, timeout=2)
+        finally:
+            release.set()
+            for task in (read, replacement):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(read, replacement, return_exceptions=True)
+
+    asyncio.run(exercise())
+    assert released == [True]
+    assert pause_calls == ([] if preference_read == 2 else ["owner-a"])
+    if preference_read == 2:
+        assert repository.backfill_controls["owner-a"] == before_control
+        assert repository.job_list_migration_requests == []
+    else:
+        assert repository.backfill_controls["owner-a"]["state"] == "paused"
+        assert repository.job_list_migration_requests == [False]
+    assert repository.jobs == {}
+
+
 def test_recent_recovery_is_recent_first_idempotent_and_reports_durable_states():
     repository = FakeRepository()
     authority = _authority()
