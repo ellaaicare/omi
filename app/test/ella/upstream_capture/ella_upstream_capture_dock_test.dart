@@ -1083,6 +1083,21 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('live dock status announces its full status once at normal and large text', (tester) async {
+    final semantics = tester.ensureSemantics();
+    final fixture = await _DockFixture.create(tester);
+    for (final textScale in [1.0, 3.0]) {
+      await fixture.pump(tester, textScale: textScale, reduceMotion: true);
+      fixture.makeNecklaceLive();
+      await tester.pump();
+      final status = tester.getSemantics(find.byKey(const Key('upstream-capture-status')));
+      expect(status.label, 'Recording with your necklace. Ready. Waiting for speech…');
+      expect(status.flagsCollection.isLiveRegion, isTrue);
+    }
+    await tester.pumpWidget(const SizedBox.shrink());
+    semantics.dispose();
+  });
+
   testWidgets('Whispers distinguishes saved configuration from failed native playback', (tester) async {
     final fixture = await _DockFixture.create(tester);
     GuardianModeState? savedState;

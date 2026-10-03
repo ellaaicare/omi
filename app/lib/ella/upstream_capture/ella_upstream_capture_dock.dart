@@ -826,6 +826,7 @@ class _DockStatus extends StatelessWidget {
     return Semantics(
       container: true,
       liveRegion: true,
+      excludeSemantics: true,
       label: detail == null ? label : '$label. $detail',
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
