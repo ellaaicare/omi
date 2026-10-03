@@ -46,6 +46,12 @@ import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 typedef MemoryScopeConversationLoader = Future<ServerConversation?> Function(String conversationId);
+typedef MemoryVoiceReceiptOperation = Future<ConversationCorrectionReceipt?> Function({
+  required String conversationId,
+  required String correctionId,
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+});
 
 @visibleForTesting
 class StandardVoiceStartupSerialGate {
@@ -205,6 +211,10 @@ class EllaVoiceChatPage extends StatefulWidget {
     this.todayCardRepository,
     this.modalPresentation = false,
     this.demoState,
+    this.memoryReinterpretationEvents,
+    this.memoryReceiptFetcher = getConversationCorrectionReceipt,
+    this.memoryUndo = undoConversationCorrection,
+    this.memoryReceiptAuthorityProvider = WalOwnerAuthority.active,
   });
 
   final V2VSessionScope? sessionScope;
@@ -213,6 +223,14 @@ class EllaVoiceChatPage extends StatefulWidget {
   final TodayCardRepository? todayCardRepository;
   final bool modalPresentation;
   final EllaVoiceDemoState? demoState;
+  @visibleForTesting
+  final Stream<MemoryReinterpretationEvent>? memoryReinterpretationEvents;
+  @visibleForTesting
+  final MemoryVoiceReceiptOperation memoryReceiptFetcher;
+  @visibleForTesting
+  final MemoryVoiceReceiptOperation memoryUndo;
+  @visibleForTesting
+  final ExactAccountAuthorityVerifier? Function() memoryReceiptAuthorityProvider;
 
   @visibleForTesting
   static bool shouldInjectVoiceTurns(V2VSessionScope? sessionScope) => sessionScope == null;
@@ -301,9 +319,14 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   bool _consentPromptActive = false;
   MemoryReinterpretationEvent? _memoryReinterpretationEvent;
   ConversationCorrectionReceipt? _memoryCorrectionReceipt;
+  ExactAccountAuthorityVerifier? _memoryEventAuthority;
+  ExactAccountAuthorityVerifier? _memoryReceiptAuthority;
+  int _memoryReceiptGeneration = 0;
+  int? _confirmedMemoryReceiptGeneration;
   Timer? _memoryReceiptPollTimer;
   int _memoryReceiptPollAttempts = 0;
   String? _memorySessionNotificationKey;
+  StreamSubscription<MemoryReinterpretationEvent>? _fixtureMemoryEventSubscription;
   EllaVoicePolicyReason? _policyReason;
   DateTime? _policyResetsAt;
   DateTime? _voiceSessionStartedAt;
@@ -353,6 +376,9 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       },
     );
     _sessionScope = widget.sessionScope;
+    if (widget.demoState != null) {
+      _fixtureMemoryEventSubscription = widget.memoryReinterpretationEvents?.listen(_handleMemoryReinterpretation);
+    }
     _policyReason = widget.demoState?.policyReason;
     // Voice mode auto-starts when the Voice tab becomes active (see didChangeDependencies)
     _playerSub = _audioPlayer.playerStateStream.listen((state) {
@@ -413,6 +439,15 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   @override
   void didUpdateWidget(covariant EllaVoiceChatPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.sessionScope?.conversationId != widget.sessionScope?.conversationId) {
+      _memoryReceiptGeneration++;
+      _memoryReceiptPollTimer?.cancel();
+      _memoryReinterpretationEvent = null;
+      _memoryEventAuthority = null;
+      _memoryCorrectionReceipt = null;
+      _memoryReceiptAuthority = null;
+      _confirmedMemoryReceiptGeneration = null;
+    }
     if (oldWidget.demoState != widget.demoState) {
       _policyReason = widget.demoState?.policyReason;
       _policyResetsAt = null;
@@ -464,6 +499,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
   @override
   void dispose() {
+    _memoryReceiptGeneration++;
     _notifyMemorySessionEnded(_activeSessionId);
     _v2vTurnReconciler.endSession(_activeSessionId);
     _voiceStartupGuard.dispose();
@@ -472,6 +508,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     _typewriterTimer?.cancel();
     _quotaClock?.cancel();
     _memoryReceiptPollTimer?.cancel();
+    _fixtureMemoryEventSubscription?.cancel();
     _playerSub?.cancel();
     _audioPlayer.dispose();
     _transcriptScrollController.dispose();
@@ -1416,10 +1453,15 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   void _handleMemoryReinterpretation(MemoryReinterpretationEvent event) {
     final scope = _sessionScope;
     if (scope == null ||
+        widget.sessionScope?.conversationId != scope.conversationId ||
         event.conversationId != scope.conversationId ||
         (_activeSessionId.isNotEmpty && event.sessionId != _activeSessionId)) {
       return;
     }
+    final authority = widget.memoryReceiptAuthorityProvider();
+    if (authority == null || authority.uid.isEmpty || !authority.isExactCurrent()) return;
+    _memoryReceiptGeneration++;
+    _memoryEventAuthority = authority;
     _memoryReinterpretationEvent = event;
     _memoryReceiptPollAttempts = 0;
     _memoryReceiptPollTimer?.cancel();
@@ -1428,18 +1470,37 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
   Future<void> _pollMemoryCorrectionReceipt() async {
     final event = _memoryReinterpretationEvent;
-    if (event == null || !mounted) return;
+    final authority = _memoryEventAuthority;
+    final generation = _memoryReceiptGeneration;
+    bool isCurrent() =>
+        mounted &&
+        _memoryReinterpretationEvent == event &&
+        _memoryReceiptGeneration == generation &&
+        widget.sessionScope?.conversationId == event?.conversationId &&
+        authority?.isExactCurrent() == true;
+    if (event == null || authority == null || !isCurrent()) return;
     _memoryReceiptPollAttempts++;
 
-    final receipt = await getConversationCorrectionReceipt(
-      conversationId: event.conversationId,
-      correctionId: event.correctionId,
-    );
-    if (!mounted || _memoryReinterpretationEvent != event) return;
+    ConversationCorrectionReceipt? receipt;
+    try {
+      receipt = await widget.memoryReceiptFetcher(
+        conversationId: event.conversationId,
+        correctionId: event.correctionId,
+        expectedAuthenticatedUid: authority.uid,
+        exactAuthority: authority,
+      );
+    } catch (_) {
+      return;
+    }
+    if (!isCurrent()) return;
     if (receipt != null &&
         receipt.conversationId == event.conversationId &&
         receipt.correctionId == event.correctionId) {
-      setState(() => _memoryCorrectionReceipt = receipt);
+      setState(() {
+        _memoryCorrectionReceipt = receipt;
+        _memoryReceiptAuthority = authority;
+        _confirmedMemoryReceiptGeneration = generation;
+      });
     }
 
     if ((receipt == null || receipt.isPending) && _memoryReceiptPollAttempts < 40) {
@@ -1447,23 +1508,52 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     }
   }
 
-  Future<ConversationCorrectionReceipt?> _undoMemoryCorrection() async {
-    final receipt = _memoryCorrectionReceipt;
-    if (receipt == null || !receipt.isApplied) return null;
-    final updated = await undoConversationCorrection(
+  Future<ConversationCorrectionReceipt?> _undoMemoryCorrection(
+    ConversationCorrectionReceipt receipt,
+    ExactAccountAuthorityVerifier authority,
+    int generation,
+  ) async {
+    bool isCurrent() =>
+        mounted &&
+        authority.isExactCurrent() &&
+        _sessionScope?.conversationId == receipt.conversationId &&
+        widget.sessionScope?.conversationId == receipt.conversationId &&
+        _memoryReceiptGeneration == generation &&
+        _confirmedMemoryReceiptGeneration == generation &&
+        _memoryCorrectionReceipt?.correctionId == receipt.correctionId;
+    if (!receipt.isApplied || !isCurrent()) return null;
+    final updated = await widget.memoryUndo(
       conversationId: receipt.conversationId,
       correctionId: receipt.correctionId,
+      expectedAuthenticatedUid: authority.uid,
+      exactAuthority: authority,
     );
-    if (mounted && updated != null) {
-      setState(() => _memoryCorrectionReceipt = updated);
+    if (!isCurrent() ||
+        updated == null ||
+        !updated.isUndone ||
+        updated.conversationId != receipt.conversationId ||
+        updated.correctionId != receipt.correctionId) {
+      return null;
     }
+    setState(() => _memoryCorrectionReceipt = updated);
     return updated;
   }
 
   void _reviewMemoryCorrection() {
     final receipt = _memoryCorrectionReceipt;
-    if (receipt == null || !receipt.isApplied) return;
-    showMemoryCorrectionReceiptSheet(context, receipt: receipt, onUndo: _undoMemoryCorrection);
+    final authority = _memoryReceiptAuthority;
+    final generation = _confirmedMemoryReceiptGeneration;
+    if (receipt == null ||
+        !receipt.isApplied ||
+        authority == null ||
+        generation == null ||
+        !authority.isExactCurrent() ||
+        widget.sessionScope?.conversationId != receipt.conversationId ||
+        _sessionScope?.conversationId != receipt.conversationId) {
+      return;
+    }
+    showMemoryCorrectionReceiptSheet(context,
+        receipt: receipt, onUndo: () => _undoMemoryCorrection(receipt, authority, generation));
   }
 
   void _onSpeechResult(SpeechRecognitionResult result) {
