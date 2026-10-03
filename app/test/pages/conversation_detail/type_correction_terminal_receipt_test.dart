@@ -26,8 +26,10 @@ class _ExactAuthority implements ExactAccountAuthorityVerifier {
   @override
   final String uid;
 
+  bool current = true;
+
   @override
-  bool isExactCurrent() => true;
+  bool isExactCurrent() => current;
 }
 
 class _TestEnv implements EnvFields {
@@ -88,6 +90,259 @@ void main() {
     );
   });
 
+  for (final outcome in [
+    'identity_blocked',
+    'direct_apply_failed',
+    'applied',
+    'pending',
+    'missing',
+    'mismatch',
+    'server-mismatch',
+    'unknown',
+    'late-applied'
+  ]) {
+    testWidgets('ordinary form keeps truthful $outcome result after one accepted POST', (tester) async {
+      final authority = _ExactAuthority('owner-1');
+      var posts = 0;
+      var gets = 0;
+      var applied = 0;
+      final receipts = <ConversationCorrectionReceipt>[];
+      String? clientId;
+      await tester.pumpWidget(MaterialApp(
+        theme: ellaThemeData(),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+            body: Builder(
+                builder: (context) => TextButton(
+                      onPressed: () => showModalBottomSheet<void>(
+                        context: context,
+                        isScrollControlled: true,
+                        builder: (_) => CorrectSummarySheet(
+                          conversation: ServerConversation(
+                              id: 'memory-1',
+                              createdAt: DateTime.utc(2026),
+                              structured: Structured('Original memory', 'Original overview')),
+                          appSummary: 'Original overview',
+                          authorityProvider: () => authority,
+                          submitter: (
+                                  {required conversationId,
+                                  required correctionId,
+                                  required correctionText,
+                                  summaryTitle,
+                                  summaryOverview,
+                                  appSummary,
+                                  expectedAuthenticatedUid,
+                                  exactAuthority,
+                                  required requestTimeout}) =>
+                              submitConversationCorrectionResult(
+                            conversationId: conversationId,
+                            correctionId: correctionId,
+                            correctionText: correctionText,
+                            expectedAuthenticatedUid: expectedAuthenticatedUid,
+                            exactAuthority: exactAuthority,
+                            requestTimeout: requestTimeout,
+                            transport: (
+                                {required url,
+                                required method,
+                                required body,
+                                required expectedAuthenticatedUid,
+                                required exactAuthority,
+                                required timeout}) async {
+                              posts++;
+                              expect(method, 'POST');
+                              clientId = correctionId;
+                              return http.Response(
+                                  jsonEncode({
+                                    'correction_id': outcome == 'server-mismatch' ? 'server-selected-id' : correctionId,
+                                    'conversation_id': conversationId,
+                                    'trace_id': 'test-trace',
+                                    'status': 'queued',
+                                    'queued': true
+                                  }),
+                                  202);
+                            },
+                          ),
+                          receiptPoller: (
+                                  {required conversationId,
+                                  required correctionId,
+                                  required expectedAuthenticatedUid,
+                                  required exactAuthority,
+                                  required pollBudget}) =>
+                              getConversationCorrectionReceipt(
+                            conversationId: conversationId,
+                            correctionId: correctionId,
+                            expectedAuthenticatedUid: expectedAuthenticatedUid,
+                            exactAuthority: exactAuthority,
+                            transport: (
+                                {required url,
+                                required method,
+                                required body,
+                                required expectedAuthenticatedUid,
+                                required exactAuthority,
+                                required timeout}) async {
+                              gets++;
+                              expect(method, 'GET');
+                              expect(body, isEmpty);
+                              expect(correctionId, clientId);
+                              if (outcome == 'missing' ||
+                                  outcome == 'server-mismatch' ||
+                                  (outcome == 'late-applied' && gets == 1)) {
+                                return http.Response('{}', 404);
+                              }
+                              return http.Response(
+                                  jsonEncode({
+                                    'correction_id': outcome == 'mismatch' ? 'other-id' : correctionId,
+                                    'conversation_id': conversationId,
+                                    'status': outcome == 'mismatch' || outcome == 'late-applied' ? 'applied' : outcome,
+                                    'failure_code':
+                                        outcome == 'identity_blocked' ? 'correction_candidate_identity_blocked' : null,
+                                    'before': {'title': 'Original memory'},
+                                    'after': {'title': 'Verified update'}
+                                  }),
+                                  200);
+                            },
+                          ),
+                          onReceipt: (receipt, _) async => receipts.add(receipt),
+                          onApplied: () async => applied++,
+                        ),
+                      ),
+                      child: const Text('Open correction'),
+                    ))),
+      ));
+      await tester.tap(find.text('Open correction'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const ValueKey('type-correction-input')), 'Synthetic correction');
+      await tester.ensureVisible(find.byKey(const ValueKey('type-correction-submit')));
+      await tester.tap(find.byKey(const ValueKey('type-correction-submit')));
+      await tester.pumpAndSettle();
+      expect(posts, 1);
+      expect(gets, 1);
+      if (outcome == 'applied') {
+        expect(applied, 1);
+        expect(receipts.single.isApplied, isTrue);
+        expect(find.byType(CorrectSummarySheet), findsNothing);
+      } else {
+        expect(applied, 0);
+        expect(find.byType(CorrectSummarySheet), findsOneWidget);
+        expect(find.text('Memory updated'), findsNothing);
+        if (outcome == 'identity_blocked' || outcome == 'direct_apply_failed') {
+          expect(find.text("Ella couldn't update this memory"), findsOneWidget);
+          expect(find.byKey(const ValueKey('type-correction-check-status')), findsNothing);
+        } else {
+          expect(find.text("We haven't confirmed the result yet."), findsOneWidget);
+          await tester.ensureVisible(find.byKey(const ValueKey('type-correction-check-status')));
+          await tester.tap(find.byKey(const ValueKey('type-correction-check-status')));
+          await tester.pumpAndSettle();
+          expect(gets, 2);
+          expect(posts, 1, reason: 'Check status must never resubmit');
+          if (outcome == 'late-applied') {
+            expect(applied, 1);
+            expect(receipts.single.isApplied, isTrue);
+            expect(find.byType(CorrectSummarySheet), findsNothing);
+          }
+        }
+        final submit = find.byKey(const ValueKey('type-correction-submit'));
+        if (submit.evaluate().isNotEmpty) expect(tester.widget<FilledButton>(submit).onPressed, isNull);
+      }
+    });
+  }
+
+  for (final transition in ['account', 'disposed', 'conversation']) {
+    testWidgets('late applied receipt after $transition transition cannot commit or close another route',
+        (tester) async {
+      final authority = _ExactAuthority('owner-1');
+      final pending = Completer<ConversationCorrectionReceipt?>();
+      final conversation = ValueNotifier(ServerConversation(
+          id: 'original-memory',
+          createdAt: DateTime.utc(2026),
+          structured: Structured('Original', 'Original overview')));
+      addTearDown(conversation.dispose);
+      var posts = 0;
+      var applied = 0;
+      var observed = 0;
+      String? submittedId;
+      await tester.pumpWidget(MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+            body: Builder(
+                builder: (context) => TextButton(
+                      onPressed: () => showModalBottomSheet<void>(
+                        context: context,
+                        isScrollControlled: true,
+                        builder: (_) => ValueListenableBuilder<ServerConversation>(
+                          valueListenable: conversation,
+                          builder: (_, value, __) => CorrectSummarySheet(
+                            conversation: value,
+                            appSummary: value.structured.overview,
+                            authorityProvider: () => authority.current ? authority : null,
+                            submitter: (
+                                {required conversationId,
+                                required correctionId,
+                                required correctionText,
+                                summaryTitle,
+                                summaryOverview,
+                                appSummary,
+                                expectedAuthenticatedUid,
+                                exactAuthority,
+                                required requestTimeout}) async {
+                              posts++;
+                              submittedId = correctionId;
+                              return ConversationCorrectionSubmitResult.accepted(ConversationCorrectionSubmission(
+                                  conversationId: conversationId,
+                                  correctionId: correctionId,
+                                  traceId: 'test-trace',
+                                  status: 'queued',
+                                  queued: true));
+                            },
+                            receiptPoller: (
+                                    {required conversationId,
+                                    required correctionId,
+                                    required expectedAuthenticatedUid,
+                                    required exactAuthority,
+                                    required pollBudget}) =>
+                                pending.future,
+                            onApplied: () async => applied++,
+                            onReceipt: (_, __) async => observed++,
+                          ),
+                        ),
+                      ),
+                      child: const Text('Open correction'),
+                    ))),
+      ));
+      await tester.tap(find.text('Open correction'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const ValueKey('type-correction-input')), 'Synthetic correction');
+      await tester.tap(find.byKey(const ValueKey('type-correction-submit')));
+      await tester.pump();
+      expect(posts, 1);
+      expect(find.byType(CorrectSummarySheet), findsOneWidget, reason: '202 is not terminal');
+      switch (transition) {
+        case 'account':
+          authority.current = false;
+        case 'disposed':
+          Navigator.of(tester.element(find.byType(CorrectSummarySheet))).pop();
+        case 'conversation':
+          conversation.value = ServerConversation(
+              id: 'other-memory', createdAt: DateTime.utc(2026), structured: Structured('Other', 'Other overview'));
+      }
+      await tester.pumpAndSettle();
+      pending.complete(ConversationCorrectionReceipt(
+          conversationId: 'original-memory',
+          correctionId: submittedId!,
+          status: 'applied',
+          before: const ConversationCorrectionSummary(title: 'Original'),
+          after: const ConversationCorrectionSummary(title: 'Changed')));
+      await tester.pumpAndSettle();
+      expect(applied, 0);
+      expect(observed, 0);
+      expect(find.text('Memory updated'), findsNothing);
+      if (transition == 'conversation') expect(find.byType(CorrectSummarySheet), findsOneWidget);
+      expect(find.text('Open correction'), findsOneWidget);
+    });
+  }
+
   testWidgets('correction sheet scrolls above keyboard at 3x text on a small phone', (tester) async {
     tester.view.physicalSize = const Size(320, 568);
     tester.view.devicePixelRatio = 1;
@@ -118,6 +373,30 @@ void main() {
                                 createdAt: DateTime.utc(2026),
                                 structured: Structured('Memory', 'Overview')),
                             appSummary: 'Overview',
+                            authorityProvider: () => _ExactAuthority('owner-1'),
+                            submitter: (
+                                    {required conversationId,
+                                    required correctionId,
+                                    required correctionText,
+                                    summaryTitle,
+                                    summaryOverview,
+                                    appSummary,
+                                    expectedAuthenticatedUid,
+                                    exactAuthority,
+                                    required requestTimeout}) async =>
+                                ConversationCorrectionSubmitResult.accepted(ConversationCorrectionSubmission(
+                                    conversationId: conversationId,
+                                    correctionId: correctionId,
+                                    traceId: 'test-trace',
+                                    status: 'queued',
+                                    queued: true)),
+                            receiptPoller: (
+                                    {required conversationId,
+                                    required correctionId,
+                                    required expectedAuthenticatedUid,
+                                    required exactAuthority,
+                                    required pollBudget}) async =>
+                                null,
                           ),
                         ),
                         child: const Text('Open'),
@@ -145,6 +424,19 @@ void main() {
         image.dispose();
       });
     }
+    await tester.enterText(find.byKey(const ValueKey('type-correction-input')), 'Synthetic correction');
+    await tester.ensureVisible(find.byKey(const ValueKey('type-correction-submit')));
+    await tester.tap(find.byKey(const ValueKey('type-correction-submit')));
+    await tester.pumpAndSettle();
+    expect(find.text("We haven't confirmed the result yet."), findsOneWidget);
+    for (final key in ['type-correction-check-status', 'type-correction-close']) {
+      final action = find.byKey(ValueKey(key));
+      await tester.ensureVisible(action);
+      await tester.pumpAndSettle();
+      expect(action.hitTestable(), findsOneWidget);
+      expect(tester.getSize(action).height, greaterThanOrEqualTo(48));
+    }
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('test_type_correction_202_acknowledges_queue_immediately_and_polls_without_logging_body', (tester) async {
@@ -299,7 +591,8 @@ void main() {
     expect(acceptedCalls, 1);
     expect(submittedCorrectionIds, hasLength(1));
     expect(find.textContaining('self_hosted_runtime_target_mode_required'), findsNothing);
-    expect(find.byType(CorrectSummarySheet), findsNothing);
+    expect(find.byType(CorrectSummarySheet), findsOneWidget);
+    expect(find.text("Ella can't reach your correction service right now"), findsOneWidget);
     expect(find.text('Memory updated'), findsNothing);
     expect(logs, isNotEmpty);
     expect(logs.every((entry) => !entry.contains(correctionText)), isTrue);

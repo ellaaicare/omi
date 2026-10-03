@@ -8572,6 +8572,12 @@ class AppLocalizationsFr extends AppLocalizations {
       'Choose Grok Native Realtime or Gemini Native Live in Voice settings to talk about this memory.';
 
   @override
+  String get memoryCorrectionWaiting => 'We haven\'t confirmed the result yet.';
+
+  @override
+  String get memoryCorrectionCheckStatus => 'Check status';
+
+  @override
   String get memoryCorrectionPending => 'Ella is updating this memory';
 
   @override

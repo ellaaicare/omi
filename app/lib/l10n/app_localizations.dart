@@ -15837,6 +15837,18 @@ abstract class AppLocalizations {
   /// **'Choose Grok Native Realtime or Gemini Native Live in Voice settings to talk about this memory.'**
   String get memoryTalkProviderRequired;
 
+  /// Shown when a submitted correction has no verified terminal receipt
+  ///
+  /// In en, this message translates to:
+  /// **'We haven\'t confirmed the result yet.'**
+  String get memoryCorrectionWaiting;
+
+  /// Read-only action to check the original submitted correction
+  ///
+  /// In en, this message translates to:
+  /// **'Check status'**
+  String get memoryCorrectionCheckStatus;
+
   /// Pending memory reinterpretation receipt status
   ///
   /// In en, this message translates to:
