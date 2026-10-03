@@ -1047,6 +1047,7 @@ class MemoryTypeCorrectionButton extends StatefulWidget {
 class _MemoryTypeCorrectionButtonState extends State<MemoryTypeCorrectionButton> {
   ConversationCorrectionReceipt? _receipt;
   ExactAccountAuthorityVerifier? _receiptAuthority;
+  int? _receiptGeneration;
   int _generation = 0;
 
   @override
@@ -1061,6 +1062,7 @@ class _MemoryTypeCorrectionButtonState extends State<MemoryTypeCorrectionButton>
     setState(() {
       _receipt = null;
       _receiptAuthority = null;
+      _receiptGeneration = null;
     });
   }
 
@@ -1113,13 +1115,14 @@ class _MemoryTypeCorrectionButtonState extends State<MemoryTypeCorrectionButton>
   void _review() {
     final receipt = _receipt;
     final authority = _receiptAuthority;
+    final generation = _receiptGeneration;
     if (receipt == null ||
         !receipt.isApplied ||
         authority == null ||
+        generation == null ||
         !_isCurrent(receipt.conversationId, _generation, authority)) {
       return;
     }
-    final generation = _generation;
     showMemoryCorrectionReceiptSheet(context, receipt: receipt, onUndo: () => _undo(receipt, authority, generation));
   }
 
@@ -1139,7 +1142,7 @@ class _MemoryTypeCorrectionButtonState extends State<MemoryTypeCorrectionButton>
             final generation = ++_generation;
             final detail = context.read<ConversationDetailProvider>();
             final messenger = ScaffoldMessenger.of(context);
-            final acceptedMessage = context.l10n.memoryCorrectionPending;
+            final acceptedMessage = context.l10n.memoryCorrectionWaiting;
             showModalBottomSheet(
               context: context,
               isScrollControlled: true,
@@ -1165,6 +1168,7 @@ class _MemoryTypeCorrectionButtonState extends State<MemoryTypeCorrectionButton>
                   setState(() {
                     _receipt = receipt;
                     _receiptAuthority = receiptAuthority;
+                    _receiptGeneration = generation;
                   });
                   if (receipt.isApplied) {
                     await detail.refreshConversation(
@@ -1219,7 +1223,7 @@ typedef CorrectionReceiptPoller = Future<ConversationCorrectionReceipt?> Functio
   required Duration pollBudget,
 });
 
-Future<void> _observeAcceptedCorrection({
+Future<ConversationCorrectionReceipt?> _observeAcceptedCorrection({
   required ConversationCorrectionSubmission submission,
   required ExactAccountAuthorityVerifier authority,
   required Duration pollBudget,
@@ -1227,6 +1231,7 @@ Future<void> _observeAcceptedCorrection({
   required PendingConversationCorrectionIdentityStore identityStore,
   required Future<void> Function()? onApplied,
   required Future<void> Function(ConversationCorrectionReceipt, ExactAccountAuthorityVerifier)? onReceipt,
+  required bool Function() isCurrent,
 }) async {
   try {
     final receipt = await receiptPoller(
@@ -1238,23 +1243,38 @@ Future<void> _observeAcceptedCorrection({
     ).timeout(pollBudget);
     if (receipt == null ||
         receipt.isPending ||
-        !authority.isExactCurrent() ||
+        (!receipt.isApplied &&
+            !receipt.isUndone &&
+            !const {
+              'direct_apply_failed',
+              'direct_apply_disabled',
+              'queue_failed',
+              'reconciliation_failed',
+              'consent_revoked',
+              'identity_blocked',
+              'correction_blocked_identity_gate',
+              'refused',
+              'failed',
+            }.contains(receipt.status)) ||
+        !isCurrent() ||
         receipt.conversationId != submission.conversationId ||
         receipt.correctionId != submission.correctionId) {
-      return;
+      return null;
     }
     await identityStore.clearIfTerminal(
       uid: authority.uid,
       conversationId: submission.conversationId,
       correctionId: submission.correctionId,
     );
-    if (!authority.isExactCurrent()) return;
+    if (!isCurrent()) return null;
     await onReceipt?.call(receipt, authority);
-    if (receipt.isApplied && onApplied != null && authority.isExactCurrent()) {
+    if (receipt.isApplied && onApplied != null && isCurrent()) {
       await onApplied();
     }
+    return isCurrent() ? receipt : null;
   } catch (_) {
     // The durable pending identity allows receipt discovery to resume later.
+    return null;
   }
 }
 
@@ -1290,16 +1310,82 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
   final TextEditingController _controller = TextEditingController();
   bool _isSubmitting = false;
   String? _submissionError;
+  ConversationCorrectionSubmission? _acceptedSubmission;
+  ExactAccountAuthorityVerifier? _submissionAuthority;
+  ConversationCorrectionReceipt? _terminalReceipt;
+  bool _receiptReadInFlight = false;
+  int _generation = 0;
+
+  bool _isCurrent(String conversationId, int generation, ExactAccountAuthorityVerifier authority) {
+    if (!mounted) return false;
+    final current = widget.authorityProvider();
+    return widget.conversation.id == conversationId &&
+        _generation == generation &&
+        authority.isExactCurrent() &&
+        current?.uid == authority.uid &&
+        current?.isExactCurrent() == true;
+  }
+
+  @override
+  void didUpdateWidget(covariant CorrectSummarySheet oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.conversation.id != widget.conversation.id) {
+      _generation++;
+      _acceptedSubmission = null;
+      _submissionAuthority = null;
+      _terminalReceipt = null;
+      _receiptReadInFlight = false;
+      _isSubmitting = false;
+      _submissionError = null;
+      _controller.clear();
+    }
+  }
+
+  Future<void> _checkReceipt({Duration pollBudget = conversationCorrectionClientPollBudget}) async {
+    final submission = _acceptedSubmission;
+    final authority = _submissionAuthority;
+    final generation = _generation;
+    if (submission == null ||
+        authority == null ||
+        _receiptReadInFlight ||
+        !_isCurrent(submission.conversationId, generation, authority)) {
+      return;
+    }
+    setState(() {
+      _receiptReadInFlight = true;
+      _isSubmitting = true;
+      _submissionError = null;
+    });
+    final receipt = await _observeAcceptedCorrection(
+      submission: submission,
+      authority: authority,
+      pollBudget: pollBudget,
+      receiptPoller: widget.receiptPoller,
+      identityStore: widget.correctionIdentityStore,
+      onApplied: widget.onApplied,
+      onReceipt: widget.onReceipt,
+      isCurrent: () => _isCurrent(submission.conversationId, generation, authority),
+    );
+    if (!mounted || !_isCurrent(submission.conversationId, generation, authority)) return;
+    setState(() {
+      _receiptReadInFlight = false;
+      _isSubmitting = false;
+      _terminalReceipt = receipt;
+      if (receipt?.isFailed == true) _submissionError = correctionTerminalFailureMessage(context.l10n, receipt);
+    });
+    if (receipt?.isApplied == true) Navigator.of(context).pop();
+  }
 
   @override
   void dispose() {
+    _generation++;
     _controller.dispose();
     super.dispose();
   }
 
   Future<void> _submit() async {
     final correctionText = _controller.text.trim();
-    if (correctionText.isEmpty || _isSubmitting) return;
+    if (correctionText.isEmpty || _isSubmitting || _acceptedSubmission != null) return;
 
     final operationStopwatch = Stopwatch()..start();
     Duration remainingBudget() => conversationCorrectionClientPollBudget - operationStopwatch.elapsed;
@@ -1308,6 +1394,8 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
       _submissionError = null;
     });
     final authority = widget.authorityProvider();
+    final conversationId = widget.conversation.id;
+    final generation = ++_generation;
     try {
       if (authority != null && authority.uid.isNotEmpty && authority.isExactCurrent()) {
         final correctionId = await widget.correctionIdentityStore.acquire(
@@ -1318,7 +1406,7 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
           summaryOverview: widget.conversation.structured.overview,
           appSummary: widget.appSummary,
         );
-        if (!authority.isExactCurrent()) throw StateError('Exact account authority changed before correction submit');
+        if (!_isCurrent(conversationId, generation, authority)) return;
         final remainingBeforeSubmit = remainingBudget();
         if (remainingBeforeSubmit <= Duration.zero) throw TimeoutException('Correction operation deadline exceeded');
         final submitBudget = remainingBeforeSubmit < conversationCorrectionSubmitBudget
@@ -1338,6 +1426,7 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
             )
             .timeout(submitBudget);
         if (submitResult.wasAcceptedOrMayHaveBeenAccepted) {
+          if (!_isCurrent(conversationId, generation, authority)) return;
           final submission = submitResult.submission ??
               ConversationCorrectionSubmission(
                 correctionId: correctionId,
@@ -1349,34 +1438,18 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
           if (submission.conversationId != widget.conversation.id || submission.correctionId != correctionId) {
             throw StateError('Correction submission identity mismatch');
           }
-          if (!authority.isExactCurrent()) {
-            if (mounted) Navigator.of(context).pop();
+          setState(() {
+            _acceptedSubmission = submission;
+            _submissionAuthority = authority;
+          });
+          await widget.onAccepted?.call();
+          if (!_isCurrent(conversationId, generation, authority)) return;
+          final pollBudget = remainingBudget();
+          if (pollBudget <= Duration.zero) {
+            setState(() => _isSubmitting = false);
             return;
           }
-          final pollBudget = remainingBudget();
-          if (pollBudget <= Duration.zero) throw TimeoutException('Correction operation deadline exceeded');
-          final receiptPoller = widget.receiptPoller;
-          final identityStore = widget.correctionIdentityStore;
-          final onApplied = widget.onApplied;
-          final onReceipt = widget.onReceipt;
-          unawaited(
-            _observeAcceptedCorrection(
-              submission: submission,
-              authority: authority,
-              pollBudget: pollBudget,
-              receiptPoller: receiptPoller,
-              identityStore: identityStore,
-              onApplied: onApplied,
-              onReceipt: onReceipt,
-            ),
-          );
-
-          if (!mounted) return;
-          setState(() => _isSubmitting = false);
-          HapticFeedback.mediumImpact();
-          await widget.onAccepted?.call();
-          if (!mounted) return;
-          Navigator.of(context).pop();
+          await _checkReceipt(pollBudget: pollBudget);
           return;
         }
       }
@@ -1384,10 +1457,15 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
       // Fail closed without logging correction text or transport response bodies.
     }
 
-    if (!mounted) return;
+    if (!mounted ||
+        _generation != generation ||
+        widget.conversation.id != conversationId ||
+        (authority != null && !_isCurrent(conversationId, generation, authority))) {
+      return;
+    }
     setState(() {
       _isSubmitting = false;
-      _submissionError = correctionTerminalFailureMessage(context.l10n, null);
+      _submissionError = _acceptedSubmission == null ? correctionTerminalFailureMessage(context.l10n, null) : null;
     });
   }
 
@@ -1431,6 +1509,7 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
               TextField(
                 key: const ValueKey('type-correction-input'),
                 controller: _controller,
+                readOnly: _acceptedSubmission != null,
                 autofocus: true,
                 minLines: 4,
                 maxLines: 8,
@@ -1463,30 +1542,64 @@ class _CorrectSummarySheetState extends State<CorrectSummarySheet> {
                   style: const TextStyle(color: EllaColors.error, fontSize: 14, height: 1.3),
                 ),
               ],
-              const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton(
-                  key: const ValueKey('type-correction-submit'),
-                  onPressed: _isSubmitting ? null : _submit,
-                  style: FilledButton.styleFrom(
-                    backgroundColor: EllaColors.primary,
-                    foregroundColor: EllaColors.textPrimary,
-                    minimumSize: const Size(48, 48),
-                    disabledBackgroundColor: EllaColors.bgTertiary,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  ),
-                  child: _isSubmitting
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.textPrimary),
-                        )
-                      : const Text('Submit Correction',
-                          textAlign: TextAlign.center, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+              if (_acceptedSubmission != null && _submissionError == null) ...[
+                const SizedBox(height: 12),
+                Text(
+                  _terminalReceipt?.isUndone == true
+                      ? context.l10n.memoryCorrectionUndone
+                      : context.l10n.memoryCorrectionWaiting,
+                  key: const ValueKey('type-correction-result'),
+                  style: const TextStyle(color: EllaColors.textPrimary, fontSize: 14, height: 1.3),
                 ),
-              ),
+              ],
+              const SizedBox(height: 16),
+              if (_acceptedSubmission == null)
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    key: const ValueKey('type-correction-submit'),
+                    onPressed: _isSubmitting ? null : _submit,
+                    style: FilledButton.styleFrom(
+                      backgroundColor: EllaColors.primary,
+                      foregroundColor: EllaColors.textPrimary,
+                      minimumSize: const Size(48, 48),
+                      disabledBackgroundColor: EllaColors.bgTertiary,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    ),
+                    child: _isSubmitting
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.textPrimary),
+                          )
+                        : const Text('Submit Correction',
+                            textAlign: TextAlign.center, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+                  ),
+                ),
+              if (_acceptedSubmission != null) ...[
+                if (_terminalReceipt == null)
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton(
+                      key: const ValueKey('type-correction-check-status'),
+                      style: OutlinedButton.styleFrom(
+                          foregroundColor: EllaColors.textPrimary, minimumSize: const Size(48, 48)),
+                      onPressed: _isSubmitting ? null : () => _checkReceipt(),
+                      child: Text(context.l10n.memoryCorrectionCheckStatus),
+                    ),
+                  ),
+                SizedBox(
+                  width: double.infinity,
+                  child: TextButton(
+                    key: const ValueKey('type-correction-close'),
+                    style:
+                        TextButton.styleFrom(foregroundColor: EllaColors.textPrimary, minimumSize: const Size(48, 48)),
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: Text(context.l10n.close),
+                  ),
+                ),
+              ],
             ],
           )),
         ),

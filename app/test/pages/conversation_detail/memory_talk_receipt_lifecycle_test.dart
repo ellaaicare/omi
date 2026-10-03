@@ -468,6 +468,10 @@ void main() {
     await submitTyped(tester);
     expect(ids, hasLength(2));
     expect(ids.first, isNot(ids.last));
+    expect(find.byType(CorrectSummarySheet), findsOneWidget, reason: '202 must keep the second form open');
+    await tester.tap(find.byKey(const ValueKey('type-correction-close')));
+    await tester.pumpAndSettle();
+    expect(find.byType(CorrectSummarySheet), findsNothing);
     await tester.tap(find.text('Review'));
     await tester.pumpAndSettle();
     expect(find.text('Original after'), findsOneWidget);
