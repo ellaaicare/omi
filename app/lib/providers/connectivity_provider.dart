@@ -66,19 +66,23 @@ class ConnectivityProvider extends ChangeNotifier {
   }
 }
 
-/// Shows the health-probe result without blocking taps or API calls.
+/// Reports a missing network interface without treating a passive probe as a send failure.
 class PassiveBackendProbeBanner extends StatelessWidget {
   const PassiveBackendProbeBanner({super.key});
 
   @override
   Widget build(BuildContext context) {
     final connectivity = context.watch<ConnectivityProvider>();
-    if (connectivity.backendReachable != false) return const SizedBox.shrink();
+    if (connectivity.isConnected) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.fromLTRB(18, 8, 18, 0),
-      child: Text(
-        context.l10n.ellaServerUnreachableBanner,
+      child: Column(
         key: const Key('passive-backend-probe-banner'),
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(context.l10n.noInternetConnection),
+          Text(context.l10n.pleaseCheckInternetConnectionAndTryAgain),
+        ],
       ),
     );
   }
