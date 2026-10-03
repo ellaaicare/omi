@@ -1252,6 +1252,7 @@ Future<ConversationCorrectionReceipt?> _observeAcceptedCorrection({
               'reconciliation_failed',
               'consent_revoked',
               'identity_blocked',
+              'correction_blocked_identity_gate',
               'refused',
               'failed',
             }.contains(receipt.status)) ||

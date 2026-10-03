@@ -92,6 +92,7 @@ void main() {
 
   for (final outcome in [
     'identity_blocked',
+    'correction_blocked_identity_gate',
     'direct_apply_failed',
     'applied',
     'pending',
@@ -196,7 +197,9 @@ void main() {
                                     'conversation_id': conversationId,
                                     'status': outcome == 'mismatch' || outcome == 'late-applied' ? 'applied' : outcome,
                                     'failure_code':
-                                        outcome == 'identity_blocked' ? 'correction_candidate_identity_blocked' : null,
+                                        const {'identity_blocked', 'correction_blocked_identity_gate'}.contains(outcome)
+                                            ? 'correction_candidate_identity_blocked'
+                                            : null,
                                     'before': {'title': 'Original memory'},
                                     'after': {'title': 'Verified update'}
                                   }),
@@ -226,9 +229,13 @@ void main() {
         expect(applied, 0);
         expect(find.byType(CorrectSummarySheet), findsOneWidget);
         expect(find.text('Memory updated'), findsNothing);
-        if (outcome == 'identity_blocked' || outcome == 'direct_apply_failed') {
+        if (const {'identity_blocked', 'correction_blocked_identity_gate', 'direct_apply_failed'}.contains(outcome)) {
           expect(find.text("Ella couldn't update this memory"), findsOneWidget);
           expect(find.byKey(const ValueKey('type-correction-check-status')), findsNothing);
+          expect(find.byKey(const ValueKey('type-correction-submit')), findsNothing);
+          expect(receipts.single.isFailed, isTrue);
+          expect(gets, 1);
+          expect(posts, 1);
         } else {
           expect(find.text("We haven't confirmed the result yet."), findsOneWidget);
           await tester.ensureVisible(find.byKey(const ValueKey('type-correction-check-status')));
