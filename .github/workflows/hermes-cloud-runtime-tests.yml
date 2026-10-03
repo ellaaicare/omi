@@ -1553,10 +1553,11 @@ jobs:
       - name: Run preserved artwork contracts and additive style consent gate
         run: |
           set -euo pipefail
-          baseline_artwork_selector='not (style_only or style_patch or explicit_consent_preferences_put_contract_remains_unchanged)'
+          baseline_artwork_selector='not (style_only or style_patch or explicit_consent_preferences_put_contract_remains_unchanged or stored_artwork_consent)'
           test "$(pytest --collect-only -q tests/unit/test_memory_artwork_contract.py -k "$baseline_artwork_selector" | grep -c '::')" -eq 194
+          test "$(pytest --collect-only -q tests/unit/test_memory_artwork_contract.py -k 'not stored_artwork_consent' | grep -c '::')" -eq 219
           artwork_ids="$(pytest --collect-only -q tests/unit/test_memory_artwork_contract.py | sed '/^$/d')"
-          test "$(grep -c '::' <<<"$artwork_ids")" -eq 219
+          test "$(grep -c '::' <<<"$artwork_ids")" -eq 239
           required_style_ids=(
             "tests/unit/test_memory_artwork_contract.py::test_style_only_rejects_unaccepted_consent_without_reaccepting[declined]"
             "tests/unit/test_memory_artwork_contract.py::test_style_only_rejects_unaccepted_consent_without_reaccepting[not_set]"
@@ -1587,8 +1588,33 @@ jobs:
           for required_id in "${required_style_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$artwork_ids"
           done
+          required_stored_consent_ids=(
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_required_before_generation_admission[missing-automatic]"
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_required_before_generation_admission[missing-manual]"
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_required_before_generation_admission[not_set-automatic]"
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_required_before_generation_admission[not_set-manual]"
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_required_before_generation_admission[declined-automatic]"
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_required_before_generation_admission[declined-manual]"
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_required_before_generation_admission[wrong_version-automatic]"
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_required_before_generation_admission[wrong_version-manual]"
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_terminal_callback_cannot_grant_consent"
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_absent_snapshot_cannot_overwrite_concurrent_decline"
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_passive_read_and_backfill_cannot_grant_consent[historical_backfill]"
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_passive_read_and_backfill_cannot_grant_consent[preview_backfill]"
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_rechecked_after_runtime_await_without_mutation[missing]"
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_rechecked_after_runtime_await_without_mutation[declined]"
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_rechecked_after_runtime_await_without_mutation[wrong_version]"
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_rechecked_after_runtime_await_without_mutation[global]"
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_worker_denies_before_provider_egress[missing]"
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_worker_denies_before_provider_egress[declined]"
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_worker_denies_before_provider_egress[wrong_version]"
+            "tests/unit/test_memory_artwork_contract.py::test_stored_artwork_consent_explicit_preferences_put_still_allows_generation"
+          )
+          for required_id in "${required_stored_consent_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$artwork_ids"
+          done
           pytest tests/unit/test_memory_artwork_contract.py -v | tee /tmp/artwork-style-consent-pytest.log
-          grep -Eq '219 passed' /tmp/artwork-style-consent-pytest.log
+          grep -Eq '239 passed' /tmp/artwork-style-consent-pytest.log
           ! grep -Eq '[0-9]+ skipped|[0-9]+ failed' /tmp/artwork-style-consent-pytest.log
 
       - name: Run real Firestore summary CAS contention gate
