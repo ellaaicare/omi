@@ -13,7 +13,7 @@
 //     (lib/main_upstream_capture.dart when YES, lib/main.dart when NO). build-and-upload.sh uses it.
 // See app/lib/upstream_capture/README.md.
 
-ELLA_UPSTREAM_CAPTURE_ENABLED = NO
+ELLA_UPSTREAM_CAPTURE_ENABLED = YES
 
 ELLA_UPSTREAM_CAPTURE_NATIVE_SOURCES = BaseBatchAudioWriter.swift BatchAudioWriter.swift BleHostApiImpl.swift LimitlessBatchAudioWriter.swift LimitlessFlashDrainEngine.swift LimitlessProtocol.swift OmiBleConnectionPolicy.swift OmiBleDiscoveryNaming.swift OmiBleEnergyPolicy.swift OmiBleManager.swift OmiBlePairingPolicy.swift PhoneMicBatchAudioWriter.swift PhoneMicCaptureEngine.swift PhoneMicController.swift PhoneMicControllerSeams.swift PhoneMicConverterPipeline.swift PhoneMicEventEmitter.swift PhoneMicHostApiImpl.swift PhoneMicInterruptionMonitor.swift PhoneMicOpusEncoder.swift PhoneMicOpusShim.h PhoneMicOpusShim.m PhoneMicPermissionGate.swift PhoneMicPigeon.g.swift PhoneMicSessionConfigurator.swift PigeonCommunicator.g.swift SyncTransferBackgroundLease.swift
 
