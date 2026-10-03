@@ -1,11 +1,14 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
+import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
+import 'package:omi/utils/logger.dart';
 
 const memoryArtworkSchemaVersion = 'ella.memory_artwork.v1';
 const memoryArtworkLibrariesSchemaVersion = 'ella.memory_artwork.libraries.v1';
@@ -30,6 +33,26 @@ typedef MemoryArtworkHttpCall = Future<http.Response?> Function({
   void Function()? onSendAttempt,
 });
 typedef MemoryArtworkAuthorityProvider = ExactAccountAuthorityVerifier? Function();
+
+enum MemoryArtworkQueueReadOutcome { success, authentication, noResponse, timeout, non200, schema, internal }
+
+class MemoryArtworkQueueReadDiagnostic {
+  const MemoryArtworkQueueReadDiagnostic._(this.readNumber, this.outcome, this.elapsedMilliseconds, this.statusCode);
+
+  final int readNumber;
+  final MemoryArtworkQueueReadOutcome outcome;
+  final int elapsedMilliseconds;
+  final int? statusCode;
+
+  String get outcomeCode => switch (outcome) {
+        MemoryArtworkQueueReadOutcome.noResponse => 'no_response',
+        MemoryArtworkQueueReadOutcome.non200 => 'non_200',
+        _ => outcome.name,
+      };
+
+  String get message =>
+      '[MemoryArtworkQueue] read=$readNumber outcome=$outcomeCode elapsed_ms=$elapsedMilliseconds status=${statusCode ?? 'none'}';
+}
 
 enum MemoryArtworkResultStatus { generating, ready, unavailable, declined }
 
@@ -318,13 +341,17 @@ class MemoryArtworkApi {
     MemoryArtworkHttpCall request = makeApiCall,
     MemoryArtworkAuthorityProvider authorityProvider = WalOwnerAuthority.active,
     String? baseUrl,
+    void Function(MemoryArtworkQueueReadDiagnostic)? onQueueReadDiagnostic,
   })  : _request = request,
         _authorityProvider = authorityProvider,
-        _baseUrl = baseUrl?.trim() ?? '';
+        _baseUrl = baseUrl?.trim() ?? '',
+        _onQueueReadDiagnostic = onQueueReadDiagnostic ?? _logQueueReadDiagnostic;
 
   final MemoryArtworkHttpCall _request;
   final MemoryArtworkAuthorityProvider _authorityProvider;
   final String _baseUrl;
+  final void Function(MemoryArtworkQueueReadDiagnostic) _onQueueReadDiagnostic;
+  int _queueReadSequence = 0;
   final Map<String, Future<MemoryArtworkDay?>> _dayRequests = <String, Future<MemoryArtworkDay?>>{};
 
   /// Production clients resolve a first-party API base URL. Test doubles that
@@ -737,17 +764,68 @@ class MemoryArtworkApi {
   }
 
   Future<MemoryArtworkQueueStatus?> queueStatus() async {
-    final authority = _authorityProvider();
-    if (authority == null) return null;
-    final response = await _call(
-      authority,
-      method: 'GET',
-      path: 'v1/ella/memory-artwork/queue',
-      timeout: const Duration(seconds: 30),
-    );
-    if (response?.statusCode != 200 || !authority.isExactCurrent()) return null;
-    return _queueStatusFromPayload(_jsonObject(response!.body));
+    final readNumber = ++_queueReadSequence;
+    final elapsed = Stopwatch()..start();
+    var outcome = MemoryArtworkQueueReadOutcome.internal;
+    int? statusCode;
+    try {
+      final authority = _authorityProvider();
+      if (authority == null) {
+        outcome = MemoryArtworkQueueReadOutcome.authentication;
+        return null;
+      }
+      final response = await _call(
+        authority,
+        method: 'GET',
+        path: 'v1/ella/memory-artwork/queue',
+        timeout: const Duration(seconds: 30),
+      );
+      // The shared transport can swallow failures. Null cannot identify their cause.
+      if (response == null) {
+        outcome = MemoryArtworkQueueReadOutcome.noResponse;
+        return null;
+      }
+      statusCode = response.statusCode;
+      if (response.statusCode != 200) {
+        outcome = response.statusCode == 401
+            ? MemoryArtworkQueueReadOutcome.authentication
+            : MemoryArtworkQueueReadOutcome.non200;
+        return null;
+      }
+      if (!authority.isExactCurrent()) {
+        outcome = MemoryArtworkQueueReadOutcome.authentication;
+        return null;
+      }
+      final result = _queueStatusFromPayload(_jsonObject(response.body));
+      outcome = result == null ? MemoryArtworkQueueReadOutcome.schema : MemoryArtworkQueueReadOutcome.success;
+      return result;
+    } catch (error) {
+      outcome = switch (error) {
+        TimeoutException() => MemoryArtworkQueueReadOutcome.timeout,
+        ExactAccountAuthorityChangedException() => MemoryArtworkQueueReadOutcome.authentication,
+        ClientApiFailure(kind: ClientApiFailureKind.authenticationRequired || ClientApiFailureKind.accountChanged) =>
+          MemoryArtworkQueueReadOutcome.authentication,
+        http.ClientException() => MemoryArtworkQueueReadOutcome.noResponse,
+        _ => MemoryArtworkQueueReadOutcome.internal,
+      };
+      rethrow;
+    } finally {
+      elapsed.stop();
+      final diagnostic = MemoryArtworkQueueReadDiagnostic._(
+        readNumber,
+        outcome,
+        elapsed.elapsedMilliseconds.clamp(0, 120000),
+        statusCode != null && statusCode >= 100 && statusCode <= 599 ? statusCode : null,
+      );
+      try {
+        _onQueueReadDiagnostic(diagnostic);
+      } catch (_) {
+        // Diagnostics must not change the read result or exception contract.
+      }
+    }
   }
+
+  static void _logQueueReadDiagnostic(MemoryArtworkQueueReadDiagnostic diagnostic) => Logger.debug(diagnostic.message);
 
   Future<MemoryArtworkQueueStatus?> controlQueue({
     required MemoryArtworkQueueAction action,

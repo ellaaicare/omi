@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -5,10 +6,12 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import 'package:omi/backend/http/http_pool_manager.dart';
+import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/ella/services/memory_artwork_api.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
+import 'package:omi/utils/logger.dart';
 
 class _Authority implements ExactAccountAuthorityVerifier {
   _Authority(this.uid);
@@ -35,8 +38,226 @@ class _ExpiringAuthority implements ExactAccountAuthorityVerifier {
   bool isExactCurrent() => ++checks <= allowedChecks;
 }
 
+http.Response _queueDiagnosticSuccess() => http.Response(
+      jsonEncode({
+        'schema_version': 'ella.memory_artwork.queue.v1',
+        'generation_id': 'a' * 64,
+        'style_version': memoryArtworkDefaultStyle,
+        'state': 'running',
+        'control_state': 'running',
+        'scan_status': 'completed',
+        'scanned': 0,
+        'pages_processed': 0,
+        'auto_continue': false,
+        'batch_size': 10,
+        'batch_remaining': 10,
+        'ready': 0,
+        'active': 0,
+        'queued': 0,
+        'retrying': 0,
+        'failed': 0,
+        'total': 0,
+        'remaining': 0,
+        'styles': [],
+      }),
+      200,
+    );
+
+MemoryArtworkApi _queueDiagnosticApi(
+  Future<http.Response?> Function() response,
+  void Function(MemoryArtworkQueueReadDiagnostic) observer, {
+  MemoryArtworkAuthorityProvider? authorityProvider,
+}) =>
+    MemoryArtworkApi(
+      baseUrl: 'https://private-fixture.example',
+      authorityProvider: authorityProvider ?? () => _Authority('private-fixture-owner'),
+      onQueueReadDiagnostic: observer,
+      request: ({
+        required url,
+        required headers,
+        required body,
+        required method,
+        timeout,
+        retries,
+        requireAuthCheck,
+        expectedAuthenticatedUid,
+        exactAuthority,
+        onSendAttempt,
+      }) async {
+        expect(method, 'GET');
+        expect(body, isEmpty);
+        expect(timeout, const Duration(seconds: 30));
+        expect(retries, 0);
+        expect(requireAuthCheck, isTrue);
+        expect(exactAuthority, isNotNull);
+        return response();
+      },
+    );
+
 void main() {
   PlatformManager.initializeForTesting();
+
+  for (final response in <http.Response?>[null, http.Response('{"private":"fixture"}', 200)]) {
+    test('queue read emits content-free evidence for ${response == null ? 'no response' : 'invalid metadata'}',
+        () async {
+      final initialLogs = Logger.instance.talker.history.length;
+      var requests = 0;
+      final api = MemoryArtworkApi(
+        baseUrl: 'https://api.example',
+        authorityProvider: () => _Authority('private-fixture-owner'),
+        request: ({
+          required url,
+          required headers,
+          required body,
+          required method,
+          timeout,
+          retries,
+          requireAuthCheck,
+          expectedAuthenticatedUid,
+          exactAuthority,
+          onSendAttempt,
+        }) async {
+          requests++;
+          expect(method, 'GET');
+          expect(body, isEmpty);
+          expect(timeout, const Duration(seconds: 30));
+          expect(retries, 0);
+          return response;
+        },
+      );
+      expect(await api.queueStatus(), isNull);
+      expect(requests, 1);
+      final messages = Logger.instance.talker.history
+          .skip(initialLogs)
+          .map((entry) => entry.message ?? '')
+          .where((message) => message.startsWith('[MemoryArtworkQueue]'))
+          .toList();
+      expect(messages, hasLength(1));
+      expect(messages.single, contains('outcome=${response == null ? 'no_response' : 'schema'}'));
+      expect(messages.single, isNot(contains('private')));
+      expect(messages.single, isNot(contains('https')));
+    });
+  }
+
+  for (final entry in <(http.Response?, MemoryArtworkQueueReadOutcome, int?)>[
+    (null, MemoryArtworkQueueReadOutcome.noResponse, null),
+    (http.Response('private body', 401), MemoryArtworkQueueReadOutcome.authentication, 401),
+    (http.Response('private body', 403), MemoryArtworkQueueReadOutcome.non200, 403),
+    (http.Response('private body', 500), MemoryArtworkQueueReadOutcome.non200, 500),
+    (http.Response('private body', 999), MemoryArtworkQueueReadOutcome.non200, null),
+    (http.Response('private invalid JSON', 200), MemoryArtworkQueueReadOutcome.schema, 200),
+    (_queueDiagnosticSuccess(), MemoryArtworkQueueReadOutcome.success, 200),
+  ]) {
+    test('queue diagnostic reports only fixed response evidence ${entry.$2.name} ${entry.$3}', () async {
+      final events = <MemoryArtworkQueueReadDiagnostic>[];
+      var requests = 0;
+      final api = _queueDiagnosticApi(() async {
+        requests++;
+        return entry.$1;
+      }, events.add);
+      final result = await api.queueStatus();
+      expect(result != null, entry.$2 == MemoryArtworkQueueReadOutcome.success);
+      expect(requests, 1);
+      expect(events, hasLength(1));
+      final event = events.single;
+      expect(event.outcome, entry.$2);
+      expect(event.statusCode, entry.$3);
+      expect(event.readNumber, 1);
+      expect(event.elapsedMilliseconds, inInclusiveRange(0, 120000));
+      expect(event.message, isNot(contains('private')));
+      expect(event.message, isNot(contains('https')));
+      expect(event.message, isNot(contains('999')));
+    });
+  }
+
+  for (final entry in <(Object, MemoryArtworkQueueReadOutcome)>[
+    (TimeoutException('private timeout'), MemoryArtworkQueueReadOutcome.timeout),
+    (ExactAccountAuthorityChangedException('private authority'), MemoryArtworkQueueReadOutcome.authentication),
+    (
+      const ClientApiFailure(ClientApiFailureKind.authenticationRequired, backendCode: 'private-code'),
+      MemoryArtworkQueueReadOutcome.authentication
+    ),
+    (const ClientApiFailure(ClientApiFailureKind.accountChanged), MemoryArtworkQueueReadOutcome.authentication),
+    (const ClientApiFailure(ClientApiFailureKind.forbidden), MemoryArtworkQueueReadOutcome.internal),
+    (
+      http.ClientException('private transport', Uri.parse('https://private-fixture.example')),
+      MemoryArtworkQueueReadOutcome.noResponse
+    ),
+    (StateError('private internal'), MemoryArtworkQueueReadOutcome.internal),
+  ]) {
+    test('queue diagnostic preserves thrown exception ${entry.$1.runtimeType} ${entry.$2.name}', () async {
+      final events = <MemoryArtworkQueueReadDiagnostic>[];
+      var requests = 0;
+      final api = _queueDiagnosticApi(() async {
+        requests++;
+        throw entry.$1;
+      }, events.add);
+      await expectLater(api.queueStatus(), throwsA(same(entry.$1)));
+      expect(requests, 1);
+      expect(events, hasLength(1));
+      expect(events.single.outcome, entry.$2);
+      expect(events.single.statusCode, isNull);
+      expect(events.single.message, isNot(contains('private')));
+      expect(events.single.message, isNot(contains(entry.$1.runtimeType.toString())));
+    });
+  }
+
+  test('queue diagnostic admission failure has zero requests and stale completion stays unavailable', () async {
+    final events = <MemoryArtworkQueueReadDiagnostic>[];
+    var requests = 0;
+    final authority = _Authority('private-fixture-owner');
+    ExactAccountAuthorityVerifier? current;
+    final api = _queueDiagnosticApi(() async {
+      requests++;
+      authority.current = false;
+      return _queueDiagnosticSuccess();
+    }, events.add, authorityProvider: () => current);
+    expect(await api.queueStatus(), isNull);
+    expect(requests, 0);
+    current = authority;
+    expect(await api.queueStatus(), isNull);
+    expect(requests, 1);
+    expect(events.map((event) => event.readNumber), [1, 2]);
+    expect(events.every((event) => event.outcome == MemoryArtworkQueueReadOutcome.authentication), isTrue);
+  });
+
+  test('queue diagnostic completion ordering stays bound to each read', () async {
+    final responses = [Completer<http.Response?>(), Completer<http.Response?>()];
+    final events = <MemoryArtworkQueueReadDiagnostic>[];
+    var requests = 0;
+    final api = _queueDiagnosticApi(() => responses[requests++].future, events.add);
+    final first = api.queueStatus();
+    final second = api.queueStatus();
+    responses[1].complete(http.Response('private body', 403));
+    expect(await second, isNull);
+    responses[0].complete(_queueDiagnosticSuccess());
+    expect(await first, isNotNull);
+    expect(requests, 2);
+    expect(events.map((event) => event.readNumber), [2, 1]);
+    expect(events.map((event) => event.statusCode), [403, 200]);
+    expect(events.map((event) => event.outcome),
+        [MemoryArtworkQueueReadOutcome.non200, MemoryArtworkQueueReadOutcome.success]);
+  });
+
+  test('queue diagnostic observer failure cannot change results or rethrown exceptions', () async {
+    final error = StateError('private request failure');
+    var requests = 0;
+    var observations = 0;
+    final api = _queueDiagnosticApi(() async {
+      requests++;
+      if (requests == 1) return _queueDiagnosticSuccess();
+      if (requests == 2) return null;
+      throw error;
+    }, (_) {
+      observations++;
+      throw StateError('private observer failure');
+    });
+    expect(await api.queueStatus(), isNotNull);
+    expect(await api.queueStatus(), isNull);
+    await expectLater(api.queueStatus(), throwsA(same(error)));
+    expect(requests, 3);
+    expect(observations, 3);
+  });
 
   test('makeApiCall reports the mutation boundary only immediately before real HTTP egress', () async {
     var sendBoundaryCalls = 0;
