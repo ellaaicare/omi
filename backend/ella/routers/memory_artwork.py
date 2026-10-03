@@ -7,7 +7,7 @@ import re
 from typing import Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ella.services.ai_consent import assert_current_ai_consent, require_current_ai_consent
 from ella.services.memory_artwork import (
@@ -38,6 +38,13 @@ class MemoryArtworkPreferencesUpdate(BaseModel):
     consent: Literal["accepted", "declined"]
     consent_version: str = ARTWORK_CONSENT_VERSION
     style_version: str = DEFAULT_STYLE_VERSION
+
+
+class MemoryArtworkStyleUpdate(BaseModel):
+    consent_version: str
+    style_version: str
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class MemoryArtworkGenerationRequest(BaseModel):
@@ -117,6 +124,21 @@ async def put_memory_artwork_preferences(
         return await MemoryArtworkService().set_preferences(
             uid,
             consent=payload.consent,
+            consent_version=payload.consent_version,
+            style_version=payload.style_version,
+        )
+    except MemoryArtworkError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch("/memory-artwork/preferences")
+async def patch_memory_artwork_style(
+    payload: MemoryArtworkStyleUpdate,
+    uid: str = Depends(get_exact_firebase_uid),
+):
+    try:
+        return await MemoryArtworkService().set_style(
+            uid,
             consent_version=payload.consent_version,
             style_version=payload.style_version,
         )

@@ -47,6 +47,7 @@ def _load_service_module():
         "get_preferences",
         "stabilize_preferences_authority",
         "set_preferences",
+        "update_style",
         "get_backfill_control",
         "set_backfill_control",
         "pause_observed_legacy_auto_continue_control",
@@ -174,6 +175,26 @@ def _load_database_module():
 artwork_database = _load_database_module()
 
 
+class StyleReference:
+    def __init__(self, state, *, exists=True):
+        self.state = state
+        self.exists = exists
+
+    def get(self, transaction=None):
+        return types.SimpleNamespace(exists=self.exists, to_dict=lambda: copy.deepcopy(self.state))
+
+
+class StyleTransaction:
+    def __init__(self):
+        self.operations = []
+
+    def update(self, reference, payload):
+        self.operations.append(copy.deepcopy(payload))
+        for path, value in payload.items():
+            parent, key = path.split(".", 1)
+            reference.state[parent][key] = value
+
+
 def _terminal_memory(memory_id: str, *, created_at: datetime | None = None) -> dict:
     revision = f"summary-{memory_id}"
     return {
@@ -219,6 +240,20 @@ class FakeRepository:
         result = copy.deepcopy(self.preferences_by_uid.get(uid, {}))
         result[artwork.artwork_db.DELETION_PENDING_FIELD] = uid in self.deletion_pending
         return result
+
+    def update_style(self, uid, **kwargs):
+        reference = StyleReference(
+            {
+                artwork_database.PREFERENCES_FIELD: copy.deepcopy(self.preferences_by_uid.get(uid, {})),
+                artwork_database.DELETION_PENDING_FIELD: uid in self.deletion_pending,
+                artwork_database.BACKFILL_CONTROL_FIELD: copy.deepcopy(self.backfill_controls.get(uid, {})),
+            }
+        )
+        outcome = artwork_database._update_style_transaction(StyleTransaction(), reference, **kwargs)
+        if outcome == "updated":
+            self.preferences_by_uid[uid] = reference.state[artwork_database.PREFERENCES_FIELD]
+        assert reference.state[artwork_database.BACKFILL_CONTROL_FIELD] == self.backfill_controls.get(uid, {})
+        return outcome
 
     def set_preferences(self, uid, preferences, *, backfill_control_state=None):
         self.preferences_by_uid[uid] = copy.deepcopy(preferences)
@@ -7033,6 +7068,241 @@ def _load_memory_artwork_router_module(router_name: str):
             else:
                 setattr(parent_auth, "exact_firebase_auth", saved_parent_auth)
     return router_module
+
+
+@pytest.mark.parametrize("consent", ["declined", "not_set", "unknown"])
+def test_style_only_rejects_unaccepted_consent_without_reaccepting(consent):
+    repository = FakeRepository()
+    preferences = _accepted_preferences(_authority())
+    preferences["consent"] = consent
+    repository.preferences_by_uid["owner-a"] = copy.deepcopy(preferences)
+    service = artwork.MemoryArtworkService(
+        repository=repository, authority_resolver=_resolver, config=_enabled_config()
+    )
+    with pytest.raises(artwork.MemoryArtworkError) as failure:
+        asyncio.run(
+            service.set_style(
+                "owner-a",
+                consent_version=artwork.ARTWORK_CONSENT_VERSION,
+                style_version="ella.memory_artwork.style.paper-collage.v1",
+            )
+        )
+    assert failure.value.code == "memory_artwork_consent_required"
+    assert repository.preferences_by_uid["owner-a"] == preferences
+
+
+@pytest.mark.parametrize("drift", ["version", "binding", "profile", "digest", "deletion", "missing"])
+def test_style_only_transaction_refuses_current_authority_drift(drift):
+    preferences = _accepted_preferences(_authority())
+    state = {artwork_database.PREFERENCES_FIELD: preferences}
+    field = {
+        "version": "consent_version",
+        "binding": "binding_id",
+        "profile": "profile_id",
+        "digest": "authority_digest",
+    }.get(drift)
+    if field:
+        preferences[field] = "stale"
+    if drift == "deletion":
+        state[artwork_database.DELETION_PENDING_FIELD] = True
+    reference = StyleReference(state, exists=drift != "missing")
+    original = copy.deepcopy(state)
+    transaction = StyleTransaction()
+    outcome = artwork_database._update_style_transaction(
+        transaction,
+        reference,
+        consent_version=artwork.ARTWORK_CONSENT_VERSION,
+        style_version="ella.memory_artwork.style.paper-collage.v1",
+        binding_id="binding-owner-a",
+        profile_id="profile-owner-a",
+        authority_digest="digest-a",
+        updated_at=datetime.now(timezone.utc),
+    )
+    assert outcome != "updated"
+    assert transaction.operations == []
+    assert reference.state == original
+
+
+@pytest.mark.parametrize("queue_state", ["running", "paused", "cancelled"])
+def test_style_only_preserves_all_consent_receipt_and_binding_metadata(queue_state):
+    repository = FakeRepository()
+    preferences = _accepted_preferences(_authority())
+    preferences.update({"receipt_id": "receipt-a", "decided_at": "original-decision", "extension": {"retained": True}})
+    repository.preferences_by_uid["owner-a"] = copy.deepcopy(preferences)
+    control = {
+        "state": queue_state,
+        "generation_id": "original-generation",
+        "style_version": artwork.DEFAULT_STYLE_VERSION,
+        "batch_remaining": 3,
+        "auto_continue": True,
+        "auto_continue_receipt": {"retained": "original-owner-decision"},
+    }
+    repository.backfill_controls["owner-a"] = copy.deepcopy(control)
+    service = artwork.MemoryArtworkService(
+        repository=repository, authority_resolver=_resolver, config=_enabled_config()
+    )
+    result = asyncio.run(
+        service.set_style(
+            "owner-a",
+            consent_version=artwork.ARTWORK_CONSENT_VERSION,
+            style_version="ella.memory_artwork.style.paper-collage.v1",
+        )
+    )
+    stored = repository.preferences_by_uid["owner-a"]
+    assert result["consent"] == "accepted"
+    assert result["style_version"] == "ella.memory_artwork.style.paper-collage.v1"
+    assert {key: stored[key] for key in preferences if key != "style_version"} == {
+        key: value for key, value in preferences.items() if key != "style_version"
+    }
+    assert repository.jobs == {}
+    assert repository.reserve_writes == 0
+    assert repository.backfill_controls["owner-a"] == control
+    assert artwork.ARTWORK_CONSENT_VERSION == "ai-data-processors-v10"
+
+
+@pytest.mark.parametrize("drift", ["decline", "global", "owner", "disabled", "request_version"])
+def test_style_only_refuses_revocation_and_wrong_owner_after_resolution(drift):
+    repository = FakeRepository()
+    preferences = _accepted_preferences(_authority())
+    repository.preferences_by_uid["owner-a"] = copy.deepcopy(preferences)
+    global_consent = True
+
+    async def resolver(uid):
+        nonlocal global_consent
+        if drift == "decline":
+            repository.preferences_by_uid[uid]["consent"] = "declined"
+        if drift == "global":
+            global_consent = False
+        return _authority("owner-b" if drift == "owner" else uid)
+
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=resolver,
+        global_consent_checker=lambda uid: global_consent,
+        config=artwork.MemoryArtworkConfig(False, False, False, False) if drift == "disabled" else _enabled_config(),
+    )
+    with pytest.raises(artwork.MemoryArtworkError):
+        asyncio.run(
+            service.set_style(
+                "owner-a",
+                consent_version="stale" if drift == "request_version" else artwork.ARTWORK_CONSENT_VERSION,
+                style_version="ella.memory_artwork.style.paper-collage.v1",
+            )
+        )
+    expected = {**preferences, "consent": "declined"} if drift == "decline" else preferences
+    assert repository.preferences_by_uid["owner-a"] == expected
+    assert "owner-b" not in repository.preferences_by_uid
+
+    assert repository.jobs == {}
+
+
+@pytest.mark.parametrize("extra", [None, "consent", "binding_id", "uid", "receipt_id"])
+def test_style_patch_is_authenticated_and_forbids_consent_or_authority_inputs(monkeypatch, extra):
+    router = _load_memory_artwork_router_module("ella_memory_artwork_style_router_test")
+    repository = FakeRepository()
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    service = artwork.MemoryArtworkService(
+        repository=repository, authority_resolver=_resolver, config=_enabled_config()
+    )
+    monkeypatch.setattr(router, "MemoryArtworkService", lambda: service)
+    app = FastAPI()
+    app.include_router(router.router)
+    client = TestClient(app)
+    payload = {
+        "consent_version": artwork.ARTWORK_CONSENT_VERSION,
+        "style_version": "ella.memory_artwork.style.paper-collage.v1",
+    }
+    assert client.patch("/v1/ella/memory-artwork/preferences", json=payload).status_code == 401
+    app.dependency_overrides[router.get_exact_firebase_uid] = lambda: "owner-a"
+    if extra:
+        payload[extra] = "accepted" if extra == "consent" else "other-owner"
+    response = client.patch("/v1/ella/memory-artwork/preferences", json=payload)
+    assert response.status_code == (422 if extra else 200)
+    assert repository.preferences_by_uid["owner-a"]["consent"] == "accepted"
+    assert repository.preferences_by_uid["owner-a"]["style_version"] == (
+        artwork.DEFAULT_STYLE_VERSION if extra else "ella.memory_artwork.style.paper-collage.v1"
+    )
+    assert repository.jobs == {}
+
+
+def test_explicit_consent_preferences_put_contract_remains_unchanged(monkeypatch):
+    repository = FakeRepository()
+    erasures = []
+    monkeypatch.setattr(artwork, "delete_user_artwork_for_consent", lambda uid, **kwargs: erasures.append(uid))
+    service = artwork.MemoryArtworkService(
+        repository=repository, authority_resolver=_resolver, config=_enabled_config()
+    )
+    for consent in ["accepted", "declined"]:
+        result = asyncio.run(
+            service.set_preferences(
+                "owner-a",
+                consent=consent,
+                consent_version=artwork.ARTWORK_CONSENT_VERSION,
+                style_version=artwork.DEFAULT_STYLE_VERSION,
+            )
+        )
+        assert result["consent"] == consent
+        assert repository.preferences_by_uid["owner-a"]["consent"] == consent
+        assert repository.backfill_controls["owner-a"]["state"] == ("running" if consent == "accepted" else "cancelled")
+    assert erasures == ["owner-a"]
+
+
+def test_style_only_owner_allowlist_denies_before_resolution_or_mutation():
+    repository = FakeRepository()
+    preferences = _accepted_preferences(_authority())
+    repository.preferences_by_uid["owner-a"] = copy.deepcopy(preferences)
+
+    async def never_resolve(uid):
+        raise AssertionError("ineligible owners must not resolve runtime")
+
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=never_resolve,
+        config=artwork.MemoryArtworkConfig(True, True, True, True, frozenset({"owner-b"})),
+    )
+    with pytest.raises(artwork.MemoryArtworkError, match="memory_artwork_internal_owner_required"):
+        asyncio.run(
+            service.set_style(
+                "owner-a",
+                consent_version=artwork.ARTWORK_CONSENT_VERSION,
+                style_version="ella.memory_artwork.style.paper-collage.v1",
+            )
+        )
+    assert repository.preferences_by_uid["owner-a"] == preferences
+    assert repository.jobs == {}
+
+
+def test_style_only_stale_digest_refuses_without_stabilization_or_receipt_rewrite():
+    repository = FakeRepository()
+    authority = _authority(
+        digest=artwork._stable_artwork_authority_digest("owner-a", "binding-owner-a", "profile-owner-a")
+    )
+    preferences = _accepted_preferences(authority)
+    preferences.update({"authority_digest": "old-credential-digest", "receipt_id": "original-receipt"})
+    repository.preferences_by_uid["owner-a"] = copy.deepcopy(preferences)
+
+    async def stable_resolver(uid):
+        return authority
+
+    def never_stabilize(*args, **kwargs):
+        raise AssertionError("style-only update must not migrate authority metadata")
+
+    repository.stabilize_preferences_authority = never_stabilize
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=stable_resolver,
+        config=_enabled_config(),
+    )
+    with pytest.raises(artwork.MemoryArtworkError, match="memory_artwork_preference_authority_stale"):
+        asyncio.run(
+            service.set_style(
+                "owner-a",
+                consent_version=artwork.ARTWORK_CONSENT_VERSION,
+                style_version="ella.memory_artwork.style.paper-collage.v1",
+            )
+        )
+    assert repository.preferences_by_uid["owner-a"] == preferences
+    assert repository.jobs == {}
 
 
 def test_mounted_route_rejects_unauthenticated_request_before_service_work(monkeypatch):
