@@ -1386,6 +1386,147 @@ void main() {
     expect(find.byKey(const Key('memory-cached-artwork-memory-corrupted-cache')), findsNothing);
   });
 
+  for (final replacement in ['memory', 'authority', 'variant']) {
+    testWidgets('retired local image error cannot evict $replacement replacement artwork', (tester) async {
+      const displayKey = 'local-render-display';
+      var api = _TerminalPollArtworkApi(
+        cacheScope: displayKey,
+        read: (_) async => const MemoryArtworkResult(status: MemoryArtworkResultStatus.unavailable),
+      );
+      final file = File('assets/images/onboarding-bg-1.webp');
+      final evicted = <String>[];
+      var memoryId = 'memory-local-render';
+      var authorityEpoch = 1;
+      var refreshEpoch = 0;
+      await trustDisplayKey(displayKey);
+      Widget build() => MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: MemoryArtworkImage(
+              conversation: ServerConversation(
+                id: memoryId,
+                createdAt: DateTime(2026, 9, 30),
+                structured: Structured('A memory', 'A saved summary.'),
+              ),
+              api: api,
+              deferRemoteFetch: true,
+              authorityEpoch: authorityEpoch,
+              refreshEpoch: refreshEpoch,
+              cachedFileLookup: (_) async => file,
+              cacheEvictor: (key) async => evicted.add(key),
+            ),
+          );
+      await tester.pumpWidget(build());
+      await tester.pump();
+      final original = tester.widget<Image>(find.byKey(Key('memory-cached-artwork-$memoryId')));
+      if (replacement == 'memory') {
+        memoryId = 'memory-local-replacement';
+      } else if (replacement == 'authority') {
+        authorityEpoch++;
+      } else {
+        await MemoryArtworkCache.rememberDisplayCacheKey(
+          provisionalCacheKey: displayKey,
+          authoritativeCacheKey: 'local-render-new-variant',
+          isAuthorityCurrent: () => true,
+        );
+        refreshEpoch++;
+      }
+      if (replacement != 'variant') {
+        api.current = false;
+        api = _TerminalPollArtworkApi(
+          cacheScope: 'local-render-new-$replacement',
+          read: (_) async => const MemoryArtworkResult(status: MemoryArtworkResultStatus.unavailable),
+        );
+        await trustDisplayKey('local-render-new-$replacement');
+      }
+      await tester.pumpWidget(build());
+      await tester.pump();
+      original.errorBuilder!(tester.element(find.byType(MemoryArtworkImage)), Exception('retired codec'), null);
+      await tester.pump();
+      await tester.pump();
+      expect(evicted, isEmpty, reason: 'retired render callbacks must not evict the current file/key');
+      expect(find.byKey(Key('memory-cached-artwork-$memoryId')), findsOneWidget);
+      expect(api.readCalls, 0);
+      expect(api.generationCalls, 0);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('retired local image error cannot evict a replaced file in the same request', (tester) async {
+    final api = _DelayedArtworkApi();
+    final evicted = <String>[];
+    await trustDisplayKey('owner-profile-memory-revision-cache-key');
+    await tester.pumpWidget(MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: MemoryArtworkImage(
+        conversation: ServerConversation(
+          id: 'memory-local-file-replacement',
+          createdAt: DateTime(2026, 9, 30),
+          structured: Structured('A memory', 'A saved summary.'),
+        ),
+        api: api,
+        cachedFileLookup: (_) async => File('assets/images/onboarding-bg-1.webp'),
+        cacheEvictor: (key) async => evicted.add(key),
+      ),
+    ));
+    await tester.pump();
+    final original = tester.widget<Image>(find.byKey(const Key('memory-cached-artwork-memory-local-file-replacement')));
+    api.remoteResult.complete(MemoryArtworkResult(
+      status: MemoryArtworkResultStatus.ready,
+      url: Uri.parse('https://private-storage.example/local-file-replacement.png'),
+      cacheKey: 'owner-profile-memory-revision-cache-key',
+    ));
+    await tester.pump();
+    await tester.pump();
+    final replacement =
+        tester.widget<Image>(find.byKey(const Key('memory-cached-artwork-memory-local-file-replacement')));
+    File renderedFile(Image image) => ((image.image as ResizeImage).imageProvider as FileImage).file;
+    expect(identical(renderedFile(original), renderedFile(replacement)), isFalse);
+    original.errorBuilder!(tester.element(find.byType(MemoryArtworkImage)), Exception('obsolete file'), null);
+    await tester.pump();
+    await tester.pump();
+    expect(evicted, isEmpty);
+    expect(find.byKey(const Key('memory-cached-artwork-memory-local-file-replacement')), findsOneWidget);
+    expect(api.lastEnqueueIfMissing, isFalse);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('local image error after authority revocation cannot evict saved artwork', (tester) async {
+    const displayKey = 'local-render-revoked';
+    final api = _TerminalPollArtworkApi(
+      cacheScope: displayKey,
+      read: (_) async => const MemoryArtworkResult(status: MemoryArtworkResultStatus.unavailable),
+    );
+    final evicted = <String>[];
+    await trustDisplayKey(displayKey);
+    await tester.pumpWidget(MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: MemoryArtworkImage(
+        conversation: ServerConversation(
+          id: 'memory-local-revoked',
+          createdAt: DateTime(2026, 9, 30),
+          structured: Structured('A memory', 'A saved summary.'),
+        ),
+        api: api,
+        deferRemoteFetch: true,
+        cachedFileLookup: (_) async => File('assets/images/onboarding-bg-1.webp'),
+        cacheEvictor: (key) async => evicted.add(key),
+      ),
+    ));
+    await tester.pump();
+    final image = tester.widget<Image>(find.byKey(const Key('memory-cached-artwork-memory-local-revoked')));
+    api.current = false;
+    image.errorBuilder!(tester.element(find.byType(MemoryArtworkImage)), Exception('retired owner'), null);
+    await tester.pump();
+    await tester.pump();
+    expect(evicted, isEmpty);
+    expect(api.readCalls, 0);
+    expect(api.generationCalls, 0);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('keeps cached artwork visible through a transient refresh failure', (tester) async {
     final api = _DelayedArtworkApi();
     final cachedFile = File('assets/images/onboarding-bg-1.webp');
