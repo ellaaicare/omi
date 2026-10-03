@@ -149,13 +149,16 @@ class MemoryArtworkPreferences {
   final String consentVersion;
   final String styleVersion;
   final bool releaseEnabled;
+
+  bool get hasAcceptedConsent => consent == 'accepted' && consentVersion.isNotEmpty;
 }
 
 class MemoryArtworkPreferenceUpdate {
-  const MemoryArtworkPreferenceUpdate({required this.saved, this.failureCode = ''});
+  const MemoryArtworkPreferenceUpdate({required this.saved, this.failureCode = '', this.preferences});
 
   final bool saved;
   final String failureCode;
+  final MemoryArtworkPreferences? preferences;
 }
 
 class MemoryArtworkLibrary {
@@ -612,9 +615,16 @@ class MemoryArtworkApi {
   Future<MemoryArtworkPreferences?> preferences() async {
     final authority = _authorityProvider();
     if (authority == null) return null;
+    return _preferencesWithAuthority(authority);
+  }
+
+  Future<MemoryArtworkPreferences?> _preferencesWithAuthority(ExactAccountAuthorityVerifier authority) async {
     final response = await _call(authority, method: 'GET', path: 'v1/ella/memory-artwork/preferences');
-    if (response == null || response.statusCode != 200) return null;
-    final payload = _jsonObject(response.body);
+    if (response == null || response.statusCode != 200 || !authority.isExactCurrent()) return null;
+    return _preferencesFromPayload(_jsonObject(response.body));
+  }
+
+  static MemoryArtworkPreferences? _preferencesFromPayload(Map<String, dynamic>? payload) {
     if (payload == null || payload['schema_version'] != memoryArtworkSchemaVersion) return null;
     return MemoryArtworkPreferences(
       consent: payload['consent']?.toString().trim() ?? 'not_set',
@@ -632,11 +642,21 @@ class MemoryArtworkApi {
     if (consentVersion.isEmpty || !_supportedStyles.contains(styleVersion)) {
       return const MemoryArtworkPreferenceUpdate(saved: false, failureCode: 'memory_artwork_preference_invalid');
     }
+    final current = await _preferencesWithAuthority(authority);
+    if (!authority.isExactCurrent()) {
+      return const MemoryArtworkPreferenceUpdate(saved: false, failureCode: 'memory_artwork_authority_changed');
+    }
+    if (current == null || !current.hasAcceptedConsent || current.consentVersion != consentVersion) {
+      return const MemoryArtworkPreferenceUpdate(saved: false, failureCode: 'memory_artwork_consent_required');
+    }
+    if (!current.releaseEnabled) {
+      return const MemoryArtworkPreferenceUpdate(saved: false, failureCode: 'memory_artwork_release_disabled');
+    }
     final response = await _call(
       authority,
-      method: 'PUT',
+      method: 'PATCH',
       path: 'v1/ella/memory-artwork/preferences',
-      body: jsonEncode({'consent': 'accepted', 'consent_version': consentVersion, 'style_version': styleVersion}),
+      body: jsonEncode({'consent_version': consentVersion, 'style_version': styleVersion}),
     );
     if (!authority.isExactCurrent()) {
       return const MemoryArtworkPreferenceUpdate(saved: false, failureCode: 'memory_artwork_authority_changed');
@@ -644,7 +664,15 @@ class MemoryArtworkApi {
     if (response?.statusCode != 200) {
       return MemoryArtworkPreferenceUpdate(saved: false, failureCode: _safeFailureCode(response?.body));
     }
-    return const MemoryArtworkPreferenceUpdate(saved: true);
+    final saved = _preferencesFromPayload(_jsonObject(response!.body));
+    if (saved == null ||
+        !saved.hasAcceptedConsent ||
+        saved.consentVersion != consentVersion ||
+        saved.styleVersion != styleVersion ||
+        !saved.releaseEnabled) {
+      return const MemoryArtworkPreferenceUpdate(saved: false, failureCode: 'memory_artwork_response_invalid');
+    }
+    return MemoryArtworkPreferenceUpdate(saved: true, preferences: saved);
   }
 
   Future<MemoryArtworkLibraries?> libraries() async {

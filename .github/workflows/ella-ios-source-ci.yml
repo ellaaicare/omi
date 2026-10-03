@@ -888,7 +888,7 @@ jobs:
             "$expected_sha" "$actual_sha" "$expected_test_count" "$actual_pass_count" "${expected_test_ids[*]}"
 
   callback-summary-cas-contract:
-    name: Callback 79, artwork 67, and Firestore 6 contracts
+    name: Callback 79, artwork 88, and Firestore 7 contracts
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -949,8 +949,8 @@ jobs:
           source "$RUNNER_TEMP/callback-cas-python/bin/activate"
           artwork_ids="$(python -m pytest --collect-only -q tests/unit/test_memory_artwork_contract.py | sed '/^$/d')"
           artwork_count="$(grep -c '::' <<<"$artwork_ids")"
-          [[ "$artwork_count" -eq 67 ]] || {
-            echo "Memory artwork collection mismatch: expectedCount=67 actualCount=$artwork_count" >&2
+          [[ "$artwork_count" -eq 88 ]] || {
+            echo "Memory artwork collection mismatch: expectedCount=88 actualCount=$artwork_count" >&2
             exit 1
           }
           grep -Fq 'test_mounted_route_rejects_unauthenticated_request_before_service_work' <<<"$artwork_ids"
@@ -995,11 +995,32 @@ jobs:
           grep -Fq 'test_missing_ready_blob_is_demoted_and_can_be_rereserved' <<<"$artwork_ids"
           grep -Fq 'test_stale_missing_blob_read_cannot_demote_a_new_same_key_generation_claim' <<<"$artwork_ids"
           grep -Fq 'test_pending_job_query_is_bounded_to_due_work_and_ordered' <<<"$artwork_ids"
+          grep -Fq 'test_style_only_rejects_unaccepted_consent_without_reaccepting[declined]' <<<"$artwork_ids"
+          grep -Fq 'test_style_only_rejects_unaccepted_consent_without_reaccepting[not_set]' <<<"$artwork_ids"
+          grep -Fq 'test_style_only_rejects_unaccepted_consent_without_reaccepting[unknown]' <<<"$artwork_ids"
+          grep -Fq 'test_style_only_transaction_refuses_current_authority_drift[version]' <<<"$artwork_ids"
+          grep -Fq 'test_style_only_transaction_refuses_current_authority_drift[binding]' <<<"$artwork_ids"
+          grep -Fq 'test_style_only_transaction_refuses_current_authority_drift[profile]' <<<"$artwork_ids"
+          grep -Fq 'test_style_only_transaction_refuses_current_authority_drift[digest]' <<<"$artwork_ids"
+          grep -Fq 'test_style_only_transaction_refuses_current_authority_drift[deletion]' <<<"$artwork_ids"
+          grep -Fq 'test_style_only_transaction_refuses_current_authority_drift[missing]' <<<"$artwork_ids"
+          grep -Fq 'test_style_only_preserves_all_consent_receipt_and_binding_metadata' <<<"$artwork_ids"
+          grep -Fq 'test_style_only_refuses_revocation_and_wrong_owner_after_resolution[decline]' <<<"$artwork_ids"
+          grep -Fq 'test_style_only_refuses_revocation_and_wrong_owner_after_resolution[global]' <<<"$artwork_ids"
+          grep -Fq 'test_style_only_refuses_revocation_and_wrong_owner_after_resolution[owner]' <<<"$artwork_ids"
+          grep -Fq 'test_style_only_refuses_revocation_and_wrong_owner_after_resolution[disabled]' <<<"$artwork_ids"
+          grep -Fq 'test_style_only_refuses_revocation_and_wrong_owner_after_resolution[request_version]' <<<"$artwork_ids"
+          grep -Fq 'test_style_patch_is_authenticated_and_forbids_consent_or_authority_inputs[None]' <<<"$artwork_ids"
+          grep -Fq 'test_style_patch_is_authenticated_and_forbids_consent_or_authority_inputs[consent]' <<<"$artwork_ids"
+          grep -Fq 'test_style_patch_is_authenticated_and_forbids_consent_or_authority_inputs[binding_id]' <<<"$artwork_ids"
+          grep -Fq 'test_style_patch_is_authenticated_and_forbids_consent_or_authority_inputs[uid]' <<<"$artwork_ids"
+          grep -Fq 'test_style_patch_is_authenticated_and_forbids_consent_or_authority_inputs[receipt_id]' <<<"$artwork_ids"
+          grep -Fq 'test_explicit_consent_preferences_put_contract_remains_unchanged' <<<"$artwork_ids"
           python -m pytest -q -rA tests/unit/test_memory_artwork_contract.py \
             | tee /tmp/memory-artwork-pytest.log
-          grep -Eq '67 passed' /tmp/memory-artwork-pytest.log
+          grep -Eq '88 passed' /tmp/memory-artwork-pytest.log
           ! grep -Eqi '(^|[[:space:]])(skipped|deselected)([[:space:]]|$)' /tmp/memory-artwork-pytest.log
-          printf 'Memory artwork execution receipt: expectedCount=67 actualCount=67 skipped=0 deselected=0\n'
+          printf 'Memory artwork execution receipt: expectedCount=88 actualCount=88 skipped=0 deselected=0\n'
 
       - name: Run real Firestore summary CAS and artwork dispatch inventory
         working-directory: backend
@@ -1014,11 +1035,12 @@ jobs:
           }
           artwork_firestore_ids="$(python -m pytest --collect-only -q tests/unit/test_memory_artwork_firestore.py | sed '/^$/d')"
           artwork_firestore_count="$(grep -c '::' <<<"$artwork_firestore_ids")"
-          [[ "$artwork_firestore_count" -eq 1 ]] || {
-            echo "Firestore artwork collection mismatch: expectedCount=1 actualCount=$artwork_firestore_count" >&2
+          [[ "$artwork_firestore_count" -eq 2 ]] || {
+            echo "Firestore artwork collection mismatch: expectedCount=2 actualCount=$artwork_firestore_count" >&2
             exit 1
           }
           grep -Fq 'test_real_firestore_generation_and_dispatch_commit_and_repair_together' <<<"$artwork_firestore_ids"
+          grep -Fq 'test_real_firestore_style_only_cannot_overwrite_a_concurrent_decline' <<<"$artwork_firestore_ids"
 
           emulator_name="omi-summary-cas-firestore-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           docker run --rm -d \
@@ -1045,7 +1067,7 @@ jobs:
               tests/unit/test_conversation_summary_cas.py \
               tests/unit/test_memory_artwork_firestore.py \
             | tee /tmp/firestore-summary-cas-pytest.log
-          grep -Eq '6 passed' /tmp/firestore-summary-cas-pytest.log
+          grep -Eq '7 passed' /tmp/firestore-summary-cas-pytest.log
           ! grep -Eqi '(^|[[:space:]])(skipped|deselected)([[:space:]]|$)' \
             /tmp/firestore-summary-cas-pytest.log
-          printf 'Firestore CAS/artwork execution receipt: expectedCount=6 actualCount=6 skipped=0 deselected=0\n'
+          printf 'Firestore CAS/artwork execution receipt: expectedCount=7 actualCount=7 skipped=0 deselected=0\n'

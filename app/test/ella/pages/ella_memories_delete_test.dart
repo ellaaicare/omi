@@ -38,6 +38,7 @@ class _MutableAuthority implements AccountCommitAuthority {
 class _FakeArtworkApi extends MemoryArtworkApi {
   _FakeArtworkApi({
     this.releaseEnabled = true,
+    this.consent = 'accepted',
     List<MemoryArtworkResult>? displayResults,
     List<MemoryArtworkQueueStatus?>? queueStatuses,
   })  : _displayResults = List<MemoryArtworkResult>.of(displayResults ?? const []),
@@ -51,6 +52,8 @@ class _FakeArtworkApi extends MemoryArtworkApi {
   bool isDisplayAuthorityCurrent() => true;
 
   final bool releaseEnabled;
+  final String consent;
+  int styleCalls = 0;
   String selectedStyle = memoryArtworkDefaultStyle;
   int backfillCalls = 0;
   final List<String?> backfillCursors = [];
@@ -63,7 +66,7 @@ class _FakeArtworkApi extends MemoryArtworkApi {
 
   @override
   Future<MemoryArtworkPreferences?> preferences() async => MemoryArtworkPreferences(
-        consent: 'accepted',
+        consent: consent,
         consentVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
         styleVersion: selectedStyle,
         releaseEnabled: releaseEnabled,
@@ -71,6 +74,7 @@ class _FakeArtworkApi extends MemoryArtworkApi {
 
   @override
   Future<MemoryArtworkPreferenceUpdate> setStyle({required String consentVersion, required String styleVersion}) async {
+    styleCalls++;
     expect(consentVersion, SharedPreferencesUtil.currentAiConsentContractVersion);
     selectedStyle = styleVersion;
     return const MemoryArtworkPreferenceUpdate(saved: true);
@@ -167,6 +171,16 @@ class _DelayedBackfillArtworkApi extends _FakeArtworkApi {
     backfillModes.add(mode);
     if (backfillCalls == 1) return firstBackfill.future;
     return Future.value(const MemoryArtworkBackfillPage(queued: 1, existing: 0, skipped: 0, hasMore: false));
+  }
+}
+
+class _DelayedStyleArtworkApi extends _FakeArtworkApi {
+  final result = Completer<MemoryArtworkPreferenceUpdate>();
+
+  @override
+  Future<MemoryArtworkPreferenceUpdate> setStyle({required String consentVersion, required String styleVersion}) {
+    styleCalls++;
+    return result.future;
   }
 }
 
@@ -906,6 +920,60 @@ void main() {
     expect(artworkApi.backfillCalls, backfillCallsBeforeStyleChange + 1);
     expect(find.textContaining('Illustration style saved'), findsOneWidget);
   });
+
+  for (final consent in ['not_set', 'declined']) {
+    testWidgets('Gallery style selection never accepts $consent artwork consent', (tester) async {
+      final provider = ConversationProvider()
+        ..conversations = [memory('style-consent-memory')]
+        ..hasLoadedConversations = true
+        ..hasFreshConversations = true
+        ..hasMoreConversations = false;
+      final api = _FakeArtworkApi(consent: consent);
+      addTearDown(provider.dispose);
+      await pumpPage(tester, provider, artworkApi: api);
+      final backfills = api.backfillCalls;
+      await tester.tap(find.byKey(const Key('memory-artwork-style-menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Paper collage'));
+      await tester.pumpAndSettle();
+      expect(api.styleCalls, 0);
+      expect(api.backfillCalls, backfills);
+      expect(api.selectedStyle, memoryArtworkDefaultStyle);
+      expect(find.textContaining('Illustration style saved'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  for (final completion in ['account_changed', 'authority_exception', 'transport_exception']) {
+    testWidgets('Gallery style response after $completion never grants consent or starts preview', (tester) async {
+      final provider = ConversationProvider()
+        ..conversations = [memory('style-origin-memory')]
+        ..hasLoadedConversations = true
+        ..hasFreshConversations = true
+        ..hasMoreConversations = false;
+      final api = _DelayedStyleArtworkApi();
+      addTearDown(provider.dispose);
+      await pumpPage(tester, provider, artworkApi: api);
+      final backfills = api.backfillCalls;
+      final menu = tester.widget<PopupMenuButton<String>>(find.byKey(const Key('memory-artwork-style-menu')));
+      menu.onSelected!(memoryArtworkPaperCollageStyle);
+      await tester.pump();
+      expect(api.styleCalls, 1);
+      if (completion == 'account_changed') {
+        SharedPreferencesUtil().invalidateAccountAuthorityForTransition();
+        await tester.pump();
+        api.result.complete(const MemoryArtworkPreferenceUpdate(saved: true));
+      } else if (completion == 'authority_exception') {
+        api.result.completeError(ExactAccountAuthorityChangedException('synthetic retired style origin'));
+      } else {
+        api.result.completeError(StateError('synthetic transport failure'));
+      }
+      await tester.pumpAndSettle();
+      expect(api.backfillCalls, backfills);
+      expect(find.textContaining('Illustration style saved'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets('unavailable artwork preferences stop retrying until a later authority epoch', (tester) async {
     final provider = ConversationProvider()

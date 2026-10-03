@@ -1102,7 +1102,16 @@ void main() {
             200,
           );
         }
-        return http.Response('{}', 200);
+        return http.Response(
+          jsonEncode({
+            'schema_version': memoryArtworkSchemaVersion,
+            'consent': 'accepted',
+            'consent_version': 'ai-data-processors-v10',
+            'style_version': method == 'PATCH' ? memoryArtworkPaperCollageStyle : memoryArtworkDefaultStyle,
+            'release_enabled': true,
+          }),
+          200,
+        );
       },
     );
 
@@ -1115,14 +1124,128 @@ void main() {
       isTrue,
     );
     expect(await api.backfillRecent(), isTrue);
-    expect(methods, ['PUT', 'POST']);
+    expect(methods, ['GET', 'PATCH', 'POST']);
     expect(urls, [
+      'https://api.example/v1/ella/memory-artwork/preferences',
       'https://api.example/v1/ella/memory-artwork/preferences',
       'https://api.example/v1/ella/memory-artwork/backfill',
     ]);
-    expect(jsonDecode(bodies.first)['style_version'], memoryArtworkPaperCollageStyle);
+    expect(jsonDecode(bodies[1]), {
+      'consent_version': 'ai-data-processors-v10',
+      'style_version': memoryArtworkPaperCollageStyle,
+    });
     expect(jsonDecode(bodies.last), {'mode': 'preview'});
   });
+
+  for (final consent in ['not_set', 'declined', 'unknown']) {
+    test('style change refuses $consent artwork consent without a preference write', () async {
+      final methods = <String>[];
+      var storedConsent = consent;
+      final api = MemoryArtworkApi(
+        baseUrl: 'https://api.example',
+        authorityProvider: () => _Authority('owner-a'),
+        request: ({
+          required url,
+          required headers,
+          required body,
+          required method,
+          timeout,
+          retries,
+          requireAuthCheck,
+          expectedAuthenticatedUid,
+          exactAuthority,
+          onSendAttempt,
+        }) async {
+          methods.add(method);
+          if (method == 'PUT') storedConsent = jsonDecode(body)['consent'] as String;
+          return http.Response(
+            jsonEncode({
+              'schema_version': memoryArtworkSchemaVersion,
+              'consent': storedConsent,
+              'consent_version': 'ai-data-processors-v10',
+              'style_version': memoryArtworkDefaultStyle,
+              'release_enabled': true,
+            }),
+            200,
+          );
+        },
+      );
+
+      final result = await api.setStyle(
+        consentVersion: 'ai-data-processors-v10',
+        styleVersion: memoryArtworkPaperCollageStyle,
+      );
+
+      expect(result.saved, isFalse);
+      expect(result.failureCode, 'memory_artwork_consent_required');
+      expect(methods, ['GET']);
+      expect(storedConsent, consent);
+    });
+  }
+
+  for (final drift in [
+    'version',
+    'unavailable',
+    'authority_before',
+    'authority_after',
+    'decline_after',
+    'unsupported'
+  ]) {
+    test('style-only request fails closed on $drift without a consent PUT or generation POST', () async {
+      final authority = _Authority('owner-a');
+      final methods = <String>[];
+      final api = MemoryArtworkApi(
+        baseUrl: 'https://api.example',
+        authorityProvider: () => authority,
+        request: ({
+          required url,
+          required headers,
+          required body,
+          required method,
+          timeout,
+          retries,
+          requireAuthCheck,
+          expectedAuthenticatedUid,
+          exactAuthority,
+          onSendAttempt,
+        }) async {
+          methods.add(method);
+          expect(expectedAuthenticatedUid, 'owner-a');
+          expect(identical(exactAuthority, authority), isTrue);
+          if (method == 'GET' && drift == 'authority_before') authority.current = false;
+          if (method == 'PATCH' && drift == 'authority_after') authority.current = false;
+          if (method == 'PATCH') {
+            expect(jsonDecode(body), {
+              'consent_version': 'ai-data-processors-v10',
+              'style_version': memoryArtworkPaperCollageStyle,
+            });
+            if (drift == 'unsupported') return http.Response('{}', 405);
+          }
+          return http.Response(
+            jsonEncode({
+              'schema_version': memoryArtworkSchemaVersion,
+              'consent': method == 'PATCH' && drift == 'decline_after' ? 'declined' : 'accepted',
+              'consent_version': drift == 'version' ? 'other-version' : 'ai-data-processors-v10',
+              'style_version': method == 'PATCH' ? memoryArtworkPaperCollageStyle : memoryArtworkDefaultStyle,
+              'release_enabled': true,
+            }),
+            drift == 'unavailable' ? 503 : 200,
+          );
+        },
+      );
+      final result = await api.setStyle(
+        consentVersion: 'ai-data-processors-v10',
+        styleVersion: memoryArtworkPaperCollageStyle,
+      );
+      expect(result.saved, isFalse);
+      expect(methods, [
+        'GET',
+        if (const ['authority_after', 'decline_after', 'unsupported'].contains(drift)) 'PATCH'
+      ]);
+      expect(methods, isNot(contains('PUT')));
+      expect(methods, isNot(contains('POST')));
+    });
+  }
 
   test('style update exposes a safe typed backend failure', () async {
     final api = MemoryArtworkApi(

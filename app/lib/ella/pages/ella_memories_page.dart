@@ -341,23 +341,32 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
 
   Future<void> _selectArtworkStyle(String styleVersion) async {
     final preferences = _artworkPreferences;
-    if (preferences == null || !preferences.releaseEnabled) {
+    if (preferences == null || !preferences.releaseEnabled || !preferences.hasAcceptedConsent) {
       _showMessage(context.l10n.memoryArtworkStyleUnavailable);
       return;
     }
-    final result = await _artworkApi.setStyle(consentVersion: preferences.consentVersion, styleVersion: styleVersion);
-    if (!mounted) return;
+    final authorityEpoch = _artworkAuthorityEpoch;
+    MemoryArtworkPreferenceUpdate result;
+    try {
+      result = await _artworkApi.setStyle(consentVersion: preferences.consentVersion, styleVersion: styleVersion);
+    } on ExactAccountAuthorityChangedException {
+      return;
+    } catch (_) {
+      result = const MemoryArtworkPreferenceUpdate(saved: false);
+    }
+    if (!mounted || authorityEpoch != _artworkAuthorityEpoch || !_artworkApi.isDisplayAuthorityCurrent()) return;
     if (!result.saved) {
       _showMessage(context.l10n.memoryArtworkStyleUnavailable);
       return;
     }
     setState(() {
-      _artworkPreferences = MemoryArtworkPreferences(
-        consent: 'accepted',
-        consentVersion: preferences.consentVersion,
-        styleVersion: styleVersion,
-        releaseEnabled: preferences.releaseEnabled,
-      );
+      _artworkPreferences = result.preferences ??
+          MemoryArtworkPreferences(
+            consent: preferences.consent,
+            consentVersion: preferences.consentVersion,
+            styleVersion: styleVersion,
+            releaseEnabled: preferences.releaseEnabled,
+          );
       // A prior style can have a larger ready count. Resetting its queue
       // snapshot makes the new style's first status authoritative.
       _artworkQueueStatus = null;
