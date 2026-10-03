@@ -275,6 +275,7 @@ ROUTE_GROUPS = (
         ("GET", "/v1/ella/memory-artwork/day/{day}", "get_memory_artwork_day"),
         ("GET", "/v1/ella/memory-artwork/preferences", "get_memory_artwork_preferences"),
         ("PUT", "/v1/ella/memory-artwork/preferences", "put_memory_artwork_preferences"),
+        ("PATCH", "/v1/ella/memory-artwork/preferences", "patch_memory_artwork_style"),
         ("GET", "/v1/ella/memories/{memory_id}/artwork", "get_memory_artwork"),
         ("POST", "/v1/ella/memories/{memory_id}/artwork", "retry_memory_artwork"),
         ("POST", "/v1/ella/memory-artwork/backfill", "backfill_memory_artwork"),
