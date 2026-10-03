@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from threading import Event
 
 import pytest
+from google.cloud import firestore
 
 
 @pytest.mark.skipif(
@@ -16,8 +17,6 @@ import pytest
     reason="requires the hosted Firestore emulator gate",
 )
 def test_real_firestore_style_only_cannot_overwrite_a_concurrent_decline(monkeypatch):
-    from google.cloud import firestore
-
     client = firestore.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "omi-ci"))
     monkeypatch.setitem(sys.modules, "database._client", SimpleNamespace(db=client))
     path = Path(__file__).resolve().parents[2] / "database" / "memory_artwork.py"
