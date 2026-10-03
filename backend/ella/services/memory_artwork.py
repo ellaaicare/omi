@@ -1749,6 +1749,9 @@ class MemoryArtworkService:
             return {"outcome": "disabled", "status": "unavailable"}
         if not self.global_consent_checker(uid):
             return {"outcome": "consent_required", "status": "unavailable"}
+        # Eligibility and a generation request do not grant artwork consent.
+        if preferences.get("consent") != "accepted" or preferences.get("consent_version") != ARTWORK_CONSENT_VERSION:
+            return {"outcome": "consent_required", "status": "unavailable"}
         if _source_is_sensitive(conversation):
             return {"outcome": "sensitive_source_excluded", "status": "unavailable"}
         published_artwork, _, _ = _release_artwork(conversation)
@@ -1774,22 +1777,13 @@ class MemoryArtworkService:
                 ),
             }
         authority = await self.authority_resolver(uid)
-        if not preferences:
-            self.repository.set_preferences(
-                uid,
-                {
-                    "schema_version": ARTWORK_SCHEMA_VERSION,
-                    "consent": "accepted",
-                    "consent_version": ARTWORK_CONSENT_VERSION,
-                    "style_version": DEFAULT_STYLE_VERSION,
-                    "binding_id": authority.binding_id,
-                    "profile_id": authority.profile_id,
-                    "authority_digest": authority.authority_digest,
-                    "updated_at": datetime.now(timezone.utc),
-                },
-                backfill_control_state="running",
-            )
-            preferences = self.repository.get_preferences(uid)
+        preferences = self.repository.get_preferences(uid)
+        if (
+            not self.global_consent_checker(uid)
+            or preferences.get("consent") != "accepted"
+            or preferences.get("consent_version") != ARTWORK_CONSENT_VERSION
+        ):
+            return {"outcome": "consent_required", "status": "unavailable"}
         preferences = self._stabilize_preferences(uid, authority)
         if preferences.get("consent") != "accepted" or preferences.get("consent_version") != ARTWORK_CONSENT_VERSION:
             return {"outcome": "consent_required", "status": "unavailable"}

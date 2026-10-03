@@ -2391,6 +2391,215 @@ def test_disabled_and_declined_states_never_call_provider():
     assert provider.calls == 0
 
 
+class StoredConsentRepository(FakeRepository):
+    """Match Firestore's genuinely empty absent-preference read."""
+
+    def __init__(self):
+        super().__init__()
+        self.preference_writes = 0
+        self.stabilizations = 0
+
+    def get_preferences(self, uid):
+        result = super().get_preferences(uid)
+        if not result.get(artwork.artwork_db.DELETION_PENDING_FIELD):
+            result.pop(artwork.artwork_db.DELETION_PENDING_FIELD, None)
+        return result
+
+    def set_preferences(self, uid, preferences, **kwargs):
+        self.preference_writes += 1
+        return super().set_preferences(uid, preferences, **kwargs)
+
+    def stabilize_preferences_authority(self, uid, **kwargs):
+        self.stabilizations += 1
+        return super().stabilize_preferences_authority(uid, **kwargs)
+
+
+@pytest.mark.parametrize("request_mode", ["automatic", "manual"])
+@pytest.mark.parametrize("consent_state", ["missing", "not_set", "declined", "wrong_version"])
+def test_stored_artwork_consent_required_before_generation_admission(request_mode, consent_state):
+    repository = StoredConsentRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    if consent_state != "missing":
+        preferences = _accepted_preferences(_authority())
+        if consent_state == "wrong_version":
+            preferences["consent_version"] = "unreviewed-version"
+        else:
+            preferences["consent"] = consent_state
+        repository.preferences_by_uid["owner-a"] = preferences
+    before = copy.deepcopy(repository.preferences_by_uid)
+    resolutions = []
+    provider = FakeProvider()
+
+    async def resolve(uid):
+        resolutions.append(uid)
+        return _authority(uid)
+
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=resolve,
+        provider_factory=lambda: provider,
+        config=_enabled_config(),
+    )
+    result = asyncio.run(service.enqueue("owner-a", "memory-1", request_mode=request_mode))
+
+    assert result == {
+        "outcome": "declined" if consent_state == "declined" else "consent_required",
+        "status": "declined" if consent_state == "declined" else "unavailable",
+    }
+    assert resolutions == []
+    assert repository.preferences_by_uid == before
+    assert repository.preference_writes == repository.stabilizations == repository.reserve_writes == 0
+    assert repository.backfill_controls == repository.jobs == {}
+    assert provider.calls == 0
+
+
+def test_stored_artwork_consent_terminal_callback_cannot_grant_consent(monkeypatch):
+    repository = StoredConsentRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+    monkeypatch.setattr(artwork, "MemoryArtworkService", lambda: service)
+
+    asyncio.run(artwork.enqueue_after_terminal_enrichment("owner-a", "memory-1"))
+
+    assert repository.preferences_by_uid == repository.jobs == repository.backfill_controls == {}
+    assert repository.preference_writes == repository.stabilizations == repository.reserve_writes == 0
+
+
+def test_stored_artwork_consent_absent_snapshot_cannot_overwrite_concurrent_decline():
+    repository = StoredConsentRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    resolutions = []
+
+    async def resolve(uid):
+        resolutions.append(uid)
+        repository.preferences_by_uid[uid] = {"consent": "declined"}
+        return _authority(uid)
+
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=resolve,
+        config=_enabled_config(),
+    )
+    assert asyncio.run(service.enqueue("owner-a", "memory-1")) == {
+        "outcome": "consent_required",
+        "status": "unavailable",
+    }
+    # Denial precedes the await that formerly permitted an accepted overwrite.
+    assert resolutions == []
+    assert repository.preferences_by_uid == repository.jobs == repository.backfill_controls == {}
+    assert repository.preference_writes == repository.stabilizations == repository.reserve_writes == 0
+
+
+@pytest.mark.parametrize("origin", [artwork.HISTORICAL_BACKFILL_ORIGIN, artwork.PREVIEW_BACKFILL_ORIGIN])
+def test_stored_artwork_consent_passive_read_and_backfill_cannot_grant_consent(origin):
+    repository = StoredConsentRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+
+    assert asyncio.run(service.preferences("owner-a"))["consent"] == "not_set"
+    result = asyncio.run(service.backfill("owner-a", origin=origin))
+
+    assert result["queued"] == 0
+    assert result["skipped"] == 1
+    assert repository.preferences_by_uid == repository.jobs == repository.backfill_controls == {}
+    assert repository.preference_writes == repository.stabilizations == repository.reserve_writes == 0
+
+
+@pytest.mark.parametrize("drift", ["missing", "declined", "wrong_version", "global"])
+def test_stored_artwork_consent_rechecked_after_runtime_await_without_mutation(drift):
+    repository = StoredConsentRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    globally_authorized = [True]
+
+    async def resolve(uid):
+        if drift == "missing":
+            repository.preferences_by_uid.pop(uid)
+        elif drift == "declined":
+            repository.preferences_by_uid[uid]["consent"] = "declined"
+        elif drift == "wrong_version":
+            repository.preferences_by_uid[uid]["consent_version"] = "unreviewed-version"
+        else:
+            globally_authorized[0] = False
+        return _authority(uid)
+
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=resolve,
+        global_consent_checker=lambda _uid: globally_authorized[0],
+        config=_enabled_config(),
+    )
+    result = asyncio.run(service.enqueue("owner-a", "memory-1", request_mode="automatic"))
+
+    assert result == {"outcome": "consent_required", "status": "unavailable"}
+    assert repository.preference_writes == repository.stabilizations == repository.reserve_writes == 0
+    assert repository.jobs == repository.backfill_controls == {}
+
+
+@pytest.mark.parametrize("drift", ["missing", "declined", "wrong_version"])
+def test_stored_artwork_consent_worker_denies_before_provider_egress(drift):
+    repository = StoredConsentRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
+    provider = FakeProvider()
+    resolve_calls = []
+
+    async def resolve(uid):
+        resolve_calls.append(uid)
+        if len(resolve_calls) == 2:
+            if drift == "missing":
+                repository.preferences_by_uid.pop(uid)
+            elif drift == "declined":
+                repository.preferences_by_uid[uid]["consent"] = "declined"
+            else:
+                repository.preferences_by_uid[uid]["consent_version"] = "unreviewed-version"
+        return _authority(uid)
+
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=resolve,
+        provider_factory=lambda: provider,
+        config=_enabled_config(),
+    )
+    asyncio.run(service.enqueue("owner-a", "memory-1"))
+
+    with pytest.raises(artwork.MemoryArtworkError):
+        _run_claimed_process(service, repository)
+
+    assert provider.calls == 0
+    assert repository.preference_writes == 0
+
+
+def test_stored_artwork_consent_explicit_preferences_put_still_allows_generation():
+    repository = StoredConsentRepository()
+    repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
+    service = artwork.MemoryArtworkService(
+        repository=repository,
+        authority_resolver=_resolver,
+        config=_enabled_config(),
+    )
+
+    result = asyncio.run(
+        service.set_preferences(
+            "owner-a",
+            consent="accepted",
+            consent_version=artwork.ARTWORK_CONSENT_VERSION,
+            style_version=artwork.DEFAULT_STYLE_VERSION,
+        )
+    )
+    assert result["consent"] == "accepted"
+    assert asyncio.run(service.enqueue("owner-a", "memory-1", request_mode="automatic"))["outcome"] == "reserved"
+    assert repository.preference_writes == repository.reserve_writes == 1
+
+
 def test_declining_artwork_consent_erases_user_prefix_without_runtime_resolution(monkeypatch):
     repository = FakeRepository()
     repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
@@ -3334,7 +3543,7 @@ def test_global_consent_revocation_at_final_egress_check_blocks_provider():
     repository.conversations[("owner-a", "memory-1")] = _terminal_memory("memory-1")
     repository.preferences_by_uid["owner-a"] = _accepted_preferences(_authority())
     provider = FakeProvider()
-    consent_checks = iter((True, True, False))
+    consent_checks = iter((True, True, True, False))
     service = artwork.MemoryArtworkService(
         repository=repository,
         authority_resolver=_resolver,
