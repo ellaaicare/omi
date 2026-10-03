@@ -631,8 +631,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (preferences?.releaseEnabled == true) {
       unawaited(_refreshHomeArtworkQueueStatus());
       unawaited(_refreshHomeArtworkLibraries());
+      if (!preferences!.hasAcceptedConsent) return;
       final savedCursor = SharedPreferencesUtil().memoryArtworkBackfillCursor(
-        preferences!.styleVersion,
+        preferences.styleVersion,
         expectedUid: authority.uid,
         expectedProfileBindingId: authority.profileBindingId,
         expectedAuthorityGeneration: authority.generation,
@@ -665,11 +666,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   Future<void> _recoverRecentHomeArtwork() async {
     final authority = _captureHomeArtworkAuthority();
     final preferences = _homeArtworkPreferences;
-    if (authority == null ||
-        preferences == null ||
-        !preferences.releaseEnabled ||
-        preferences.consent != 'accepted' ||
-        preferences.consentVersion.isEmpty) {
+    if (authority == null || preferences == null || !preferences.releaseEnabled || !preferences.hasAcceptedConsent) {
       return;
     }
     final foregroundCycle = _homeArtworkRecoveryForegroundCycle;
@@ -937,7 +934,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     while (true) {
       final preferences = _homeArtworkPreferences;
       final authority = _captureHomeArtworkAuthority();
-      if (preferences == null || !preferences.releaseEnabled || authority == null) return null;
+      if (preferences == null || !preferences.releaseEnabled || !preferences.hasAcceptedConsent || authority == null) {
+        return null;
+      }
       final queue = _homeArtworkQueueStatus;
       if (queue != null && queue.controlState != MemoryArtworkQueueState.running) return null;
       final active = _homeArtworkBackfillInFlight;
@@ -1024,6 +1023,16 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         expectedAuthorityGeneration: authority.generation,
       );
       if (savedCursor == _artworkBackfillComplete) return null;
+      final currentPreferences = _homeArtworkPreferences;
+      if (!mounted ||
+          !_isHomeArtworkAuthorityCurrent(authority) ||
+          currentPreferences == null ||
+          !currentPreferences.releaseEnabled ||
+          !currentPreferences.hasAcceptedConsent ||
+          currentPreferences.consentVersion != preferences.consentVersion ||
+          currentPreferences.styleVersion != preferences.styleVersion) {
+        return null;
+      }
       final page = await _memoryArtworkApi.backfillNext(cursor: savedCursor.isEmpty ? null : savedCursor, mode: mode);
       if (!_isHomeArtworkAuthorityCurrent(authority)) return null;
       if (page == null) {
@@ -2113,7 +2122,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final heroMemory = orderedMemories.isEmpty || showDayGallery ? null : orderedMemories.first;
     final remainingMemories = showDayGallery ? orderedMemories : orderedMemories.skip(1).toList(growable: false);
     final artworkReleaseEnabled = _homeArtworkPreferences?.releaseEnabled == true;
-    final automaticArtworkRepairMemoryIds = _homeMemorySort == MemoryGallerySort.recent && artworkReleaseEnabled
+    final artworkAdmissionAllowed = artworkReleaseEnabled && _homeArtworkPreferences?.hasAcceptedConsent == true;
+    final automaticArtworkRepairMemoryIds = _homeMemorySort == MemoryGallerySort.recent && artworkAdmissionAllowed
         ? homeRecentArtworkRepairMemoryIds(orderedMemories, now: now, visiblePerDayLimit: showDayGallery ? 4 : null)
         : <String>{};
     final showDailyNote = shouldShowDailyNote(_todayCardController.state);

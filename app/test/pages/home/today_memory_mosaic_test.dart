@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -1967,6 +1968,95 @@ void main() {
     expect(artwork.backfillCursors.where((cursor) => cursor == null).length, greaterThanOrEqualTo(2));
     expect(find.text('Illustration style saved. Ella will prepare the artwork in the background.'), findsOneWidget);
   });
+
+  for (final consent in ['not_set', 'declined', 'unknown', 'null', 'empty-version', 'missing', 'accepted']) {
+    testWidgets('passive Home requires stored artwork consent for $consent preferences', (tester) async {
+      final authority = await _installArtworkAuthority();
+      final requests = <({String method, String path})>[];
+      final artwork = MemoryArtworkApi(
+        authorityProvider: () => authority,
+        baseUrl: 'https://artwork.test/',
+        request: ({
+          required url,
+          required headers,
+          required body,
+          required method,
+          timeout,
+          retries,
+          requireAuthCheck,
+          expectedAuthenticatedUid,
+          exactAuthority,
+          onSendAttempt,
+        }) async {
+          final path = Uri.parse(url).path;
+          requests.add((method: method, path: path));
+          expect(expectedAuthenticatedUid, authority.uid);
+          expect(exactAuthority, same(authority));
+          if (path.endsWith('/preferences')) {
+            return consent == 'missing'
+                ? http.Response('{}', 404)
+                : http.Response(
+                    jsonEncode({
+                      'schema_version': memoryArtworkSchemaVersion,
+                      'consent': consent == 'null'
+                          ? null
+                          : consent == 'empty-version'
+                              ? 'accepted'
+                              : consent,
+                      'consent_version': consent == 'empty-version' ? '' : 'ai-data-processors-v10',
+                      'style_version': memoryArtworkDefaultStyle,
+                      'release_enabled': true,
+                    }),
+                    200,
+                  );
+          }
+          return http.Response('{}', 404);
+        },
+      );
+      final harness = await _pumpHome(
+        tester,
+        conversations: _ConversationFixtures.manyMemories(),
+        memoryArtworkApi: artwork,
+        memoryArtworkAuthorityProvider: () => authority,
+      );
+      addTearDown(harness.dispose);
+      await tester.pump(const Duration(milliseconds: 100));
+
+      void expectNoAdmission() {
+        if (consent == 'accepted') {
+          expect(requests.where((request) => request.path.endsWith('/backfill')).length, 1);
+          expect(requests.where((request) => request.path.endsWith('/recovery/recent')), isNotEmpty);
+          expect(
+            tester
+                .widgetList<MemoryArtworkImage>(find.byType(MemoryArtworkImage))
+                .any((image) => image.enqueueIfMissing),
+            isTrue,
+          );
+          return;
+        }
+        expect(requests.where((request) => request.method != 'GET'), isEmpty);
+        for (final image in tester.widgetList<MemoryArtworkImage>(find.byType(MemoryArtworkImage))) {
+          expect(image.enqueueIfMissing, isFalse);
+        }
+      }
+
+      expectNoAdmission();
+      final navigator = Navigator.of(tester.element(find.byType(TodayPage)));
+      unawaited(navigator.push(MaterialPageRoute<void>(
+        builder: (_) => const Scaffold(body: Text('Passive settings route')),
+      )));
+      await tester.pumpAndSettle();
+      navigator.pop();
+      await tester.pumpAndSettle();
+      expectNoAdmission();
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      await tester.pump();
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump(const Duration(milliseconds: 100));
+      expectNoAdmission();
+      expect(requests.where((request) => request.path.endsWith('/preferences')), isNotEmpty);
+    });
+  }
 
   testWidgets('Home reconciles recent artwork once per exact foreground authority cycle', (tester) async {
     final authority = await _installArtworkAuthority();

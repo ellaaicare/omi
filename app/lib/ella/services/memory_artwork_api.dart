@@ -149,6 +149,8 @@ class MemoryArtworkPreferences {
   final String consentVersion;
   final String styleVersion;
   final bool releaseEnabled;
+
+  bool get hasAcceptedConsent => consent == 'accepted' && consentVersion.isNotEmpty;
 }
 
 class MemoryArtworkPreferenceUpdate {
