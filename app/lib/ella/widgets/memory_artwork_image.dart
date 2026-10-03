@@ -23,7 +23,7 @@ typedef MemoryArtworkDisplayCacheKeyRememberer = Future<String?> Function({
   required bool Function() isAuthorityCurrent,
 });
 
-enum _MemoryArtworkFallbackKind { preparing, unavailable }
+enum _MemoryArtworkFallbackKind { loading, preparing, unavailable }
 
 bool _artworkReadinessChanged(ServerConversation previous, ServerConversation current) {
   String? enrichmentValue(ServerConversation conversation, String key) =>
@@ -1147,10 +1147,13 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
             ),
           ));
     }
-    final fallbackKind = !_displayReadRetryAvailable &&
-            (result == null || result.status == MemoryArtworkResultStatus.generating || result.refreshPending)
-        ? _MemoryArtworkFallbackKind.preparing
-        : _MemoryArtworkFallbackKind.unavailable;
+    final fallbackKind = _displayReadRetryAvailable
+        ? _MemoryArtworkFallbackKind.unavailable
+        : result == null
+            ? _MemoryArtworkFallbackKind.loading
+            : result.status == MemoryArtworkResultStatus.generating || result.refreshPending
+                ? _MemoryArtworkFallbackKind.preparing
+                : _MemoryArtworkFallbackKind.unavailable;
     return _withDisplayReadRetry(context, _cachedArtworkOrFallback(context, kind: fallbackKind));
   }
 
@@ -1194,7 +1197,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         cacheWidth: result.selectedVariantWidth ?? result.pixelWidth,
         gaplessPlayback: true,
         frameBuilder: (_, child, frame, __) =>
-            frame == null ? _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing) : child,
+            frame == null ? _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.loading) : child,
         errorBuilder: (_, __, ___) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             _handleImageLoadFailure(
@@ -1204,7 +1207,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
               cacheKey,
             );
           });
-          return _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing);
+          return _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.loading);
         },
       );
     }
@@ -1216,14 +1219,14 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       fit: widget.fit,
       memCacheWidth: result.selectedVariantWidth ?? result.pixelWidth,
       useOldImageOnUrlChange: true,
-      placeholder: (_, __) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing),
+      placeholder: (_, __) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.loading),
       errorListener: (_) => _handleImageLoadFailure(
         widget.api ?? MemoryArtworkApi(),
         widget.conversation.artwork,
         generation,
         cacheKey,
       ),
-      errorWidget: (_, __, ___) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.preparing),
+      errorWidget: (_, __, ___) => _cachedArtworkOrFallback(context, kind: _MemoryArtworkFallbackKind.loading),
     );
   }
 
@@ -1303,18 +1306,20 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   }
 
   Widget _fallbackImageWithAction(BuildContext context, Widget image, {required _MemoryArtworkFallbackKind kind}) {
-    final isPreparing = kind == _MemoryArtworkFallbackKind.preparing;
-    final canGenerate = !isPreparing && !_manualGenerationInFlight && _canManuallyGenerate(_remoteResult);
-    if (!isPreparing && !canGenerate) return image;
+    final isWaiting = kind != _MemoryArtworkFallbackKind.unavailable;
+    final canGenerate = !isWaiting && !_manualGenerationInFlight && _canManuallyGenerate(_remoteResult);
+    if (!isWaiting && !canGenerate) return image;
     return LayoutBuilder(
       builder: (context, constraints) => Stack(
         fit: StackFit.expand,
         children: [
           image,
-          if (isPreparing)
+          if (isWaiting)
             Center(
               child: Semantics(
-                label: context.l10n.memoryArtworkPreparingLabel,
+                label: kind == _MemoryArtworkFallbackKind.preparing
+                    ? context.l10n.memoryArtworkPreparingLabel
+                    : context.l10n.loading,
                 child: Material(
                   color: const Color(0xE6F8F2E8),
                   shape: const CircleBorder(),
@@ -1337,7 +1342,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
               ),
             )
           else if (canGenerate)
-            _photoRetryAction(compact: constraints.maxWidth < 180),
+            _photoRetryAction(compact: constraints.maxWidth < 180 || MediaQuery.textScalerOf(context).scale(12) > 18),
         ],
       ),
     );
@@ -1361,8 +1366,8 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
               key: key,
               onTap: _generateArtwork,
               child: const SizedBox(
-                width: 44,
-                height: 44,
+                width: 48,
+                height: 48,
                 child: Icon(Icons.auto_awesome_outlined, color: Color(0xFF3A776A), size: 20),
               ),
             ),
@@ -1384,18 +1389,21 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
             key: key,
             borderRadius: BorderRadius.circular(24),
             onTap: _generateArtwork,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.auto_awesome_outlined, color: Color(0xFF3A776A), size: 18),
-                  const SizedBox(width: 6),
-                  Text(
-                    context.l10n.memoryArtworkRetry,
-                    style: const TextStyle(color: Color(0xFF315F55), fontSize: 12, fontWeight: FontWeight.w700),
-                  ),
-                ],
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.auto_awesome_outlined, color: Color(0xFF3A776A), size: 18),
+                    const SizedBox(width: 6),
+                    Text(
+                      context.l10n.memoryArtworkRetry,
+                      style: const TextStyle(color: Color(0xFF315F55), fontSize: 12, fontWeight: FontWeight.w700),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -1405,8 +1413,8 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   }
 
   Widget _placeholder(_MemoryArtworkFallbackKind kind) {
-    final isPreparing = kind == _MemoryArtworkFallbackKind.preparing;
-    final canGenerate = !isPreparing && !_manualGenerationInFlight && _canManuallyGenerate(_remoteResult);
+    final isWaiting = kind != _MemoryArtworkFallbackKind.unavailable;
+    final canGenerate = !isWaiting && !_manualGenerationInFlight && _canManuallyGenerate(_remoteResult);
     if (widget.compactPlaceholder) {
       final icon = switch (widget.conversation.structured.category.toLowerCase()) {
         'family' || 'friends' || 'relationships' => Icons.people_outline_rounded,
@@ -1419,8 +1427,10 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       return Semantics(
         label: canGenerate
             ? context.l10n.memoryArtworkRetry
-            : isPreparing
-                ? context.l10n.memoryArtworkPreparingLabel
+            : isWaiting
+                ? kind == _MemoryArtworkFallbackKind.preparing
+                    ? context.l10n.memoryArtworkPreparingLabel
+                    : context.l10n.loading
                 : context.l10n.memoryArtworkUnavailableLabel,
         button: canGenerate,
         onTap: canGenerate ? _generateArtwork : null,
@@ -1458,7 +1468,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
           mainAxisSize: MainAxisSize.min,
           children: [
             if (!useCompactLayout) ...[
-              if (isPreparing)
+              if (isWaiting)
                 SizedBox(
                   key: Key('memory-artwork-generation-progress-${widget.conversation.id}'),
                   width: 38,
