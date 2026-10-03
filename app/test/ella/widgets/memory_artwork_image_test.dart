@@ -1778,6 +1778,129 @@ void main() {
     expect(find.byKey(const Key('memory-artwork-generation-progress-recent-memory-fallback')), findsOneWidget);
   });
 
+  for (final hasPhoto in [false, true]) {
+    testWidgets('passive artwork loading ${hasPhoto ? 'with photo' : 'placeholder'} makes no generation claim',
+        (tester) async {
+      final semantics = tester.ensureSemantics();
+      final api = _DelayedArtworkApi();
+      final photoData = hasPhoto ? await rootBundle.load('assets/images/onboarding-bg-1.webp') : null;
+      await tester.pumpWidget(MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: SizedBox(
+          width: 112,
+          height: 112,
+          child: MemoryArtworkImage(
+            conversation: ServerConversation(
+              id: 'memory-passive-loading',
+              createdAt: DateTime(2026, 9, 2),
+              structured: Structured('A memory', 'A saved summary.'),
+              photos: photoData == null
+                  ? []
+                  : [
+                      ConversationPhoto(
+                        id: 'photo-loading',
+                        base64: base64Encode(photoData.buffer.asUint8List()),
+                        createdAt: DateTime(2026, 9, 2),
+                      ),
+                    ],
+            ),
+            api: api,
+            cachedFileLookup: (_) async => null,
+            compactPlaceholder: true,
+          ),
+        ),
+      ));
+      await tester.pump();
+      expect(api.remoteResult.isCompleted, isFalse);
+      expect(api.lastEnqueueIfMissing, isFalse);
+      expect(find.bySemanticsLabel('Loading...'), findsOneWidget);
+      expect(find.bySemanticsLabel('Ella is preparing an illustration for this memory'), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+      semantics.dispose();
+    });
+  }
+
+  testWidgets('verified artwork generation still announces preparation', (tester) async {
+    final semantics = tester.ensureSemantics();
+    final api = _TerminalPollArtworkApi(
+      read: (_) async => const MemoryArtworkResult(status: MemoryArtworkResultStatus.generating),
+    );
+    await tester.pumpWidget(MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: MemoryArtworkImage(
+        conversation: ServerConversation(
+          id: 'memory-verified-generating',
+          createdAt: DateTime(2026, 9, 2),
+          structured: Structured('A memory', 'A saved summary.'),
+        ),
+        api: api,
+        compactPlaceholder: true,
+        cachedFileLookup: (_) async => null,
+      ),
+    ));
+    await tester.pump();
+    expect(find.bySemanticsLabel('Ella is preparing an illustration for this memory'), findsOneWidget);
+    expect(find.bySemanticsLabel('Loading...'), findsNothing);
+    expect(api.enqueueRequests, [false]);
+    await tester.pumpWidget(const SizedBox.shrink());
+    semantics.dispose();
+  });
+
+  for (final width in [64.0, 112.0, 320.0]) {
+    for (final scale in [1.0, 3.0]) {
+      testWidgets('source photo artwork action is reachable at ${width}px ${scale}x text', (tester) async {
+        final semantics = tester.ensureSemantics();
+        final api = _ManualGenerationArtworkApi();
+        final photoData = await rootBundle.load('assets/images/onboarding-bg-1.webp');
+        await tester.pumpWidget(MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: MediaQuery(
+            data: MediaQueryData(textScaler: TextScaler.linear(scale)),
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: SizedBox(
+                width: width,
+                height: width == 64 ? 64 : 220,
+                child: MemoryArtworkImage(
+                  conversation: ServerConversation(
+                    id: 'memory-photo-action-target',
+                    createdAt: DateTime(2026, 9, 2),
+                    structured: Structured('A memory', 'A saved summary.'),
+                    photos: [
+                      ConversationPhoto(
+                        id: 'photo-action',
+                        base64: base64Encode(photoData.buffer.asUint8List()),
+                        createdAt: DateTime(2026, 9, 2),
+                      ),
+                    ],
+                  ),
+                  api: api,
+                  cachedFileLookup: (_) async => null,
+                  allowManualGeneration: true,
+                  maxTransientRetries: 0,
+                ),
+              ),
+            ),
+          ),
+        ));
+        await tester.pump();
+        final action = find.byKey(const Key('memory-artwork-photo-retry-memory-photo-action-target'));
+        expect(tester.getSize(action).shortestSide, greaterThanOrEqualTo(48));
+        expect(tester.getRect(action).left, greaterThanOrEqualTo(0));
+        expect(tester.getRect(action).right, lessThanOrEqualTo(width));
+        expect(tester.getSemantics(action).label, contains('Try artwork again'));
+        expect(action.hitTestable(), findsOneWidget);
+        expect(api.enqueueRequests, [false]);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+        semantics.dispose();
+      });
+    }
+  }
+
   testWidgets('a source photo keeps artwork retry and preparing progress visible', (tester) async {
     final api = _ManualGenerationArtworkApi();
     final photoData = await rootBundle.load('assets/images/onboarding-bg-1.webp');
@@ -4189,7 +4312,8 @@ void main() {
     expect(tester.getSize(placeholder), const Size(64, 64));
     expect(find.byType(CircularProgressIndicator), findsNothing);
     expect(find.text('Coffee with Rose'), findsNothing, reason: 'the readable title belongs to the row, not its icon');
-    expect(tester.getSemantics(placeholder).label, contains('preparing'));
+    expect(tester.getSemantics(placeholder).label, 'Loading...',
+        reason: 'retained local metadata is not confirmation that generation is running');
     api.remoteResult.complete(const MemoryArtworkResult(
       status: MemoryArtworkResultStatus.unavailable,
       failureCode: 'memory_artwork_provider_failed',
