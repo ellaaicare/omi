@@ -445,6 +445,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     _homeArtworkQueuePollTimer?.cancel();
     _homeArtworkStyleOperationGeneration++;
     _homeArtworkQueueOperationGeneration++;
+    MemoryArtworkQueueDiagnostics.clear();
     final finalization = _homeCaptureFinalizationInFlight;
     if (finalization != null) {
       _abandonHomeCaptureAfterFinalization = true;
@@ -668,13 +669,20 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (authority == null || _homeArtworkPreferences?.releaseEnabled != true) return;
     final operationGeneration = _homeArtworkQueueOperationGeneration;
     final refreshSequence = ++_homeArtworkQueueRefreshSequence;
+    final diagnosticTicket = MemoryArtworkQueueDiagnostics.begin(
+      isCurrent: () =>
+          mounted &&
+          _isHomeArtworkAuthorityCurrent(authority) &&
+          operationGeneration == _homeArtworkQueueOperationGeneration &&
+          refreshSequence == _homeArtworkQueueRefreshSequence,
+    );
     if (_homeArtworkQueueStatus == null && _homeArtworkQueueLoadState != _ArtworkQueueLoadState.loading) {
       setState(() => _homeArtworkQueueLoadState = _ArtworkQueueLoadState.loading);
       _publishHomeArtworkStudioState();
     }
     MemoryArtworkQueueStatus? status;
     try {
-      status = await _memoryArtworkApi.queueStatus();
+      status = await _memoryArtworkApi.queueStatusWithDiagnostics(diagnosticTicket);
     } on ExactAccountAuthorityChangedException {
       _scheduleHomeArtworkReload();
       return;
@@ -688,6 +696,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       return;
     }
     if (status == null) {
+      MemoryArtworkQueueDiagnostics.project(diagnosticTicket, applied: false);
       final previous = _homeArtworkQueueStatus;
       setState(() => _homeArtworkQueueLoadState = _ArtworkQueueLoadState.failed);
       _publishHomeArtworkStudioState();
@@ -697,6 +706,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       return;
     }
     final previous = _homeArtworkQueueStatus;
+    MemoryArtworkQueueDiagnostics.project(diagnosticTicket, applied: true);
     final refreshVisibleArtwork = previous == null ||
         status.styleVersion != previous.styleVersion ||
         status.generationId != previous.generationId ||

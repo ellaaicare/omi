@@ -5,7 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/ella/pages/ella_runtime_diagnostics_page.dart';
 import 'package:omi/l10n/app_localizations.dart';
-import 'package:omi/pages/settings/device_diagnostics_page.dart';
+import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/services/devices.dart';
@@ -25,7 +25,7 @@ void main() {
 
   setUp(() => SharedPreferences.setMockInitialValues(const {}));
 
-  testWidgets('Device diagnostics entry navigates to DeviceDiagnosticsPage', (tester) async {
+  testWidgets('ordinary diagnostics expose device counts without generic buffers or export', (tester) async {
     final capture = _NoopCaptureProvider();
     final device = DeviceProvider(deviceService: _NoopDeviceService(), automaticallyReconnectOnReady: false);
 
@@ -44,15 +44,20 @@ void main() {
     );
     await tester.pump();
 
-    final entryFinder = find.byKey(const Key('runtime-diagnostics-device-diagnostics-entry'));
+    DebugLogManager.recordDeviceDiagnostic('private-device-name private-address');
+    DebugLogManager.deviceCandidatesSeen = 7;
+    await tester.pump(const Duration(seconds: 1));
+    final entryFinder = find.byKey(const Key('runtime-diagnostics-device-counts'));
     await tester.drag(find.byType(ListView), const Offset(0, -500));
     await tester.pump();
     expect(entryFinder, findsOneWidget);
 
-    await tester.tap(entryFinder);
-    await tester.pumpAndSettle();
-
-    expect(find.byType(DeviceDiagnosticsPage), findsOneWidget);
+    expect(find.textContaining('candidatesSeen=7'), findsOneWidget);
+    expect(find.textContaining('private-device'), findsNothing);
+    expect(find.text('Copy diagnostics'), findsNothing);
+    expect(find.byKey(const Key('runtime-diagnostics-device-diagnostics-entry')), findsNothing);
+    DebugLogManager.resetDeviceDiagnostics();
+    await tester.pumpWidget(const SizedBox.shrink());
 
     capture.dispose();
     device.dispose();

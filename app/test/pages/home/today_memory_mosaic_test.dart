@@ -2111,6 +2111,12 @@ void main() {
       }
 
       expectNoAdmission();
+      if (consent != 'missing') {
+        final diagnostic = MemoryArtworkQueueDiagnostics.latest;
+        expect(diagnostic?.read?.statusCode, 404);
+        expect(diagnostic?.read?.outcome, MemoryArtworkQueueReadOutcome.non200);
+        expect(diagnostic?.projection, MemoryArtworkQueueProjection.failed);
+      }
       final navigator = Navigator.of(tester.element(find.byType(TodayPage)));
       unawaited(navigator.push(MaterialPageRoute<void>(
         builder: (_) => const Scaffold(body: Text('Passive settings route')),
@@ -2128,6 +2134,93 @@ void main() {
       await tester.pump(const Duration(milliseconds: 100));
       expectNoAdmission();
       expect(requests.where((request) => request.path.endsWith('/preferences')), isNotEmpty);
+    });
+  }
+
+  for (final valid in [true, false]) {
+    testWidgets('Home projects its exact real API queue read only after completion valid=$valid', (tester) async {
+      final authority = await _installArtworkAuthority();
+      final response = Completer<http.Response?>();
+      var queueRequests = 0;
+      final artwork = MemoryArtworkApi(
+        authorityProvider: () => authority,
+        baseUrl: 'https://artwork.test/',
+        request: (
+            {required url,
+            required headers,
+            required body,
+            required method,
+            timeout,
+            retries,
+            requireAuthCheck,
+            expectedAuthenticatedUid,
+            exactAuthority,
+            onSendAttempt}) async {
+          expect(method, 'GET');
+          final path = Uri.parse(url).path;
+          if (path.endsWith('/preferences')) {
+            return http.Response(
+                jsonEncode({
+                  'schema_version': memoryArtworkSchemaVersion,
+                  'consent': 'accepted',
+                  'consent_version': 'ai-data-processors-v10',
+                  'style_version': memoryArtworkDefaultStyle,
+                  'release_enabled': true,
+                }),
+                200);
+          }
+          if (path.endsWith('/queue')) {
+            queueRequests++;
+            return response.future;
+          }
+          return http.Response('{}', 404);
+        },
+      );
+      final harness = await _pumpHome(
+        tester,
+        conversations: _ConversationFixtures.manyMemories(),
+        memoryArtworkApi: artwork,
+        memoryArtworkAuthorityProvider: () => authority,
+      );
+      addTearDown(harness.dispose);
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(queueRequests, 1);
+      expect(MemoryArtworkQueueDiagnostics.latest?.read, isNull);
+      expect(MemoryArtworkQueueDiagnostics.latest?.projection, MemoryArtworkQueueProjection.pending);
+      response.complete(http.Response(
+          jsonEncode(valid
+              ? {
+                  'schema_version': 'ella.memory_artwork.queue.v1',
+                  'generation_id': 'a' * 64,
+                  'style_version': memoryArtworkDefaultStyle,
+                  'state': 'completed',
+                  'control_state': 'running',
+                  'scan_status': 'completed',
+                  'scanned': 0,
+                  'pages_processed': 0,
+                  'auto_continue': false,
+                  'batch_size': 10,
+                  'batch_remaining': 0,
+                  'ready': 0,
+                  'active': 0,
+                  'queued': 0,
+                  'retrying': 0,
+                  'failed': 0,
+                  'total': 0,
+                  'remaining': 0,
+                  'styles': [],
+                }
+              : {'private': 'invalid-fixture'}),
+          200));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      final diagnostic = MemoryArtworkQueueDiagnostics.latest;
+      expect(diagnostic?.read?.statusCode, 200);
+      expect(diagnostic?.read?.outcome,
+          valid ? MemoryArtworkQueueReadOutcome.success : MemoryArtworkQueueReadOutcome.schema);
+      expect(
+          diagnostic?.projection, valid ? MemoryArtworkQueueProjection.applied : MemoryArtworkQueueProjection.failed);
+      expect(queueRequests, 1);
     });
   }
 
@@ -2225,53 +2318,70 @@ void main() {
     expect(artwork.backfillCursors, isEmpty);
   });
 
-  testWidgets('Home discards a delayed queue read after account authority changes without admitting artwork',
-      (tester) async {
-    final authorityA = await _installArtworkAuthority(uid: 'account-a', profileBindingId: 'profile-a');
-    var activeAuthority = authorityA;
-    final gate = Completer<void>();
-    final artwork = _FakeMemoryArtworkApi(
-      queueStatusGates: {0: gate},
-      recentRecovery: const MemoryArtworkRecentRecovery(
-        scanned: 1,
-        reservationLimit: 10,
-        reserved: 1,
-        deferred: 0,
-        ready: 0,
-        pending: 1,
-        retrying: 0,
-        exhausted: 0,
-        skipped: 0,
-      ),
-    );
-    final harness = await _pumpHome(
-      tester,
-      conversations: _ConversationFixtures.manyMemories(),
-      memoryArtworkApi: artwork,
-      memoryArtworkAuthorityProvider: () => activeAuthority,
-    );
-    addTearDown(harness.dispose);
+  for (final replacement in ['account', 'same_uid_profile', 'same_uid_profile_aba']) {
+    testWidgets('Home discards a delayed queue read after $replacement authority changes without admitting artwork',
+        (tester) async {
+      final authorityA = await _installArtworkAuthority(uid: 'account-a', profileBindingId: 'profile-a');
+      var activeAuthority = authorityA;
+      final gate = Completer<void>();
+      final artwork = _FakeMemoryArtworkApi(
+        queueStatusGates: {0: gate},
+        recentRecovery: const MemoryArtworkRecentRecovery(
+          scanned: 1,
+          reservationLimit: 10,
+          reserved: 1,
+          deferred: 0,
+          ready: 0,
+          pending: 1,
+          retrying: 0,
+          exhausted: 0,
+          skipped: 0,
+        ),
+      );
+      final harness = await _pumpHome(
+        tester,
+        conversations: _ConversationFixtures.manyMemories(),
+        memoryArtworkApi: artwork,
+        memoryArtworkAuthorityProvider: () => activeAuthority,
+      );
+      addTearDown(harness.dispose);
 
-    expect(artwork.recentRecoveryRequests, 0);
-    authorityA.current = false;
-    activeAuthority = await _installArtworkAuthority(uid: 'account-b', profileBindingId: 'profile-b');
-    harness.authorityChanges.value += 1;
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    expect(artwork.recentRecoveryRequests, 0);
-    final queueRequestsAfterReplacement = artwork.queueStatusRequests;
+      expect(artwork.recentRecoveryRequests, 0);
+      authorityA.current = false;
+      activeAuthority = await _installArtworkAuthority(
+        uid: replacement == 'account' ? 'account-b' : 'account-a',
+        profileBindingId: 'profile-b',
+      );
+      harness.authorityChanges.value += 1;
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      if (replacement == 'same_uid_profile_aba') {
+        activeAuthority.current = false;
+        activeAuthority = await _installArtworkAuthority(uid: 'account-a', profileBindingId: 'profile-a');
+        harness.authorityChanges.value += 1;
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      expect(artwork.recentRecoveryRequests, 0);
+      final replacementDiagnostic = MemoryArtworkQueueDiagnostics.latest;
+      expect(replacementDiagnostic?.projection, MemoryArtworkQueueProjection.failed);
+      // Fake queueStatus overrides do not manufacture HTTP diagnostics.
+      expect(replacementDiagnostic?.read, isNull);
+      final queueRequestsAfterReplacement = artwork.queueStatusRequests;
 
-    gate.complete();
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
+      gate.complete();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
 
-    expect(tester.takeException(), isNull);
-    expect(
-      artwork.queueStatusRequests,
-      queueRequestsAfterReplacement,
-      reason: 'the delayed previous-account response cannot refresh current-account artwork state',
-    );
-  });
+      expect(tester.takeException(), isNull);
+      expect(MemoryArtworkQueueDiagnostics.latest, same(replacementDiagnostic));
+      expect(
+        artwork.queueStatusRequests,
+        queueRequestsAfterReplacement,
+        reason: 'the delayed previous-account response cannot refresh current-account artwork state',
+      );
+    });
+  }
 
   testWidgets('Home keeps recent fallback content when reconciliation transport is unavailable', (tester) async {
     MemoryArtworkImage.resetAutomaticGenerationBudgetForTesting();
@@ -2786,6 +2896,7 @@ void main() {
     addTearDown(harness.dispose);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
+    expect(MemoryArtworkQueueDiagnostics.latest?.projection, MemoryArtworkQueueProjection.failed);
 
     await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
     await tester.pumpAndSettle();
@@ -2801,6 +2912,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
+    expect(MemoryArtworkQueueDiagnostics.latest?.projection, MemoryArtworkQueueProjection.applied);
     expect(find.text('Ella is preparing artwork. You can leave this screen.'), findsOneWidget);
     expect(find.byKey(const Key('home-artwork-queue-progress-bar')), findsOneWidget);
   });
@@ -3303,9 +3415,12 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
+    final currentDiagnostic = MemoryArtworkQueueDiagnostics.latest;
+    expect(currentDiagnostic?.projection, MemoryArtworkQueueProjection.applied);
     oldRefresh.complete();
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
+    expect(MemoryArtworkQueueDiagnostics.latest, same(currentDiagnostic));
     await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
