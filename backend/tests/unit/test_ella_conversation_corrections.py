@@ -1,8 +1,10 @@
 import asyncio
+import copy
 import hashlib
 import importlib.util
 import json
 import sys
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -116,6 +118,185 @@ def _conversation():
             "category": "health",
         },
     }
+
+
+@pytest.mark.parametrize("terminal_status", ["applied", "correction_blocked_identity_gate", "queued"])
+def test_client_uuid_post_and_terminal_get_use_the_same_exact_receipt(monkeypatch, terminal_status):
+    owner = "fixture-owner"
+    conversation_id = "fixture-conversation"
+    correction_id = str(uuid.UUID(int=1))
+    conversation = {**_conversation(), "active_summary_version_id": "fixture-base"}
+    audits = {}
+    model_calls = []
+    summary_writes = []
+
+    def get_conversation(uid, cid):
+        return copy.deepcopy(conversation) if (uid, cid) == (owner, conversation_id) else None
+
+    def persist(uid, cid, correction, payload):
+        audits.setdefault((uid, cid, correction), {}).update(copy.deepcopy(payload))
+
+    class AuditReference:
+        def __init__(self, uid, cid, correction):
+            self.key = (uid, cid, correction)
+
+        def get(self, transaction=None):
+            data = audits.get(self.key)
+            return SimpleNamespace(exists=data is not None, to_dict=lambda: copy.deepcopy(data))
+
+    class ConversationReference:
+        def get(self, transaction=None):
+            return SimpleNamespace(exists=True, to_dict=lambda: copy.deepcopy(conversation))
+
+    class Transaction:
+        def set(self, reference, payload, merge=False):
+            if isinstance(reference, AuditReference):
+                persist(*reference.key, payload)
+            else:
+                conversation.update(copy.deepcopy(payload))
+
+    def claim(**kwargs):
+        return corrections._claim_initial_correction_submission_in_transaction(
+            Transaction(),
+            ConversationReference(),
+            AuditReference(owner, conversation_id, kwargs["correction_id"]),
+            **kwargs,
+        )
+
+    async def generated(**kwargs):
+        model_calls.append(kwargs["correction_id"])
+        if terminal_status == "applied":
+            summary_writes.append(kwargs["correction_id"])
+        persist(owner, conversation_id, kwargs["correction_id"], {"status": terminal_status})
+        return corrections.ConversationCorrectionResponse(
+            correction_id=kwargs["correction_id"],
+            conversation_id=conversation_id,
+            trace_id=kwargs["trace_id"],
+            status=terminal_status,
+            queued=terminal_status == "queued",
+        )
+
+    monkeypatch.setattr(corrections.conversations_db, "get_conversation", get_conversation)
+    monkeypatch.setattr(corrections.conversations_db, "bootstrap_summary_versioning_update", lambda value: {})
+    monkeypatch.setattr(corrections.conversations_db, "update_conversation", lambda *args: None)
+    monkeypatch.setattr(corrections, "_persist_correction_audit", persist)
+    monkeypatch.setattr(corrections, "_audit_ref", AuditReference)
+    monkeypatch.setattr(corrections, "_append_correction_event", lambda *args: None)
+    monkeypatch.setattr(corrections, "_create_summary_correction_proposal", lambda **kwargs: None)
+    monkeypatch.setattr(corrections, "_correction_propagation_counts", lambda *args: (0, 0, "not_requested"))
+    monkeypatch.setattr(corrections, "_run_direct_correction_apply", generated)
+    monkeypatch.setattr(corrections, "_claim_initial_correction_submission", claim)
+    monkeypatch.setattr(corrections, "DIRECT_CORRECTION_APPLY_ENABLED", True)
+    monkeypatch.setattr(corrections, "DIRECT_CORRECTION_BACKGROUND_ENABLED", False)
+    app = FastAPI()
+    app.include_router(corrections.router)
+    app.dependency_overrides[corrections.require_current_ai_consent] = lambda: owner
+    app.dependency_overrides[corrections.get_exact_firebase_uid] = lambda: owner
+    client = TestClient(app)
+    url = f"/v1/ella/conversations/{conversation_id}/corrections"
+    payload = {"correction_id": correction_id, "correction_text": "Synthetic fixture correction.", "source": "ios"}
+    response = client.post(url, json=payload)
+    assert response.status_code == 202
+    assert response.json()["correction_id"] == correction_id
+    receipt = client.get(f"/v1/ella/conversations/{conversation_id}/corrections/{correction_id}")
+    assert receipt.status_code == 200
+    assert receipt.json()["correction_id"] == correction_id
+    assert receipt.json()["status"] == terminal_status
+    # Simulate loss of the accepted POST response: retry the exact payload.
+    duplicate = client.post(url, json=payload)
+    assert duplicate.status_code == 202
+    assert duplicate.json()["correction_id"] == correction_id
+    assert duplicate.json()["status"] == terminal_status
+    conflict = client.post(url, json={**payload, "correction_text": "Different synthetic correction."})
+    assert conflict.status_code == 409
+    context_conflict = client.post(url, json={**payload, "summary_context": {"title": "Changed context"}})
+    assert context_conflict.status_code == 409
+    assert client.post(url, json={**payload, "correction_id": "not-a-uuid"}).status_code == 422
+    app.dependency_overrides[corrections.require_current_ai_consent] = lambda: "different-fixture-owner"
+    app.dependency_overrides[corrections.get_exact_firebase_uid] = lambda: "different-fixture-owner"
+    assert client.post(url, json=payload).status_code == 404
+    assert client.get(f"{url}/{correction_id}").status_code == 404
+
+    def revoked():
+        raise HTTPException(status_code=403, detail="ai_consent_required")
+
+    app.dependency_overrides[corrections.require_current_ai_consent] = revoked
+    assert client.post(url, json=payload).status_code == 403
+    assert model_calls == [correction_id]
+    assert summary_writes == ([correction_id] if terminal_status == "applied" else [])
+
+
+@pytest.mark.parametrize(
+    "drift", ["version", "locked", "missing", "uid", "conversation_id", "correction_id", "payload", "status", "replay"]
+)
+def test_client_uuid_reservation_rechecks_exact_transaction_inputs_without_writes(monkeypatch, drift):
+    del monkeypatch
+    uid, cid, correction_id = "fixture-owner", "fixture-conversation", str(uuid.UUID(int=2))
+    request = corrections.ConversationCorrectionRequest(
+        correction_id=correction_id, correction_text="Fixture correction."
+    )
+    audit = {
+        "uid": uid,
+        "conversation_id": cid,
+        "correction_id": correction_id,
+        "trace_id": f"correction:{cid}:{correction_id}",
+        "request_fingerprint": corrections._correction_request_fingerprint(request),
+        "status": "submitted",
+    }
+    existing = copy.deepcopy(audit)
+    if drift in {"uid", "conversation_id", "correction_id"}:
+        existing[drift] = "different-fixture"
+    if drift == "payload":
+        existing["request_fingerprint"] = "different-fingerprint"
+    if drift == "status":
+        existing["status"] = "unknown-private-state"
+    conversation = {
+        "active_summary_version_id": "new-version" if drift == "version" else "fixture-base",
+        "is_locked": drift == "locked",
+    }
+
+    class Reference:
+        def __init__(self, data, exists=True):
+            self.data, self.exists = data, exists
+
+        def get(self, transaction=None):
+            return SimpleNamespace(exists=self.exists, to_dict=lambda: copy.deepcopy(self.data))
+
+    class Transaction:
+        writes = []
+
+        def set(self, *args, **kwargs):
+            self.writes.append((args, kwargs))
+
+    transaction = Transaction()
+    kwargs = {
+        "uid": uid,
+        "conversation_id": cid,
+        "correction_id": correction_id,
+        "expected_active_summary_version_id": "fixture-base",
+        "bootstrap_update": {},
+        "correction_state": {},
+        "audit_payload": audit,
+    }
+    args = (
+        transaction,
+        Reference(conversation, drift != "missing"),
+        Reference(existing, drift not in {"version", "locked", "missing"}),
+    )
+    if drift == "status":
+        with pytest.raises(HTTPException) as failure:
+            corrections._claim_initial_correction_submission_in_transaction(*args, **kwargs)
+        assert failure.value.status_code == 404
+    else:
+        outcome = corrections._claim_initial_correction_submission_in_transaction(*args, **kwargs)
+        expected = {
+            "version": "version_drift",
+            "locked": "conversation_locked",
+            "missing": "conversation_missing",
+            "replay": "replay",
+        }.get(drift, "idempotency_conflict")
+        assert outcome["outcome"] == expected
+    assert transaction.writes == []
 
 
 def _retry_conversation(status="processing", request_id="84eb13fa-31d9-40ba-a742-c4de4757dc10"):

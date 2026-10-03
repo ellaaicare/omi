@@ -156,3 +156,31 @@ for coordinated migration.
 4. Revert the backend deployment only after optional mode is active and health
    is verified. No rollback step may turn a request carrying CAS headers into an
    unconditional write.
+# Client Correction UUID Compatibility
+
+The optional UUID `correction_id` on correction POST is the client's exact
+receipt identity. For this opt-in contract, an initial Firestore transaction
+reads the owner-scoped conversation and correction audit, checks the active
+summary version and lock state, and atomically records the request fingerprint
+and submitted receipt. The fingerprint covers normalized correction text,
+source, and summary context. Repeating that exact owner/conversation/UUID/payload
+returns the existing receipt without a second model call, task, proposal, or
+summary write; changing the payload returns 409. Invalid UUIDs return 422.
+Receipt readback validates the persisted owner/conversation/UUID/trace/status.
+
+The normal current-consent route dependency, runtime/provider consent checks,
+identity guard, summary CAS, canonical/vector writes and Undo path are unchanged.
+Omitting the UUID retains the existing legacy server-generated-ID behavior.
+This is not a backport of the full terminal-lease recovery stack in PR417.
+In particular, a crash after reservation but before background execution may
+leave a pending receipt indefinitely. Identical POST replay returns that pending
+state and does not requeue work: there is no safe distinction here between a
+lost task and a still-live task. Accepted-response loss after terminal work is
+recoverable by the same UUID; crash-before-execution recovery is not implemented.
+
+Deployment acceptance must exercise the installed client's POST -> matching
+UUID -> terminal GET contract for both applied and identity-blocked corrections,
+alongside duplicate/conflict/owner/consent/version tests. A 202 or matching UUID
+is not proof of applied or canonical work. The narrower repair requires separate
+source review and owner deployment authorization; no live replay is authorized
+by these tests or this document.
