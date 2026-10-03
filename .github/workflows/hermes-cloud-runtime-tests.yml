@@ -1377,7 +1377,7 @@ jobs:
           )" -eq 86
           pytest tests/unit/test_ella_callbacks_summary_update.py -k "$callback_contract_selector" -v
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
-          baseline_summary_cas_selector='not (conversation_builder_reads_and_writes_with_the_same_transaction or conversation_builder_commits_correction_audit_in_the_same_transaction or correction_audit_enqueue_failure_aborts_the_conversation_transaction or real_firestore_transaction_contention_preserves_one_complete_canonical_source)'
+          baseline_summary_cas_selector='not (conversation_builder_reads_and_writes_with_the_same_transaction or conversation_builder_commits_correction_audit_in_the_same_transaction or correction_audit_enqueue_failure_aborts_the_conversation_transaction or real_firestore_transaction_contention_preserves_one_complete_canonical_source or real_firestore_client_correction_initial_claim_is_exact_and_single_dispatch)'
           conversation_summary_cas_ids="$(
             pytest --collect-only -q tests/unit/test_conversation_summary_cas.py \
               -k "$baseline_summary_cas_selector" |
@@ -1411,7 +1411,25 @@ jobs:
           done
           test "$(grep -c '::' <<<"$conversation_summary_cas_ids")" -eq 51
           pytest tests/unit/test_conversation_summary_cas.py -k "$baseline_summary_cas_selector" -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 129
+          correction_ids="$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | sed '/^$/d')"
+          test "$(grep -c '::' <<<"$correction_ids")" -eq 141
+          required_client_correction_ids=(
+            "tests/unit/test_ella_conversation_corrections.py::test_client_uuid_post_and_terminal_get_use_the_same_exact_receipt[applied]"
+            "tests/unit/test_ella_conversation_corrections.py::test_client_uuid_post_and_terminal_get_use_the_same_exact_receipt[correction_blocked_identity_gate]"
+            "tests/unit/test_ella_conversation_corrections.py::test_client_uuid_post_and_terminal_get_use_the_same_exact_receipt[queued]"
+            "tests/unit/test_ella_conversation_corrections.py::test_client_uuid_reservation_rechecks_exact_transaction_inputs_without_writes[version]"
+            "tests/unit/test_ella_conversation_corrections.py::test_client_uuid_reservation_rechecks_exact_transaction_inputs_without_writes[locked]"
+            "tests/unit/test_ella_conversation_corrections.py::test_client_uuid_reservation_rechecks_exact_transaction_inputs_without_writes[missing]"
+            "tests/unit/test_ella_conversation_corrections.py::test_client_uuid_reservation_rechecks_exact_transaction_inputs_without_writes[uid]"
+            "tests/unit/test_ella_conversation_corrections.py::test_client_uuid_reservation_rechecks_exact_transaction_inputs_without_writes[conversation_id]"
+            "tests/unit/test_ella_conversation_corrections.py::test_client_uuid_reservation_rechecks_exact_transaction_inputs_without_writes[correction_id]"
+            "tests/unit/test_ella_conversation_corrections.py::test_client_uuid_reservation_rechecks_exact_transaction_inputs_without_writes[payload]"
+            "tests/unit/test_ella_conversation_corrections.py::test_client_uuid_reservation_rechecks_exact_transaction_inputs_without_writes[status]"
+            "tests/unit/test_ella_conversation_corrections.py::test_client_uuid_reservation_rechecks_exact_transaction_inputs_without_writes[replay]"
+          )
+          for required_id in "${required_client_correction_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$correction_ids"
+          done
           pytest tests/unit/test_ella_conversation_corrections.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 49
           pytest tests/unit/test_ella_guardian_delivery.py -v
@@ -1522,12 +1540,15 @@ jobs:
       - name: Run real Firestore summary CAS contention gate
         run: |
           set -euo pipefail
-          summary_cas_contract_selector='active_summary_version_compare_and_set_is_atomic_and_fail_closed or conversation_builder_reads_and_writes_with_the_same_transaction or conversation_builder_commits_correction_audit_in_the_same_transaction or correction_audit_enqueue_failure_aborts_the_conversation_transaction or real_firestore_transaction_contention_preserves_one_complete_canonical_source'
+          summary_cas_contract_selector='active_summary_version_compare_and_set_is_atomic_and_fail_closed or conversation_builder_reads_and_writes_with_the_same_transaction or conversation_builder_commits_correction_audit_in_the_same_transaction or correction_audit_enqueue_failure_aborts_the_conversation_transaction or real_firestore_transaction_contention_preserves_one_complete_canonical_source or real_firestore_client_correction_initial_claim_is_exact_and_single_dispatch'
           test "$(
             pytest --collect-only -q tests/unit/test_conversation_summary_cas.py \
               -k "$summary_cas_contract_selector" |
               grep -c '::'
-          )" -eq 5
+          )" -eq 6
+          pytest --collect-only -q tests/unit/test_conversation_summary_cas.py \
+            -k "$summary_cas_contract_selector" | \
+            grep -Fqx 'tests/unit/test_conversation_summary_cas.py::test_real_firestore_client_correction_initial_claim_is_exact_and_single_dispatch'
           emulator_name="omi-summary-cas-firestore-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           docker run --rm -d \
             --name "${emulator_name}" \
@@ -1551,7 +1572,9 @@ jobs:
           curl --silent --fail "http://${FIRESTORE_EMULATOR_HOST}/" >/dev/null
           ELLA_FIRESTORE_EMULATOR_TESTS=true \
             python -m pytest tests/unit/test_conversation_summary_cas.py \
-              -k "$summary_cas_contract_selector" -v
+              -k "$summary_cas_contract_selector" -v | tee /tmp/correction-summary-firestore-pytest.log
+          grep -Eq '6 passed' /tmp/correction-summary-firestore-pytest.log
+          ! grep -Eq '[0-9]+ skipped|[0-9]+ failed' /tmp/correction-summary-firestore-pytest.log
 
   guardian-app-contracts:
     runs-on: macos-14

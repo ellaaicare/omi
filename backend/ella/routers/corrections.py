@@ -6,6 +6,7 @@ of the upstream OMI conversation router so future upstream syncs do not have to
 carry this custom app contract as a core patch.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from google.cloud.firestore import transactional
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 import database.conversations as conversations_db
@@ -103,6 +105,7 @@ class SummaryContext(BaseModel):
 
 
 class ConversationCorrectionRequest(BaseModel):
+    correction_id: Optional[uuid.UUID] = None
     correction_text: str = Field(
         ...,
         min_length=1,
@@ -120,6 +123,102 @@ class ConversationCorrectionRequest(BaseModel):
         if not stripped:
             raise ValueError("correction_text cannot be blank")
         return stripped
+
+
+def _correction_request_fingerprint(request: ConversationCorrectionRequest) -> str:
+    payload = {
+        "correction_text": request.correction_text,
+        "source": request.source,
+        "summary_context": request.summary_context.model_dump(),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+_CLIENT_CORRECTION_RECEIPT_STATUSES = {
+    "submitted",
+    "queued",
+    "applied",
+    "undone",
+    "correction_blocked_identity_gate",
+    "direct_apply_failed",
+    "direct_apply_disabled",
+    "queue_failed",
+}
+
+
+def _validate_client_correction_audit(audit: dict, *, uid: str, conversation_id: str, correction_id: str) -> None:
+    # Legacy/internal receipts retain their existing shape. New client-ID
+    # reservations must prove the exact authenticated tuple before readback.
+    if "request_fingerprint" not in audit:
+        return
+    if (
+        audit.get("uid") != uid
+        or audit.get("conversation_id") != conversation_id
+        or audit.get("correction_id") != correction_id
+        or audit.get("trace_id") != f"correction:{conversation_id}:{correction_id}"
+        or audit.get("status") not in _CLIENT_CORRECTION_RECEIPT_STATUSES
+    ):
+        raise HTTPException(status_code=404, detail="Correction not found")
+
+
+def _claim_initial_correction_submission_in_transaction(
+    transaction,
+    conversation_ref,
+    audit_ref,
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    expected_active_summary_version_id: str,
+    bootstrap_update: dict,
+    correction_state: dict,
+    audit_payload: dict,
+) -> dict:
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    audit_snapshot = audit_ref.get(transaction=transaction)
+    if not conversation_snapshot.exists:
+        return {"outcome": "conversation_missing"}
+    conversation = conversation_snapshot.to_dict() or {}
+    if conversation.get("is_locked", False):
+        return {"outcome": "conversation_locked"}
+    if audit_snapshot.exists:
+        audit = audit_snapshot.to_dict() or {}
+        if (
+            audit.get("uid") != uid
+            or audit.get("conversation_id") != conversation_id
+            or audit.get("correction_id") != correction_id
+            or audit.get("request_fingerprint") != audit_payload["request_fingerprint"]
+        ):
+            return {"outcome": "idempotency_conflict"}
+        _validate_client_correction_audit(audit, uid=uid, conversation_id=conversation_id, correction_id=correction_id)
+        return {"outcome": "replay", "audit": audit}
+    current_version = str(
+        conversation.get("active_summary_version_id") or bootstrap_update.get("active_summary_version_id") or ""
+    )
+    if current_version != expected_active_summary_version_id:
+        return {"outcome": "version_drift"}
+    transaction.set(conversation_ref, {**bootstrap_update, "correction_state": correction_state}, merge=True)
+    transaction.set(audit_ref, audit_payload)
+    return {"outcome": "created", "audit": audit_payload}
+
+
+@transactional
+def _claim_initial_correction_submission_transaction(transaction, conversation_ref, audit_ref, **kwargs):
+    return _claim_initial_correction_submission_in_transaction(transaction, conversation_ref, audit_ref, **kwargs)
+
+
+def _claim_initial_correction_submission(*, uid: str, conversation_id: str, correction_id: str, **kwargs) -> dict:
+    conversation_ref = db.collection("users").document(uid).collection("conversations").document(conversation_id)
+    return _claim_initial_correction_submission_transaction(
+        db.transaction(),
+        conversation_ref,
+        _audit_ref(uid, conversation_id, correction_id),
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        **kwargs,
+    )
 
 
 class ConversationCorrectionResponse(BaseModel):
@@ -541,6 +640,7 @@ def _correction_receipt(
     _require_unlocked_conversation(conversation)
     audit_snapshot = _audit_ref(uid, conversation_id, correction_id).get()
     audit = audit_snapshot.to_dict() if getattr(audit_snapshot, "exists", False) else {}
+    _validate_client_correction_audit(audit, uid=uid, conversation_id=conversation_id, correction_id=correction_id)
     before, corrected = _correction_summary_versions(conversation, correction_id)
     if not audit and corrected is None:
         raise HTTPException(status_code=404, detail="Correction not found")
@@ -1782,7 +1882,7 @@ async def _submit_conversation_correction(
     if conversation.get("is_locked", False):
         raise HTTPException(status_code=402, detail="Conversation locked")
 
-    correction_id = str(uuid.uuid4())
+    correction_id = str(request.correction_id or uuid.uuid4())
     trace_id = f"correction:{conversation_id}:{correction_id}"
     submitted_at = _now_iso()
     structured = _structured_summary(conversation)
@@ -1803,14 +1903,6 @@ async def _submit_conversation_correction(
         "active_summary_version_id": bootstrap_update.get("active_summary_version_id")
         or conversation.get("active_summary_version_id"),
     }
-    _update_conversation_correction_state(
-        uid,
-        conversation_id,
-        {
-            **bootstrap_update,
-            "correction_state": submitted_state,
-        },
-    )
 
     audit_payload = {
         "correction_id": correction_id,
@@ -1828,7 +1920,43 @@ async def _submit_conversation_correction(
         "updated_at": submitted_at,
         "events": [{"stage": "submitted", "status": "ok", "at": submitted_at, "trace_id": trace_id}],
     }
-    _persist_correction_audit(uid, conversation_id, correction_id, audit_payload)
+    if request.correction_id is not None:
+        audit_payload["request_fingerprint"] = _correction_request_fingerprint(request)
+        claim = _claim_initial_correction_submission(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            expected_active_summary_version_id=str(submitted_state.get("active_summary_version_id") or ""),
+            bootstrap_update=bootstrap_update,
+            correction_state=submitted_state,
+            audit_payload=audit_payload,
+        )
+        outcome = claim.get("outcome")
+        if outcome == "conversation_missing":
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        if outcome == "conversation_locked":
+            raise HTTPException(status_code=402, detail="Conversation locked")
+        if outcome in {"version_drift", "idempotency_conflict"}:
+            raise HTTPException(status_code=409, detail="Correction idempotency conflict")
+        if outcome == "replay":
+            # A pending reservation is intentionally not requeued: a lost
+            # background task cannot safely be distinguished from a live one.
+            audit = claim["audit"]
+            return ConversationCorrectionResponse(
+                correction_id=correction_id,
+                conversation_id=conversation_id,
+                trace_id=audit["trace_id"],
+                status=audit["status"],
+                queued=audit["status"] in {"submitted", "queued"},
+                proposal_id=audit.get("proposal_id"),
+            )
+        if outcome != "created":
+            raise HTTPException(status_code=500, detail="Correction submission claim failed")
+    else:
+        _update_conversation_correction_state(
+            uid, conversation_id, {**bootstrap_update, "correction_state": submitted_state}
+        )
+        _persist_correction_audit(uid, conversation_id, correction_id, audit_payload)
 
     proposal_id = None
     try:

@@ -17,6 +17,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import HTTPException
+from google.cloud import firestore
 from utils.ella.canonical_omi import transcript_grounding_hash
 
 
@@ -1656,6 +1658,92 @@ def test_correction_audit_enqueue_failure_aborts_the_conversation_transaction(mo
 
     # The real Firestore transaction never commits queued writes when its body raises.
     assert len(transaction.updates) == 1
+
+
+@pytest.mark.skipif(
+    os.environ.get("ELLA_FIRESTORE_EMULATOR_TESTS") != "true",
+    reason="requires the hosted Firestore emulator gate",
+)
+def test_real_firestore_client_correction_initial_claim_is_exact_and_single_dispatch():
+    backend = Path(__file__).resolve().parents[2]
+    tree = ast.parse((backend / "ella" / "routers" / "corrections.py").read_text(encoding="utf-8"))
+    names = {
+        "_validate_client_correction_audit",
+        "_claim_initial_correction_submission_in_transaction",
+        "_claim_initial_correction_submission_transaction",
+    }
+    nodes = [
+        node
+        for node in tree.body
+        if (isinstance(node, ast.FunctionDef) and node.name in names)
+        or (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "_CLIENT_CORRECTION_RECEIPT_STATUSES"
+                for target in node.targets
+            )
+        )
+    ]
+    assert len(nodes) == 4
+    namespace = {"HTTPException": HTTPException, "transactional": firestore.transactional}
+    # Load only exact pure/transaction production functions, never router
+    # imports, credentials, provider configuration, or application globals.
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "<exact-correction-transaction>", "exec"), namespace)
+    claim_transaction = namespace["_claim_initial_correction_submission_transaction"]
+    client = firestore.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "omi-ci"))
+    uid, cid, correction_id = f"correction-claim-{uuid.uuid4()}", "fixture-conversation", str(uuid.uuid4())
+    conversation_ref = client.collection("users").document(uid).collection("conversations").document(cid)
+    audit_ref = conversation_ref.collection("corrections").document(correction_id)
+    stale_ref = conversation_ref.collection("corrections").document(str(uuid.uuid4()))
+    payload = {
+        "uid": uid,
+        "conversation_id": cid,
+        "correction_id": correction_id,
+        "trace_id": f"correction:{cid}:{correction_id}",
+        "status": "submitted",
+        "request_fingerprint": hashlib.sha256(b"synthetic-payload").hexdigest(),
+    }
+
+    def claim(reference=audit_ref, audit_payload=payload):
+        return claim_transaction(
+            client.transaction(),
+            conversation_ref,
+            reference,
+            uid=uid,
+            conversation_id=cid,
+            correction_id=audit_payload["correction_id"],
+            expected_active_summary_version_id="fixture-base",
+            bootstrap_update={},
+            correction_state={"correction_id": audit_payload["correction_id"], "pending": True},
+            audit_payload=copy.deepcopy(audit_payload),
+        )
+
+    barrier = threading.Barrier(2)
+
+    def simultaneous_claim():
+        barrier.wait(timeout=10)
+        return claim()
+
+    try:
+        conversation_ref.set({"active_summary_version_id": "fixture-base"})
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(simultaneous_claim) for _ in range(2)]
+            results = [future.result(timeout=30) for future in futures]
+        assert sorted(result["outcome"] for result in results) == ["created", "replay"]
+        assert sum(result["outcome"] == "created" for result in results) == 1
+        assert audit_ref.get().to_dict() == payload
+        assert claim(audit_payload={**payload, "request_fingerprint": "different"})["outcome"] == "idempotency_conflict"
+        assert audit_ref.get().to_dict() == payload
+        conversation_ref.update({"active_summary_version_id": "newer-version"})
+        stale_payload = {**payload, "correction_id": stale_ref.id, "trace_id": f"correction:{cid}:{stale_ref.id}"}
+        assert claim(stale_ref, stale_payload)["outcome"] == "version_drift"
+        assert not stale_ref.get().exists
+        assert conversation_ref.get().to_dict()["active_summary_version_id"] == "newer-version"
+    finally:
+        stale_ref.delete()
+        audit_ref.delete()
+        conversation_ref.delete()
+        client.close()
 
 
 def _load_emulator_modules(monkeypatch):
