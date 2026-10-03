@@ -41,6 +41,7 @@ backfill.
 | --- | --- | --- | --- |
 | GET | `/v1/ella/memory-artwork/preferences` | Firebase owner | Read consent/style state and supported versions. |
 | PUT | `/v1/ella/memory-artwork/preferences` | Firebase owner | Persist versioned accept/decline and style choice for the current binding. |
+| PATCH | `/v1/ella/memory-artwork/preferences` | Firebase owner | Change style only under existing accepted artwork consent and exact current stored authority. |
 | GET | `/v1/ella/memories/{memory_id}/artwork` | Firebase owner | Read typed state or an owner-scoped signed URL. |
 | POST | `/v1/ella/memories/{memory_id}/artwork` | Firebase owner | Idempotently queue one terminal enriched memory. |
 | POST | `/v1/ella/memory-artwork/backfill` | Firebase owner | Queue at most the newest ten eligible memories. |
@@ -49,6 +50,33 @@ backfill.
 Old clients remain compatible because `artwork` is optional. Declined and
 unavailable states do not contain a URL; clients must render a local neutral
 fallback rather than a generic image presented as memory-specific.
+
+## Style-only consent repair
+
+PATCH accepts only `consent_version` and `style_version`; extra consent, owner,
+receipt, or binding fields are forbidden. It preserves the v10 artwork contract,
+internal-owner admission, stable owner/binding/profile digest, and existing
+global-consent checks. The Firestore transaction rereads accepted consent,
+version, binding/profile/digest, and deletion state before updating only style
+and update time. Declined/not-set consent is never reaccepted. Stale stored
+authority digest is refused, not silently migrated. Explicit-consent PUT and
+its decline erasure remain unchanged.
+
+This backend-only union retains all existing queue-control fields, including
+paused/cancelled state, remaining budget, and auto-continue receipt. It does not
+queue, resume, regenerate, or authorize any provider request. The newer app's
+automatic bounded preview after a style change remains rollout-held: existing
+preview/historical worker admission is tied to the old control generation and
+does not admit the changed style without a separately reviewed explicit action.
+Do not relabel preview work as terminal enrichment to bypass that gate.
+
+Backend PATCH must be reviewed/deployed before a newer app can use it. Older
+clients using PUT retain the implicit style/consent coupling; this source patch
+does not fix installed clients. Unsupported PATCH must not fall back to PUT.
+The hosted gate retains 194 artwork cases plus 25 additive cases, all correction
+141/CAS51 contracts, and the separate strict summary-emulator six cases. Artwork
+emulator coverage is two required cases with zero skips. Without an emulator,
+local skips are not transaction-concurrency proof.
 
 ## Configuration
 

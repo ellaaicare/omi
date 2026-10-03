@@ -279,6 +279,8 @@ class MemoryArtworkRepository(Protocol):
 
     def set_preferences(self, uid: str, preferences: dict[str, Any], **kwargs) -> None: ...
 
+    def update_style(self, uid: str, **kwargs) -> str: ...
+
     def get_backfill_control(self, uid: str) -> dict[str, Any]: ...
 
     def set_backfill_control(self, uid: str, **kwargs) -> dict[str, Any]: ...
@@ -348,6 +350,7 @@ class FirestoreMemoryArtworkRepository:
     get_preferences = staticmethod(artwork_db.get_preferences)
     stabilize_preferences_authority = staticmethod(artwork_db.stabilize_preferences_authority)
     set_preferences = staticmethod(artwork_db.set_preferences)
+    update_style = staticmethod(artwork_db.update_style)
     get_backfill_control = staticmethod(artwork_db.get_backfill_control)
     set_backfill_control = staticmethod(artwork_db.set_backfill_control)
     pause_observed_legacy_auto_continue_control = staticmethod(artwork_db.pause_observed_legacy_auto_continue_control)
@@ -1674,6 +1677,45 @@ class MemoryArtworkService:
                 style_version=style_version,
             )
         return await self.queue_status(uid)
+
+    async def set_style(self, uid: str, *, consent_version: str, style_version: str) -> dict:
+        if not self.config.allows_uid(uid):
+            raise MemoryArtworkError("memory_artwork_internal_owner_required")
+        if consent_version != ARTWORK_CONSENT_VERSION:
+            raise MemoryArtworkError("memory_artwork_consent_version_stale")
+        if style_version not in SUPPORTED_STYLE_VERSIONS:
+            raise MemoryArtworkError("memory_artwork_style_version_invalid")
+        if not (self.config.enabled and self.config.release_enabled):
+            raise MemoryArtworkError("memory_artwork_release_disabled")
+        if not self.global_consent_checker(uid):
+            raise MemoryArtworkError("memory_artwork_consent_required")
+        authority = await self.authority_resolver(uid)
+        if (
+            authority.uid != uid
+            or not authority.binding_id
+            or not authority.profile_id
+            or not authority.authority_digest
+        ):
+            raise MemoryArtworkError("memory_artwork_preference_authority_stale")
+        if not self.global_consent_checker(uid):
+            raise MemoryArtworkError("memory_artwork_consent_required")
+        outcome = self.repository.update_style(
+            uid,
+            consent_version=consent_version,
+            style_version=style_version,
+            binding_id=authority.binding_id,
+            profile_id=authority.profile_id,
+            authority_digest=authority.authority_digest,
+            updated_at=datetime.now(timezone.utc),
+        )
+        if outcome != "updated":
+            code = {
+                "consent_required": "memory_artwork_consent_required",
+                "deletion_pending": "memory_artwork_deletion_pending",
+                "preference_authority_stale": "memory_artwork_preference_authority_stale",
+            }.get(outcome, "memory_artwork_preference_authority_stale")
+            raise MemoryArtworkError(code)
+        return await self.preferences(uid)
 
     async def enqueue(
         self,

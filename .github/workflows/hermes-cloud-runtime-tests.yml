@@ -25,6 +25,12 @@ on:
       - "backend/database/managed_cloud_consent.py"
       - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
+      - "backend/database/memory_artwork.py"
+      - "backend/ella/services/memory_artwork.py"
+      - "backend/ella/routers/memory_artwork.py"
+      - "backend/tests/unit/test_memory_artwork_contract.py"
+      - "backend/tests/unit/test_memory_artwork_firestore.py"
+      - "backend/ella/docs/MEMORY_ARTWORK_V1.md"
       - "backend/models/conversation.py"
       - "backend/models/conversation_integrity.py"
       - "backend/models/hermes_cloud_enrichment_contract.py"
@@ -209,6 +215,12 @@ on:
       - "backend/database/managed_cloud_consent.py"
       - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
+      - "backend/database/memory_artwork.py"
+      - "backend/ella/services/memory_artwork.py"
+      - "backend/ella/routers/memory_artwork.py"
+      - "backend/tests/unit/test_memory_artwork_contract.py"
+      - "backend/tests/unit/test_memory_artwork_firestore.py"
+      - "backend/ella/docs/MEMORY_ARTWORK_V1.md"
       - "backend/models/conversation.py"
       - "backend/models/conversation_integrity.py"
       - "backend/models/hermes_cloud_enrichment_contract.py"
@@ -428,6 +440,7 @@ jobs:
           "Jinja2==3.1.4"
           "jsonschema==4.23.0"
           "numpy==1.26.4"
+          "pillow==10.4.0"
           "PyJWT==2.9.0"
           "pytest==8.3.2"
           "openapi-spec-validator==0.7.1"
@@ -1537,6 +1550,47 @@ jobs:
           test "$(pytest --collect-only -q tests/unit/test_ella_scanner_echo_suppression.py | grep -c '::')" -eq 17
           pytest tests/unit/test_ella_scanner_echo_suppression.py -v
 
+      - name: Run preserved artwork contracts and additive style consent gate
+        run: |
+          set -euo pipefail
+          baseline_artwork_selector='not (style_only or style_patch or explicit_consent_preferences_put_contract_remains_unchanged)'
+          test "$(pytest --collect-only -q tests/unit/test_memory_artwork_contract.py -k "$baseline_artwork_selector" | grep -c '::')" -eq 194
+          artwork_ids="$(pytest --collect-only -q tests/unit/test_memory_artwork_contract.py | sed '/^$/d')"
+          test "$(grep -c '::' <<<"$artwork_ids")" -eq 219
+          required_style_ids=(
+            "tests/unit/test_memory_artwork_contract.py::test_style_only_rejects_unaccepted_consent_without_reaccepting[declined]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_only_rejects_unaccepted_consent_without_reaccepting[not_set]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_only_rejects_unaccepted_consent_without_reaccepting[unknown]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_only_transaction_refuses_current_authority_drift[version]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_only_transaction_refuses_current_authority_drift[binding]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_only_transaction_refuses_current_authority_drift[profile]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_only_transaction_refuses_current_authority_drift[digest]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_only_transaction_refuses_current_authority_drift[deletion]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_only_transaction_refuses_current_authority_drift[missing]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_only_preserves_all_consent_receipt_and_binding_metadata[running]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_only_preserves_all_consent_receipt_and_binding_metadata[paused]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_only_preserves_all_consent_receipt_and_binding_metadata[cancelled]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_only_refuses_revocation_and_wrong_owner_after_resolution[decline]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_only_refuses_revocation_and_wrong_owner_after_resolution[global]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_only_refuses_revocation_and_wrong_owner_after_resolution[owner]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_only_refuses_revocation_and_wrong_owner_after_resolution[disabled]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_only_refuses_revocation_and_wrong_owner_after_resolution[request_version]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_patch_is_authenticated_and_forbids_consent_or_authority_inputs[None]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_patch_is_authenticated_and_forbids_consent_or_authority_inputs[consent]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_patch_is_authenticated_and_forbids_consent_or_authority_inputs[binding_id]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_patch_is_authenticated_and_forbids_consent_or_authority_inputs[uid]"
+            "tests/unit/test_memory_artwork_contract.py::test_style_patch_is_authenticated_and_forbids_consent_or_authority_inputs[receipt_id]"
+            "tests/unit/test_memory_artwork_contract.py::test_explicit_consent_preferences_put_contract_remains_unchanged"
+            "tests/unit/test_memory_artwork_contract.py::test_style_only_owner_allowlist_denies_before_resolution_or_mutation"
+            "tests/unit/test_memory_artwork_contract.py::test_style_only_stale_digest_refuses_without_stabilization_or_receipt_rewrite"
+          )
+          for required_id in "${required_style_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$artwork_ids"
+          done
+          pytest tests/unit/test_memory_artwork_contract.py -v | tee /tmp/artwork-style-consent-pytest.log
+          grep -Eq '219 passed' /tmp/artwork-style-consent-pytest.log
+          ! grep -Eq '[0-9]+ skipped|[0-9]+ failed' /tmp/artwork-style-consent-pytest.log
+
       - name: Run real Firestore summary CAS contention gate
         run: |
           set -euo pipefail
@@ -1575,6 +1629,13 @@ jobs:
               -k "$summary_cas_contract_selector" -v | tee /tmp/correction-summary-firestore-pytest.log
           grep -Eq '6 passed' /tmp/correction-summary-firestore-pytest.log
           ! grep -Eq '[0-9]+ skipped|[0-9]+ failed' /tmp/correction-summary-firestore-pytest.log
+          artwork_firestore_ids="$(pytest --collect-only -q tests/unit/test_memory_artwork_firestore.py)"
+          test "$(grep -c '::' <<<"$artwork_firestore_ids")" -eq 2
+          grep -Fqx 'tests/unit/test_memory_artwork_firestore.py::test_real_firestore_style_only_cannot_overwrite_a_concurrent_decline' <<<"$artwork_firestore_ids"
+          ELLA_FIRESTORE_EMULATOR_TESTS=true \
+            python -m pytest tests/unit/test_memory_artwork_firestore.py -v | tee /tmp/artwork-style-firestore-pytest.log
+          grep -Eq '2 passed' /tmp/artwork-style-firestore-pytest.log
+          ! grep -Eq '[0-9]+ skipped|[0-9]+ failed' /tmp/artwork-style-firestore-pytest.log
 
   guardian-app-contracts:
     runs-on: macos-14

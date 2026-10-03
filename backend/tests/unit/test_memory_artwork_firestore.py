@@ -7,6 +7,94 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from google.api_core.exceptions import Aborted
+from google.cloud import firestore
+
+
+@pytest.mark.skipif(
+    os.environ.get("ELLA_FIRESTORE_EMULATOR_TESTS") != "true",
+    reason="requires the hosted Firestore emulator gate",
+)
+def test_real_firestore_style_only_cannot_overwrite_a_concurrent_decline(monkeypatch):
+    """Inject a server abort, then prove real decline commit and SDK retry.
+
+    This is deterministic retry evidence, not natural-contention evidence.
+    Firestore's pessimistic read lock would otherwise block a competing write
+    while a test waits for that write to commit before releasing the read.
+    """
+    client = firestore.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "omi-ci"))
+    monkeypatch.setitem(sys.modules, "database._client", SimpleNamespace(db=client))
+    path = Path(__file__).resolve().parents[2] / "database" / "memory_artwork.py"
+    spec = importlib.util.spec_from_file_location("database.memory_artwork_style_emulator_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    user_ref = client.collection("users").document(f"artwork-style-test-{uuid.uuid4()}")
+    preferences = {
+        "consent": "accepted",
+        "consent_version": "test-version",
+        "style_version": "original-style",
+        "binding_id": "binding-a",
+        "profile_id": "profile-a",
+        "authority_digest": "digest-a",
+        "receipt_id": "retained-receipt",
+        "decided_at": "original-decision",
+    }
+    kwargs = dict(
+        consent_version="test-version",
+        style_version="new-style",
+        binding_id="binding-a",
+        profile_id="profile-a",
+        authority_digest="digest-a",
+        updated_at=datetime.now(timezone.utc),
+    )
+    control = {"state": "paused", "generation_id": "original-generation", "auto_continue": False}
+    try:
+        user_ref.set({module.PREFERENCES_FIELD: preferences, module.BACKFILL_CONTROL_FIELD: control})
+        assert module.update_style(user_ref.id, **kwargs) == "updated"
+        assert user_ref.get().to_dict()[module.BACKFILL_CONTROL_FIELD] == control
+        stored = user_ref.get().to_dict()[module.PREFERENCES_FIELD]
+        assert {key: stored[key] for key in preferences if key != "style_version"} == {
+            key: value for key, value in preferences.items() if key != "style_version"
+        }
+        user_ref.set({module.PREFERENCES_FIELD: preferences, module.BACKFILL_CONTROL_FIELD: control})
+        original = module._update_style_transaction
+        commit = client._firestore_api.commit
+        attempts = []
+        aborted_commits = []
+
+        def record_real_commit(**arguments):
+            try:
+                return commit(**arguments)
+            except Aborted:
+                aborted_commits.append(True)
+                raise
+
+        def update_after_injected_server_abort(transaction, reference, **arguments):
+            observed = reference.get(transaction=transaction).to_dict()[module.PREFERENCES_FIELD]["consent"]
+            outcome = original(transaction, reference, **arguments)
+            attempts.append((observed, outcome))
+            if len(attempts) == 1:
+                assert (observed, outcome) == ("accepted", "updated")
+                # Release the server-side read lock without cleaning the SDK's
+                # transaction ID. Its subsequent real commit RPC must abort.
+                client._firestore_api.rollback(
+                    request={"database": client._database_string, "transaction": transaction.id}
+                )
+                reference.update({f"{module.PREFERENCES_FIELD}.consent": "declined"})
+                assert reference.get().to_dict()[module.PREFERENCES_FIELD]["consent"] == "declined"
+            return outcome
+
+        monkeypatch.setattr(client._firestore_api, "commit", record_real_commit)
+        monkeypatch.setattr(module, "_update_style_transaction", update_after_injected_server_abort)
+        assert module.update_style(user_ref.id, **kwargs) == "consent_required"
+        assert attempts == [("accepted", "updated"), ("declined", "consent_required")]
+        assert aborted_commits == [True]
+        stored = user_ref.get().to_dict()[module.PREFERENCES_FIELD]
+        assert user_ref.get().to_dict()[module.BACKFILL_CONTROL_FIELD] == control
+        assert stored == {**preferences, "consent": "declined"}
+    finally:
+        user_ref.delete()
+        client.close()
 
 
 @pytest.mark.skipif(
@@ -14,8 +102,6 @@ import pytest
     reason="requires the hosted Firestore emulator gate",
 )
 def test_real_firestore_generation_and_dispatch_commit_and_repair_together(monkeypatch):
-    from google.cloud import firestore
-
     client = firestore.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "omi-ci"))
     monkeypatch.setitem(sys.modules, "database._client", SimpleNamespace(db=client))
     path = Path(__file__).resolve().parents[2] / "database" / "memory_artwork.py"
@@ -30,7 +116,19 @@ def test_real_firestore_generation_and_dispatch_commit_and_repair_together(monke
     user_ref = client.collection("users").document(uid)
     conversation_ref = user_ref.collection("conversations").document(memory_id)
     now = datetime.now(timezone.utc)
-    user_ref.set({"id": uid})
+    user_ref.set(
+        {
+            "id": uid,
+            module.PREFERENCES_FIELD: {
+                "consent": "accepted",
+                "consent_version": "ai-data-processors-v10",
+                "style_version": "ella.memory_artwork.style.soft-gouache.v1",
+                "binding_id": "fixture-binding",
+                "profile_id": "fixture-profile",
+                "authority_digest": "fixture-digest",
+            },
+        }
+    )
     conversation_ref.set(
         {
             "id": memory_id,
