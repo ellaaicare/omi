@@ -7,7 +7,8 @@ import 'package:omi/backend/http/shared.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/capture_host/ella_capture_host.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
-import 'package:omi/pages/settings/device_diagnostics_page.dart';
+import 'package:omi/ella/services/memory_artwork_api.dart';
+import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/services/connectivity_service.dart';
@@ -58,6 +59,34 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
         _ => context.l10n.unknown,
       };
 
+  String _safeCode(String code) {
+    const known = {
+      'timeout',
+      'no_network_interface',
+      'refresh_exception',
+      'same_uid_rollover',
+      'transport_exception',
+      'authority_superseded',
+      'subject_mismatch',
+      'grant_not_explicitly_terminal',
+      'consent_policy_mismatch',
+      'account_epoch_unavailable',
+      'consent_grant_not_current',
+      'explicit_not_accepted',
+      'explicit_local_revoke',
+      'persisted_authority_invalid',
+      'explicit_deleted',
+      'explicit_notAccepted',
+      'explicit_reconsentRequired',
+    };
+    if (known.contains(code)) return code;
+    final http = RegExp(r'^http_([1-5][0-9]{2})$').firstMatch(code);
+    return http == null ? context.l10n.unknown : 'http_${http.group(1)}';
+  }
+
+  String _safeStatus(int? status) =>
+      status != null && status >= 100 && status <= 599 ? status.toString() : context.l10n.unknown;
+
   @override
   Widget build(BuildContext context) {
     final connectivity = ConnectivityService();
@@ -77,16 +106,22 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
           final backendProbe = connectivity.backendReachable == null
               ? context.l10n.unknown
               : connectivity.backendReachable!
-                  ? '${context.l10n.connected} · ${connectivity.lastBackendProbeStatus ?? '-'}'
-                  : '${context.l10n.disconnected} · ${connectivity.lastBackendProbeError}';
-          final apiResult = ApiTransportDiagnostics.lastStatusCode?.toString() ??
-              (ApiTransportDiagnostics.lastError.isEmpty ? context.l10n.unknown : ApiTransportDiagnostics.lastError);
+                  ? '${context.l10n.connected} · ${_safeStatus(connectivity.lastBackendProbeStatus)}'
+                  : '${context.l10n.disconnected} · ${_safeCode(connectivity.lastBackendProbeError)}';
+          final apiResult = ApiTransportDiagnostics.lastStatusCode == null
+              ? _safeCode(ApiTransportDiagnostics.lastError)
+              : _safeStatus(ApiTransportDiagnostics.lastStatusCode);
           final leaseDetail = <String>[
             lease.phase.name,
-            if (lease.retryableFailures > 0) 'retry ${lease.retryableFailures}',
-            if (lease.supportCode.isNotEmpty) lease.supportCode,
-            if (lease.terminalReason.isNotEmpty) lease.terminalReason,
+            if (lease.retryableFailures > 0) 'retry ${lease.retryableFailures.clamp(0, 1000000)}',
+            if (lease.supportCode.isNotEmpty) _safeCode(lease.supportCode),
+            if (lease.terminalReason.isNotEmpty) _safeCode(lease.terminalReason),
           ].join(' · ');
+          final artwork = MemoryArtworkQueueDiagnostics.latest;
+          final artworkRead = artwork?.read;
+          final artworkDetail = artwork == null
+              ? context.l10n.unknown
+              : '${artworkRead?.message ?? context.l10n.unknown}\nhome=${artwork.projection.name}';
           return ListView(
             key: const Key('ella-runtime-diagnostics'),
             padding: const EdgeInsets.all(16),
@@ -104,6 +139,11 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
               _DiagnosticRow(
                 label: context.l10n.diagnosticsLastApi,
                 value: '$apiResult\n${_time(ApiTransportDiagnostics.lastAttemptAt)}',
+              ),
+              _DiagnosticRow(
+                key: const Key('runtime-diagnostics-artwork-read'),
+                label: context.l10n.memoryArtworkStudio,
+                value: artworkDetail,
               ),
               _DiagnosticRow(
                 label: context.l10n.diagnosticsConsentLease,
@@ -137,12 +177,13 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
                       : '${upstream.lastFailure!.reason.code} · ${upstream.lastFailure!.closeCode ?? '-'}\n${_time(upstream.lastFailure!.at)}',
                 ),
               const SizedBox(height: 6),
-              _DeviceDiagnosticsEntryRow(
-                onTap: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(builder: (_) => const DeviceDiagnosticsPage()),
-                  );
-                },
+              _DiagnosticRow(
+                key: const Key('runtime-diagnostics-device-counts'),
+                label: context.l10n.deviceDiagnostics,
+                value: 'scansStarted=${DebugLogManager.deviceScansStarted.clamp(0, 1000000)} '
+                    'scansStopped=${DebugLogManager.deviceScansStopped.clamp(0, 1000000)}\n'
+                    'candidatesSeen=${DebugLogManager.deviceCandidatesSeen.clamp(0, 1000000)} '
+                    'candidatesAdmitted=${DebugLogManager.deviceCandidatesAdmitted.clamp(0, 1000000)}',
               ),
             ],
           );
@@ -152,48 +193,8 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
   }
 }
 
-/// Always-available entry into [DeviceDiagnosticsPage], regardless of the
-/// ELLA_PUBLIC_BUILD flag — this screen is itself reached via a long-press
-/// on the Home greeting rather than the Developer-settings unlock, so it
-/// stays reachable on public builds where that unlock is disabled.
-class _DeviceDiagnosticsEntryRow extends StatelessWidget {
-  const _DeviceDiagnosticsEntryRow({required this.onTap});
-
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) => GestureDetector(
-        key: const Key('runtime-diagnostics-device-diagnostics-entry'),
-        onTap: onTap,
-        child: EllaCardSurface(
-          borderRadius: 14,
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        context.l10n.deviceDiagnostics,
-                        style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w700),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(context.l10n.deviceDiagnosticsDescription, style: EllaTextStyles.caption),
-                    ],
-                  ),
-                ),
-                const Icon(Icons.chevron_right, size: 20),
-              ],
-            ),
-          ),
-        ),
-      );
-}
-
 class _DiagnosticRow extends StatelessWidget {
-  const _DiagnosticRow({required this.label, required this.value});
+  const _DiagnosticRow({super.key, required this.label, required this.value});
 
   final String label;
   final String value;

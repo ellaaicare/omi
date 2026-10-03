@@ -402,17 +402,17 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               },
             ),
 
+            EllaSettingsRow(
+              key: const Key('ella-runtime-diagnostics-entry'),
+              icon: Icons.monitor_heart_outlined,
+              title: context.l10n.ellaRuntimeDiagnostics,
+              subtitle: context.l10n.ellaRuntimeDiagnosticsSubtitle,
+              onTap: () {
+                Navigator.push(context, MaterialPageRoute(builder: (context) => const EllaRuntimeDiagnosticsPage()));
+              },
+            ),
             if (_developerUnlocked) ...[
               _buildSectionHeader(context.l10n.ellaMoreSection),
-              EllaSettingsRow(
-                key: const Key('ella-runtime-diagnostics-entry'),
-                icon: Icons.monitor_heart_outlined,
-                title: context.l10n.ellaRuntimeDiagnostics,
-                subtitle: context.l10n.ellaRuntimeDiagnosticsSubtitle,
-                onTap: () {
-                  Navigator.push(context, MaterialPageRoute(builder: (context) => const EllaRuntimeDiagnosticsPage()));
-                },
-              ),
               const SizedBox(height: 8),
               EllaSettingsRow(
                 icon: Icons.developer_mode,

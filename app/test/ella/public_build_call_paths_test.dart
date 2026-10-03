@@ -992,6 +992,9 @@ void main() {
     expect(statusCalls, 0);
     expect(urlCalls, 0);
     expect(find.byType(EllaSettingsPage), findsOneWidget);
+    await tester.scrollUntilVisible(find.byKey(const Key('ella-runtime-diagnostics-entry')), 180);
+    expect(find.byKey(const Key('ella-runtime-diagnostics-entry')), findsOneWidget);
+    expect(find.text('Advanced settings'), findsNothing);
     expect(find.text('Ella workspace'), findsNothing);
     if (!allowsGuardianSurface()) {
       for (final key in const [

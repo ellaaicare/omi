@@ -54,6 +54,75 @@ class MemoryArtworkQueueReadDiagnostic {
       '[MemoryArtworkQueue] read=$readNumber outcome=$outcomeCode elapsed_ms=$elapsedMilliseconds status=${statusCode ?? 'none'}';
 }
 
+enum MemoryArtworkQueueProjection { pending, applied, failed }
+
+class MemoryArtworkQueueReadTicket {
+  MemoryArtworkQueueReadTicket._(this._isCurrent);
+
+  final bool Function() _isCurrent;
+}
+
+class MemoryArtworkQueueDiagnosticSnapshot {
+  const MemoryArtworkQueueDiagnosticSnapshot._(this.read, this.projection);
+
+  final MemoryArtworkQueueReadDiagnostic? read;
+  final MemoryArtworkQueueProjection projection;
+}
+
+/// One process-local, authority-fenced result. Tickets, not per-instance read
+/// numbers, correlate an HTTP outcome with the Home state that consumed it.
+class MemoryArtworkQueueDiagnostics {
+  MemoryArtworkQueueDiagnostics._();
+
+  static final Object _zoneKey = Object();
+  static MemoryArtworkQueueReadTicket? _ticket;
+  static MemoryArtworkQueueDiagnosticSnapshot? _snapshot;
+
+  static MemoryArtworkQueueReadTicket begin({required bool Function() isCurrent}) {
+    final ticket = MemoryArtworkQueueReadTicket._(isCurrent);
+    _ticket = ticket;
+    _snapshot = const MemoryArtworkQueueDiagnosticSnapshot._(null, MemoryArtworkQueueProjection.pending);
+    return ticket;
+  }
+
+  static MemoryArtworkQueueDiagnosticSnapshot? get latest {
+    final ticket = _ticket;
+    if (ticket == null || !_isCurrent(ticket)) {
+      clear();
+      return null;
+    }
+    return _snapshot;
+  }
+
+  static void clear() {
+    _ticket = null;
+    _snapshot = null;
+  }
+
+  static bool _isCurrent(MemoryArtworkQueueReadTicket ticket) {
+    try {
+      return ticket._isCurrent();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static bool _canPublish(MemoryArtworkQueueReadTicket ticket) => identical(_ticket, ticket) && _isCurrent(ticket);
+
+  static void _record(MemoryArtworkQueueReadTicket ticket, MemoryArtworkQueueReadDiagnostic read) {
+    if (!_canPublish(ticket)) return;
+    _snapshot = MemoryArtworkQueueDiagnosticSnapshot._(read, MemoryArtworkQueueProjection.pending);
+  }
+
+  static void project(MemoryArtworkQueueReadTicket ticket, {required bool applied}) {
+    if (!_canPublish(ticket)) return;
+    _snapshot = MemoryArtworkQueueDiagnosticSnapshot._(
+      _snapshot?.read,
+      applied ? MemoryArtworkQueueProjection.applied : MemoryArtworkQueueProjection.failed,
+    );
+  }
+}
+
 enum MemoryArtworkResultStatus { generating, ready, unavailable, declined }
 
 enum MemoryArtworkQueueState { running, paused, cancelled, completed, needsAttention }
@@ -763,7 +832,15 @@ class MemoryArtworkApi {
     return _recentRecoveryFromPayload(_jsonObject(response!.body));
   }
 
+  // The zone follows this invocation through finally without changing the
+  // overridable queueStatus seam. Overrides that omit HTTP leave the read unknown.
+  Future<MemoryArtworkQueueStatus?> queueStatusWithDiagnostics(MemoryArtworkQueueReadTicket ticket) => runZoned(
+        queueStatus,
+        zoneValues: {MemoryArtworkQueueDiagnostics._zoneKey: ticket},
+      );
+
   Future<MemoryArtworkQueueStatus?> queueStatus() async {
+    final ticket = Zone.current[MemoryArtworkQueueDiagnostics._zoneKey] as MemoryArtworkQueueReadTicket?;
     final readNumber = ++_queueReadSequence;
     final elapsed = Stopwatch()..start();
     var outcome = MemoryArtworkQueueReadOutcome.internal;
@@ -817,6 +894,7 @@ class MemoryArtworkApi {
         elapsed.elapsedMilliseconds.clamp(0, 120000),
         statusCode != null && statusCode >= 100 && statusCode <= 599 ? statusCode : null,
       );
+      if (ticket != null) MemoryArtworkQueueDiagnostics._record(ticket, diagnostic);
       try {
         _onQueueReadDiagnostic(diagnostic);
       } catch (_) {

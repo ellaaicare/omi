@@ -4,13 +4,21 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/ella/pages/ella_runtime_diagnostics_page.dart';
+import 'package:omi/ella/pages/ella_settings_page.dart';
 import 'package:omi/ella/capture_host/ella_capture_host.dart';
+import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
+import 'package:omi/ella/services/memory_artwork_api.dart';
+import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/backend/http/shared.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/device_provider.dart';
+import 'package:omi/providers/user_provider.dart';
 import 'package:omi/services/devices.dart';
+import 'package:omi/services/connectivity_service.dart';
 import 'package:omi/services/devices/device_connection.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -26,8 +34,149 @@ void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues(const {});
     EllaCaptureHost.resetForTesting();
+    MemoryArtworkQueueDiagnostics.clear();
   });
   tearDown(EllaCaptureHost.resetForTesting);
+
+  for (final width in [320.0, 390.0]) {
+    testWidgets('ordinary artwork snapshot is read-only and scroll safe at 3x width=$width', (tester) async {
+      tester.view.physicalSize = Size(width, width == 320 ? 568 : 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      var current = true;
+      var requests = 0;
+      final authority = _ReadAuthority(() => current);
+      final api = MemoryArtworkApi(
+        baseUrl: 'https://private-fixture.invalid',
+        authorityProvider: () => authority,
+        request: (
+            {required url,
+            required headers,
+            required body,
+            required method,
+            timeout,
+            retries,
+            requireAuthCheck,
+            expectedAuthenticatedUid,
+            exactAuthority,
+            onSendAttempt}) async {
+          requests++;
+          expect(method, 'GET');
+          return null;
+        },
+      );
+      final ticket = MemoryArtworkQueueDiagnostics.begin(isCurrent: authority.isExactCurrent);
+      await api.queueStatusWithDiagnostics(ticket);
+      MemoryArtworkQueueDiagnostics.project(ticket, applied: false);
+      final capture = _DiagnosticsCaptureProvider('disconnected');
+      final device = DeviceProvider(deviceService: _NoopDeviceService(), automaticallyReconnectOnReady: false);
+      EllaCaptureHost.installForTesting(homeCaptureDockBuilder: (_) => const SizedBox.shrink());
+      ApiTransportDiagnostics.lastError = 'private-runtime-type https://private.invalid';
+      await tester.pumpWidget(MultiProvider(
+        providers: [
+          ChangeNotifierProvider<CaptureProvider>.value(value: capture),
+          ChangeNotifierProvider<DeviceProvider>.value(value: device),
+        ],
+        child: MaterialApp(
+          theme: ellaThemeData(),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(textScaler: const TextScaler.linear(3)),
+            child: child!,
+          ),
+          home: const EllaRuntimeDiagnosticsPage(),
+        ),
+      ));
+      await tester.pump();
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('runtime-diagnostics-artwork-read')),
+        180,
+        scrollable: find
+            .descendant(of: find.byKey(const Key('ella-runtime-diagnostics')), matching: find.byType(Scrollable))
+            .first,
+      );
+      expect(find.textContaining('outcome=no_response'), findsOneWidget);
+      expect(find.textContaining('home=failed'), findsOneWidget);
+      expect(find.textContaining('private-'), findsNothing);
+      expect(find.textContaining('https://'), findsNothing);
+      await tester.pump(const Duration(seconds: 3));
+      expect(requests, 1);
+      expect(capture.metricsListeners, 0);
+      current = false;
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.textContaining('outcome=no_response'), findsNothing);
+      expect(MemoryArtworkQueueDiagnostics.latest, isNull);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      ApiTransportDiagnostics.lastError = '';
+      capture.dispose();
+      device.dispose();
+    });
+  }
+
+  testWidgets('upstream Settings opens ordinary diagnostics without advanced controls', (tester) async {
+    final capture = _DiagnosticsCaptureProvider('disconnected');
+    final device = DeviceProvider(deviceService: _NoopDeviceService(), automaticallyReconnectOnReady: false);
+    EllaCaptureHost.installForTesting(homeCaptureDockBuilder: (_) => const SizedBox.shrink());
+    await tester.pumpWidget(MultiProvider(
+      providers: [
+        ChangeNotifierProvider<CaptureProvider>.value(value: capture),
+        ChangeNotifierProvider<DeviceProvider>.value(value: device),
+        ChangeNotifierProvider(create: (_) => UserProvider()),
+      ],
+      child: const MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: EllaSettingsPage(runtimeSideEffectsEnabled: false, authenticatedUidOverride: ''),
+      ),
+    ));
+    await tester.pump();
+    final entry = find.byKey(const Key('ella-runtime-diagnostics-entry'));
+    await tester.scrollUntilVisible(entry, 180);
+    await tester.tap(entry);
+    await tester.pumpAndSettle();
+    expect(find.byType(EllaRuntimeDiagnosticsPage), findsOneWidget);
+    expect(find.text('Advanced settings'), findsNothing);
+    expect(capture.metricsListeners, 0);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    capture.dispose();
+    device.dispose();
+  });
+
+  testWidgets('ordinary runtime diagnostics never render arbitrary lease strings', (tester) async {
+    final capture = _DiagnosticsCaptureProvider('disconnected');
+    final device = DeviceProvider(deviceService: _NoopDeviceService(), automaticallyReconnectOnReady: false);
+    AiConsentActiveSessionLease.diagnostics.value = const AiConsentLeaseDiagnostics(
+      phase: AiConsentLeasePhase.retrying,
+      supportCode: 'private-token https://private.invalid?secret=fixture',
+      terminalReason: 'private-owner',
+    );
+    ConnectivityService().applyHealthProbeForTest(statusCode: 17);
+    await tester.pumpWidget(MultiProvider(
+      providers: [
+        ChangeNotifierProvider<CaptureProvider>.value(value: capture),
+        ChangeNotifierProvider<DeviceProvider>.value(value: device),
+      ],
+      child: const MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: EllaRuntimeDiagnosticsPage(),
+      ),
+    ));
+    await tester.pump();
+    expect(find.textContaining('private-'), findsNothing);
+    expect(find.textContaining('https://'), findsNothing);
+    expect(find.textContaining('Connected · 17'), findsNothing);
+    expect(find.textContaining('Connected · Unknown'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+    AiConsentActiveSessionLease.diagnostics.value = const AiConsentLeaseDiagnostics();
+    ConnectivityService().applyHealthProbeForTest(statusCode: 200);
+    capture.dispose();
+    device.dispose();
+  });
 
   test('socket diagnostics retain only fixed metadata, never arbitrary payloads', () {
     expect(EllaCaptureSocketFailure.fromReason('https://private.test?token=secret', 1008, DateTime.now()), isNull);
@@ -123,6 +272,15 @@ void main() {
       device.dispose();
     }
   });
+}
+
+class _ReadAuthority implements ExactAccountAuthorityVerifier {
+  _ReadAuthority(this.current);
+  final bool Function() current;
+  @override
+  String get uid => 'private-fixture-owner';
+  @override
+  bool isExactCurrent() => current();
 }
 
 class _DiagnosticsCaptureProvider extends CaptureProvider {

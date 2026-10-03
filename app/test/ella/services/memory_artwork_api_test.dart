@@ -96,6 +96,98 @@ MemoryArtworkApi _queueDiagnosticApi(
 
 void main() {
   PlatformManager.initializeForTesting();
+  setUp(MemoryArtworkQueueDiagnostics.clear);
+  tearDown(MemoryArtworkQueueDiagnostics.clear);
+
+  for (final entry in <(http.Response?, MemoryArtworkQueueReadOutcome)>[
+    (_queueDiagnosticSuccess(), MemoryArtworkQueueReadOutcome.success),
+    (http.Response('private invalid payload', 200), MemoryArtworkQueueReadOutcome.schema),
+    (null, MemoryArtworkQueueReadOutcome.noResponse),
+  ]) {
+    test('supported queue snapshot separates ${entry.$2.name} from Home projection', () async {
+      final ticket = MemoryArtworkQueueDiagnostics.begin(isCurrent: () => true);
+      final api = _queueDiagnosticApi(() async => entry.$1, (_) {});
+      expect(MemoryArtworkQueueDiagnostics.latest?.read, isNull);
+      final result = await api.queueStatusWithDiagnostics(ticket);
+      final snapshot = MemoryArtworkQueueDiagnostics.latest!;
+      expect(snapshot.read?.outcome, entry.$2);
+      expect(snapshot.projection, MemoryArtworkQueueProjection.pending);
+      expect(snapshot.read?.elapsedMilliseconds, inInclusiveRange(0, 120000));
+      MemoryArtworkQueueDiagnostics.project(ticket, applied: result != null);
+      expect(MemoryArtworkQueueDiagnostics.latest?.projection,
+          result == null ? MemoryArtworkQueueProjection.failed : MemoryArtworkQueueProjection.applied);
+      expect(snapshot.read?.message, isNot(contains('private')));
+    });
+  }
+
+  test('supported queue snapshot preserves timeout and observer exception contracts', () async {
+    final ticket = MemoryArtworkQueueDiagnostics.begin(isCurrent: () => true);
+    final error = TimeoutException('private timeout');
+    final api = _queueDiagnosticApi(() async => throw error, (_) => throw StateError('private observer'));
+    await expectLater(api.queueStatusWithDiagnostics(ticket), throwsA(same(error)));
+    expect(MemoryArtworkQueueDiagnostics.latest?.read?.outcome, MemoryArtworkQueueReadOutcome.timeout);
+    MemoryArtworkQueueDiagnostics.project(ticket, applied: false);
+    expect(MemoryArtworkQueueDiagnostics.latest?.projection, MemoryArtworkQueueProjection.failed);
+  });
+
+  test('supported queue tickets cannot collide across API instances or completion order', () async {
+    final firstResponse = Completer<http.Response?>();
+    final first = _queueDiagnosticApi(() => firstResponse.future, (_) {});
+    final second = _queueDiagnosticApi(() async => http.Response('private forbidden', 403), (_) {});
+    final firstTicket = MemoryArtworkQueueDiagnostics.begin(isCurrent: () => true);
+    final pending = first.queueStatusWithDiagnostics(firstTicket);
+    final secondTicket = MemoryArtworkQueueDiagnostics.begin(isCurrent: () => true);
+    await second.queueStatusWithDiagnostics(secondTicket);
+    MemoryArtworkQueueDiagnostics.project(secondTicket, applied: false);
+    final current = MemoryArtworkQueueDiagnostics.latest;
+    expect(current?.read?.readNumber, 1);
+    expect(current?.read?.statusCode, 403);
+    firstResponse.complete(_queueDiagnosticSuccess());
+    expect(await pending, isNotNull);
+    MemoryArtworkQueueDiagnostics.project(firstTicket, applied: true);
+    expect(MemoryArtworkQueueDiagnostics.latest, same(current));
+  });
+
+  test('supported queue read retires on epoch change and cannot repopulate after account ABA', () async {
+    var epoch = 1;
+    var owner = 'fixture-a';
+    final response = Completer<http.Response?>();
+    final ticket = MemoryArtworkQueueDiagnostics.begin(isCurrent: () => owner == 'fixture-a' && epoch == 1);
+    final api = _queueDiagnosticApi(() => response.future, (_) {});
+    final pending = api.queueStatusWithDiagnostics(ticket);
+    owner = 'fixture-b';
+    epoch++;
+    expect(MemoryArtworkQueueDiagnostics.latest, isNull);
+    owner = 'fixture-a';
+    epoch++;
+    response.complete(_queueDiagnosticSuccess());
+    expect(await pending, isNotNull);
+    MemoryArtworkQueueDiagnostics.project(ticket, applied: true);
+    expect(MemoryArtworkQueueDiagnostics.latest, isNull);
+  });
+
+  test('supported queue clear refuses late finally and old projection after replacement', () async {
+    final response = Completer<http.Response?>();
+    final ticket = MemoryArtworkQueueDiagnostics.begin(isCurrent: () => true);
+    final api = _queueDiagnosticApi(() => response.future, (_) {});
+    final pending = api.queueStatusWithDiagnostics(ticket);
+    MemoryArtworkQueueDiagnostics.clear();
+    final replacement = MemoryArtworkQueueDiagnostics.begin(isCurrent: () => true);
+    response.complete(_queueDiagnosticSuccess());
+    await pending;
+    MemoryArtworkQueueDiagnostics.project(ticket, applied: true);
+    expect(MemoryArtworkQueueDiagnostics.latest?.read, isNull);
+    expect(MemoryArtworkQueueDiagnostics.latest?.projection, MemoryArtworkQueueProjection.pending);
+    MemoryArtworkQueueDiagnostics.project(replacement, applied: false);
+    expect(MemoryArtworkQueueDiagnostics.latest?.projection, MemoryArtworkQueueProjection.failed);
+  });
+
+  test('supported diagnostics guard failure never changes API result', () async {
+    final ticket = MemoryArtworkQueueDiagnostics.begin(isCurrent: () => throw StateError('private guard'));
+    final api = _queueDiagnosticApi(() async => _queueDiagnosticSuccess(), (_) {});
+    expect(await api.queueStatusWithDiagnostics(ticket), isNotNull);
+    expect(MemoryArtworkQueueDiagnostics.latest, isNull);
+  });
 
   for (final response in <http.Response?>[null, http.Response('{"private":"fixture"}', 200)]) {
     test('queue read emits content-free evidence for ${response == null ? 'no response' : 'invalid metadata'}',
