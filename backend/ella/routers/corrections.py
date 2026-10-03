@@ -14,7 +14,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
@@ -241,6 +241,15 @@ class ConversationCorrectionReceiptResponse(BaseModel):
     correction_id: str
     conversation_id: str
     status: str
+    failure_code: Optional[
+        Literal[
+            "ungrounded_name_detected",
+            "vocative_or_salutation_detected",
+            "direct_apply_failed",
+            "direct_apply_disabled",
+            "queue_failed",
+        ]
+    ] = None
     applied_at: Optional[datetime] = None
     undone_at: Optional[datetime] = None
     before_version_id: Optional[str] = None
@@ -422,6 +431,9 @@ Rules:
 - Keep the overview warm, specific, and useful for the account holder to reread later.
 - Write the overview in the third person, describing what happened. Never address the account holder directly, use a greeting or salutation, or invent a persona for them.
 - title and overview must contain only descriptive summary content, not an acknowledgment, reply to the correction, or message to a person.
+- title and overview must be JSON strings. Use sentence case, not Title Case, for title and overview.
+- Preserve the exact supplied capitalization of evidenced names and ordinary source words. Do not capitalize an ordinary content word just because it starts a title or sentence.
+- For an ordinary object or action, begin the title with a function word such as "The", followed by source-case content words. Use the same approach for overview sentence openings unless an exactly evidenced name begins the sentence. Never change a name's capitalization to evade this rule.
 - Do not begin any sentence with a single capitalized word followed by a comma. Do not end a sentence with a comma followed by a standalone capitalized word. Keep time and weekday details inside the descriptive sentence instead.
 - Use the correction as authoritative when it resolves identity, topic, title, or media attribution.
 - Re-read the entire transcript and current summary, then produce one coherent corrected summary. Do not append or splice the correction text verbatim.
@@ -649,6 +661,14 @@ def _correction_receipt(
         raw_state if isinstance(raw_state, dict) and str(raw_state.get("correction_id") or "") == correction_id else {}
     )
     status_value = str(audit.get("status") or state.get("status") or "pending")
+    failure_code = None
+    # Project fixed terminal evidence only, never exception text or rejected output.
+    if status_value == "correction_blocked_identity_gate":
+        reason = audit.get("direct_apply_blocked_reason")
+        if isinstance(reason, str) and reason in {"ungrounded_name_detected", "vocative_or_salutation_detected"}:
+            failure_code = reason
+    elif status_value in {"direct_apply_failed", "direct_apply_disabled", "queue_failed"}:
+        failure_code = status_value
     applied_count, reverted_count, propagation_status = _correction_propagation_counts(
         uid,
         conversation_id,
@@ -668,6 +688,7 @@ def _correction_receipt(
         correction_id=correction_id,
         conversation_id=conversation_id,
         status=status_value,
+        failure_code=failure_code,
         applied_at=audit.get("applied_at"),
         undone_at=audit.get("undone_at"),
         before_version_id=(str(before.get("id") or "") or None) if before else None,

@@ -135,6 +135,7 @@ def test_client_uuid_post_and_terminal_get_use_the_same_exact_receipt(monkeypatc
     audits = {}
     model_calls = []
     summary_writes = []
+    actual_direct_apply = corrections._run_direct_correction_apply
 
     def get_conversation(uid, cid):
         return copy.deepcopy(conversation) if (uid, cid) == (owner, conversation_id) else None
@@ -171,6 +172,8 @@ def test_client_uuid_post_and_terminal_get_use_the_same_exact_receipt(monkeypatc
 
     async def generated(**kwargs):
         model_calls.append(kwargs["correction_id"])
+        if terminal_status == "correction_blocked_identity_gate":
+            return await actual_direct_apply(**kwargs)
         if terminal_status == "applied":
             summary_writes.append(kwargs["correction_id"])
         persist(owner, conversation_id, kwargs["correction_id"], {"status": terminal_status})
@@ -182,6 +185,12 @@ def test_client_uuid_post_and_terminal_get_use_the_same_exact_receipt(monkeypatc
             queued=terminal_status == "queued",
         )
 
+    async def unsupported_person(**kwargs):
+        return {"title": "Rowan's account story", "overview": "[Ella] The conversation was corrected."}
+
+    async def forbidden_apply(**kwargs):
+        pytest.fail("the actual identity gate must reject before any summary write")
+
     monkeypatch.setattr(corrections.conversations_db, "get_conversation", get_conversation)
     monkeypatch.setattr(corrections.conversations_db, "bootstrap_summary_versioning_update", lambda value: {})
     monkeypatch.setattr(corrections.conversations_db, "update_conversation", lambda *args: None)
@@ -191,6 +200,9 @@ def test_client_uuid_post_and_terminal_get_use_the_same_exact_receipt(monkeypatc
     monkeypatch.setattr(corrections, "_create_summary_correction_proposal", lambda **kwargs: None)
     monkeypatch.setattr(corrections, "_correction_propagation_counts", lambda *args: (0, 0, "not_requested"))
     monkeypatch.setattr(corrections, "_run_direct_correction_apply", generated)
+    monkeypatch.setattr(corrections, "_generate_corrected_summary", unsupported_person)
+    monkeypatch.setattr(corrections, "_apply_corrected_summary", forbidden_apply)
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
     monkeypatch.setattr(corrections, "_claim_initial_correction_submission", claim)
     monkeypatch.setattr(corrections, "DIRECT_CORRECTION_APPLY_ENABLED", True)
     monkeypatch.setattr(corrections, "DIRECT_CORRECTION_BACKGROUND_ENABLED", False)
@@ -208,6 +220,15 @@ def test_client_uuid_post_and_terminal_get_use_the_same_exact_receipt(monkeypatc
     assert receipt.status_code == 200
     assert receipt.json()["correction_id"] == correction_id
     assert receipt.json()["status"] == terminal_status
+    assert receipt.json()["failure_code"] == (
+        "ungrounded_name_detected" if terminal_status == "correction_blocked_identity_gate" else None
+    )
+    assert receipt.json()["after_version_id"] is None
+    assert receipt.json()["undo_version_id"] is None
+    if terminal_status == "correction_blocked_identity_gate":
+        assert receipt.json()["active_version_id"] == "fixture-base"
+        assert "Rowan" not in json.dumps(receipt.json())
+        assert client.post(f"{url}/{correction_id}/undo").status_code == 404
     # Simulate loss of the accepted POST response: retry the exact payload.
     duplicate = client.post(url, json=payload)
     assert duplicate.status_code == 202
@@ -230,6 +251,68 @@ def test_client_uuid_post_and_terminal_get_use_the_same_exact_receipt(monkeypatc
     assert client.post(url, json=payload).status_code == 403
     assert model_calls == [correction_id]
     assert summary_writes == ([correction_id] if terminal_status == "applied" else [])
+
+
+@pytest.mark.parametrize(
+    "status,reason,expected",
+    [
+        ("correction_blocked_identity_gate", "ungrounded_name_detected", "ungrounded_name_detected"),
+        ("correction_blocked_identity_gate", "vocative_or_salutation_detected", "vocative_or_salutation_detected"),
+        ("correction_blocked_identity_gate", "private fixture text", None),
+        ("correction_blocked_identity_gate", {"private": "fixture"}, None),
+        ("correction_blocked_identity_gate", ["ungrounded_name_detected"], None),
+        ("correction_blocked_identity_gate", None, None),
+        ("applied", "ungrounded_name_detected", None),
+        ("queued", "vocative_or_salutation_detected", None),
+        ("direct_apply_failed", "private fixture text", "direct_apply_failed"),
+        ("direct_apply_disabled", None, "direct_apply_disabled"),
+        ("queue_failed", None, "queue_failed"),
+    ],
+    ids=[
+        "name",
+        "vocative",
+        "untrusted-string",
+        "untrusted-map",
+        "untrusted-list",
+        "missing",
+        "applied-stale-reason",
+        "queued-stale-reason",
+        "generic-failure",
+        "disabled",
+        "queue-failed",
+    ],
+)
+def test_correction_receipt_failure_code_is_exact_terminal_allowlist(monkeypatch, status, reason, expected):
+    uid, cid, correction_id = "fixture-owner", "fixture-conversation", str(uuid.UUID(int=17))
+    audit = {
+        "uid": uid,
+        "conversation_id": cid,
+        "correction_id": correction_id,
+        "trace_id": f"correction:{cid}:{correction_id}",
+        "request_fingerprint": "fixture-fingerprint",
+        "status": status,
+        "direct_apply_blocked_reason": reason,
+        "direct_apply_error": "private fixture exception text",
+    }
+    monkeypatch.setattr(
+        corrections,
+        "_audit_ref",
+        lambda *args: SimpleNamespace(get=lambda: SimpleNamespace(exists=True, to_dict=lambda: copy.deepcopy(audit))),
+    )
+    monkeypatch.setattr(corrections, "_correction_propagation_counts", lambda *args: (0, 0, "not_requested"))
+    receipt = corrections._correction_receipt(
+        uid=uid, conversation_id=cid, correction_id=correction_id, conversation=_conversation()
+    ).model_dump()
+    assert receipt["failure_code"] == expected
+    assert "direct_apply_error" not in receipt
+    assert "direct_apply_blocked_reason" not in receipt
+    assert "private fixture" not in json.dumps(receipt, default=str)
+    audit["uid"] = "different-fixture-owner"
+    with pytest.raises(HTTPException) as error:
+        corrections._correction_receipt(
+            uid=uid, conversation_id=cid, correction_id=correction_id, conversation=_conversation()
+        )
+    assert error.value.status_code == 404
 
 
 @pytest.mark.parametrize(
@@ -5375,6 +5458,76 @@ def test_correction_prompt_requires_nonconversational_guard_compatible_output():
     assert "Keep time and weekday details inside the descriptive sentence" in prompt
     assert "Never address the account holder directly" in prompt
     assert "Only use a person's name if it appears in the transcript" in prompt
+    assert "Use sentence case, not Title Case, for title and overview" in prompt
+    assert "Preserve the exact supplied capitalization of evidenced names" in prompt
+    assert 'For an ordinary object or action, begin the title with a function word such as "The"' in prompt
+    assert "Do not capitalize an ordinary content word just because it starts a title or sentence" in prompt
+    assert "title and overview must be JSON strings" in prompt
+
+
+@pytest.mark.parametrize(
+    "title,transcript,blocked",
+    [
+        ("Notebook color changed", "the notebook is blue.", True),
+        ("The notebook color changed", "the notebook is blue.", False),
+        ("The notebook with Rowan", "Rowan said the notebook is blue.", False),
+        ("The notebook with Zoë", "Zoë said the notebook is blue.", False),
+        ("The notebook with Fable", "the notebook is blue.", True),
+        ("The notebook with Will", "the notebook will be blue.", True),
+    ],
+    ids=[
+        "ordinary-title-case",
+        "ordinary-source-case",
+        "grounded-name",
+        "grounded-unicode",
+        "unknown-name",
+        "auxiliary",
+    ],
+)
+def test_correction_sentence_case_candidate_keeps_actual_direct_apply_guard(monkeypatch, title, transcript, blocked):
+    apply_calls, audits = [], []
+    original = {"title": "An ordinary object", "overview": "[Ella] The notebook is blue."}
+    candidate = {"title": title, "overview": "[Ella] The notebook is red."}
+    monkeypatch.setattr(corrections, "get_user_from_uid", lambda uid: None)
+    monkeypatch.setattr(corrections, "_persist_correction_audit", lambda *args: audits.append(args[-1]))
+    monkeypatch.setattr(corrections, "_append_correction_event", lambda *args: None)
+    monkeypatch.setattr(corrections.conversations_db, "update_conversation", lambda *args: None)
+
+    async def generated(**kwargs):
+        return copy.deepcopy(candidate)
+
+    async def apply(**kwargs):
+        apply_calls.append(kwargs)
+        return {"status": "ok", "active_summary_version_id": "fixture-result"}
+
+    monkeypatch.setattr(corrections, "_generate_corrected_summary", generated)
+    monkeypatch.setattr(corrections, "_apply_corrected_summary", apply)
+    result = asyncio.run(
+        corrections._run_direct_correction_apply(
+            uid="fixture-owner",
+            conversation_id="fixture-conversation",
+            correction_id=str(uuid.UUID(int=18)),
+            trace_id="fixture-trace",
+            request=corrections.ConversationCorrectionRequest(
+                correction_text="change the notebook color to red; leave transcript unchanged", source="ios"
+            ),
+            structured=copy.deepcopy(original),
+            transcript=transcript,
+            segment_count=1,
+            submitted_at="2024-01-01T00:00:00+00:00",
+            active_summary_version_id="fixture-base",
+            proposal_id=None,
+        )
+    )
+    assert original == {"title": "An ordinary object", "overview": "[Ella] The notebook is blue."}
+    if blocked:
+        assert result.status == "correction_blocked_identity_gate"
+        assert apply_calls == []
+        assert audits[-1]["direct_apply_blocked_reason"] == "ungrounded_name_detected"
+    else:
+        assert result.status == "applied"
+        assert len(apply_calls) == 1
+        assert apply_calls[0]["corrected"] == candidate
 
 
 @pytest.mark.parametrize(
