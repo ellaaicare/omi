@@ -9,6 +9,17 @@ import 'package:omi/ella/pages/ella_voice_chat_page.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/providers/capture_provider.dart';
+import 'package:omi/backend/http/api/conversations.dart';
+import 'package:omi/ella/services/v2v_client.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
+
+class _VoiceReceiptAuthority implements ExactAccountAuthorityVerifier {
+  bool current = true;
+  @override
+  String get uid => 'voice-owner';
+  @override
+  bool isExactCurrent() => current;
+}
 
 void main() {
   test('Demo voice fixtures never initialize speech recognition', () {
@@ -161,6 +172,281 @@ void main() {
     expect(source, contains('captureProvider.hasUnfinalizedPhoneCaptureContent'));
     expect(source, isNot(contains('captureDiagnostics.source == CaptureDiagnosticSource.phone')));
     expect(source, isNot(contains('captureProvider.stopStreamRecording()')));
+  });
+
+  MemoryReinterpretationEvent receiptEvent(String id) => MemoryReinterpretationEvent(
+        state: 'applied',
+        sessionId: 'voice-session',
+        conversationId: 'voice-memory',
+        correctionId: id,
+      );
+
+  ConversationCorrectionReceipt voiceReceipt(String id, {String status = 'applied'}) => ConversationCorrectionReceipt(
+        conversationId: 'voice-memory',
+        correctionId: id,
+        status: status,
+        before: const ConversationCorrectionSummary(title: 'Before'),
+        after: const ConversationCorrectionSummary(title: 'After'),
+      );
+
+  Future<void> pumpMemoryVoice(
+    WidgetTester tester, {
+    required Stream<MemoryReinterpretationEvent> events,
+    required _VoiceReceiptAuthority authority,
+    required MemoryVoiceReceiptOperation fetchReceipt,
+    required MemoryVoiceReceiptOperation undo,
+    String conversationId = 'voice-memory',
+  }) async {
+    await tester.pumpWidget(MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: EllaVoiceChatPage(
+        demoState: EllaVoiceDemoState(quota: EllaAccessDemoFixtures.active.quota),
+        sessionScope: V2VSessionScope.memory(conversationId: conversationId),
+        memoryReinterpretationEvents: events,
+        memoryReceiptFetcher: fetchReceipt,
+        memoryUndo: undo,
+        memoryReceiptAuthorityProvider: () => authority,
+      ),
+    ));
+    await tester.pump();
+  }
+
+  Future<void> pumpReceiptFrames(WidgetTester tester) async {
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump();
+  }
+
+  testWidgets('Voice delayed receipt stays retired after conversation A B A replacement', (tester) async {
+    final events = StreamController<MemoryReinterpretationEvent>();
+    final authority = _VoiceReceiptAuthority();
+    final pending = Completer<ConversationCorrectionReceipt?>();
+    var reads = 0;
+    Future<ConversationCorrectionReceipt?> fetch({
+      required String conversationId,
+      required String correctionId,
+      String? expectedAuthenticatedUid,
+      ExactAccountAuthorityVerifier? exactAuthority,
+    }) {
+      reads++;
+      return pending.future;
+    }
+
+    for (final id in ['voice-memory', 'other-memory', 'voice-memory']) {
+      await pumpMemoryVoice(tester,
+          events: events.stream,
+          authority: authority,
+          fetchReceipt: fetch,
+          undo: ({required conversationId, required correctionId, expectedAuthenticatedUid, exactAuthority}) async =>
+              fail('retired receipt must not Undo'),
+          conversationId: id);
+      if (id == 'voice-memory' && reads == 0) {
+        events.add(receiptEvent('receipt-a'));
+        await tester.pump();
+      }
+    }
+    pending.complete(voiceReceipt('receipt-a'));
+    await pumpReceiptFrames(tester);
+    expect(reads, 1);
+    expect(find.text('Review'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+    unawaited(events.close());
+  });
+
+  for (final next in ['pending', 'applied']) {
+    testWidgets('Voice Review A cannot Undo after newer receipt B is $next', (tester) async {
+      final events = StreamController<MemoryReinterpretationEvent>();
+      final authority = _VoiceReceiptAuthority();
+      final pending = Completer<ConversationCorrectionReceipt?>();
+      final undos = <String>[];
+      await pumpMemoryVoice(tester,
+          events: events.stream,
+          authority: authority,
+          fetchReceipt: ({required conversationId, required correctionId, expectedAuthenticatedUid, exactAuthority}) =>
+              correctionId == 'receipt-a' ? Future.value(voiceReceipt(correctionId)) : pending.future,
+          undo: ({required conversationId, required correctionId, expectedAuthenticatedUid, exactAuthority}) async {
+            undos.add(correctionId);
+            return voiceReceipt(correctionId, status: 'undone');
+          });
+      events.add(receiptEvent('receipt-a'));
+      await tester.pump();
+      await pumpReceiptFrames(tester);
+      await tester.tap(find.text('Review'));
+      await pumpReceiptFrames(tester);
+      events.add(receiptEvent('receipt-b'));
+      await tester.pump();
+      if (next == 'applied') {
+        pending.complete(voiceReceipt('receipt-b'));
+        await pumpReceiptFrames(tester);
+      }
+      await tester.tap(find.text('Undo update'));
+      await pumpReceiptFrames(tester);
+      expect(undos, isEmpty, reason: 'retired displayed receipt never dispatches Undo');
+      expect(find.byKey(const ValueKey('memory-correction-undo-error')), findsOneWidget);
+      expect(find.text('Memory update undone'), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+      if (!pending.isCompleted) pending.complete(null);
+      unawaited(events.close());
+    });
+  }
+
+  testWidgets('Voice current receipt permits exactly its own Undo after Review reopens', (tester) async {
+    final events = StreamController<MemoryReinterpretationEvent>();
+    final authority = _VoiceReceiptAuthority();
+    final undos = <String>[];
+    await pumpMemoryVoice(tester,
+        events: events.stream,
+        authority: authority,
+        fetchReceipt: (
+                {required conversationId, required correctionId, expectedAuthenticatedUid, exactAuthority}) async =>
+            voiceReceipt(correctionId),
+        undo: ({required conversationId, required correctionId, expectedAuthenticatedUid, exactAuthority}) async {
+          expect(expectedAuthenticatedUid, authority.uid);
+          expect(exactAuthority, same(authority));
+          undos.add(correctionId);
+          return voiceReceipt(correctionId, status: 'undone');
+        });
+    events.add(receiptEvent('receipt-a'));
+    await pumpReceiptFrames(tester);
+    await tester.tap(find.text('Review'));
+    await pumpReceiptFrames(tester);
+    tester.state<NavigatorState>(find.byType(Navigator).first).pop();
+    await pumpReceiptFrames(tester);
+    await tester.tap(find.text('Review'));
+    await pumpReceiptFrames(tester);
+    await tester.tap(find.text('Undo update'));
+    await pumpReceiptFrames(tester);
+    expect(undos, ['receipt-a']);
+    expect(find.text('Memory update undone'), findsWidgets);
+    await tester.pumpWidget(const SizedBox.shrink());
+    unawaited(events.close());
+  });
+
+  testWidgets('Voice retained Review rejects owner replacement before Undo transport', (tester) async {
+    final events = StreamController<MemoryReinterpretationEvent>();
+    final authority = _VoiceReceiptAuthority();
+    var undos = 0;
+    await pumpMemoryVoice(tester,
+        events: events.stream,
+        authority: authority,
+        fetchReceipt: (
+                {required conversationId, required correctionId, expectedAuthenticatedUid, exactAuthority}) async =>
+            voiceReceipt(correctionId),
+        undo: ({required conversationId, required correctionId, expectedAuthenticatedUid, exactAuthority}) async {
+          undos++;
+          return voiceReceipt(correctionId, status: 'undone');
+        });
+    events.add(receiptEvent('receipt-a'));
+    await pumpReceiptFrames(tester);
+    await tester.tap(find.text('Review'));
+    await pumpReceiptFrames(tester);
+    authority.current = false;
+    await tester.tap(find.text('Undo update'));
+    await pumpReceiptFrames(tester);
+    expect(undos, 0);
+    expect(find.byKey(const ValueKey('memory-correction-undo-error')), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+    unawaited(events.close());
+  });
+
+  for (final replacement in ['dispose', 'owner']) {
+    testWidgets('Voice delayed receipt is ignored after $replacement replacement', (tester) async {
+      final events = StreamController<MemoryReinterpretationEvent>();
+      final authority = _VoiceReceiptAuthority();
+      final response = Completer<ConversationCorrectionReceipt?>();
+      await pumpMemoryVoice(tester,
+          events: events.stream,
+          authority: authority,
+          fetchReceipt: ({required conversationId, required correctionId, expectedAuthenticatedUid, exactAuthority}) {
+            expect(expectedAuthenticatedUid, authority.uid);
+            expect(exactAuthority, same(authority));
+            return response.future;
+          },
+          undo: ({required conversationId, required correctionId, expectedAuthenticatedUid, exactAuthority}) async =>
+              null);
+      events.add(receiptEvent('receipt-a'));
+      await tester.pump();
+      if (replacement == 'dispose') {
+        await tester.pumpWidget(const SizedBox.shrink());
+      } else {
+        authority.current = false;
+      }
+      response.complete(voiceReceipt('receipt-a'));
+      await pumpReceiptFrames(tester);
+      expect(find.text('Review'), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      unawaited(events.close());
+    });
+  }
+
+  testWidgets('Voice in-flight Undo A cannot replace newer receipt B after response', (tester) async {
+    final events = StreamController<MemoryReinterpretationEvent>();
+    final authority = _VoiceReceiptAuthority();
+    final response = Completer<ConversationCorrectionReceipt?>();
+    var undos = 0;
+    await pumpMemoryVoice(tester,
+        events: events.stream,
+        authority: authority,
+        fetchReceipt: (
+                {required conversationId, required correctionId, expectedAuthenticatedUid, exactAuthority}) async =>
+            voiceReceipt(correctionId),
+        undo: ({required conversationId, required correctionId, expectedAuthenticatedUid, exactAuthority}) {
+          expect(correctionId, 'receipt-a');
+          expect(expectedAuthenticatedUid, authority.uid);
+          expect(exactAuthority, same(authority));
+          undos++;
+          return response.future;
+        });
+    events.add(receiptEvent('receipt-a'));
+    await pumpReceiptFrames(tester);
+    await tester.tap(find.text('Review'));
+    await pumpReceiptFrames(tester);
+    final undo = tester.widget<OutlinedButton>(find.widgetWithText(OutlinedButton, 'Undo update')).onPressed!;
+    undo();
+    undo();
+    await tester.pump();
+    expect(undos, 1);
+    events.add(receiptEvent('receipt-b'));
+    await pumpReceiptFrames(tester);
+    response.complete(voiceReceipt('receipt-a', status: 'undone'));
+    await pumpReceiptFrames(tester);
+    expect(find.byKey(const ValueKey('memory-correction-undo-error')), findsOneWidget);
+    expect(find.text('Memory update undone'), findsNothing);
+    tester.state<NavigatorState>(find.byType(Navigator).first).pop();
+    await pumpReceiptFrames(tester);
+    expect(find.text('Memory updated'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+    unawaited(events.close());
+  });
+
+  testWidgets('Voice wrong event tuple and failed receipt read never admit Review', (tester) async {
+    final events = StreamController<MemoryReinterpretationEvent>();
+    final authority = _VoiceReceiptAuthority();
+    var reads = 0;
+    await pumpMemoryVoice(tester,
+        events: events.stream,
+        authority: authority,
+        fetchReceipt: (
+            {required conversationId, required correctionId, expectedAuthenticatedUid, exactAuthority}) async {
+          reads++;
+          throw StateError('Synthetic read failure');
+        },
+        undo: ({required conversationId, required correctionId, expectedAuthenticatedUid, exactAuthority}) async =>
+            null);
+    events.add(const MemoryReinterpretationEvent(
+        state: 'applied', sessionId: 'voice-session', conversationId: 'other-memory', correctionId: 'receipt-a'));
+    await pumpReceiptFrames(tester);
+    expect(reads, 0);
+    events.add(receiptEvent('receipt-a'));
+    await pumpReceiptFrames(tester);
+    expect(reads, 1);
+    expect(find.text('Review'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    unawaited(events.close());
   });
 
   Future<void> pumpVoice(

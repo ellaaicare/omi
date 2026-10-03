@@ -32,28 +32,29 @@ ServerConversation memoryConversation({String id = conversationId, String title 
       structured: Structured(title, 'The selected memory overview'),
     );
 
-ConversationReinterpretationJob appliedJob() => const ConversationReinterpretationJob(
+ConversationReinterpretationJob appliedJob({String voiceSessionId = sessionId, String receiptId = correctionId}) =>
+    ConversationReinterpretationJob(
       jobId: 'job-1',
-      sessionId: sessionId,
+      sessionId: voiceSessionId,
       conversationId: conversationId,
       status: 'applied',
       outcome: 'applied',
-      correctionIds: [correctionId],
+      correctionIds: [receiptId],
       receipts: [
         ConversationReinterpretationReceiptReference(
           conversationId: conversationId,
-          correctionId: correctionId,
+          correctionId: receiptId,
           status: 'applied',
         ),
       ],
     );
 
-ConversationCorrectionReceipt appliedReceipt() => const ConversationCorrectionReceipt(
-      correctionId: correctionId,
+ConversationCorrectionReceipt appliedReceipt({String id = correctionId}) => ConversationCorrectionReceipt(
+      correctionId: id,
       conversationId: conversationId,
       status: 'applied',
-      before: ConversationCorrectionSummary(title: 'Before'),
-      after: ConversationCorrectionSummary(title: 'After'),
+      before: const ConversationCorrectionSummary(title: 'Before'),
+      after: const ConversationCorrectionSummary(title: 'After'),
     );
 
 class MemoryTestAuthority implements ExactAccountAuthorityVerifier {
@@ -67,9 +68,10 @@ class MemoryTestAuthority implements ExactAccountAuthorityVerifier {
 late MemoryTestAuthority authority;
 
 class _FakeMemoryVoiceSheet extends StatefulWidget {
-  const _FakeMemoryVoiceSheet({required this.onSessionEnded});
+  const _FakeMemoryVoiceSheet({required this.onSessionEnded, this.voiceSessionId = sessionId});
 
   final ValueChanged<MemoryReceiptDiscoveryRequest> onSessionEnded;
+  final String voiceSessionId;
 
   @override
   State<_FakeMemoryVoiceSheet> createState() => _FakeMemoryVoiceSheetState();
@@ -79,7 +81,7 @@ class _FakeMemoryVoiceSheetState extends State<_FakeMemoryVoiceSheet> {
   @override
   void dispose() {
     widget.onSessionEnded(
-      const MemoryReceiptDiscoveryRequest(conversationId: conversationId, sessionId: sessionId),
+      MemoryReceiptDiscoveryRequest(conversationId: conversationId, sessionId: widget.voiceSessionId),
     );
     super.dispose();
   }
@@ -102,6 +104,7 @@ Widget app({
   required MemoryReinterpretationReceiptDiscovery discovery,
   ConversationDetailProvider? provider,
   ValueNotifier<ServerConversation>? selectedConversation,
+  String Function()? nextSessionId,
   Future<ConversationCorrectionReceipt?> Function({
     required String conversationId,
     required String correctionId,
@@ -122,7 +125,8 @@ Widget app({
           enableDrag: false,
           builder: (_) => FractionallySizedBox(
             heightFactor: 0.94,
-            child: _FakeMemoryVoiceSheet(onSessionEnded: onSessionEnded),
+            child: _FakeMemoryVoiceSheet(
+                onSessionEnded: onSessionEnded, voiceSessionId: nextSessionId?.call() ?? sessionId),
           ),
         ),
       );
@@ -684,6 +688,115 @@ void main() {
       expect(find.text('Memory updated'), findsNothing);
     });
   }
+
+  for (final secondReceipt in ['pending', 'applied']) {
+    testWidgets('Talk Review A cannot Undo after newer session B is $secondReceipt', (tester) async {
+      var sessions = 0;
+      var reads = 0;
+      final pendingJob = Completer<ConversationReinterpretationJob?>();
+      final undos = <String>[];
+      final discovery = MemoryReinterpretationReceiptDiscovery(
+        fetchLatest: (_) => ++reads == 1 ? Future.value(appliedJob()) : pendingJob.future,
+        fetchReceipt: (_, id) async => appliedReceipt(id: id),
+        maxAttempts: 1,
+      );
+      await tester.pumpWidget(app(
+        discovery: discovery,
+        nextSessionId: () => ++sessions == 1 ? sessionId : 'session-2',
+        undoCorrection: (
+            {required conversationId, required correctionId, expectedAuthenticatedUid, exactAuthority}) async {
+          undos.add(correctionId);
+          return ConversationCorrectionReceipt(
+            conversationId: conversationId,
+            correctionId: correctionId,
+            status: 'undone',
+            before: const ConversationCorrectionSummary(title: 'Before'),
+            after: const ConversationCorrectionSummary(title: 'After'),
+          );
+        },
+      ));
+      await endSession(tester);
+      await endSession(tester);
+      await tester.tap(find.text('Review'));
+      await tester.pumpAndSettle();
+      if (secondReceipt == 'applied') {
+        pendingJob.complete(appliedJob(voiceSessionId: 'session-2', receiptId: 'correction-2'));
+        await tester.pumpAndSettle();
+      }
+      await tester.tap(find.text('Undo update'));
+      await tester.pumpAndSettle();
+      expect(undos, isEmpty, reason: 'displayed receipt A is retired before any Undo transport');
+      expect(find.byKey(const ValueKey('memory-correction-undo-error')), findsOneWidget);
+      expect(find.text('Memory update undone'), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+      if (!pendingJob.isCompleted) pendingJob.complete(null);
+    });
+  }
+
+  testWidgets('Talk current Review can reopen and duplicate taps share one in-flight Undo', (tester) async {
+    var undos = 0;
+    final response = Completer<ConversationCorrectionReceipt?>();
+    final discovery = MemoryReinterpretationReceiptDiscovery(
+      fetchLatest: (_) async => appliedJob(),
+      fetchReceipt: (_, __) async => appliedReceipt(),
+      maxAttempts: 1,
+    );
+    await tester.pumpWidget(app(
+      discovery: discovery,
+      undoCorrection: ({required conversationId, required correctionId, expectedAuthenticatedUid, exactAuthority}) {
+        expect(correctionId, appliedReceipt().correctionId);
+        expect(exactAuthority, same(authority));
+        undos++;
+        return response.future;
+      },
+    ));
+    await endSession(tester);
+    await tester.tap(find.text('Review'));
+    await tester.pumpAndSettle();
+    tester.state<NavigatorState>(find.byType(Navigator).first).pop();
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Review'));
+    await tester.pumpAndSettle();
+    final undo = tester.widget<OutlinedButton>(find.widgetWithText(OutlinedButton, 'Undo update')).onPressed!;
+    undo();
+    undo();
+    await tester.pump();
+    expect(undos, 1);
+    response.complete(const ConversationCorrectionReceipt(
+      conversationId: conversationId,
+      correctionId: correctionId,
+      status: 'undone',
+      before: ConversationCorrectionSummary(title: 'Before'),
+      after: ConversationCorrectionSummary(title: 'After'),
+    ));
+    await tester.pumpAndSettle();
+    expect(find.text('Memory update undone'), findsWidgets);
+  });
+
+  testWidgets('Talk retained Review rejects owner replacement before Undo transport', (tester) async {
+    var undos = 0;
+    final discovery = MemoryReinterpretationReceiptDiscovery(
+      fetchLatest: (_) async => appliedJob(),
+      fetchReceipt: (_, __) async => appliedReceipt(),
+      maxAttempts: 1,
+    );
+    await tester.pumpWidget(app(
+      discovery: discovery,
+      undoCorrection: (
+          {required conversationId, required correctionId, expectedAuthenticatedUid, exactAuthority}) async {
+        undos++;
+        return null;
+      },
+    ));
+    await endSession(tester);
+    await tester.tap(find.text('Review'));
+    await tester.pumpAndSettle();
+    authority.current = false;
+    await tester.tap(find.text('Undo update'));
+    await tester.pumpAndSettle();
+    expect(undos, 0);
+    expect(find.byKey(const ValueKey('memory-correction-undo-error')), findsOneWidget);
+  });
 
   testWidgets('successful Undo reloads summary and forwards original account authority', (tester) async {
     var refreshes = 0;

@@ -807,6 +807,7 @@ class _MemoryTalkButtonState extends State<MemoryTalkButton> {
   MemoryReceiptDiscoveryResult? _discoveryResult;
   ConversationCorrectionReceipt? _receipt;
   ExactAccountAuthorityVerifier? _receiptAuthority;
+  int? _receiptGeneration;
   int _talkGeneration = 0;
 
   ServerConversation get conversation => widget.conversation;
@@ -829,6 +830,7 @@ class _MemoryTalkButtonState extends State<MemoryTalkButton> {
       _discoveryResult = null;
       _receipt = null;
       _receiptAuthority = null;
+      _receiptGeneration = null;
     }
   }
 
@@ -918,6 +920,7 @@ class _MemoryTalkButtonState extends State<MemoryTalkButton> {
       if (result.receipt != null && result.receipt!.conversationId == conversation.id) {
         _receipt = result.receipt;
         _receiptAuthority = authority;
+        _receiptGeneration = generation;
       }
     });
     if (result.state == MemoryReceiptDiscoveryState.applied && result.receipt?.isApplied == true && isCurrent()) {
@@ -928,13 +931,14 @@ class _MemoryTalkButtonState extends State<MemoryTalkButton> {
     }
   }
 
-  Future<ConversationCorrectionReceipt?> _undoMemoryCorrection() async {
-    final receipt = _receipt;
-    final authority = _receiptAuthority;
-    final generation = _talkGeneration;
-    if (receipt == null ||
-        !receipt.isApplied ||
-        authority == null ||
+  Future<ConversationCorrectionReceipt?> _undoMemoryCorrection(
+    ConversationCorrectionReceipt receipt,
+    ExactAccountAuthorityVerifier authority,
+    int generation,
+  ) async {
+    if (!receipt.isApplied ||
+        _receipt?.correctionId != receipt.correctionId ||
+        _receiptGeneration != generation ||
         !_isCurrentOrigin(receipt.conversationId, generation, authority)) {
       return null;
     }
@@ -951,6 +955,7 @@ class _MemoryTalkButtonState extends State<MemoryTalkButton> {
       return null;
     }
     if (!_isCurrentOrigin(receipt.conversationId, generation, authority) ||
+        _receiptGeneration != generation ||
         updated == null ||
         updated.conversationId != receipt.conversationId ||
         updated.correctionId != receipt.correctionId ||
@@ -969,8 +974,17 @@ class _MemoryTalkButtonState extends State<MemoryTalkButton> {
 
   void _reviewMemoryCorrection() {
     final receipt = _receipt;
-    if (receipt == null || !receipt.isApplied) return;
-    showMemoryCorrectionReceiptSheet(context, receipt: receipt, onUndo: _undoMemoryCorrection);
+    final authority = _receiptAuthority;
+    final generation = _receiptGeneration;
+    if (receipt == null ||
+        !receipt.isApplied ||
+        authority == null ||
+        generation == null ||
+        !_isCurrentOrigin(receipt.conversationId, _talkGeneration, authority)) {
+      return;
+    }
+    showMemoryCorrectionReceiptSheet(context,
+        receipt: receipt, onUndo: () => _undoMemoryCorrection(receipt, authority, generation));
   }
 
   @override
