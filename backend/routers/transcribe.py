@@ -627,6 +627,65 @@ class CaptureReconnectAuthorityBusy(RuntimeError):
     """The active capture still belongs to another live socket generation."""
 
 
+def _capture_send_failure_diagnostic(msg, error, websocket, *, active: bool) -> dict:
+    # Never serialize the event, exception text, or client-provided close reason here.
+    message_type = getattr(msg, 'event_type', None)
+    status = getattr(msg, 'status', None)
+    exception_class = type(error).__name__
+    close_code = getattr(error, 'code', None)
+    return {
+        'message_type': (
+            message_type
+            if message_type in ('service_status', 'ping', 'last_memory', 'memory_created', 'memory_processing_started')
+            else 'other'
+        ),
+        'status': (
+            status
+            if message_type == 'service_status'
+            and status
+            in (
+                'initiating',
+                'in_progress_conversations_processing',
+                'capture_protocol_ready',
+                'capture_protocol_drained',
+                'capture_reconnect_busy',
+                'stt_initiating',
+                'ready',
+            )
+            else None
+        ),
+        'exception_class': (
+            exception_class
+            if exception_class
+            in (
+                'WebSocketDisconnect',
+                'RuntimeError',
+                'OSError',
+                'BrokenPipeError',
+                'ConnectionResetError',
+                'TimeoutError',
+                'TypeError',
+                'ValueError',
+            )
+            else 'OtherError'
+        ),
+        'close_code': (
+            close_code
+            if type(close_code) is int
+            and close_code
+            in (1000, 1001, 1002, 1003, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 4001, 4004)
+            else None
+        ),
+        'websocket_client_state': (
+            websocket.client_state.name if websocket.client_state in tuple(WebSocketState) else 'UNKNOWN'
+        ),
+        'websocket_application_state': (
+            websocket.application_state.name if websocket.application_state in tuple(WebSocketState) else 'UNKNOWN'
+        ),
+        'websocket_active': bool(active),
+    }
+
+
 def _utc_iso_from_ts(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
@@ -1076,11 +1135,14 @@ async def _stream_handler(
         try:
             await websocket.send_json(msg.to_json())
             return True
-        except WebSocketDisconnect:
-            print("WebSocket disconnected", uid, session_id)
-            websocket_active = False
-        except Exception as e:
-            print(f"Can not send message event, error: {e}", uid, session_id)
+        except Exception as error:
+            if isinstance(error, WebSocketDisconnect):
+                websocket_active = False
+            diagnostic = _capture_send_failure_diagnostic(msg, error, websocket, active=websocket_active)
+            print(
+                f"[CAPTURE-TRANSPORT] {json.dumps({'event': 'capture_message_send_failed', 'correlation': delivery_correlation, **diagnostic}, sort_keys=True)}",
+                flush=True,
+            )
 
         return False
 
@@ -1277,6 +1339,8 @@ async def _stream_handler(
         adopt: bool = False,
     ) -> bool:
         nonlocal websocket_active, websocket_close_code
+        if not websocket_active:
+            return False
         installed = install_capture_authority(
             uid,
             conversation_id,
@@ -1344,6 +1408,8 @@ async def _stream_handler(
         adopt: bool = True,
     ) -> bool:
         nonlocal current_conversation_id, websocket_active
+        if adopt and not websocket_active:
+            return False
 
         conversation_source = ConversationSource.omi
         if source:
@@ -1643,6 +1709,8 @@ async def _stream_handler(
         nonlocal current_conversation_id
 
         for _ in range(3):
+            if not websocket_active:
+                return None
             active_conversation_id = redis_db.get_in_progress_conversation_id(uid)
             candidate = retrieve_in_progress_conversation(uid)
             if candidate:
@@ -1708,6 +1776,8 @@ async def _stream_handler(
                 return None
             await asyncio.sleep(0)
 
+        if not websocket_active:
+            return None
         raise CaptureReconnectAuthorityBusy("active conversation ownership changed during reconnect")
 
     _send_message_event(
