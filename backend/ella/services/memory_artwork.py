@@ -1165,16 +1165,46 @@ class MemoryArtworkService:
         if not self.config.allows_uid(uid):
             raise MemoryArtworkError("memory_artwork_internal_owner_required")
         authority = await self.authority_resolver(uid)
+        if authority.uid != uid:
+            raise MemoryArtworkError("memory_artwork_authority_changed")
+        style_version, control = await asyncio.to_thread(self._read_queue_control, uid, authority)
+        await asyncio.to_thread(self._queue_preferences, uid, authority, style_version=style_version)
+        await self._revalidate_queue_authority(uid, authority)
+        result = await asyncio.to_thread(self._queue_status_snapshot, uid, authority, style_version, control)
+        await asyncio.to_thread(self._queue_preferences, uid, authority, style_version=style_version)
+        await self._revalidate_queue_authority(uid, authority)
+        return result
+
+    async def _revalidate_queue_authority(self, uid: str, authority: ArtworkRuntimeAuthority) -> None:
+        current = await self.authority_resolver(uid)
+        if not _same_artwork_authority(authority, current) or authority.authority_digest != current.authority_digest:
+            raise MemoryArtworkError("memory_artwork_authority_changed")
+
+    def _queue_preferences(
+        self, uid: str, authority: ArtworkRuntimeAuthority, *, style_version: Optional[str] = None
+    ) -> dict[str, Any]:
         preferences = self.repository.get_preferences(uid)
-        style_version = str(preferences.get("style_version") or "")
+        expected_style = str(preferences.get("style_version") or "") if style_version is None else style_version
         if not self.global_consent_checker(uid) or not _preferences_match_authority(
             preferences,
             authority,
-            style_version=style_version,
+            style_version=expected_style,
         ):
             raise MemoryArtworkError("memory_artwork_preference_authority_stale")
+        return preferences
+
+    def _read_queue_control(self, uid: str, authority: ArtworkRuntimeAuthority) -> tuple[str, dict[str, Any]]:
+        preferences = self._queue_preferences(uid, authority)
+        return str(preferences.get("style_version") or ""), self.repository.get_backfill_control(uid)
+
+    def _queue_status_snapshot(
+        self,
+        uid: str,
+        authority: ArtworkRuntimeAuthority,
+        style_version: str,
+        control: dict[str, Any],
+    ) -> dict[str, Any]:
         generation_id = artwork_db.reconciliation_job_id(uid, authority.authority_digest, style_version)
-        control = self.repository.get_backfill_control(uid)
         control_is_current = bool(
             control.get("generation_id") == generation_id
             and control.get("authority_digest") == authority.authority_digest
