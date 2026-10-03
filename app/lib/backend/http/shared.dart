@@ -163,7 +163,28 @@ Future<http.Response?> makeApiCall({
   String? expectedAuthenticatedUid,
   ExactAccountAuthorityVerifier? exactAuthority,
   void Function()? onSendAttempt,
+  void Function(HttpTransportDiagnostic)? onTransportDiagnostic,
 }) async {
+  final diagnosticElapsed = Stopwatch()..start();
+  var diagnosticOpen = true;
+  var diagnosticStage = HttpTransportStage.authHeaders;
+  int? diagnosticStatus;
+  void recordStage(HttpTransportStage stage, int? statusCode, [HttpTransportFailure? failure]) {
+    if (!diagnosticOpen) return;
+    diagnosticStage = stage;
+    diagnosticStatus = statusCode != null && statusCode >= 100 && statusCode <= 599 ? statusCode : null;
+    try {
+      onTransportDiagnostic?.call(HttpTransportDiagnostic(
+        stage: stage,
+        failure: failure,
+        elapsedMilliseconds: diagnosticElapsed.elapsedMilliseconds.clamp(0, 120000),
+        statusCode: diagnosticStatus,
+      ));
+    } catch (_) {
+      // Observer failures cannot change HTTP behavior.
+    }
+  }
+
   try {
     final effectiveTimeout =
         timeout ?? (method == 'GET' ? ApiClient.requestTimeoutRead : ApiClient.requestTimeoutWrite);
@@ -172,6 +193,7 @@ Future<http.Response?> makeApiCall({
         ? MonotonicRequestDeadline.forRequest(timeout: effectiveTimeout, retries: effectiveRetries)
         : null;
     final shouldCheckAuth = requireAuthCheck ?? _isRequiredAuthCheck(url);
+    recordStage(HttpTransportStage.authHeaders, null);
     Map<String, String> builtHeaders = await buildHeaders(
       requireAuthCheck: shouldCheckAuth,
       fromHeaders: headers,
@@ -186,10 +208,12 @@ Future<http.Response?> makeApiCall({
       exactAuthority: exactAuthority,
       absoluteDeadline: absoluteDeadline,
       onSendAttempt: onSendAttempt,
+      onTransportStage: recordStage,
     );
 
     if (retryOnUnauthorized && shouldCheckAuth && response.statusCode == 401) {
       Logger.log('Token expired on 1st attempt');
+      recordStage(HttpTransportStage.authHeaders, response.statusCode);
       SharedPreferencesUtil().authToken = await AuthService.instance.getIdToken() ?? '';
       if (SharedPreferencesUtil().authToken.isNotEmpty) {
         builtHeaders = await buildHeaders(
@@ -205,6 +229,7 @@ Future<http.Response?> makeApiCall({
           exactAuthority: exactAuthority,
           absoluteDeadline: absoluteDeadline,
           onSendAttempt: onSendAttempt,
+          onTransportStage: recordStage,
         );
         Logger.log('Token refreshed and request retried');
         if (response.statusCode == 401) {
@@ -226,8 +251,22 @@ Future<http.Response?> makeApiCall({
     }
 
     ApiTransportDiagnostics.recordResponse(response.statusCode);
+    recordStage(HttpTransportStage.completed, response.statusCode);
+    diagnosticOpen = false;
     return response;
   } catch (e, stackTrace) {
+    final failure = switch (e) {
+      TimeoutException() => HttpTransportFailure.timeout,
+      ExactAccountAuthorityChangedException() => HttpTransportFailure.authentication,
+      ClientApiFailure(kind: ClientApiFailureKind.authenticationRequired || ClientApiFailureKind.accountChanged) =>
+        HttpTransportFailure.authentication,
+      SocketException() || HandshakeException() || http.ClientException() => HttpTransportFailure.network,
+      _ => HttpTransportFailure.internal,
+    };
+    recordStage(diagnosticStage, diagnosticStatus, failure);
+    // Timeouts do not cancel underlying futures. Late completions and nested
+    // failure-report requests must not change this invocation's terminal evidence.
+    diagnosticOpen = false;
     if (e is ExactAccountAuthorityChangedException) rethrow;
     ApiTransportDiagnostics.recordFailure(e);
     Logger.debug('HTTP request failed: $e, $stackTrace');
