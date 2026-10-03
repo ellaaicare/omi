@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import time
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ from models.conversation_integrity import (
 )
 from utils.ella.canonical_auth import canonical_event_service_headers
 
+logger = logging.getLogger(__name__)
 CANONICAL_EVENTS_URL = os.getenv("ELLA_CANONICAL_EVENTS_URL", "http://127.0.0.1:8000/v1/ella/events")
 CANONICAL_OMI_WRITE_ENABLED = os.getenv("ELLA_CANONICAL_OMI_WRITE_ENABLED", "true").lower() == "true"
 CANONICAL_OMI_TIMEOUT = float(os.getenv("ELLA_CANONICAL_OMI_TIMEOUT", "5"))
@@ -340,16 +342,49 @@ def write_omi_canonical_event(
         summary_kind=summary_kind,
         trace_id=trace_id,
     )
-    started = time.time()
-    response = requests.post(
-        CANONICAL_EVENTS_URL,
-        json={"events": [event]},
-        headers={"Content-Type": "application/json", **canonical_event_service_headers(uid)},
-        timeout=timeout if timeout is not None else CANONICAL_OMI_TIMEOUT,
-    )
-    elapsed_ms = int((time.time() - started) * 1000)
-    if response.status_code >= 400:
-        raise RuntimeError(f"canonical_events_http_{response.status_code}: {response.text[:200]}")
-    payload = response.json()
+    headers = {"Content-Type": "application/json", **canonical_event_service_headers(uid)}
+    started = time.monotonic()
+    stage, outcome, error_category = "request", "unconfirmed", "none"
+    http_status = None
+    try:
+        response = requests.post(
+            CANONICAL_EVENTS_URL,
+            json={"events": [event]},
+            headers=headers,
+            timeout=timeout if timeout is not None else CANONICAL_OMI_TIMEOUT,
+        )
+        stage = "response_status"
+        if type(response.status_code) is int and 100 <= response.status_code <= 599:
+            http_status = response.status_code
+        if response.status_code >= 400:
+            raise RuntimeError(f"canonical_events_http_{response.status_code}: {response.text[:200]}")
+        stage = "response_json"
+        payload = response.json()
+        outcome = "response_received"
+    except Exception as error:
+        if isinstance(error, requests.ConnectTimeout):
+            error_category = "connect_timeout"
+        elif isinstance(error, requests.ReadTimeout):
+            error_category = "read_timeout"
+        elif isinstance(error, (requests.Timeout, TimeoutError)):
+            error_category = "timeout_unknown"
+        elif isinstance(error, requests.ConnectionError):
+            error_category = "connection_error"
+        else:
+            error_category = "unexpected_error"
+        raise
+    finally:
+        elapsed_ms = max(0, min(86400000, int((time.monotonic() - started) * 1000)))
+        # A response or timeout alone does not prove the remote commit outcome.
+        logger.info(
+            "canonical_omi_http_result",
+            extra={
+                "stage": stage,
+                "outcome": outcome,
+                "error_category": error_category,
+                "elapsed_ms": elapsed_ms,
+                "http_status": http_status,
+            },
+        )
     payload["latency_ms"] = elapsed_ms
     return payload

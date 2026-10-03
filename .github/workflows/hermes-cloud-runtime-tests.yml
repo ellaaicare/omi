@@ -1166,6 +1166,21 @@ jobs:
             "tests/unit/test_ella_canonical_omi.py::test_build_omi_canonical_event_emits_bound_semantic_grounding_provenance"
             "tests/unit/test_ella_canonical_omi.py::test_build_omi_canonical_event_preserves_parallel_verifier_receipt"
             "tests/unit/test_ella_canonical_omi.py::test_build_omi_canonical_event_rejects_any_cross_call_identity_reuse"
+            "tests/unit/test_ella_canonical_omi.py::test_canonical_transport_diagnostic_failure_is_private_and_unconfirmed[ConnectTimeout-connect_timeout]"
+            "tests/unit/test_ella_canonical_omi.py::test_canonical_transport_diagnostic_failure_is_private_and_unconfirmed[ReadTimeout-read_timeout]"
+            "tests/unit/test_ella_canonical_omi.py::test_canonical_transport_diagnostic_failure_is_private_and_unconfirmed[Timeout-timeout_unknown]"
+            "tests/unit/test_ella_canonical_omi.py::test_canonical_transport_diagnostic_failure_is_private_and_unconfirmed[TimeoutError-timeout_unknown]"
+            "tests/unit/test_ella_canonical_omi.py::test_canonical_transport_diagnostic_failure_is_private_and_unconfirmed[ConnectionError-connection_error]"
+            "tests/unit/test_ella_canonical_omi.py::test_canonical_transport_diagnostic_failure_is_private_and_unconfirmed[RuntimeError-unexpected_error]"
+            "tests/unit/test_ella_canonical_omi.py::test_canonical_transport_diagnostic_response_is_not_a_commit_receipt[None]"
+            "tests/unit/test_ella_canonical_omi.py::test_canonical_transport_diagnostic_response_is_not_a_commit_receipt[0.25]"
+            "tests/unit/test_ella_canonical_omi.py::test_canonical_transport_diagnostic_invalid_response_is_private_and_bounded[1000000000.0-86400000]"
+            "tests/unit/test_ella_canonical_omi.py::test_canonical_transport_diagnostic_invalid_response_is_private_and_bounded[-1.0-0]"
+            "tests/unit/test_ella_canonical_omi.py::test_canonical_transport_diagnostic_http_failure_does_not_log_body[403]"
+            "tests/unit/test_ella_canonical_omi.py::test_canonical_transport_diagnostic_http_failure_does_not_log_body[500]"
+            "tests/unit/test_ella_canonical_omi.py::test_canonical_transport_timeout_never_infers_remote_commit_or_retries[False]"
+            "tests/unit/test_ella_canonical_omi.py::test_canonical_transport_timeout_never_infers_remote_commit_or_retries[True]"
+            "tests/unit/test_ella_canonical_omi.py::test_canonical_transport_diagnostic_disabled_path_has_no_http_or_log"
             "tests/unit/test_ella_conversation_corrections.py::test_semantic_attestation_is_atomically_bound_to_new_version_and_canonical_event"
             "tests/unit/test_today_card_postgres.py::test_parallel_verifier_receipt_is_eligible_today_card_evidence"
             "tests/unit/test_today_card_postgres.py::test_parallel_receipt_with_reused_verifier_identity_fails_closed"
@@ -1224,10 +1239,8 @@ jobs:
               exit 1
             fi
           done
-          # 236 + 1 (test_create_conversation_with_explicit_id_already_durable_is_idempotent_upsert,
-          # the SYNC-V2-002 idempotent-upsert regression added to
-          # test_conversation_processing_failures.py).
-          test "$(grep -c '::' <<<"$today_card_ids")" -eq 237
+          # All 237 existing cases plus 15 canonical transport diagnostic regressions.
+          test "$(grep -c '::' <<<"$today_card_ids")" -eq 252
           pytest \
             tests/unit/test_today_card.py \
             tests/unit/test_today_card_api.py \
