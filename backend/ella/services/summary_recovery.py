@@ -931,17 +931,34 @@ async def recover_failed_conversation_summary(
         elif (
             pending_state.get('status') == 'writeback_pending_canonical'
             and pending_state.get('kind') == 'recovered_enriched'
-            and pending_state.get('trace_id')
-            and str(pending_state.get('request_fingerprint') or '').strip()
-            and is_current_summary_request_fingerprint_input(pending_state.get('request_fingerprint_input'))
-            and latest.get('active_summary_version_id')
         ):
             stored_request_input = pending_state.get('request_fingerprint_input')
+            source_version = pending_state.get('source_active_summary_version_id')
+            result_version = latest.get('active_summary_version_id')
+            if (
+                not is_current_summary_request_fingerprint_input(stored_request_input)
+                or 'source_active_summary_version_id' not in pending_state
+                or 'based_on_version_id' not in stored_request_input
+                or (source_version is not None and (type(source_version) is not str or not source_version))
+                or stored_request_input['based_on_version_id'] != source_version
+                or type(result_version) is not str
+                or not result_version
+                or pending_state.get('result_summary_version_id') != result_version
+                or type(pending_state.get('trace_id')) is not str
+                or not pending_state['trace_id']
+                or type(pending_state.get('request_fingerprint')) is not str
+                or not pending_state['request_fingerprint']
+                or stored_request_input.get('require_canonical') is not True
+                or stored_request_input.get('require_source_match') is not True
+                or stored_request_input.get('expected_transcript_hash') != expected_transcript_hash
+                or pending_state.get('source_transcript_hash') != expected_transcript_hash
+            ):
+                raise ConcurrentConversationRecoveryChangeError('canonical_replay_source_binding_invalid')
             apply_result = await apply_summary_update(
                 uid=uid,
                 conversation_id=conversation_id,
                 trace_id=str(pending_state['trace_id']),
-                active_summary_version_id=latest.get('active_summary_version_id'),
+                active_summary_version_id=source_version,
                 summary={},
                 summary_kind='recovered_enriched',
                 require_canonical=True,

@@ -102,6 +102,8 @@ SUMMARY_WRITEBACK_COMPLETED = 'completed'
 SUMMARY_WRITEBACK_SUPERSEDED = 'superseded'
 CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD = 'canonical_summary_publication_sequence'
 CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD = 'canonical_summary_publication_sha256'
+LEGACY_CANONICAL_PUBLICATION_RECEIPT_FIELD = 'legacy_canonical_publication_receipt'
+LEGACY_CANONICAL_PUBLICATION_CONTRACT = 'legacy-canonical-publication-v1'
 OPERATION_RECEIPT_PUBLIC_FIELDS = (
     'token',
     'status',
@@ -249,6 +251,88 @@ def _assert_canonical_publication_sha256(conversation: dict[str, Any]) -> None:
     carried_sha256 = str(conversation.get(CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD) or '')
     if carried_sha256 != _publication_post_image_sha256(conversation):
         raise CanonicalSummaryOperationConflictError('canonical_summary_publication_image_mismatch')
+
+
+def _legacy_canonical_replay_conversation(
+    conversation: dict[str, Any],
+    *,
+    uid: str,
+    conversation_id: str,
+    trace_id: str,
+    request_input: dict[str, Any],
+    verify_source_binding: bool = False,
+) -> dict[str, Any]:
+    receipt = conversation.get(LEGACY_CANONICAL_PUBLICATION_RECEIPT_FIELD)
+    state = conversation.get('enrichment_state') or {}
+    expected_keys = {
+        'contract_version',
+        'uid',
+        'conversation_id',
+        'trace_id',
+        'request_fingerprint',
+        'source_active_summary_version_id',
+        'result_summary_version_id',
+        'publication_sequence',
+        'publication_sha256',
+        'publication_updated_at',
+    }
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != expected_keys
+        or receipt.get('contract_version') != LEGACY_CANONICAL_PUBLICATION_CONTRACT
+        or receipt.get('uid') != uid
+        or receipt.get('conversation_id') != conversation_id
+        or type(trace_id) is not str
+        or not trace_id
+        or receipt.get('trace_id') != trace_id
+        or state.get('trace_id') != trace_id
+        or not is_current_summary_request_fingerprint_input(request_input)
+        or 'based_on_version_id' not in request_input
+        or (
+            request_input['based_on_version_id'] is not None
+            and (type(request_input['based_on_version_id']) is not str or not request_input['based_on_version_id'])
+        )
+        or receipt.get('source_active_summary_version_id') != request_input['based_on_version_id']
+        or (
+            verify_source_binding
+            and (
+                'source_active_summary_version_id' not in state
+                or state['source_active_summary_version_id'] != request_input['based_on_version_id']
+                or request_input.get('require_canonical') is not True
+                or request_input.get('require_source_match') is not True
+                or request_input.get('expected_transcript_hash')
+                != transcript_grounding_hash(_conversation_transcript_segments(conversation))
+                or state.get('source_transcript_hash') != request_input.get('expected_transcript_hash')
+            )
+        )
+        or receipt.get('request_fingerprint') != _summary_request_fingerprint(request_input)
+        or receipt.get('request_fingerprint') != state.get('request_fingerprint')
+        or receipt.get('result_summary_version_id') != conversation.get('active_summary_version_id')
+        or not isinstance(receipt.get('result_summary_version_id'), str)
+        or not receipt['result_summary_version_id']
+        or receipt.get('result_summary_version_id') != state.get('result_summary_version_id')
+        or type(receipt.get('publication_sequence')) is not int
+        or receipt['publication_sequence'] < 1
+        or type(conversation.get(CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD)) is not int
+        or receipt['publication_sequence'] != conversation.get(CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD)
+        or receipt.get('publication_sha256') != conversation.get(CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD)
+        or not isinstance(receipt.get('publication_updated_at'), datetime)
+        or receipt['publication_updated_at'].utcoffset() is None
+    ):
+        raise ConcurrentConversationSummaryChangeError('canonical_replay_publication_receipt_invalid')
+    completed_state = {
+        **state,
+        'status': 'writeback_applied',
+        'pending': False,
+        'canonical_status': 'completed',
+        'error': None,
+        'updated_at': receipt['publication_updated_at'],
+    }
+    result = _conversation_projected_to_active_summary(
+        {**conversation, 'id': conversation_id, 'enrichment_state': completed_state}
+    )
+    _assert_canonical_publication_sha256(result)
+    return result
 
 
 def _next_publication_sequence(conversation: dict[str, Any], receipt: Optional[dict[str, Any]] = None) -> int:
@@ -1315,6 +1399,7 @@ async def _repair_canonical_to_latest_summary(
     canonical_writer: Callable[..., dict],
     canonical_retry_recorder: Optional[Callable[[str], Awaitable[bool]]] = None,
     max_attempts: int = 3,
+    require_exact_publication: bool = False,
 ) -> None:
     """Converge the canonical row after a stale writer loses its Firestore CAS."""
     for _attempt in range(max_attempts):
@@ -1328,6 +1413,23 @@ async def _repair_canonical_to_latest_summary(
         enrichment_state = latest.get('enrichment_state') or {}
         expected_enrichment_authority = _summary_enrichment_authority(latest)
         canonical_conversation = _conversation_projected_to_active_summary({**latest, 'id': conversation_id})
+        if require_exact_publication:
+            if (
+                type(canonical_conversation.get(CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD)) is not int
+                or canonical_conversation[CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD] < 1
+            ):
+                raise ConcurrentConversationSummaryChangeError('canonical_replay_publication_receipt_invalid')
+            try:
+                _assert_canonical_publication_sha256(canonical_conversation)
+            except CanonicalSummaryOperationConflictError:
+                canonical_conversation = _legacy_canonical_replay_conversation(
+                    latest,
+                    uid=uid,
+                    conversation_id=conversation_id,
+                    trace_id=enrichment_state.get('trace_id'),
+                    request_input=enrichment_state.get('request_fingerprint_input'),
+                    verify_source_binding=True,
+                )
         canonical_result = await asyncio.to_thread(
             canonical_writer,
             uid,
@@ -1409,6 +1511,7 @@ async def _confirm_canonical_if_result_is_active(
     confirmed_state: dict[str, Any],
     canonical_writer: Callable[..., dict],
     canonical_retry_recorder: Optional[Callable[[str], Awaitable[bool]]] = None,
+    require_exact_publication: bool = False,
 ) -> None:
     confirmed = conversations_db.update_conversation_if_summary_authority(
         uid,
@@ -1424,6 +1527,7 @@ async def _confirm_canonical_if_result_is_active(
         conversation_id=conversation_id,
         canonical_writer=canonical_writer,
         canonical_retry_recorder=canonical_retry_recorder,
+        require_exact_publication=require_exact_publication,
     )
     raise ConcurrentConversationSummaryChangeError('active_summary_version_changed')
 
@@ -1695,6 +1799,7 @@ async def write_conversation_summary(
                 conversation_id=conversation_id,
                 canonical_writer=canonical_writer,
                 canonical_retry_recorder=canonical_retry_recorder,
+                require_exact_publication=request_input.get('require_source_match') is True,
             )
             refreshed = conversations_db.get_conversation(uid, conversation_id)
             if refreshed is None:
@@ -1720,21 +1825,10 @@ async def write_conversation_summary(
         result_summary_version_id = str(conversation.get('active_summary_version_id') or '').strip()
         if not result_summary_version_id:
             raise ConcurrentConversationSummaryChangeError('active_summary_version_missing')
-        confirmed_state = {
-            **enrichment_state,
-            'status': 'writeback_applied',
-            'pending': False,
-            'canonical_status': 'completed',
-            'error': None,
-            'updated_at': datetime.now(timezone.utc),
-        }
-        canonical_conversation = _conversation_projected_to_active_summary(
-            {
-                **conversation,
-                'id': conversation_id,
-                'enrichment_state': confirmed_state,
-            }
+        canonical_conversation = _legacy_canonical_replay_conversation(
+            conversation, uid=uid, conversation_id=conversation_id, trace_id=trace_id, request_input=request_input
         )
+        confirmed_state = canonical_conversation['enrichment_state']
         try:
             canonical_result = await asyncio.to_thread(
                 canonical_writer,
@@ -1760,6 +1854,7 @@ async def write_conversation_summary(
             confirmed_state=confirmed_state,
             canonical_writer=canonical_writer,
             canonical_retry_recorder=canonical_retry_recorder,
+            require_exact_publication=request_input.get('require_source_match') is True,
         )
         return {
             'status': 'ok',
@@ -1972,6 +2067,25 @@ async def write_conversation_summary(
     canonical_conversation[CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD] = publication_sequence
     canonical_conversation[CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD] = publication_sha256
 
+    # Reserve the original publication identity in the same source/result CAS,
+    # outside the hashed state and the separate operation-token receipt lane.
+    update_data[LEGACY_CANONICAL_PUBLICATION_RECEIPT_FIELD] = (
+        {
+            'contract_version': LEGACY_CANONICAL_PUBLICATION_CONTRACT,
+            'uid': uid,
+            'conversation_id': conversation_id,
+            'trace_id': trace_id,
+            'request_fingerprint': request_fingerprint,
+            'source_active_summary_version_id': based_on_version_id,
+            'result_summary_version_id': version_update['active_summary_version_id'],
+            'publication_sequence': publication_sequence,
+            'publication_sha256': publication_sha256,
+            'publication_updated_at': state_updated_at,
+        }
+        if require_canonical
+        else None
+    )
+
     try:
         if require_source_match:
             updated = conversations_db.update_conversation_if_transcript_hash(
@@ -2059,6 +2173,7 @@ async def write_conversation_summary(
             confirmed_state=confirmed_state,
             canonical_writer=canonical_writer,
             canonical_retry_recorder=canonical_retry_recorder,
+            require_exact_publication=request_input.get('require_source_match') is True,
         )
 
     if correction_id and correction_audit_updater:

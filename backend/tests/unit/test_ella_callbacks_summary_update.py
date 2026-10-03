@@ -1644,6 +1644,9 @@ def test_parallel_summary_source_match_replay_is_idempotent(monkeypatch):
         require_source_match=True,
     )
     conversation = {
+        "created_at": datetime(2026, 10, 3, tzinfo=timezone.utc),
+        "started_at": datetime(2026, 10, 3, tzinfo=timezone.utc),
+        "finished_at": datetime(2026, 10, 3, tzinfo=timezone.utc),
         "active_summary_version_id": "summary-v2",
         "summary_versions": [
             {
@@ -1668,6 +1671,10 @@ def test_parallel_summary_source_match_replay_is_idempotent(monkeypatch):
             "request_fingerprint_input": request_input,
         },
     }
+    conversation["canonical_summary_publication_sequence"] = 1
+    conversation["canonical_summary_publication_sha256"] = summary_writeback._publication_post_image_sha256(
+        conversation
+    )
     monkeypatch.setattr(
         callbacks.conversations_db,
         "get_conversation",
