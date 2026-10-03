@@ -3179,7 +3179,9 @@ def _seed_canonical_publication_fixture(conversation, source_version):
     )
 
 
-def _future_canonical_pending(monkeypatch, source_version, remote_committed):
+def _future_canonical_pending(
+    monkeypatch, source_version, remote_committed, *, first_response_loss=True, reject_initial_confirmation=False
+):
     conversation = _retry_conversation(status="completed")
     for field in ("created_at", "started_at", "finished_at"):
         conversation[field] = datetime.fromisoformat(conversation[field])
@@ -3187,6 +3189,13 @@ def _future_canonical_pending(monkeypatch, source_version, remote_committed):
     conversation.update({"active_summary_version_id": source_version, "processing_retry_mode": "enrichment_only"})
     calls, updates, events = [], [], []
     store = InMemoryCanonicalEventStore()
+    store.publication_records = []
+    build_event = canonical_omi.build_omi_canonical_event
+
+    def recorded_event(uid, record, **kwargs):
+        event = build_event(uid, record, **kwargs)
+        store.publication_records.append((copy.deepcopy(record), copy.deepcopy(event)))
+        return event
 
     def read(uid, cid):
         return copy.deepcopy(conversation) if (uid, cid) == ("user-1", "conversation-1") else None
@@ -3197,6 +3206,8 @@ def _future_canonical_pending(monkeypatch, source_version, remote_committed):
         ) != expected_version:
             return False
         if expected_state is not None and conversation.get("enrichment_state") != expected_state:
+            return False
+        if expected_state is not None and reject_initial_confirmation:
             return False
         updates.append(copy.deepcopy(patch))
         for key, value in patch.items():
@@ -3214,7 +3225,7 @@ def _future_canonical_pending(monkeypatch, source_version, remote_committed):
     def post(url, **kwargs):
         submitted = copy.deepcopy(kwargs["json"]["events"])
         calls.append(submitted)
-        if len(calls) == 1:
+        if len(calls) == 1 and first_response_loss:
             if remote_committed:
                 asyncio.run(store.write_batch([CanonicalEventIn(**event) for event in submitted]))
             raise TimeoutError("synthetic lost response")
@@ -3229,6 +3240,7 @@ def _future_canonical_pending(monkeypatch, source_version, remote_committed):
     monkeypatch.setattr(summary_writeback.conversations_db, "update_conversation_if_transcript_hash", source_update)
     monkeypatch.setattr(canonical_omi, "CANONICAL_OMI_WRITE_ENABLED", True)
     monkeypatch.setattr(canonical_omi, "canonical_event_service_headers", lambda uid: {})
+    monkeypatch.setattr(canonical_omi, "build_omi_canonical_event", recorded_event)
     monkeypatch.setattr(canonical_omi.requests, "post", post)
     monkeypatch.setattr(
         summary_recovery, "generate_stock_conversation_summary", lambda *args: pytest.fail("generic provider")
@@ -3259,7 +3271,70 @@ def _future_canonical_pending(monkeypatch, source_version, remote_committed):
         lambda *args, **kwargs: True,
     )
 
-    with pytest.raises(summary_writeback.CanonicalSummaryWriteUnconfirmedError):
+    expected_error = (
+        summary_writeback.CanonicalSummaryWriteUnconfirmedError
+        if first_response_loss
+        else summary_writeback.ConcurrentConversationSummaryChangeError
+    )
+
+    async def initial_write():
+        return await summary_writeback.write_conversation_summary(
+            uid="user-1",
+            conversation_id="conversation-1",
+            title="Synthetic retained summary",
+            overview="[Ella] Synthetic retained summary awaiting canonical confirmation.",
+            emoji="brain",
+            category="other",
+            summary_source="observer",
+            summary_kind="recovered_enriched",
+            based_on_version_id=source_version,
+            trace_id="future-canonical-recovery",
+            require_canonical=True,
+            require_based_on_match=True,
+            require_source_match=True,
+            expected_transcript_hash=transcript_grounding_hash(conversation["transcript_segments"]),
+            preserve_generated_results=True,
+            ella_tags=["omi", "recovery"],
+            ella_signal={"source": "recovery"},
+        )
+
+    if first_response_loss or reject_initial_confirmation:
+        with pytest.raises(expected_error):
+            asyncio.run(initial_write())
+    else:
+        asyncio.run(initial_write())
+    if first_response_loss:
+        assert len(calls) == 1
+        assert conversation["enrichment_state"]["canonical_status"] == "failed"
+    return conversation, calls, store, updates
+
+
+def test_future_canonical_initial_confirmation_race_keeps_every_publication_exact(monkeypatch):
+    conversation, calls, store, _updates = _future_canonical_pending(
+        monkeypatch, "generic-v1", True, first_response_loss=False, reject_initial_confirmation=True
+    )
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    _assert_future_publication_records(calls, store)
+    assert len(store._events) == 1
+    assert conversation["enrichment_state"]["canonical_status"] == "pending"
+
+
+def test_future_canonical_completed_replay_race_keeps_every_publication_exact(monkeypatch):
+    conversation, calls, store, _updates = _future_canonical_pending(
+        monkeypatch, "generic-v1", True, first_response_loss=False
+    )
+    read = summary_writeback.conversations_db.get_conversation
+    reads = []
+
+    def raced_read(uid, cid):
+        if reads:
+            conversation["enrichment_state"]["canonical_status"] = "failed"
+        reads.append(True)
+        return read(uid, cid)
+
+    monkeypatch.setattr(summary_writeback.conversations_db, "get_conversation", raced_read)
+    with pytest.raises(summary_writeback.ConcurrentConversationSummaryChangeError):
         asyncio.run(
             summary_writeback.write_conversation_summary(
                 uid="user-1",
@@ -3268,9 +3343,8 @@ def _future_canonical_pending(monkeypatch, source_version, remote_committed):
                 overview="[Ella] Synthetic retained summary awaiting canonical confirmation.",
                 emoji="brain",
                 category="other",
-                summary_source="observer",
                 summary_kind="recovered_enriched",
-                based_on_version_id=source_version,
+                based_on_version_id="generic-v1",
                 trace_id="future-canonical-recovery",
                 require_canonical=True,
                 require_based_on_match=True,
@@ -3281,9 +3355,11 @@ def _future_canonical_pending(monkeypatch, source_version, remote_committed):
                 ella_signal={"source": "recovery"},
             )
         )
-    assert len(calls) == 1
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    _assert_future_publication_records(calls, store)
+    assert len(store._events) == 1
     assert conversation["enrichment_state"]["canonical_status"] == "failed"
-    return conversation, calls, store, updates
 
 
 @pytest.mark.parametrize("source_version", ["generic-v1", None])
@@ -3430,10 +3506,69 @@ def test_future_canonical_post_http_cas_failure_cannot_confirm_stale_result(monk
     )
     assert outcome == "failed"
     assert len(calls) >= 2
-    assert calls[0] == calls[1]
+    assert all(call == calls[0] for call in calls)
+    _assert_future_publication_records(calls, store)
     assert len(store._events) == 1
     assert conversation["active_summary_version_id"] == original_result
     assert conversation["enrichment_state"]["canonical_status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "missing",
+        "owner",
+        "source",
+        "fingerprint",
+        "transcript",
+        "trace",
+        "result",
+        "sequence",
+        "missing_sequence",
+        "missing_digest",
+    ],
+)
+def test_future_canonical_post_http_fallback_refuses_unverifiable_publication(monkeypatch, drift):
+    conversation, calls, store, _updates = _future_canonical_pending(monkeypatch, "generic-v1", True)
+
+    def reject_confirmation(*args, **kwargs):
+        receipt = conversation["legacy_canonical_publication_receipt"]
+        state = conversation["enrichment_state"]
+        if drift == "missing":
+            conversation.pop("legacy_canonical_publication_receipt")
+        elif drift == "owner":
+            receipt["uid"] = "other-owner"
+        elif drift == "source":
+            state["source_active_summary_version_id"] = "other-source"
+        elif drift == "fingerprint":
+            state["request_fingerprint"] = "sha256:" + "a" * 64
+        elif drift == "transcript":
+            conversation["transcript_segments"][0]["text"] = "Changed synthetic transcript"
+        elif drift == "trace":
+            state["trace_id"] = "other-trace"
+        elif drift == "result":
+            conversation["active_summary_version_id"] = "unknown-result"
+        elif drift == "sequence":
+            conversation["canonical_summary_publication_sequence"] = True
+        elif drift == "missing_sequence":
+            conversation.pop("canonical_summary_publication_sequence")
+        elif drift == "missing_digest":
+            conversation.pop("canonical_summary_publication_sha256")
+        return False
+
+    monkeypatch.setattr(
+        summary_writeback.conversations_db, "update_conversation_if_summary_authority", reject_confirmation
+    )
+    outcome = asyncio.run(
+        summary_recovery.recover_failed_conversation_summary(
+            uid="user-1", conversation_id="conversation-1", request_id=conversation["processing_retry_id"]
+        )
+    )
+    assert outcome == "failed"
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    _assert_future_publication_records(calls, store)
+    assert len(store._events) == 1
 
 
 def test_future_canonical_post_http_newer_result_wins_without_stale_confirmation(monkeypatch):
@@ -3477,9 +3612,19 @@ def test_future_canonical_post_http_newer_result_wins_without_stale_confirmation
     assert outcome == "failed"
     assert len(calls) == 3
     assert calls[0] == calls[1]
+    _assert_future_publication_records(calls, store)
     assert conversation["active_summary_version_id"] == "newer-result"
     assert next(iter(store._events.values()))["metadata"]["active_summary_version_id"] == "newer-result"
     summary_writeback._assert_canonical_publication_sha256(conversation)
+
+
+def _assert_future_publication_records(calls, store):
+    assert len(calls) == len(store.publication_records)
+    for call, (record, event) in zip(calls, store.publication_records):
+        summary_writeback._assert_canonical_publication_sha256(record)
+        assert call == [event]
+        for field in ("canonical_summary_publication_sequence", "canonical_summary_publication_sha256"):
+            assert event["metadata"][field] == event["source_ref"][field] == record[field]
 
 
 def test_future_canonical_reservation_is_not_in_public_conversation_serialization(monkeypatch):
