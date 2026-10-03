@@ -10209,6 +10209,14 @@
   "@memoryTalkProviderRequired": {
     "description": "Error shown when the selected voice provider cannot open memory-scoped V2V"
   },
+  "memoryCorrectionWaiting": "We haven't confirmed the result yet.",
+  "@memoryCorrectionWaiting": {
+    "description": "Shown when a submitted correction has no verified terminal receipt"
+  },
+  "memoryCorrectionCheckStatus": "Check status",
+  "@memoryCorrectionCheckStatus": {
+    "description": "Read-only action to check the original submitted correction"
+  },
   "memoryCorrectionPending": "Ella is updating this memory",
   "@memoryCorrectionPending": {
     "description": "Pending memory reinterpretation receipt status"
