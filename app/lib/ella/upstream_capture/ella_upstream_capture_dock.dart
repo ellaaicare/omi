@@ -100,6 +100,17 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
     unawaited(HapticFeedback.lightImpact().catchError((_) {}));
   }
 
+  bool Function() _capturePressAdmission() {
+    final originUid = _uid;
+    final originEpoch = _runtime.authority.bindingEpoch;
+    return () =>
+        mounted &&
+        originUid.isNotEmpty &&
+        _uid == originUid &&
+        _runtime.authority.bindingEpoch == originEpoch &&
+        !_busy;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -585,8 +596,11 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
     required IconData icon,
     required String label,
     required String compactLabel,
+    bool compactPresentation = false,
   }) {
-    final text = _actionLabel(context, label, compactLabel: compactLabel);
+    final text = compactPresentation
+        ? Text(compactLabel, semanticsLabel: label, textAlign: TextAlign.center)
+        : _actionLabel(context, label, compactLabel: compactLabel);
     if (MediaQuery.textScalerOf(context).scale(1) >= 3) {
       return OutlinedButton(
         key: key,
@@ -624,15 +638,15 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
             ),
             if (bootFailed) ...[
               const SizedBox(height: 12),
-              FilledButton.icon(
-                key: const Key('upstream-capture-retry-boot'),
-                style: _DockButtonStyles.primary(context),
+              _DockPrimaryAction(
+                buttonKey: const Key('upstream-capture-retry-boot'),
+                captureAdmission: _capturePressAdmission,
                 onPressed: () {
                   if (_busy) return;
                   _actionFeedback();
                   unawaited(_boot());
                 },
-                icon: const Icon(Icons.refresh_rounded),
+                icon: Icons.refresh_rounded,
                 label: Text(context.l10n.retry),
               ),
             ],
@@ -696,9 +710,9 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
               ],
               _AdaptiveActionPair(
                 first: phoneActive
-                    ? FilledButton.icon(
-                        key: const Key('upstream-capture-stop-phone'),
-                        style: _DockButtonStyles.primary(context),
+                    ? _DockPrimaryAction(
+                        buttonKey: const Key('upstream-capture-stop-phone'),
+                        captureAdmission: _capturePressAdmission,
                         onPressed: _busy
                             ? null
                             : () => _run(
@@ -706,22 +720,22 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
                                   _runtime.stopPhoneCapture,
                                   failureMessage: context.l10n.upstreamCaptureUnavailable,
                                 ),
-                        icon: const Icon(Icons.stop_circle_outlined),
-                        label: _actionLabel(
-                          context,
-                          context.l10n.upstreamCaptureStop,
-                          compactLabel: context.l10n.todayDockStop,
+                        icon: Icons.stop_circle_outlined,
+                        label: Text(
+                          context.l10n.todayDockStop,
+                          semanticsLabel: context.l10n.upstreamCaptureStop,
+                          textAlign: TextAlign.center,
                         ),
                       )
-                    : FilledButton.icon(
-                        key: const Key('upstream-capture-record-phone'),
-                        style: _DockButtonStyles.primary(context),
+                    : _DockPrimaryAction(
+                        buttonKey: const Key('upstream-capture-record-phone'),
+                        captureAdmission: _capturePressAdmission,
                         onPressed: _busy ? null : _startPhone,
-                        icon: const Icon(Icons.mic_none_rounded),
-                        label: _actionLabel(
-                          context,
-                          context.l10n.upstreamCaptureRecordPhone,
-                          compactLabel: context.l10n.phone,
+                        icon: Icons.mic_none_rounded,
+                        label: Text(
+                          context.l10n.todayDockRecord,
+                          semanticsLabel: context.l10n.upstreamCaptureRecordPhone,
+                          textAlign: TextAlign.center,
                         ),
                       ),
                 second: necklaceBound
@@ -739,6 +753,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
                         icon: Icons.bluetooth_disabled_rounded,
                         label: context.l10n.upstreamCaptureDisconnectNecklace,
                         compactLabel: context.l10n.disconnect,
+                        compactPresentation: true,
                       )
                     : _secondaryAction(
                         context,
@@ -749,6 +764,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
                         label:
                             _necklaceRetryAvailable ? context.l10n.retry : context.l10n.upstreamCaptureConnectNecklace,
                         compactLabel: _necklaceRetryAvailable ? context.l10n.retry : context.l10n.connect,
+                        compactPresentation: true,
                       ),
               ),
               if (live) ...[
@@ -764,9 +780,9 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
                         necklaceLive ? context.l10n.todayDockTranscriptNecklace : context.l10n.todayDockTranscriptPhone,
                     compactLabel: context.l10n.transcript,
                   ),
-                  second: FilledButton.icon(
-                    key: const Key('upstream-capture-finish'),
-                    style: _DockButtonStyles.primary(context),
+                  second: _DockPrimaryAction(
+                    buttonKey: const Key('upstream-capture-finish'),
+                    captureAdmission: _capturePressAdmission,
                     onPressed: _busy
                         ? null
                         : () => _run(
@@ -774,11 +790,11 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
                               _runtime.finishConversation,
                               failureMessage: context.l10n.upstreamCaptureUnavailable,
                             ),
-                    icon: const Icon(Icons.check_circle_outline_rounded),
-                    label: _actionLabel(
-                      context,
-                      context.l10n.upstreamCaptureFinish,
-                      compactLabel: context.l10n.todayDockFinish,
+                    icon: Icons.check_circle_outline_rounded,
+                    label: Text(
+                      context.l10n.todayDockFinish,
+                      semanticsLabel: context.l10n.upstreamCaptureFinish,
+                      textAlign: TextAlign.center,
                     ),
                   ),
                 ),
@@ -1126,11 +1142,110 @@ class _WhispersRow extends StatelessWidget {
   }
 }
 
+class _DockPrimaryAction extends StatefulWidget {
+  const _DockPrimaryAction({
+    required this.buttonKey,
+    required this.captureAdmission,
+    required this.onPressed,
+    required this.icon,
+    required this.label,
+  });
+
+  final Key buttonKey;
+  final bool Function() Function() captureAdmission;
+  final VoidCallback? onPressed;
+  final IconData icon;
+  final Widget label;
+
+  @override
+  State<_DockPrimaryAction> createState() => _DockPrimaryActionState();
+}
+
+class _DockPrimaryActionState extends State<_DockPrimaryAction> {
+  final _states = WidgetStatesController();
+  bool _pressed = false;
+  bool Function()? _pressAdmission;
+  int _pressGeneration = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _states.addListener(_onStatesChanged);
+  }
+
+  void _onStatesChanged() {
+    final pressed = widget.onPressed != null && _states.value.contains(WidgetState.pressed);
+    if (pressed == _pressed) return;
+    if (pressed) {
+      _pressGeneration++;
+      _pressAdmission = widget.captureAdmission();
+    } else {
+      final generation = _pressGeneration;
+      // Native button activation follows pressed=false synchronously. A cancelled
+      // gesture has no activation, so its admission retires in this microtask.
+      scheduleMicrotask(() {
+        if (mounted && generation == _pressGeneration && !_pressed) _pressAdmission = null;
+      });
+    }
+    setState(() => _pressed = pressed);
+  }
+
+  void _activate() {
+    if (widget.onPressed == null) return;
+    final admitted = (_pressAdmission ?? widget.captureAdmission())();
+    _pressGeneration++;
+    _pressAdmission = null;
+    if (admitted) widget.onPressed!();
+  }
+
+  @override
+  void didUpdateWidget(covariant _DockPrimaryAction oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.onPressed == null || widget.buttonKey != oldWidget.buttonKey) {
+      _pressGeneration++;
+      _pressAdmission = () => false;
+      _pressed = false;
+      final generation = _pressGeneration;
+      scheduleMicrotask(() {
+        if (mounted && generation == _pressGeneration && !_pressed) _pressAdmission = null;
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _pressGeneration++;
+    _states.removeListener(_onStatesChanged);
+    _states.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final reduceMotion = MediaQuery.disableAnimationsOf(context) || MediaQuery.accessibleNavigationOf(context);
+    final duration = reduceMotion ? Duration.zero : Duration(milliseconds: _pressed ? 90 : 140);
+    return AnimatedScale(
+      scale: !reduceMotion && _pressed ? 0.98 : 1,
+      duration: duration,
+      child: FilledButton.icon(
+        key: widget.buttonKey,
+        statesController: _states,
+        style: _DockButtonStyles.primary(context).copyWith(animationDuration: duration),
+        onPressed: widget.onPressed == null ? null : _activate,
+        icon: Icon(widget.icon),
+        label: widget.label,
+      ),
+    );
+  }
+}
+
 class _DockButtonStyles {
   const _DockButtonStyles._();
 
   static ButtonStyle primary(BuildContext context) => ButtonStyle(
         minimumSize: const WidgetStatePropertyAll(Size(0, 52)),
+        iconSize: const WidgetStatePropertyAll(20),
+        enableFeedback: false,
         padding: const WidgetStatePropertyAll(EdgeInsets.symmetric(horizontal: 14, vertical: 10)),
         foregroundColor: WidgetStateProperty.resolveWith(
           (states) => states.contains(WidgetState.disabled) ? EllaColors.inkSoft : EllaColors.paper,
@@ -1139,18 +1254,20 @@ class _DockButtonStyles {
           (states) => states.contains(WidgetState.disabled) ? EllaColors.cardDeep : EllaColors.tealDeep,
         ),
         overlayColor: WidgetStateProperty.resolveWith((states) {
-          if (states.contains(WidgetState.pressed)) return EllaColors.ink.withValues(alpha: 0.18);
+          if (states.contains(WidgetState.pressed)) return EllaColors.ink.withValues(alpha: 0.08);
           if (states.contains(WidgetState.focused)) return EllaColors.ink.withValues(alpha: 0.12);
           return null;
         }),
         textStyle: WidgetStatePropertyAll(
-          Theme.of(context).textTheme.labelLarge?.copyWith(fontSize: 16, fontWeight: FontWeight.w700),
+          Theme.of(context).textTheme.labelLarge?.copyWith(fontSize: 17, fontWeight: FontWeight.w700),
         ),
         shape: WidgetStatePropertyAll(RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
       );
 
   static ButtonStyle secondary(BuildContext context) => ButtonStyle(
-        minimumSize: const WidgetStatePropertyAll(Size(0, 52)),
+        minimumSize: const WidgetStatePropertyAll(Size(0, 48)),
+        iconSize: const WidgetStatePropertyAll(20),
+        enableFeedback: false,
         padding: const WidgetStatePropertyAll(EdgeInsets.symmetric(horizontal: 14, vertical: 10)),
         foregroundColor: WidgetStateProperty.resolveWith(
           (states) => states.contains(WidgetState.disabled) ? EllaColors.inkSoft : EllaColors.tealDeep,

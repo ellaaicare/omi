@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' show PointerDeviceKind, SemanticsAction, SemanticsActionEvent;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -69,6 +70,13 @@ class _WhisperTestAuthority implements ExactAccountAuthorityVerifier {
   final bool Function() current;
   @override
   bool isExactCurrent() => current();
+}
+
+class _PressTestAuthority extends EllaCaptureAuthority {
+  _PressTestAuthority() : super(authenticatedUid: () => _uid, sessionStartAllowed: (_) => false);
+  int epoch = 0;
+  @override
+  int get bindingEpoch => epoch;
 }
 
 class _PickerService implements legacy_service.IDeviceService {
@@ -193,7 +201,7 @@ class _DockFixture {
   final EllaCaptureAuthority authority;
   final _DockRuntime runtime;
 
-  static Future<_DockFixture> create(WidgetTester tester) async {
+  static Future<_DockFixture> create(WidgetTester tester, {EllaCaptureAuthority? authorityOverride}) async {
     SharedPreferences.setMockInitialValues({});
     await fork.SharedPreferencesUtil.init();
     await upstream.SharedPreferencesUtil.init();
@@ -207,7 +215,8 @@ class _DockFixture {
       bleListeners: _NoBleListeners(),
       preferences: upstream.SharedPreferencesUtil(),
     );
-    final authority = EllaCaptureAuthority(authenticatedUid: () => _uid, sessionStartAllowed: (_) => false);
+    final authority =
+        authorityOverride ?? EllaCaptureAuthority(authenticatedUid: () => _uid, sessionStartAllowed: (_) => false);
     final runtime = _DockRuntime(authority: authority, capture: provider);
     final fixture = _DockFixture(
       connectivity: connectivity,
@@ -362,6 +371,242 @@ void main() {
     addTearDown(() => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null));
     return calls;
   }
+
+  testWidgets('compact Record keeps a native button with a 20px icon and 17px label', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    await fixture.pump(tester);
+    final record = find.byKey(const Key('upstream-capture-record-phone'));
+    final button = tester.widget<FilledButton>(record);
+    expect(button.style!.iconSize!.resolve({}), 20);
+    expect(button.style!.textStyle!.resolve({})!.fontSize, 17);
+    expect(tester.getSize(record).height, inInclusiveRange(52, 56));
+    expect(find.descendant(of: record, matching: find.text('Record')), findsOneWidget);
+    expect(tester.getSize(find.byKey(const Key('upstream-capture-connect-necklace'))).height, greaterThanOrEqualTo(48));
+  });
+
+  testWidgets('Record press is paint-only and cancelled press never captures or buzzes', (tester) async {
+    final calls = captureHaptics(tester);
+    final fixture = await _DockFixture.create(tester);
+    var starts = 0;
+    fixture.runtime.startPhoneOverride = (_) async {
+      starts++;
+      return EllaCaptureStartOutcome.started;
+    };
+    await fixture.pump(tester);
+    final record = find.byKey(const Key('upstream-capture-record-phone'));
+    final scale = find.ancestor(of: record, matching: find.byType(AnimatedScale)).first;
+    final before = tester.getRect(record);
+    final dockSize = tester.getSize(find.byKey(const Key('upstream-capture-dock')));
+    final gesture = await tester.startGesture(tester.getCenter(record));
+    await tester.pump(const Duration(milliseconds: 90));
+    expect(tester.widget<AnimatedScale>(scale).scale, 0.98);
+    expect(tester.widget<AnimatedScale>(scale).duration, const Duration(milliseconds: 90));
+    expect(tester.getSize(record), before.size);
+    expect(tester.getSize(find.byKey(const Key('upstream-capture-dock'))), dockSize);
+    expect(starts, 0);
+    expect(calls, isEmpty);
+    await gesture.cancel();
+    await tester.pump();
+    expect(tester.widget<AnimatedScale>(scale).scale, 1);
+    expect(tester.widget<AnimatedScale>(scale).duration, const Duration(milliseconds: 140));
+    await tester.pump(const Duration(milliseconds: 140));
+    expect(tester.getRect(record), before);
+    expect(starts, 0);
+    expect(calls, isEmpty);
+  });
+
+  testWidgets('active phone Stop and Finish keep compact native controls and full semantics', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    fixture.makePhoneLive();
+    await fixture.pump(tester);
+    for (final key in ['upstream-capture-stop-phone', 'upstream-capture-finish']) {
+      final button = find.byKey(Key(key));
+      expect(tester.getSize(button).height, inInclusiveRange(52, 56));
+      final label = tester.widget<Text>(find.descendant(of: button, matching: find.byType(Text)));
+      expect(label.data, key.endsWith('phone') ? 'Stop' : 'Finish');
+      expect(
+          label.semanticsLabel,
+          key.endsWith('phone')
+              ? AppLocalizations.of(tester.element(button)).upstreamCaptureStop
+              : AppLocalizations.of(tester.element(button)).upstreamCaptureFinish);
+    }
+  });
+
+  for (final retirement in ['drag_off', 'account', 'epoch', 'state_replacement', 'dispose']) {
+    testWidgets('Record $retirement before release produces no capture or haptic', (tester) async {
+      final calls = captureHaptics(tester);
+      final authority = _PressTestAuthority();
+      final fixture = await _DockFixture.create(tester, authorityOverride: authority);
+      var uid = _uid;
+      var starts = 0;
+      var stops = 0;
+      fixture.runtime.startPhoneOverride = (_) async {
+        starts++;
+        return EllaCaptureStartOutcome.started;
+      };
+      fixture.runtime.stopPhoneOverride = () async => stops++;
+      await fixture.pump(tester, authenticatedUid: () => uid);
+      final button = find.byKey(const Key('upstream-capture-record-phone'));
+      final gesture = await tester.startGesture(tester.getCenter(button));
+      await tester.pump(const Duration(milliseconds: 90));
+      switch (retirement) {
+        case 'drag_off':
+          await gesture.moveBy(const Offset(0, -120));
+        case 'account':
+          uid = 'replacement-owner';
+        case 'epoch':
+          authority.epoch++;
+        case 'state_replacement':
+          fixture.makePhoneLive();
+        case 'dispose':
+          await tester.pumpWidget(const SizedBox.shrink());
+      }
+      await tester.pump();
+      await gesture.up();
+      await tester.pump(const Duration(milliseconds: 140));
+      expect(starts, 0);
+      expect(stops, 0);
+      expect(calls, isEmpty);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  for (final reduceMotion in [false, true]) {
+    testWidgets('Record completed activation respects reduced motion=$reduceMotion', (tester) async {
+      final calls = captureHaptics(tester);
+      final fixture = await _DockFixture.create(tester);
+      var starts = 0;
+      fixture.runtime.startPhoneOverride = (_) async {
+        starts++;
+        return EllaCaptureStartOutcome.started;
+      };
+      await fixture.pump(tester, reduceMotion: reduceMotion);
+      final button = find.byKey(const Key('upstream-capture-record-phone'));
+      final scale = find.ancestor(of: button, matching: find.byType(AnimatedScale)).first;
+      final gesture = await tester.startGesture(tester.getCenter(button));
+      await tester.pump(const Duration(milliseconds: 90));
+      expect(tester.widget<AnimatedScale>(scale).scale, reduceMotion ? 1 : 0.98);
+      expect(tester.widget<AnimatedScale>(scale).duration,
+          reduceMotion ? Duration.zero : const Duration(milliseconds: 90));
+      expect(tester.widget<FilledButton>(button).style!.animationDuration,
+          reduceMotion ? Duration.zero : const Duration(milliseconds: 90));
+      expect(starts, 0);
+      expect(calls, isEmpty);
+      await gesture.up();
+      await tester.pump();
+      expect(starts, 1);
+      expect(calls, ['HapticFeedbackType.lightImpact']);
+      expect(tester.widget<AnimatedScale>(scale).scale, 1);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('native Record keyboard activation keeps the full action semantics and one haptic', (tester) async {
+    final semantics = tester.ensureSemantics();
+    final calls = captureHaptics(tester);
+    final fixture = await _DockFixture.create(tester);
+    var starts = 0;
+    fixture.runtime.startPhoneOverride = (_) async {
+      starts++;
+      return EllaCaptureStartOutcome.started;
+    };
+    await fixture.pump(tester);
+    final button = find.byKey(const Key('upstream-capture-record-phone'));
+    expect(
+        tester.getSemantics(button),
+        matchesSemantics(
+            label: 'Record with phone',
+            isButton: true,
+            hasTapAction: true,
+            isEnabled: true,
+            hasEnabledState: true,
+            isFocusable: true,
+            hasFocusAction: true));
+    await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    expect(starts, 1);
+    expect(calls, ['HapticFeedbackType.lightImpact']);
+    semantics.dispose();
+  });
+
+  testWidgets('Record hover is not a press or accepted activation', (tester) async {
+    final calls = captureHaptics(tester);
+    final fixture = await _DockFixture.create(tester);
+    var starts = 0;
+    fixture.runtime.startPhoneOverride = (_) async {
+      starts++;
+      return EllaCaptureStartOutcome.started;
+    };
+    await fixture.pump(tester);
+    final button = find.byKey(const Key('upstream-capture-record-phone'));
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: Offset.zero);
+    await mouse.moveTo(tester.getCenter(button));
+    await tester.pump(const Duration(milliseconds: 140));
+    expect(
+        tester.widget<AnimatedScale>(find.ancestor(of: button, matching: find.byType(AnimatedScale)).first).scale, 1);
+    expect(starts, 0);
+    expect(calls, isEmpty);
+    await mouse.removePointer();
+  });
+
+  for (final width in [320.0, 390.0]) {
+    testWidgets('compact native controls stay accessible in RTL 3x at width=$width', (tester) async {
+      final fixture = await _DockFixture.create(tester);
+      await fixture.pump(tester,
+          size: Size(width, width == 320 ? 568 : 844), textScale: 3, locale: const Locale('ar'), reduceMotion: true);
+      final record = find.byKey(const Key('upstream-capture-record-phone'));
+      final connect = find.byKey(const Key('upstream-capture-connect-necklace'));
+      expect(record.hitTestable(), findsOneWidget);
+      expect(connect.hitTestable(), findsOneWidget);
+      expect(tester.getSize(record).height, greaterThanOrEqualTo(52));
+      expect(tester.getSize(connect).height, greaterThanOrEqualTo(48));
+      expect(tester.getRect(record).bottom, lessThanOrEqualTo(tester.getRect(connect).top));
+      final text = tester.widget<Text>(find.descendant(of: record, matching: find.byType(Text)));
+      expect(text.semanticsLabel, AppLocalizations.of(tester.element(record)).upstreamCaptureRecordPhone);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('native Record semantic activation dispatches exactly one accepted haptic', (tester) async {
+    final semantics = tester.ensureSemantics();
+    final calls = captureHaptics(tester);
+    final fixture = await _DockFixture.create(tester);
+    final pending = Completer<EllaCaptureStartOutcome>();
+    addTearDown(() {
+      if (!pending.isCompleted) pending.complete(EllaCaptureStartOutcome.unavailable);
+    });
+    var starts = 0;
+    fixture.runtime.startPhoneOverride = (_) {
+      starts++;
+      return pending.future;
+    };
+    await fixture.pump(tester);
+    final button = find.byKey(const Key('upstream-capture-record-phone'));
+    final node = tester.getSemantics(button);
+    tester.binding.performSemanticsAction(
+        SemanticsActionEvent(type: SemanticsAction.tap, viewId: tester.view.viewId, nodeId: node.id));
+    await tester.pump();
+    expect(starts, 1);
+    expect(calls, ['HapticFeedbackType.lightImpact']);
+    expect(tester.widget<FilledButton>(button).onPressed, isNull);
+    await tester.tap(button);
+    await tester.pump();
+    expect(starts, 1);
+    expect(calls, hasLength(1));
+    pending.complete(EllaCaptureStartOutcome.unavailable);
+    await tester.pump();
+    await tester.pump();
+    final enabledNode = tester.getSemantics(button);
+    tester.binding.performSemanticsAction(
+        SemanticsActionEvent(type: SemanticsAction.tap, viewId: tester.view.viewId, nodeId: enabledNode.id));
+    await tester.pump();
+    expect(starts, 2);
+    expect(calls, hasLength(2));
+    semantics.dispose();
+  });
 
   testWidgets('accepted phone tap gives one light feedback, never boot background or double tap', (tester) async {
     final calls = captureHaptics(tester);
