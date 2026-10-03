@@ -10,6 +10,7 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/schema/action_item.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/conversation.dart';
@@ -86,6 +87,86 @@ void main() {
     guardian_native.GuardianModeService.whisperStateFence.resetForTesting();
     SharedPreferences.setMockInitialValues({'givenName': 'Margaret'});
     await SharedPreferencesUtil.init();
+  });
+
+  testWidgets('mounted Home shows owned cached memory before the initial canonical GET completes', (tester) async {
+    SharedPreferencesUtil().uid = 'cache-owner';
+    final owner = _MemoryCommitAuthority('cache-owner');
+    final cached = ServerConversation(
+      id: 'cached-startup',
+      createdAt: DateTime(2026, 8, 9, 8),
+      startedAt: DateTime(2026, 8, 9, 8),
+      finishedAt: DateTime(2026, 8, 9, 8, 10),
+      structured: Structured('Retained morning memory', 'A saved memory.'),
+    );
+    SharedPreferencesUtil().cachedConversations = [cached];
+    final primary = Completer<ConversationsFetchResult>();
+    final memories = _StartupConversationProvider(owner, primary);
+    final capture = _FakeCaptureProvider(
+      RecordingState.stop,
+      phoneStartResult: PhoneCaptureStartResult.started,
+      hasContent: false,
+      hasFinalContent: false,
+      hasDeviceBoundaryEvidence: false,
+      finalizationResults: const [],
+    );
+    final actions = _FixtureActionsProvider(const []);
+    final device = DeviceProvider();
+    final home = HomeProvider();
+    final artwork = _FakeMemoryArtworkApi();
+    addTearDown(() async {
+      if (!primary.isCompleted) primary.complete(const ConversationsFetchResult.success([]));
+      await tester.pumpWidget(const SizedBox.shrink());
+      memories.dispose();
+      capture.dispose();
+      actions.dispose();
+      device.dispose();
+      home.dispose();
+    });
+    await tester.pumpWidget(MultiProvider(
+      providers: [
+        ChangeNotifierProvider<ConversationProvider>.value(value: memories),
+        ChangeNotifierProvider<CaptureProvider>.value(value: capture),
+        ChangeNotifierProvider<ActionItemsProvider>.value(value: actions),
+        ChangeNotifierProvider<DeviceProvider>.value(value: device),
+        ChangeNotifierProvider<HomeProvider>.value(value: home),
+      ],
+      child: MaterialApp(
+        theme: ellaThemeData(),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: TodayPage(
+            nowProvider: () => DateTime(2026, 8, 9, 9),
+            todayCardRepository: const _FixedTodayCardRepository(
+                TodayCardResponse(contractVersion: todayCardContractVersion, status: TodayCardStatus.newUser)),
+            todayCardCache: _MemoryTodayCardCache(),
+            todayCardAuthoritySnapshotProvider: () =>
+                (uid: owner.uid, authorityKey: 'cache-owner-authority', isProvisioningReady: true),
+            guardianAvailability: () => false,
+            memoryPresentationAuthorityProvider: () => owner,
+            memoryArtworkApi: artwork,
+          ),
+        ),
+      ),
+    ));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Retained morning memory'), findsOneWidget);
+    expect(memories.hasLoadedConversations, isFalse);
+    expect(memories.hasFreshConversations, isFalse);
+    expect(memories.isShowingCachedConversations, isTrue);
+    expect(artwork.backfillCursors, isEmpty);
+    expect(tester.takeException(), isNull);
+
+    primary.complete(const ConversationsFetchResult.success([]));
+    await tester.pump();
+    await tester.pump();
+    expect(memories.hasFreshConversations, isTrue);
+    expect(find.text('Retained morning memory'), findsNothing);
+    expect(SharedPreferencesUtil().cachedConversations, isEmpty);
+    expect(tester.takeException(), isNull);
   });
 
   for (final source in ['socket', 'finish', 'read failure']) {
@@ -5497,6 +5578,19 @@ Future<_HomeHarness> _pumpHome(
     home: home,
     authorityChanges: authorityChanges,
   );
+}
+
+class _StartupConversationProvider extends ConversationProvider {
+  _StartupConversationProvider(AccountCommitAuthority owner, Completer<ConversationsFetchResult> primary)
+      : super(
+          authenticatedUid: () => owner.uid,
+          activeAuthority: () => owner,
+          conversationsFetchCall: () => primary.future,
+          failedConversationsFetchCall: () async => const ConversationsFetchResult.success([]),
+        );
+
+  @override
+  Future<void> checkHasDailySummaries() async {}
 }
 
 class _FixtureActionsProvider extends ActionItemsProvider {

@@ -28,6 +28,23 @@ class _MutableAuthority implements AccountCommitAuthority {
   bool isExactCurrent() => current;
 }
 
+class _InitialLoadProvider extends ConversationProvider {
+  _InitialLoadProvider(_MutableAuthority owner, Completer<ConversationsFetchResult> primary)
+      : super(
+          authenticatedUid: () => owner.uid,
+          activeAuthority: () => owner,
+          conversationsFetchCall: () => primary.future,
+          failedConversationsFetchCall: () async => const ConversationsFetchResult.success([]),
+        );
+
+  int dailySummaryReads = 0;
+
+  @override
+  Future<void> checkHasDailySummaries() async {
+    dailySummaryReads++;
+  }
+}
+
 class _TestEnv implements EnvFields {
   @override
   String? get apiBaseUrl => 'https://api.ella.test/';
@@ -108,6 +125,564 @@ void main() {
     await SharedPreferencesUtil.init();
 
     expect(SharedPreferencesUtil().cachedConversations.single.id, 'current');
+  });
+
+  test('owned completed cache is visible while the initial canonical GET is pending', () async {
+    SharedPreferencesUtil().uid = 'current-user';
+    SharedPreferencesUtil().cachedConversations = [conversation('cached')];
+    final result = Completer<ConversationsFetchResult>();
+    final authority = _MutableAuthority('current-user');
+    final provider = ConversationProvider(
+      activeAuthority: () => authority,
+      authenticatedUid: () => 'current-user',
+      conversationsFetchCall: () => result.future,
+      failedConversationsFetchCall: () async => const ConversationsFetchResult.success([]),
+    );
+    final loading = provider.fetchConversations();
+    addTearDown(() async {
+      if (!result.isCompleted) result.complete(const ConversationsFetchResult.success([]));
+      await loading;
+      provider.dispose();
+    });
+
+    expect(provider.visibleConversations.map((item) => item.id), ['cached']);
+    expect(provider.groupedConversations.values.expand((items) => items).map((item) => item.id), ['cached']);
+    expect(provider.hasLoadedConversations, isFalse);
+    expect(provider.hasFreshConversations, isFalse);
+    expect(provider.isShowingCachedConversations, isTrue);
+    expect(provider.isLoadingConversations, isTrue);
+    expect(provider.hasMoreConversations, isTrue);
+  });
+
+  group('owned initial cache projection', () {
+    ConversationProvider pendingProvider(
+      Completer<ConversationsFetchResult> primary, {
+      _MutableAuthority? authority,
+      String Function()? signedUid,
+      ConversationsFetchCall? failures,
+      ConversationDeleteCall? delete,
+      Duration timeout = const Duration(seconds: 15),
+    }) =>
+        ConversationProvider(
+          authenticatedUid: signedUid ?? (() => 'current-user'),
+          activeAuthority: () => authority,
+          conversationsFetchCall: () => primary.future,
+          failedConversationsFetchCall: failures ?? (() async => const ConversationsFetchResult.success([])),
+          conversationDeleteCall: delete,
+          conversationsFetchTimeout: timeout,
+        );
+
+    for (final currentCache in [true, false]) {
+      test('cache projection never migrates legacy memories when current cache exists $currentCache', () async {
+        final prefs = SharedPreferencesUtil();
+        prefs.uid = 'current-user';
+        prefs.cachedConversations = currentCache ? [conversation('current-cache')] : [];
+        await prefs.saveStringList('cachedMemories', [jsonEncode(conversation('legacy-cache').toJson())]);
+        await prefs.saveBool('migratedMemories', true);
+        final currentBytes = prefs.getStringList('cachedConversations');
+        final legacyBytes = prefs.getStringList('cachedMemories');
+        final primary = Completer<ConversationsFetchResult>();
+        final provider = pendingProvider(primary, authority: _MutableAuthority('current-user'));
+        addTearDown(provider.dispose);
+        final loading = provider.fetchConversations();
+        primary.complete(const ConversationsFetchResult.failure());
+        await loading;
+
+        expect(provider.conversations.map((item) => item.id), currentCache ? ['current-cache'] : []);
+        expect(prefs.getStringList('cachedConversations'), currentBytes);
+        expect(prefs.getStringList('cachedMemories'), legacyBytes);
+        expect(prefs.getString('cachedConversationsUid'), 'current-user');
+        expect(prefs.getBool('migratedMemories'), isTrue);
+      });
+    }
+
+    for (final condition in [
+      'signed out',
+      'wrong signed uid',
+      'wrong preferences uid',
+      'unowned cache',
+      'foreign cache',
+      'no authority',
+      'wrong authority uid',
+      'retired authority',
+      'unavailable identity',
+    ]) {
+      test('$condition cannot expose or rewrite cache after primary GET failure', () async {
+        final prefs = SharedPreferencesUtil();
+        prefs.uid = 'current-user';
+        prefs.cachedConversations = [conversation('cached')];
+        final authority = _MutableAuthority(condition == 'wrong authority uid' ? 'other-user' : 'current-user');
+        if (condition == 'retired authority') authority.current = false;
+        if (condition == 'wrong preferences uid') prefs.uid = 'other-user';
+        if (condition == 'unowned cache') await prefs.saveString('cachedConversationsUid', '');
+        if (condition == 'foreign cache') await prefs.saveString('cachedConversationsUid', 'other-user');
+        final currentBytes = prefs.getStringList('cachedConversations');
+        final storedOwner = prefs.getString('cachedConversationsUid');
+        final primary = Completer<ConversationsFetchResult>();
+        final provider = pendingProvider(
+          primary,
+          authority: condition == 'no authority' ? null : authority,
+          signedUid: () {
+            if (condition == 'unavailable identity') throw StateError('Synthetic identity unavailable');
+            if (condition == 'signed out') return '';
+            return condition == 'wrong signed uid' ? 'other-user' : 'current-user';
+          },
+        );
+        addTearDown(provider.dispose);
+        final loading = provider.fetchConversations();
+        primary.complete(const ConversationsFetchResult.failure());
+        await loading;
+
+        expect(provider.conversations, isEmpty);
+        expect(provider.searchedConversations, isEmpty);
+        expect(provider.groupedConversations, isEmpty);
+        expect(provider.isShowingCachedConversations, isFalse);
+        expect(prefs.getStringList('cachedConversations'), currentBytes);
+        expect(prefs.getString('cachedConversationsUid'), storedOwner);
+      });
+    }
+
+    test('failure without startup hydration cannot project replacement-account cache', () async {
+      final prefs = SharedPreferencesUtil();
+      prefs.uid = 'current-user';
+      final primary = Completer<ConversationsFetchResult>();
+      final original = _MutableAuthority('current-user');
+      var authority = original;
+      var signedUid = 'current-user';
+      final provider = ConversationProvider(
+        authenticatedUid: () => signedUid,
+        activeAuthority: () => authority,
+        conversationsFetchCall: () => primary.future,
+        failedConversationsFetchCall: () async => const ConversationsFetchResult.success([]),
+      );
+      addTearDown(provider.dispose);
+      final loading = provider.fetchConversations();
+      original.current = false;
+      authority = _MutableAuthority('replacement-user');
+      signedUid = 'replacement-user';
+      prefs.uid = 'replacement-user';
+      prefs.cachedConversations = [conversation('replacement-cache')];
+      final replacementBytes = prefs.getStringList('cachedConversations');
+      primary.complete(const ConversationsFetchResult.failure());
+      await loading;
+
+      expect(provider.conversations, isEmpty);
+      expect(provider.isShowingCachedConversations, isFalse);
+      expect(prefs.getStringList('cachedConversations'), replacementBytes);
+      expect(prefs.getString('cachedConversationsUid'), 'replacement-user');
+    });
+
+    test('same-UID account barrier rejects late fallback even when no cache was hydrated', () async {
+      final prefs = SharedPreferencesUtil();
+      prefs.uid = 'current-user';
+      final primary = Completer<ConversationsFetchResult>();
+      final provider = pendingProvider(primary, authority: _MutableAuthority('current-user'));
+      addTearDown(provider.dispose);
+      final loading = provider.fetchConversations();
+      expect(provider.conversations, isEmpty);
+      EllaAccountCommitBarrier.quiesceForAccountTransition();
+      prefs.cachedConversations = [conversation('replacement-cache')];
+      final bytes = prefs.getStringList('cachedConversations');
+      primary.complete(const ConversationsFetchResult.failure());
+      await loading;
+
+      expect(provider.conversations, isEmpty);
+      expect(provider.isShowingCachedConversations, isFalse);
+      expect(prefs.getStringList('cachedConversations'), bytes);
+    });
+
+    test('valid current-owner fallback remains available without startup hydration', () async {
+      final prefs = SharedPreferencesUtil();
+      prefs.uid = 'current-user';
+      final primary = Completer<ConversationsFetchResult>();
+      final provider = pendingProvider(primary, authority: _MutableAuthority('current-user'))
+        ..hasLoadedConversations = true;
+      addTearDown(provider.dispose);
+      final loading = provider.fetchConversations();
+      expect(provider.conversations, isEmpty);
+      prefs.cachedConversations = [conversation('late-owned-cache')];
+      final bytes = prefs.getStringList('cachedConversations');
+      primary.complete(const ConversationsFetchResult.failure());
+      await loading;
+
+      expect(provider.visibleConversations.single.id, 'late-owned-cache');
+      expect(provider.isShowingCachedConversations, isTrue);
+      expect(provider.hasLoadedConversations, isTrue);
+      expect(provider.hasFreshConversations, isFalse);
+      expect(prefs.getStringList('cachedConversations'), bytes);
+    });
+
+    for (final invalidCache in ['missing status', 'unknown status', 'malformed JSON', 'wrong container']) {
+      test('$invalidCache cannot become completed cache after failed GET', () async {
+        final prefs = SharedPreferencesUtil();
+        prefs.uid = 'current-user';
+        await prefs.saveString('cachedConversationsUid', 'current-user');
+        final payload = conversation('unverified-cache').toJson();
+        if (invalidCache == 'missing status') payload.remove('status');
+        if (invalidCache == 'unknown status') payload['status'] = 'unknown-status';
+        final raw = invalidCache == 'malformed JSON'
+            ? 'invalid JSON'
+            : invalidCache == 'wrong container'
+                ? '[]'
+                : jsonEncode(payload);
+        await prefs.saveStringList('cachedConversations', [raw]);
+        final primary = Completer<ConversationsFetchResult>();
+        final provider = pendingProvider(primary, authority: _MutableAuthority('current-user'));
+        addTearDown(provider.dispose);
+        final loading = provider.fetchConversations();
+        expect(provider.conversations, isEmpty);
+        primary.complete(const ConversationsFetchResult.failure());
+        await loading;
+
+        expect(provider.conversations, isEmpty);
+        expect(provider.isShowingCachedConversations, isFalse);
+        expect(prefs.getStringList('cachedConversations'), [raw]);
+        expect(prefs.getString('cachedConversationsUid'), 'current-user');
+      });
+    }
+
+    test('malformed cache-owner metadata is not exposed or rewritten after failed GET', () async {
+      final bytes = [jsonEncode(conversation('cached').toJson())];
+      SharedPreferences.setMockInitialValues({
+        'uid': 'current-user',
+        'cachedConversationsUid': 42,
+        'cachedConversations': bytes,
+      });
+      await SharedPreferencesUtil.init();
+      final primary = Completer<ConversationsFetchResult>();
+      final provider = pendingProvider(primary, authority: _MutableAuthority('current-user'));
+      addTearDown(provider.dispose);
+      primary.complete(const ConversationsFetchResult.failure());
+      await provider.fetchConversations();
+
+      expect(provider.conversations, isEmpty);
+      expect(provider.isShowingCachedConversations, isFalse);
+      expect(SharedPreferencesUtil().getStringList('cachedConversations'), bytes);
+      expect((await SharedPreferences.getInstance()).get('cachedConversationsUid'), 42);
+    });
+
+    for (final condition in [
+      'signed out',
+      'wrong signed uid',
+      'wrong preferences uid',
+      'unowned cache',
+      'foreign cache',
+      'no authority',
+      'wrong authority uid',
+      'retired authority',
+      'unavailable identity',
+    ]) {
+      test('$condition does not hydrate or rewrite the cache while GET is pending', () async {
+        SharedPreferencesUtil().uid = 'current-user';
+        SharedPreferencesUtil().cachedConversations = [conversation('cached')];
+        final authority = _MutableAuthority(condition == 'wrong authority uid' ? 'other-user' : 'current-user');
+        if (condition == 'retired authority') authority.current = false;
+        if (condition == 'wrong preferences uid') SharedPreferencesUtil().uid = 'other-user';
+        if (condition == 'unowned cache') await SharedPreferencesUtil().saveString('cachedConversationsUid', '');
+        if (condition == 'foreign cache') {
+          await SharedPreferencesUtil().saveString('cachedConversationsUid', 'other-user');
+        }
+        final originalBytes = SharedPreferencesUtil().getStringList('cachedConversations');
+        final primary = Completer<ConversationsFetchResult>();
+        final provider = pendingProvider(
+          primary,
+          authority: condition == 'no authority' ? null : authority,
+          signedUid: () {
+            if (condition == 'unavailable identity') throw StateError('Synthetic identity unavailable');
+            if (condition == 'signed out') return '';
+            return condition == 'wrong signed uid' ? 'other-user' : 'current-user';
+          },
+        );
+        final loading = provider.fetchConversations();
+        addTearDown(() async {
+          if (!primary.isCompleted) primary.complete(const ConversationsFetchResult.success([]));
+          await loading;
+          provider.dispose();
+        });
+
+        expect(provider.visibleConversations, isEmpty);
+        expect(provider.isShowingCachedConversations, isFalse);
+        expect(SharedPreferencesUtil().getStringList('cachedConversations'), originalBytes);
+      });
+    }
+
+    for (final filter in ['folder', 'date', 'starred', 'daily summaries', 'existing projection', 'fresh empty']) {
+      test('$filter does not hydrate the global startup cache', () async {
+        SharedPreferencesUtil().uid = 'current-user';
+        SharedPreferencesUtil().cachedConversations = [conversation('cached')];
+        final primary = Completer<ConversationsFetchResult>();
+        final provider = pendingProvider(primary, authority: _MutableAuthority('current-user'));
+        switch (filter) {
+          case 'folder':
+            provider.selectedFolderId = 'folder';
+          case 'date':
+            provider.selectedDate = DateTime(2026, 7, 8);
+          case 'starred':
+            provider.showStarredOnly = true;
+          case 'daily summaries':
+            provider.showDailySummaries = true;
+          case 'existing projection':
+            provider.conversations = [conversation('existing')];
+          case 'fresh empty':
+            provider.hasLoadedConversations = true;
+            provider.hasFreshConversations = true;
+        }
+        final loading = provider.fetchConversations();
+        addTearDown(() async {
+          if (!primary.isCompleted) primary.complete(const ConversationsFetchResult.success([]));
+          await loading;
+          provider.dispose();
+        });
+
+        expect(provider.conversations.map((item) => item.id), filter == 'existing projection' ? ['existing'] : []);
+        expect(provider.isShowingCachedConversations, isFalse);
+      });
+    }
+
+    test('completed cache preserves metadata and excludes deleted, non-completed and hidden rows', () async {
+      SharedPreferencesUtil().uid = 'current-user';
+      final enriched = ServerConversation.fromJson({
+        ...conversation('kept').toJson(),
+        'active_summary_version_id': 'canonical-v2',
+        'enrichment_state': {'status': 'writeback_applied', 'result_summary_version_id': 'canonical-v2'},
+      });
+      SharedPreferencesUtil().cachedConversations = [
+        enriched,
+        conversation('processing')..status = ConversationStatus.processing,
+        conversation('failed')..status = ConversationStatus.failed,
+        ServerConversation.fromJson({...conversation('deleted').toJson(), 'deleted': true}),
+        conversation('discarded', discarded: true),
+        ServerConversation.fromJson({
+          ...conversation('short').toJson(),
+          'finished_at': conversation('short').startedAt!.add(const Duration(seconds: 1)).toIso8601String(),
+        }),
+      ];
+      final bytes = SharedPreferencesUtil().getStringList('cachedConversations');
+      final primary = Completer<ConversationsFetchResult>();
+      final provider = pendingProvider(primary, authority: _MutableAuthority('current-user'))
+        ..shortConversationThreshold = 60;
+      final loading = provider.fetchConversations();
+      addTearDown(() async {
+        if (!primary.isCompleted) primary.complete(const ConversationsFetchResult.success([]));
+        await loading;
+        provider.dispose();
+      });
+
+      expect(provider.visibleConversations.map((item) => item.id), ['kept']);
+      expect(provider.conversations.map((item) => item.id), ['kept', 'discarded', 'short']);
+      expect(provider.visibleConversations.single.activeSummaryVersionId, 'canonical-v2');
+      expect(provider.visibleConversations.single.enrichmentState, enriched.enrichmentState);
+      expect(provider.processingConversations, isEmpty);
+      expect(SharedPreferencesUtil().getStringList('cachedConversations'), bytes);
+    });
+
+    test('malformed owned cache does not prevent the canonical GET', () async {
+      SharedPreferencesUtil().uid = 'current-user';
+      await SharedPreferencesUtil().saveString('cachedConversationsUid', 'current-user');
+      await SharedPreferencesUtil().saveStringList('cachedConversations', ['invalid JSON']);
+      final primary = Completer<ConversationsFetchResult>();
+      final provider = pendingProvider(primary, authority: _MutableAuthority('current-user'));
+      addTearDown(provider.dispose);
+      final loading = provider.fetchConversations();
+      expect(provider.conversations, isEmpty);
+      primary.complete(ConversationsFetchResult.success([conversation('canonical')]));
+      await loading;
+      expect(provider.conversations.single.id, 'canonical');
+      expect(provider.hasFreshConversations, isTrue);
+    });
+
+    for (final outcome in ['empty', 'completed', 'failure', 'timeout']) {
+      test('$outcome canonical result preserves freshness and cache semantics', () async {
+        SharedPreferencesUtil().uid = 'current-user';
+        SharedPreferencesUtil().cachedConversations = [conversation('cached')];
+        final primary = Completer<ConversationsFetchResult>();
+        final provider = pendingProvider(primary,
+            authority: _MutableAuthority('current-user'),
+            timeout: outcome == 'timeout' ? const Duration(milliseconds: 10) : const Duration(seconds: 15));
+        addTearDown(provider.dispose);
+        final loading = provider.fetchConversations();
+        expect(provider.conversations.single.id, 'cached');
+        if (outcome != 'timeout') {
+          primary.complete(outcome == 'failure'
+              ? const ConversationsFetchResult.failure()
+              : ConversationsFetchResult.success(outcome == 'completed' ? [conversation('canonical')] : []));
+        }
+        await loading;
+        final fresh = outcome == 'empty' || outcome == 'completed';
+        final expected = outcome == 'empty' ? <String>[] : [fresh ? 'canonical' : 'cached'];
+        expect(provider.hasLoadedConversations, isTrue);
+        expect(provider.hasFreshConversations, fresh);
+        expect(provider.isShowingCachedConversations, !fresh);
+        expect(provider.isLoadingConversations, isFalse);
+        expect(provider.conversations.map((item) => item.id), expected);
+        expect(provider.searchedConversations.map((item) => item.id), expected);
+        expect(provider.groupedConversations.values.expand((items) => items).map((item) => item.id), expected);
+        expect(SharedPreferencesUtil().cachedConversations.map((item) => item.id), expected);
+        if (!primary.isCompleted) primary.complete(const ConversationsFetchResult.failure());
+      });
+    }
+
+    for (final transition in ['signed uid', 'preferences uid', 'authority', 'barrier', 'reset', 'dispose']) {
+      test('$transition rejects delayed primary and failed-record responses from hydrated cache', () async {
+        SharedPreferencesUtil().uid = 'current-user';
+        SharedPreferencesUtil().cachedConversations = [conversation('cached')];
+        final primary = Completer<ConversationsFetchResult>();
+        final failures = Completer<ConversationsFetchResult>();
+        final authority = _MutableAuthority('current-user');
+        var signedUid = 'current-user';
+        final provider =
+            pendingProvider(primary, authority: authority, signedUid: () => signedUid, failures: () => failures.future);
+        var notifications = 0;
+        provider.addListener(() => notifications++);
+        final loading = provider.fetchConversations();
+        expect(provider.conversations.single.id, 'cached');
+        switch (transition) {
+          case 'signed uid':
+            signedUid = 'other-user';
+          case 'preferences uid':
+            SharedPreferencesUtil().uid = 'other-user';
+          case 'authority':
+            authority.current = false;
+          case 'barrier':
+            EllaAccountCommitBarrier.quiesceForAccountTransition();
+          case 'reset':
+            provider.reset();
+          case 'dispose':
+            provider.dispose();
+        }
+        final cacheBytes = SharedPreferencesUtil().getStringList('cachedConversations');
+        final notificationsAfterTransition = notifications;
+        primary.complete(ConversationsFetchResult.success([conversation('stale-primary')]));
+        failures.complete(ConversationsFetchResult.success([
+          ServerConversation.fromJson({
+            ...conversation('stale-failed').toJson(),
+            'status': 'failed',
+            'processing_error': 'conversation_summary_failed',
+          }),
+        ]));
+        await loading;
+        await pumpEventQueue();
+        expect(provider.conversations.where((item) => item.id == 'stale-primary'), isEmpty);
+        expect(provider.failedConversations, isEmpty);
+        expect(SharedPreferencesUtil().getStringList('cachedConversations'), cacheBytes);
+        if (transition == 'dispose') {
+          expect(notifications, notificationsAfterTransition);
+          EllaAccountCommitBarrier.quiesceForAccountTransition();
+        } else {
+          expect(provider.conversations, isEmpty);
+          provider.dispose();
+        }
+      });
+    }
+
+    test('cached projection remains account-fenced after primary failure completes', () async {
+      SharedPreferencesUtil().uid = 'current-user';
+      SharedPreferencesUtil().cachedConversations = [conversation('cached')];
+      final primary = Completer<ConversationsFetchResult>();
+      final provider = pendingProvider(primary, authority: _MutableAuthority('current-user'));
+      addTearDown(provider.dispose);
+      final loading = provider.fetchConversations();
+      primary.complete(const ConversationsFetchResult.failure());
+      await loading;
+      expect(provider.conversations.single.id, 'cached');
+      EllaAccountCommitBarrier.quiesceForAccountTransition();
+      expect(provider.conversations, isEmpty);
+      expect(provider.isShowingCachedConversations, isFalse);
+    });
+
+    for (final transition in ['reset', 'dispose']) {
+      test('$transition during initial cached load cannot start a later daily-summary request', () async {
+        SharedPreferencesUtil().uid = 'current-user';
+        SharedPreferencesUtil().cachedConversations = [conversation('cached')];
+        final primary = Completer<ConversationsFetchResult>();
+        final provider = _InitialLoadProvider(_MutableAuthority('current-user'), primary);
+        final loading = provider.ensureFreshConversations();
+        expect(provider.conversations.single.id, 'cached');
+        if (transition == 'dispose') {
+          provider.dispose();
+        } else {
+          provider.reset();
+        }
+        primary.complete(ConversationsFetchResult.success([conversation('stale')]));
+        await loading;
+        expect(provider.dailySummaryReads, 0);
+        if (transition != 'dispose') provider.dispose();
+      });
+    }
+
+    test('failed-record refresh still completes independently after cached rows become canonical', () async {
+      SharedPreferencesUtil().uid = 'current-user';
+      SharedPreferencesUtil().cachedConversations = [conversation('cached')];
+      final primary = Completer<ConversationsFetchResult>();
+      final failures = Completer<ConversationsFetchResult>();
+      final provider =
+          pendingProvider(primary, authority: _MutableAuthority('current-user'), failures: () => failures.future);
+      addTearDown(provider.dispose);
+      final loading = provider.fetchConversations();
+      primary.complete(ConversationsFetchResult.success([conversation('canonical')]));
+      await loading;
+      failures.complete(ConversationsFetchResult.success([
+        ServerConversation.fromJson({
+          ...conversation('failed-summary').toJson(),
+          'status': 'failed',
+          'processing_error': 'conversation_summary_failed',
+        }),
+      ]));
+      await pumpEventQueue();
+      expect(provider.failedConversations.single.id, 'failed-summary');
+      expect(provider.conversations.single.id, 'canonical');
+      expect(provider.isShowingCachedConversations, isFalse);
+    });
+
+    test('permanent deletion during hydration cannot be restored by canonical response or retained cache', () async {
+      SharedPreferencesUtil().uid = 'current-user';
+      final removed = conversation('deleted');
+      SharedPreferencesUtil().cachedConversations = [removed, conversation('kept')];
+      final primary = Completer<ConversationsFetchResult>();
+      final provider =
+          pendingProvider(primary, authority: _MutableAuthority('current-user'), delete: (_, __) async => true);
+      addTearDown(provider.dispose);
+      final loading = provider.fetchConversations();
+      expect(await provider.deleteConversationPermanently(removed), isTrue);
+      primary.complete(ConversationsFetchResult.success([removed, conversation('kept')]));
+      await loading;
+      expect(provider.conversations.map((item) => item.id), ['kept']);
+      expect(SharedPreferencesUtil().cachedConversations.map((item) => item.id), ['kept']);
+    });
+
+    test('an older overlapping GET cannot replace the newer canonical projection or pagination', () async {
+      SharedPreferencesUtil().uid = 'current-user';
+      SharedPreferencesUtil().cachedConversations = [conversation('cached')];
+      final first = Completer<ConversationsFetchResult>();
+      final second = Completer<ConversationsFetchResult>();
+      final pageOffsets = <int>[];
+      var reads = 0;
+      final authority = _MutableAuthority('current-user');
+      final provider = ConversationProvider(
+        authenticatedUid: () => 'current-user',
+        activeAuthority: () => authority,
+        conversationsFetchCall: () => reads++ == 0 ? first.future : second.future,
+        failedConversationsFetchCall: () async => const ConversationsFetchResult.success([]),
+        conversationsPageFetchCall: ({required limit, required offset}) async {
+          pageOffsets.add(offset);
+          return const ConversationsFetchResult.success([]);
+        },
+      );
+      addTearDown(provider.dispose);
+      final oldLoading = provider.fetchConversations();
+      final newLoading = provider.fetchConversations();
+      second.complete(ConversationsFetchResult.success(List.generate(50, (index) => conversation('new-$index'))));
+      await newLoading;
+      first.complete(ConversationsFetchResult.success([conversation('old')]));
+      await oldLoading;
+      expect(provider.conversations.length, 50);
+      expect(provider.hasFreshConversations, isTrue);
+      expect(provider.isShowingCachedConversations, isFalse);
+      await provider.getMoreConversationsFromServer();
+      expect(pageOffsets, [50]);
+      expect(SharedPreferencesUtil().cachedConversations.map((item) => item.id),
+          unorderedEquals(List.generate(50, (index) => 'new-$index')));
+    });
   });
 
   test('confirmed permanent deletion removes every local projection and cache entry', () async {
@@ -503,6 +1078,7 @@ void main() {
     final response = Completer<ConversationsFetchResult>();
     final provider = ConversationProvider(
       activeAuthority: () => authority,
+      authenticatedUid: () => 'uid-a',
       conversationsFetchCall: () => response.future,
       failedConversationsFetchCall: () async => const ConversationsFetchResult.success([]),
       conversationDeleteCall: (_, __) async => true,
