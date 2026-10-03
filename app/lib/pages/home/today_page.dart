@@ -1066,7 +1066,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   Future<void> _selectHomeArtworkStyle(String styleVersion) async {
     final preferences = _homeArtworkPreferences;
     final authority = _captureHomeArtworkAuthority();
-    if (preferences == null || !preferences.releaseEnabled || authority == null) {
+    if (preferences == null || !preferences.releaseEnabled || !preferences.hasAcceptedConsent || authority == null) {
       _showHomeMessage(context.l10n.memoryArtworkStyleUnavailable);
       return;
     }
@@ -1097,12 +1097,13 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       return;
     }
     setState(() {
-      _homeArtworkPreferences = MemoryArtworkPreferences(
-        consent: 'accepted',
-        consentVersion: preferences.consentVersion,
-        styleVersion: styleVersion,
-        releaseEnabled: true,
-      );
+      _homeArtworkPreferences = result.preferences ??
+          MemoryArtworkPreferences(
+            consent: preferences.consent,
+            consentVersion: preferences.consentVersion,
+            styleVersion: styleVersion,
+            releaseEnabled: true,
+          );
       // The saved style starts a new generation; never let a paused/stopped
       // status from the previous style suppress its first reconciliation.
       _homeArtworkQueueStatus = null;

@@ -2516,6 +2516,31 @@ void main() {
     );
   });
 
+  for (final consent in ['not_set', 'declined']) {
+    testWidgets('Home style selection never accepts $consent artwork consent', (tester) async {
+      final authority = await _installArtworkAuthority();
+      final artwork = _FakeMemoryArtworkApi(consent: consent);
+      final harness = await _pumpHome(
+        tester,
+        conversations: _ConversationFixtures.manyMemories(),
+        memoryArtworkApi: artwork,
+        memoryArtworkAuthorityProvider: () => authority,
+      );
+      addTearDown(harness.dispose);
+      await tester.pump();
+      final backfills = artwork.backfillCursors.length;
+      await tester.tap(find.byKey(const Key('home-memory-artwork-style-menu')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.tap(find.text('Anime storybook'));
+      await tester.pumpAndSettle();
+      expect(artwork.selectedStyles, isEmpty);
+      expect(artwork.backfillCursors.length, backfills);
+      expect(find.textContaining('Illustration style saved'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   testWidgets('style change waits for active backfill and restarts the selected style', (tester) async {
     final authority = await _installArtworkAuthority();
     final gate = Completer<void>();
@@ -4982,6 +5007,7 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
     ),
     this.failQueueControls = false,
     this.failStyleUpdates = false,
+    this.consent = 'accepted',
     this.queue,
     this.libraryInventory,
     this.displayResult = const MemoryArtworkResult(
@@ -5013,6 +5039,7 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
   final Completer<void>? secondStyleGate;
   final bool failQueueControls;
   final bool failStyleUpdates;
+  final String consent;
   MemoryArtworkQueueStatus? queue;
   final MemoryArtworkLibraries? libraryInventory;
   final MemoryArtworkResult displayResult;
@@ -5076,8 +5103,8 @@ class _FakeMemoryArtworkApi extends MemoryArtworkApi {
   @override
   Future<MemoryArtworkPreferences?> preferences() async {
     preferenceRequests += 1;
-    return const MemoryArtworkPreferences(
-      consent: 'accepted',
+    return MemoryArtworkPreferences(
+      consent: consent,
       consentVersion: 'ai-data-processors-v10',
       styleVersion: memoryArtworkDefaultStyle,
       releaseEnabled: true,

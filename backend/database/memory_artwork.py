@@ -50,6 +50,55 @@ def set_preferences(uid: str, preferences: dict[str, Any]) -> None:
     _user_ref(uid).set({PREFERENCES_FIELD: preferences}, merge=True)
 
 
+def _update_style_transaction(
+    transaction,
+    user_ref,
+    *,
+    consent_version: str,
+    style_version: str,
+    binding_id: str,
+    profile_id: str,
+    authority_digest: str,
+    updated_at: datetime,
+) -> str:
+    snapshot = user_ref.get(transaction=transaction)
+    user = snapshot.to_dict() if snapshot.exists else {}
+    if not snapshot.exists or user.get(DELETION_PENDING_FIELD):
+        return "deletion_pending"
+    preferences = user.get(PREFERENCES_FIELD)
+    if (
+        not isinstance(preferences, dict)
+        or preferences.get("consent") != "accepted"
+        or preferences.get("consent_version") != consent_version
+    ):
+        return "consent_required"
+    if (
+        preferences.get("binding_id") != binding_id
+        or preferences.get("profile_id") != profile_id
+        or preferences.get("authority_digest") != authority_digest
+    ):
+        return "preference_authority_stale"
+    # Dotted updates preserve consent, receipts, and all authority metadata,
+    # including a concurrent decline which makes Firestore retry this read.
+    transaction.update(
+        user_ref,
+        {
+            f"{PREFERENCES_FIELD}.style_version": style_version,
+            f"{PREFERENCES_FIELD}.updated_at": updated_at,
+        },
+    )
+    return "updated"
+
+
+@transactional
+def _update_style(transaction, user_ref, **kwargs) -> str:
+    return _update_style_transaction(transaction, user_ref, **kwargs)
+
+
+def update_style(uid: str, **kwargs) -> str:
+    return _update_style(db.transaction(), _user_ref(uid), **kwargs)
+
+
 def get_conversation(uid: str, memory_id: str) -> Optional[dict[str, Any]]:
     snapshot = _conversation_ref(uid, memory_id).get()
     return snapshot.to_dict() if snapshot.exists else None

@@ -41,6 +41,7 @@ backfill.
 | --- | --- | --- | --- |
 | GET | `/v1/ella/memory-artwork/preferences` | Firebase owner | Read consent/style state and supported versions. |
 | PUT | `/v1/ella/memory-artwork/preferences` | Firebase owner | Persist versioned accept/decline and style choice for the current binding. |
+| PATCH | `/v1/ella/memory-artwork/preferences` | Firebase owner | Change style only when current accepted consent/version and exact binding already match. |
 | GET | `/v1/ella/memories/{memory_id}/artwork` | Firebase owner | Read typed state or an owner-scoped signed URL. |
 | POST | `/v1/ella/memories/{memory_id}/artwork` | Firebase owner | Idempotently queue one terminal enriched memory. |
 | POST | `/v1/ella/memory-artwork/backfill` | Firebase owner | Queue at most the newest ten eligible memories. |
@@ -49,6 +50,26 @@ backfill.
 Old clients remain compatible because `artwork` is optional. Declined and
 unavailable states do not contain a URL; clients must render a local neutral
 fallback rather than a generic image presented as memory-specific.
+
+### Style changes do not grant consent
+
+The preferences GET advertises the current policy version even when consent is
+`not_set` or `declined`; a nonempty version is not permission. New style clients
+first read accepted consent under their captured account authority, then PATCH
+only `consent_version` (an expected version) and `style_version`. The PATCH model
+rejects extra consent, UID, receipt, and binding fields. The Firestore transaction
+rereads current consent/version, binding/profile/digest, and account-deletion
+state and updates only style and update time. All consent decisions, receipt
+metadata, and authority fields are preserved, including a concurrent decline.
+Release gates and current global AI consent must also pass; no generation or
+provider work occurs in this operation. A client accepts success only from a
+current, matching canonical preferences response.
+
+The backend PATCH must be reviewed and deployed before the new app style path
+is usable. Unsupported PATCH responses fail closed with no legacy PUT fallback.
+The explicit-consent PUT remains compatible; old clients that incorrectly used
+it for implicit style opt-in are not repaired by this additive server route.
+This source patch does not change an installed binary or grant consent.
 
 ## Configuration
 
