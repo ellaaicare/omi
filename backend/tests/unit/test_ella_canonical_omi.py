@@ -1,7 +1,12 @@
 import json
 import hashlib
+import logging
 from datetime import datetime, timezone
 
+import pytest
+import requests
+
+from utils.ella import canonical_omi
 from utils.ella.canonical_omi import (
     TODAY_CARD_GROUNDING_ATTESTER,
     TODAY_CARD_GROUNDING_CONTRACT_VERSION,
@@ -277,3 +282,182 @@ def test_build_omi_canonical_event_json_normalizes_nested_timestamps():
     assert event["metadata"]["structured"]["events"][0]["observed_at"] == "2026-05-07T18:57:12Z"
     assert event["metadata"]["summary_versions"][0]["created_at"] == "2026-05-07T18:57:12Z"
     assert event["metadata"]["transcript_segments"][0]["timestamp"] == "2026-05-07T18:57:12Z"
+
+
+def _transport_fixture():
+    return {
+        "id": "private-fixture-event",
+        "created_at": "2026-10-03T01:00:00Z",
+        "structured": {"title": "Private fixture title", "overview": "Private fixture text"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("error_type", "category"),
+    [
+        (requests.ConnectTimeout, "connect_timeout"),
+        (requests.ReadTimeout, "read_timeout"),
+        (requests.Timeout, "timeout_unknown"),
+        (TimeoutError, "timeout_unknown"),
+        (requests.ConnectionError, "connection_error"),
+        (RuntimeError, "unexpected_error"),
+    ],
+)
+def test_canonical_transport_diagnostic_failure_is_private_and_unconfirmed(monkeypatch, caplog, error_type, category):
+    calls = []
+    failure = error_type("private-fixture-error-token-url-body")
+
+    def post(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise failure
+
+    monkeypatch.setattr(canonical_omi, "CANONICAL_OMI_WRITE_ENABLED", True)
+    monkeypatch.setattr(canonical_omi, "CANONICAL_OMI_TIMEOUT", 5)
+    monkeypatch.setattr(canonical_omi, "canonical_event_service_headers", lambda uid: {"Private": "fixture-secret"})
+    monkeypatch.setattr(canonical_omi.requests, "post", post)
+    ticks = iter((10.0, 11.25))
+    monkeypatch.setattr(canonical_omi.time, "monotonic", lambda: next(ticks))
+    caplog.set_level(logging.INFO, logger="utils.ella.canonical_omi")
+
+    with pytest.raises(error_type) as observed:
+        canonical_omi.write_omi_canonical_event("private-fixture-owner", _transport_fixture())
+
+    assert observed.value is failure
+    assert len(calls) == 1
+    assert calls[0][1]["timeout"] == 5
+    records = [record for record in caplog.records if record.getMessage() == "canonical_omi_http_result"]
+    assert len(records) == 1
+    record = records[0]
+    assert record.stage == "request"
+    assert record.outcome == "unconfirmed"
+    assert record.error_category == category
+    assert record.elapsed_ms == 1250
+    assert record.http_status is None
+    assert record.exc_info is None
+    assert "private-fixture" not in repr(record.__dict__)
+    assert "fixture-secret" not in repr(record.__dict__)
+
+
+@pytest.mark.parametrize("timeout", [None, 0.25])
+def test_canonical_transport_diagnostic_response_is_not_a_commit_receipt(monkeypatch, caplog, timeout):
+    calls = []
+    payload = {"ok": False}
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return payload
+
+    monkeypatch.setattr(canonical_omi, "CANONICAL_OMI_WRITE_ENABLED", True)
+    monkeypatch.setattr(canonical_omi, "CANONICAL_OMI_TIMEOUT", 5)
+    monkeypatch.setattr(canonical_omi, "canonical_event_service_headers", lambda uid: {})
+    monkeypatch.setattr(canonical_omi.requests, "post", lambda *args, **kwargs: calls.append(kwargs) or Response())
+    ticks = iter((10.0, 10.5))
+    monkeypatch.setattr(canonical_omi.time, "monotonic", lambda: next(ticks))
+    caplog.set_level(logging.INFO, logger="utils.ella.canonical_omi")
+
+    assert canonical_omi.write_omi_canonical_event("private-fixture-owner", _transport_fixture(), timeout=timeout) == {
+        "ok": False,
+        "latency_ms": 500,
+    }
+    assert len(calls) == 1
+    assert calls[0]["timeout"] == (5 if timeout is None else timeout)
+    record = next(record for record in caplog.records if record.getMessage() == "canonical_omi_http_result")
+    assert record.outcome == "response_received"
+    assert record.stage == "response_json"
+    assert record.error_category == "none"
+    assert record.http_status == 200
+    assert record.elapsed_ms == 500
+
+
+@pytest.mark.parametrize(("end_time", "elapsed_ms"), [(1e9, 86400000), (-1.0, 0)])
+def test_canonical_transport_diagnostic_invalid_response_is_private_and_bounded(
+    monkeypatch, caplog, end_time, elapsed_ms
+):
+    class Response:
+        status_code = 200
+
+        def json(self):
+            raise ValueError("private-fixture-response-body")
+
+    monkeypatch.setattr(canonical_omi, "CANONICAL_OMI_WRITE_ENABLED", True)
+    monkeypatch.setattr(canonical_omi, "canonical_event_service_headers", lambda uid: {})
+    monkeypatch.setattr(canonical_omi.requests, "post", lambda *args, **kwargs: Response())
+    ticks = iter((0.0, end_time))
+    monkeypatch.setattr(canonical_omi.time, "monotonic", lambda: next(ticks))
+    caplog.set_level(logging.INFO, logger="utils.ella.canonical_omi")
+
+    with pytest.raises(ValueError, match="private-fixture-response-body"):
+        canonical_omi.write_omi_canonical_event("private-fixture-owner", _transport_fixture())
+
+    record = next(record for record in caplog.records if record.getMessage() == "canonical_omi_http_result")
+    assert record.stage == "response_json"
+    assert record.outcome == "unconfirmed"
+    assert record.error_category == "unexpected_error"
+    assert record.http_status == 200
+    assert record.elapsed_ms == elapsed_ms
+    assert "private-fixture" not in repr(record.__dict__)
+
+
+@pytest.mark.parametrize("status", [403, 500])
+def test_canonical_transport_diagnostic_http_failure_does_not_log_body(monkeypatch, caplog, status):
+    class Response:
+        status_code = status
+        text = "private-fixture-response-body"
+
+    monkeypatch.setattr(canonical_omi, "CANONICAL_OMI_WRITE_ENABLED", True)
+    monkeypatch.setattr(canonical_omi, "canonical_event_service_headers", lambda uid: {})
+    monkeypatch.setattr(canonical_omi.requests, "post", lambda *args, **kwargs: Response())
+    caplog.set_level(logging.INFO, logger="utils.ella.canonical_omi")
+
+    with pytest.raises(RuntimeError, match=f"canonical_events_http_{status}"):
+        canonical_omi.write_omi_canonical_event("private-fixture-owner", _transport_fixture())
+
+    record = next(record for record in caplog.records if record.getMessage() == "canonical_omi_http_result")
+    assert record.stage == "response_status"
+    assert record.outcome == "unconfirmed"
+    assert record.http_status == status
+    assert record.error_category == "unexpected_error"
+    assert "private-fixture" not in repr(record.__dict__)
+
+
+@pytest.mark.parametrize("remote_committed", [False, True])
+def test_canonical_transport_timeout_never_infers_remote_commit_or_retries(monkeypatch, caplog, remote_committed):
+    calls = []
+    remote_state = []
+
+    def post(*args, **kwargs):
+        calls.append(kwargs)
+        if remote_committed:
+            remote_state.append("synthetic_commit")
+        raise TimeoutError("synthetic response lost")
+
+    monkeypatch.setattr(canonical_omi, "CANONICAL_OMI_WRITE_ENABLED", True)
+    monkeypatch.setattr(canonical_omi, "canonical_event_service_headers", lambda uid: {})
+    monkeypatch.setattr(canonical_omi.requests, "post", post)
+    caplog.set_level(logging.INFO, logger="utils.ella.canonical_omi")
+
+    with pytest.raises(TimeoutError):
+        canonical_omi.write_omi_canonical_event("private-fixture-owner", _transport_fixture())
+
+    # This models transport uncertainty only, not canonical store idempotency.
+    assert len(calls) == 1
+    assert bool(remote_state) is remote_committed
+    record = next(record for record in caplog.records if record.getMessage() == "canonical_omi_http_result")
+    assert record.outcome == "unconfirmed"
+    assert record.error_category == "timeout_unknown"
+    assert record.http_status is None
+
+
+def test_canonical_transport_diagnostic_disabled_path_has_no_http_or_log(monkeypatch, caplog):
+    monkeypatch.setattr(canonical_omi, "CANONICAL_OMI_WRITE_ENABLED", False)
+    monkeypatch.setattr(canonical_omi.requests, "post", lambda *args, **kwargs: pytest.fail("disabled HTTP"))
+    caplog.set_level(logging.INFO, logger="utils.ella.canonical_omi")
+
+    assert canonical_omi.write_omi_canonical_event("private-fixture-owner", _transport_fixture()) == {
+        "ok": False,
+        "skipped": True,
+        "reason": "disabled",
+    }
+    assert not [record for record in caplog.records if record.name == "utils.ella.canonical_omi"]
