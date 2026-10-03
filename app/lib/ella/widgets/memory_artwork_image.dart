@@ -170,6 +170,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
 
   MemoryArtworkResult? _remoteResult;
   File? _cachedFile;
+  String? _cachedFileCacheKey;
   String _displayCacheKey = '';
   String _cacheKey = '';
   int _requestGeneration = 0;
@@ -260,6 +261,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     if (_cacheKey != resolvedCacheKey) {
       _cacheKey = resolvedCacheKey;
       _cachedFile = null;
+      _cachedFileCacheKey = null;
     }
     if (resolvedCacheKey.isNotEmpty) {
       unawaited(_loadCachedFile(resolvedCacheKey, generation, legacyCacheKey: legacyCacheKey, api: api));
@@ -375,6 +377,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       setState(() {
         _cacheKey = resolvedKey;
         _cachedFile = file;
+        _cachedFileCacheKey = resolvedKey;
       });
     } catch (_) {
       // A cache read failure must not block the authenticated network refresh.
@@ -410,16 +413,17 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
     return MemoryArtworkCache.manager.removeFile(cacheKey);
   }
 
-  void _handleCachedFileDecodeFailure(String cacheKey) {
-    if (cacheKey.isEmpty) return;
-    final generation = _requestGeneration;
+  void _handleCachedFileDecodeFailure(String cacheKey, int generation, bool Function() isRenderCurrent) {
+    if (cacheKey.isEmpty || !isRenderCurrent()) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || generation != _requestGeneration || cacheKey != _cacheKey) return;
-      unawaited(_discardCorruptedCachedFile(cacheKey, generation));
+      if (!isRenderCurrent()) return;
+      unawaited(_discardCorruptedCachedFile(cacheKey, generation, isRenderCurrent: isRenderCurrent));
     });
   }
 
-  Future<void> _discardCorruptedCachedFile(String cacheKey, int generation, {Object? imageRetryToken}) async {
+  Future<void> _discardCorruptedCachedFile(String cacheKey, int generation,
+      {Object? imageRetryToken, bool Function()? isRenderCurrent}) async {
+    if (isRenderCurrent?.call() == false) return;
     if (imageRetryToken != null && !identical(_imageRetryOwner?.token, imageRetryToken)) return;
     try {
       await _evictCachedFile(cacheKey);
@@ -427,8 +431,12 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       return;
     }
     if (!mounted || generation != _requestGeneration || cacheKey != _cacheKey) return;
+    if (isRenderCurrent?.call() == false) return;
     if (imageRetryToken != null && !identical(_imageRetryOwner?.token, imageRetryToken)) return;
-    setState(() => _cachedFile = null);
+    setState(() {
+      _cachedFile = null;
+      _cachedFileCacheKey = null;
+    });
   }
 
   Future<void> _loadRemoteResult(
@@ -546,6 +554,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         _displayReadRetryAvailable = false;
         _remoteResult = result;
         _cachedFile = null;
+        _cachedFileCacheKey = null;
         _cacheKey = _displayCacheKey;
       });
       unawaited(_evictSuppressedCachedArtwork(suppressedCacheKeys));
@@ -573,6 +582,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
             failureCode: 'memory_artwork_cache_cleanup_unavailable',
           );
           _cachedFile = null;
+          _cachedFileCacheKey = null;
         });
         _scheduleRetry(api, artwork, generation, transientTransportFailure: true, readOnly: readOnly);
         return;
@@ -952,6 +962,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       _releaseImageRetry(token);
       setState(() {
         _cachedFile = null;
+        _cachedFileCacheKey = null;
         _displayReadRetryAvailable = false;
         _remoteResult = const MemoryArtworkResult(
           status: MemoryArtworkResultStatus.unavailable,
@@ -972,6 +983,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
       // Publish those validated bytes only under the original exact authority.
       if (validFile != null && authority?.isExactCurrent() == true && api.isDisplayAuthorityCurrent()) {
         _cachedFile = validFile;
+        _cachedFileCacheKey = cacheKey;
       }
       _remoteResult = null;
     });
@@ -1235,6 +1247,21 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
   Widget _cachedArtworkOrFallback(BuildContext context, {required _MemoryArtworkFallbackKind kind}) {
     final cachedFile = _cachedFile;
     if (cachedFile == null) return _fallback(context, kind: kind);
+    final cacheKey = _cachedFileCacheKey ?? '';
+    final generation = _requestGeneration;
+    final displayCacheKey = _displayCacheKey;
+    final api = widget.api ?? MemoryArtworkApi();
+    final authority = _remoteResult?.authority;
+    bool isRenderCurrent() =>
+        mounted &&
+        generation == _requestGeneration &&
+        cacheKey == _cacheKey &&
+        cacheKey == _cachedFileCacheKey &&
+        identical(cachedFile, _cachedFile) &&
+        displayCacheKey.isNotEmpty &&
+        displayCacheKey == _displayCacheKey &&
+        displayCacheKey == _cacheKeyForDisplay(api, widget.conversation.artwork) &&
+        (authority == null || authority.isExactCurrent());
     return Semantics(
       image: true,
       label: context.l10n.memoryGeneratedArtworkLabel,
@@ -1245,7 +1272,7 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
         cacheWidth: _decodeWidth,
         gaplessPlayback: true,
         errorBuilder: (_, __, ___) {
-          _handleCachedFileDecodeFailure(_cacheKey);
+          _handleCachedFileDecodeFailure(cacheKey, generation, isRenderCurrent);
           return _fallback(context, kind: kind);
         },
       ),
