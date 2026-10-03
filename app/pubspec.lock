@@ -506,7 +506,7 @@ packages:
     source: hosted
     version: "2.3.0"
   fake_async:
-    dependency: transitive
+    dependency: "direct dev"
     description:
       name: fake_async
       sha256: "5368f224a74523e8d2e7399ea1638b37aecfca824a3cc4dfdf77bf1fa905ac44"
@@ -578,7 +578,7 @@ packages:
     source: hosted
     version: "5.5.3"
   firebase_auth_platform_interface:
-    dependency: transitive
+    dependency: "direct dev"
     description:
       name: firebase_auth_platform_interface
       sha256: "5402d13f4bb7f29f2fb819f3b6b5a5a56c9f714aef2276546d397e25ac1b6b8e"
@@ -602,7 +602,7 @@ packages:
     source: hosted
     version: "3.13.0"
   firebase_core_platform_interface:
-    dependency: transitive
+    dependency: "direct dev"
     description:
       name: firebase_core_platform_interface
       sha256: "8bcfad6d7033f5ea951d15b867622a824b13812178bfec0c779b9d81de011bbb"

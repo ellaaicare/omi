@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
 import 'package:omi/backend/http/client_api_failure.dart';
+import 'package:omi/backend/http/http_pool_manager.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
@@ -37,12 +38,14 @@ typedef MemoryArtworkAuthorityProvider = ExactAccountAuthorityVerifier? Function
 enum MemoryArtworkQueueReadOutcome { success, authentication, noResponse, timeout, non200, schema, internal }
 
 class MemoryArtworkQueueReadDiagnostic {
-  const MemoryArtworkQueueReadDiagnostic._(this.readNumber, this.outcome, this.elapsedMilliseconds, this.statusCode);
+  const MemoryArtworkQueueReadDiagnostic._(
+      this.readNumber, this.outcome, this.elapsedMilliseconds, this.statusCode, this.transport);
 
   final int readNumber;
   final MemoryArtworkQueueReadOutcome outcome;
   final int elapsedMilliseconds;
   final int? statusCode;
+  final HttpTransportDiagnostic? transport;
 
   String get outcomeCode => switch (outcome) {
         MemoryArtworkQueueReadOutcome.noResponse => 'no_response',
@@ -51,7 +54,9 @@ class MemoryArtworkQueueReadDiagnostic {
       };
 
   String get message =>
-      '[MemoryArtworkQueue] read=$readNumber outcome=$outcomeCode elapsed_ms=$elapsedMilliseconds status=${statusCode ?? 'none'}';
+      '[MemoryArtworkQueue] read=$readNumber outcome=$outcomeCode elapsed_ms=$elapsedMilliseconds status=${statusCode ?? 'none'} '
+      'stage=${transport?.stageCode ?? 'unknown'} failure=${transport == null ? 'unknown' : transport!.failure?.name ?? 'none'} '
+      'transport_elapsed_ms=${transport?.elapsedMilliseconds ?? 0} transport_status=${transport?.statusCode ?? 'none'}';
 }
 
 enum MemoryArtworkQueueProjection { pending, applied, failed }
@@ -845,6 +850,7 @@ class MemoryArtworkApi {
     final elapsed = Stopwatch()..start();
     var outcome = MemoryArtworkQueueReadOutcome.internal;
     int? statusCode;
+    HttpTransportDiagnostic? transport;
     try {
       final authority = _authorityProvider();
       if (authority == null) {
@@ -856,6 +862,7 @@ class MemoryArtworkApi {
         method: 'GET',
         path: 'v1/ella/memory-artwork/queue',
         timeout: const Duration(seconds: 30),
+        onTransportDiagnostic: (diagnostic) => transport = diagnostic,
       );
       // The shared transport can swallow failures. Null cannot identify their cause.
       if (response == null) {
@@ -893,6 +900,7 @@ class MemoryArtworkApi {
         outcome,
         elapsed.elapsedMilliseconds.clamp(0, 120000),
         statusCode != null && statusCode >= 100 && statusCode <= 599 ? statusCode : null,
+        transport,
       );
       if (ticket != null) MemoryArtworkQueueDiagnostics._record(ticket, diagnostic);
       try {
@@ -934,10 +942,28 @@ class MemoryArtworkApi {
     String body = '',
     Duration timeout = const Duration(seconds: 15),
     void Function()? onSendAttempt,
+    void Function(HttpTransportDiagnostic)? onTransportDiagnostic,
   }) {
     final normalizedBase = _resolvedBaseUrl();
     if (normalizedBase.isEmpty) return Future<http.Response?>.value(null);
     final base = normalizedBase.endsWith('/') ? normalizedBase : '$normalizedBase/';
+    // Only the actual shared transport can supply these stages. Keep legacy
+    // injected request closures unchanged and their transport evidence unknown.
+    if (onTransportDiagnostic != null && identical(_request, makeApiCall)) {
+      return makeApiCall(
+        url: '$base$path',
+        headers: const {'Accept': 'application/json'},
+        body: body,
+        method: method,
+        timeout: timeout,
+        retries: 0,
+        requireAuthCheck: true,
+        expectedAuthenticatedUid: authority.uid,
+        exactAuthority: authority,
+        onSendAttempt: onSendAttempt,
+        onTransportDiagnostic: onTransportDiagnostic,
+      );
+    }
     return _request(
       url: '$base$path',
       headers: const {'Accept': 'application/json'},

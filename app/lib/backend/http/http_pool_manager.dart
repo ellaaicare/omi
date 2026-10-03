@@ -8,6 +8,38 @@ import 'package:pool/pool.dart';
 
 import 'package:omi/services/wals/wal_owner_authority.dart';
 
+enum HttpTransportStage { authHeaders, poolWait, sendHeaders, responseBody, completed }
+
+enum HttpTransportFailure { timeout, authentication, network, internal }
+
+class HttpTransportDiagnostic {
+  const HttpTransportDiagnostic(
+      {required this.stage, required this.elapsedMilliseconds, this.failure, this.statusCode});
+
+  final HttpTransportStage stage;
+  final HttpTransportFailure? failure;
+  final int elapsedMilliseconds;
+  final int? statusCode;
+
+  String get stageCode => switch (stage) {
+        HttpTransportStage.authHeaders => 'auth_headers',
+        HttpTransportStage.poolWait => 'pool_wait',
+        HttpTransportStage.sendHeaders => 'send_headers',
+        HttpTransportStage.responseBody => 'response_body',
+        HttpTransportStage.completed => 'completed',
+      };
+}
+
+typedef HttpTransportStageObserver = void Function(HttpTransportStage stage, int? statusCode);
+
+void _observeTransportStage(HttpTransportStageObserver? observer, HttpTransportStage stage, [int? statusCode]) {
+  try {
+    observer?.call(stage, statusCode);
+  } catch (_) {
+    // Observability never changes request admission, results, or exceptions.
+  }
+}
+
 class HttpPoolManager {
   static final HttpPoolManager instance = HttpPoolManager._();
 
@@ -33,6 +65,7 @@ class HttpPoolManager {
     ExactAccountAuthorityVerifier? exactAuthority,
     MonotonicRequestDeadline? absoluteDeadline,
     void Function()? onSendAttempt,
+    HttpTransportStageObserver? onTransportStage,
   }) async {
     final totalTimeout = MonotonicRequestDeadline.budgetFor(timeout: timeout, retries: retries);
     final deadline = absoluteDeadline ?? MonotonicRequestDeadline(totalTimeout);
@@ -47,9 +80,11 @@ class HttpPoolManager {
     }
 
     final admissionTimeout = deadline.remaining < totalTimeout ? deadline.remaining : totalTimeout;
+    _observeTransportStage(onTransportStage, HttpTransportStage.poolWait);
     final future = _pool.withResource(() async {
       deadline.throwIfExpired('before pooled request construction');
-      return _executeWithRetry(requestBuilder, timeout, retries, exactAuthority, deadline, onSendAttempt);
+      return _executeWithRetry(
+          requestBuilder, timeout, retries, exactAuthority, deadline, onSendAttempt, onTransportStage);
     }).timeout(admissionTimeout);
 
     if (isGet && exactAuthority == null) {
@@ -67,6 +102,7 @@ class HttpPoolManager {
     ExactAccountAuthorityVerifier? exactAuthority,
     MonotonicRequestDeadline deadline,
     void Function()? onSendAttempt,
+    HttpTransportStageObserver? onTransportStage,
   ) async {
     http.Response? lastResponse;
     Object? lastError;
@@ -82,10 +118,13 @@ class HttpPoolManager {
           deadline.throwIfExpired('immediately before HTTP egress');
           // A caller may commit a one-shot mutation only when client.send is next.
           onSendAttempt?.call();
+          _observeTransportStage(onTransportStage, HttpTransportStage.sendHeaders);
           final streamed = await _client.send(request);
           _verifyExactAuthority(exactAuthority, 'after HTTP response headers');
+          _observeTransportStage(onTransportStage, HttpTransportStage.responseBody, streamed.statusCode);
           final response = await http.Response.fromStream(streamed);
           _verifyExactAuthority(exactAuthority, 'after HTTP response body');
+          _observeTransportStage(onTransportStage, HttpTransportStage.completed, response.statusCode);
           return response;
         })()
             .timeout(attemptTimeout);

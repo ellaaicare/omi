@@ -1,13 +1,19 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:fake_async/fake_async.dart';
+import 'package:firebase_auth_platform_interface/firebase_auth_platform_interface.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_core_platform_interface/test.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/http/http_pool_manager.dart';
 import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/http/shared.dart';
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/memory_artwork_api.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
@@ -23,6 +29,43 @@ class _Authority implements ExactAccountAuthorityVerifier {
 
   @override
   bool isExactCurrent() => current;
+}
+
+class _QueueAuth extends FirebaseAuthPlatform {
+  String? uid;
+
+  @override
+  FirebaseAuthPlatform delegateFor({required FirebaseApp app}) => this;
+
+  @override
+  FirebaseAuthPlatform setInitialValues({PigeonUserDetails? currentUser, String? languageCode}) => this;
+
+  @override
+  UserPlatform? get currentUser => uid == null ? null : _QueueUser(this, uid!);
+}
+
+class _QueueMultiFactor extends MultiFactorPlatform {
+  _QueueMultiFactor(super.auth);
+}
+
+class _QueueUser extends UserPlatform {
+  _QueueUser(FirebaseAuthPlatform auth, String uid)
+      : super(
+          auth,
+          _QueueMultiFactor(auth),
+          PigeonUserDetails(
+            userInfo: PigeonUserInfo(uid: uid, isAnonymous: false, isEmailVerified: false),
+            providerData: [],
+          ),
+        );
+}
+
+class _QueueStreamClient extends http.BaseClient {
+  _QueueStreamClient(this.handler);
+  final Future<http.StreamedResponse> Function(http.BaseRequest) handler;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) => handler(request);
 }
 
 class _ExpiringAuthority implements ExactAccountAuthorityVerifier {
@@ -95,9 +138,261 @@ MemoryArtworkApi _queueDiagnosticApi(
     );
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   PlatformManager.initializeForTesting();
   setUp(MemoryArtworkQueueDiagnostics.clear);
   tearDown(MemoryArtworkQueueDiagnostics.clear);
+
+  group('composed transport diagnostic', () {
+    final auth = _QueueAuth();
+    setUpAll(() async {
+      setupFirebaseCoreMocks();
+      FirebaseAuthPlatform.instance = auth;
+      await Firebase.initializeApp();
+    });
+    setUp(() async {
+      auth.uid = 'queue-owner';
+      SharedPreferences.setMockInitialValues({});
+      await SharedPreferencesUtil.init();
+      SharedPreferencesUtil().authToken = 'synthetic-fixture-token';
+      SharedPreferencesUtil().tokenExpirationTime = DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch;
+    });
+
+    test('token failure reports originating auth stage with zero HTTP', () async {
+      SharedPreferencesUtil().authToken = '';
+      SharedPreferencesUtil().tokenExpirationTime = 0;
+      var sends = 0;
+      HttpPoolManager.instance.replaceClientForTesting(MockClient((request) async {
+        sends++;
+        return _queueDiagnosticSuccess();
+      }));
+      final events = <MemoryArtworkQueueReadDiagnostic>[];
+      final api = MemoryArtworkApi(
+        baseUrl: 'https://queue-fixture.example/',
+        authorityProvider: () => _Authority('queue-owner'),
+        onQueueReadDiagnostic: events.add,
+      );
+      expect(await api.queueStatus(), isNull);
+      expect(sends, 0);
+      expect(events.single.message, contains('stage=auth_headers'));
+      expect(events.single.message, contains('failure=authentication'));
+    });
+
+    test('saturated pool reports pool wait timeout without admitting queue egress', () async {
+      final release = Completer<void>();
+      final saturated = Completer<void>();
+      var blockersStarted = 0;
+      var queueSends = 0;
+      HttpPoolManager.instance.replaceClientForTesting(_QueueStreamClient((request) async {
+        if (request.url.path.startsWith('/blocker/')) {
+          blockersStarted++;
+          if (blockersStarted == 10) saturated.complete();
+          await release.future;
+        } else {
+          queueSends++;
+        }
+        return http.StreamedResponse(Stream.value(utf8.encode(_queueDiagnosticSuccess().body)), 200);
+      }));
+      final blockers = List.generate(
+        10,
+        (index) => HttpPoolManager.instance.send(
+          () => http.Request('GET', Uri.parse('https://queue-fixture.example/blocker/$index')),
+          timeout: const Duration(minutes: 1),
+          retries: 0,
+        ),
+      );
+      try {
+        await saturated.future.timeout(const Duration(seconds: 1));
+        final events = <MemoryArtworkQueueReadDiagnostic>[];
+        final api = MemoryArtworkApi(
+          baseUrl: 'https://queue-fixture.example/',
+          authorityProvider: () => _Authority('queue-owner'),
+          onQueueReadDiagnostic: events.add,
+        );
+        expect(await api.queueStatus(), isNull);
+        expect(events.single.message, contains('stage=pool_wait'));
+        expect(events.single.message, contains('failure=timeout'));
+        expect(queueSends, 0);
+      } finally {
+        release.complete();
+        await Future.wait(blockers);
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(queueSends, 0);
+    }, timeout: const Timeout(Duration(seconds: 45)));
+
+    for (final bodyStalls in [false, true]) {
+      test('default queue distinguishes ${bodyStalls ? 'response body' : 'response headers'} timeout', () {
+        fakeAsync((clock) {
+          final headers = Completer<http.StreamedResponse>();
+          final body = StreamController<List<int>>();
+          var sends = 0;
+          HttpPoolManager.instance.replaceClientForTesting(_QueueStreamClient((request) async {
+            sends++;
+            if (bodyStalls) return http.StreamedResponse(body.stream, 200);
+            return headers.future;
+          }));
+          final events = <MemoryArtworkQueueReadDiagnostic>[];
+          final api = MemoryArtworkApi(
+            baseUrl: 'https://queue-fixture.example/',
+            authorityProvider: () => _Authority('queue-owner'),
+            onQueueReadDiagnostic: events.add,
+          );
+          var complete = false;
+          MemoryArtworkQueueStatus? result;
+          final ticket = MemoryArtworkQueueDiagnostics.begin(isCurrent: () => true);
+          api.queueStatusWithDiagnostics(ticket).then((value) {
+            complete = true;
+            result = value;
+          });
+          clock.flushMicrotasks();
+          expect(sends, 1);
+          clock.elapse(const Duration(seconds: 30));
+          clock.flushMicrotasks();
+          expect(complete, isTrue);
+          expect(result, isNull);
+          expect(events.single.message, contains('stage=${bodyStalls ? 'response_body' : 'send_headers'}'));
+          expect(events.single.message, contains('failure=timeout'));
+          final terminal = events.single;
+          expect(terminal.transport?.statusCode, bodyStalls ? 200 : null);
+          MemoryArtworkQueueDiagnostics.project(ticket, applied: false);
+          if (!headers.isCompleted) {
+            headers.complete(http.StreamedResponse(Stream.value(utf8.encode(_queueDiagnosticSuccess().body)), 200));
+          }
+          if (bodyStalls) body.add(utf8.encode(_queueDiagnosticSuccess().body));
+          body.close();
+          clock.flushMicrotasks();
+          expect(events, hasLength(1));
+          expect(MemoryArtworkQueueDiagnostics.latest?.read, same(terminal));
+          expect(MemoryArtworkQueueDiagnostics.latest?.projection, MemoryArtworkQueueProjection.failed);
+        });
+      });
+    }
+
+    for (final profileOnly in [false, true]) {
+      test('default transport latest ticket survives ${profileOnly ? 'profile' : 'account'} ABA and old finally',
+          () async {
+        var epoch = 0;
+        final original = _Authority('queue-owner');
+        final late = Completer<http.StreamedResponse>();
+        var sends = 0;
+        HttpPoolManager.instance.replaceClientForTesting(_QueueStreamClient((request) async {
+          sends++;
+          if (sends == 1) return late.future;
+          return http.StreamedResponse(Stream.value(utf8.encode(_queueDiagnosticSuccess().body)), 200);
+        }));
+        final first = MemoryArtworkApi(baseUrl: 'https://queue-fixture.example/', authorityProvider: () => original);
+        final firstTicket = MemoryArtworkQueueDiagnostics.begin(isCurrent: () => epoch == 0);
+        final old = first.queueStatusWithDiagnostics(firstTicket);
+        final oldExpectation = expectLater(old, throwsA(isA<ExactAccountAuthorityChangedException>()));
+        await Future<void>.delayed(Duration.zero);
+        expect(sends, 1);
+        original.current = false;
+        epoch++;
+        if (!profileOnly) auth.uid = 'other-fixture-owner';
+        expect(MemoryArtworkQueueDiagnostics.latest, isNull);
+        epoch++;
+        auth.uid = 'queue-owner';
+        final replacement = _Authority('queue-owner');
+        final second =
+            MemoryArtworkApi(baseUrl: 'https://queue-fixture.example/', authorityProvider: () => replacement);
+        final secondTicket = MemoryArtworkQueueDiagnostics.begin(isCurrent: () => epoch == 2);
+        expect(await second.queueStatusWithDiagnostics(secondTicket), isNotNull);
+        MemoryArtworkQueueDiagnostics.project(secondTicket, applied: true);
+        final current = MemoryArtworkQueueDiagnostics.latest;
+        expect(current?.read?.readNumber, 1, reason: 'per-instance read number collision is not authority');
+        late.complete(http.StreamedResponse(Stream.value(utf8.encode(_queueDiagnosticSuccess().body)), 200));
+        await oldExpectation;
+        expect(MemoryArtworkQueueDiagnostics.latest, same(current));
+        expect(current?.read?.transport?.stage, HttpTransportStage.completed);
+        expect(sends, 2);
+      });
+    }
+
+    for (final bodyStalls in [false, true]) {
+      test('shared observer closes before late ${bodyStalls ? 'body' : 'headers'} completion', () {
+        fakeAsync((clock) {
+          final headers = Completer<http.StreamedResponse>();
+          final body = StreamController<List<int>>();
+          HttpPoolManager.instance.replaceClientForTesting(_QueueStreamClient((request) async {
+            if (bodyStalls) return http.StreamedResponse(body.stream, 200);
+            return headers.future;
+          }));
+          final events = <HttpTransportDiagnostic>[];
+          var complete = false;
+          makeApiCall(
+            url: 'https://queue-fixture.example/queue',
+            headers: const {},
+            body: '',
+            method: 'GET',
+            requireAuthCheck: true,
+            expectedAuthenticatedUid: 'queue-owner',
+            exactAuthority: _Authority('queue-owner'),
+            timeout: const Duration(milliseconds: 40),
+            retries: 0,
+            onTransportDiagnostic: events.add,
+          ).then((response) {
+            expect(response, isNull);
+            complete = true;
+          });
+          clock.flushMicrotasks();
+          clock.elapse(const Duration(milliseconds: 40));
+          clock.flushMicrotasks();
+          expect(complete, isTrue);
+          expect(events.last.failure, HttpTransportFailure.timeout);
+          expect(events.last.stage, bodyStalls ? HttpTransportStage.responseBody : HttpTransportStage.sendHeaders);
+          final terminalCount = events.length;
+          if (!headers.isCompleted) headers.complete(http.StreamedResponse(Stream.value(const <int>[]), 200));
+          body.close();
+          clock.flushMicrotasks();
+          expect(events, hasLength(terminalCount),
+              reason: 'an uncancelled late future cannot publish after retirement');
+        });
+      });
+    }
+
+    test('observer failures and nested unrelated HTTP preserve result and originating evidence', () async {
+      HttpPoolManager.instance.replaceClientForTesting(MockClient((request) async => http.Response('', 200)));
+      final authority = _Authority('queue-owner');
+      Future<http.Response?>? nested;
+      final stages = <HttpTransportDiagnostic>[];
+      final response = await makeApiCall(
+        url: 'https://queue-fixture.example/outer',
+        headers: const {},
+        body: '',
+        method: 'GET',
+        requireAuthCheck: true,
+        expectedAuthenticatedUid: authority.uid,
+        exactAuthority: authority,
+        retries: 0,
+        onTransportDiagnostic: (diagnostic) {
+          stages.add(diagnostic);
+          nested ??= makeApiCall(
+            url: 'https://queue-fixture.example/nested',
+            headers: const {},
+            body: '',
+            method: 'GET',
+            requireAuthCheck: true,
+            expectedAuthenticatedUid: authority.uid,
+            exactAuthority: authority,
+            retries: 0,
+          );
+          throw StateError('private observer value');
+        },
+      );
+      expect(response?.statusCode, 200);
+      expect((await nested)?.statusCode, 200);
+      expect(stages.map((value) => value.stage), [
+        HttpTransportStage.authHeaders,
+        HttpTransportStage.poolWait,
+        HttpTransportStage.sendHeaders,
+        HttpTransportStage.responseBody,
+        HttpTransportStage.completed,
+        HttpTransportStage.completed,
+      ]);
+      expect(stages.every((value) => value.failure == null), isTrue);
+    });
+  });
 
   for (final entry in <(http.Response?, MemoryArtworkQueueReadOutcome)>[
     (_queueDiagnosticSuccess(), MemoryArtworkQueueReadOutcome.success),
@@ -255,6 +550,7 @@ void main() {
       expect(event.outcome, entry.$2);
       expect(event.statusCode, entry.$3);
       expect(event.readNumber, 1);
+      expect(event.transport, isNull, reason: 'injected transport closures do not fabricate production stages');
       expect(event.elapsedMilliseconds, inInclusiveRange(0, 120000));
       expect(event.message, isNot(contains('private')));
       expect(event.message, isNot(contains('https')));
