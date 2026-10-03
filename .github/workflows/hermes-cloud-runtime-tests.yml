@@ -1438,7 +1438,8 @@ jobs:
           test "$(grep -c '::' <<<"$conversation_summary_cas_ids")" -eq 51
           pytest tests/unit/test_conversation_summary_cas.py -k "$baseline_summary_cas_selector" -v
           correction_ids="$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | sed '/^$/d')"
-          test "$(grep -c '::' <<<"$correction_ids")" -eq 141
+          # All 141 existing cases plus 34 exact future publication/recovery regressions.
+          test "$(grep -c '::' <<<"$correction_ids")" -eq 175
           required_client_correction_ids=(
             "tests/unit/test_ella_conversation_corrections.py::test_client_uuid_post_and_terminal_get_use_the_same_exact_receipt[applied]"
             "tests/unit/test_ella_conversation_corrections.py::test_client_uuid_post_and_terminal_get_use_the_same_exact_receipt[correction_blocked_identity_gate]"
@@ -1454,6 +1455,47 @@ jobs:
             "tests/unit/test_ella_conversation_corrections.py::test_client_uuid_reservation_rechecks_exact_transaction_inputs_without_writes[replay]"
           )
           for required_id in "${required_client_correction_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$correction_ids"
+          done
+          required_future_canonical_ids=(
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_replays_exact_reserved_postimage[False-generic-v1]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_replays_exact_reserved_postimage[False-None]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_replays_exact_reserved_postimage[True-generic-v1]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_replays_exact_reserved_postimage[True-None]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[missing]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[receipt_type]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[owner]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[conversation]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[trace]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[current_trace]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[fingerprint]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[request_fingerprint]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[source_missing]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[source_conflict]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[request_source_missing]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[request_source_conflict]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[result]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[newer_result]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[transcript]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[timestamp]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[changed_timestamp]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[naive_timestamp]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[digest]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[digest_rebound]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[sequence]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[sequence_bool]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[current_sequence_bool]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[structured]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[assessment]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[extra_state]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_recovery_refuses_drift_without_http_or_provider[other_owner]"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_post_http_cas_failure_cannot_confirm_stale_result"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_post_http_newer_result_wins_without_stale_confirmation"
+            "tests/unit/test_ella_conversation_corrections.py::test_future_canonical_reservation_is_not_in_public_conversation_serialization"
+            "tests/unit/test_ella_conversation_corrections.py::test_summary_recovery_refuses_unverifiable_legacy_pending_state_without_provider[False]"
+            "tests/unit/test_ella_conversation_corrections.py::test_summary_recovery_refuses_unverifiable_legacy_pending_state_without_provider[True]"
+          )
+          for required_id in "${required_future_canonical_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$correction_ids"
           done
           pytest tests/unit/test_ella_conversation_corrections.py -v
