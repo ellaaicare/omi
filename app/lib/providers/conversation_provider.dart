@@ -99,6 +99,8 @@ class ConversationProvider extends ChangeNotifier {
   final ConversationsFetchCall? _failedConversationsFetch;
   final ConversationDeleteCall _conversationDelete;
   final ActiveAccountAuthorityProvider _activeAuthority;
+  final String Function() _authenticatedUid;
+  EllaAccountCommitLease? _cachedProjectionLease;
   final Duration _conversationsFetchTimeout;
   final Duration _failedConversationsFetchTimeout;
   int _operationGeneration = 0;
@@ -115,6 +117,7 @@ class ConversationProvider extends ChangeNotifier {
     ConversationsFetchCall? failedConversationsFetchCall,
     ConversationDeleteCall? conversationDeleteCall,
     ActiveAccountAuthorityProvider activeAuthority = WalOwnerAuthority.activeAccount,
+    String Function()? authenticatedUid,
     Duration conversationsFetchTimeout = const Duration(seconds: 15),
     Duration failedConversationsFetchTimeout = const Duration(seconds: 8),
   })  : _retryConversationProcessing = retryConversationProcessingCall,
@@ -128,6 +131,7 @@ class ConversationProvider extends ChangeNotifier {
                   exactAuthority: authority,
                 )),
         _activeAuthority = activeAuthority,
+        _authenticatedUid = authenticatedUid ?? (() => WalOwnerAuthority.authenticatedUid),
         _conversationsFetchTimeout = conversationsFetchTimeout,
         _failedConversationsFetchTimeout = failedConversationsFetchTimeout {
     _setupMergeListener();
@@ -143,6 +147,8 @@ class ConversationProvider extends ChangeNotifier {
 
   void reset() {
     _operationGeneration++;
+    _cachedProjectionLease?.close();
+    _cachedProjectionLease = null;
     _captureDeletedConversationIds.clear();
     conversations = [];
     searchedConversations = [];
@@ -521,13 +527,70 @@ class ConversationProvider extends ChangeNotifier {
     }
   }
 
+  bool _cachedOwnerIsCurrent(EllaAccountCommitLease lease) {
+    try {
+      return lease.uid.isNotEmpty &&
+          lease.isCurrent &&
+          _authenticatedUid() == lease.uid &&
+          SharedPreferencesUtil().uid == lease.uid;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _hydrateOwnedInitialCache() {
+    final prefs = SharedPreferencesUtil();
+    if (prefs.demoMode ||
+        hasLoadedConversations ||
+        hasFreshConversations ||
+        conversations.isNotEmpty ||
+        selectedFolderId != null ||
+        selectedDate != null ||
+        showStarredOnly ||
+        showDailySummaries) {
+      return;
+    }
+
+    EllaAccountCommitLease? lease;
+    try {
+      final uid = _authenticatedUid();
+      if (uid.isEmpty || prefs.uid != uid || prefs.getString('cachedConversationsUid') != uid) return;
+      lease = EllaAccountCommitBarrier.begin(authorityProvider: _activeAuthority, onInvalidated: reset);
+      if (lease == null || lease.uid != uid || !_cachedOwnerIsCurrent(lease)) return;
+      final cached = prefs.cachedConversations
+          .where((item) =>
+              item.status == ConversationStatus.completed && !item.deleted && canProjectCaptureConversation(item.id))
+          .toList();
+      if (cached.isEmpty || !_cachedOwnerIsCurrent(lease)) return;
+      _cachedProjectionLease?.close();
+      _cachedProjectionLease = lease;
+      lease = null;
+      conversations = cached;
+      isShowingCachedConversations = true;
+      _groupConversationsByDateWithoutNotify();
+    } catch (_) {
+      // An unreadable cache must not prevent the canonical request.
+    } finally {
+      lease?.close();
+    }
+  }
+
   Future fetchConversations() async {
+    final previousLease = _cachedProjectionLease;
+    if (previousLease != null && !_cachedOwnerIsCurrent(previousLease)) reset();
     previousQuery = "";
     currentSearchPage = 0;
     totalSearchPages = 0;
     searchedConversations = [];
 
+    final operationGeneration = _operationGeneration;
     final requestId = ++_fetchRequestId;
+    _hydrateOwnedInitialCache();
+    final cacheLease = _cachedProjectionLease;
+    bool requestIsCurrent() =>
+        operationGeneration == _operationGeneration &&
+        requestId == _fetchRequestId &&
+        (cacheLease == null || _cachedOwnerIsCurrent(cacheLease));
     setLoadingConversations(true);
     try {
       late final List<ServerConversation> fetchedConversations;
@@ -539,9 +602,12 @@ class ConversationProvider extends ChangeNotifier {
       } else {
         final conversationsFuture = _getConversationsFromServer();
         final failuresFuture = _getFailedConversationsFromServer();
-        unawaited(_applyFailedConversations(requestId, failuresFuture));
+        unawaited(_applyFailedConversations(requestId, failuresFuture, isCurrent: requestIsCurrent));
         final result = await _waitForConversations(conversationsFuture);
-        if (requestId != _fetchRequestId) return;
+        if (!requestIsCurrent()) {
+          if (operationGeneration == _operationGeneration && requestId == _fetchRequestId) reset();
+          return;
+        }
         if (!result.succeeded) {
           if (conversations.isEmpty && selectedFolderId == null) {
             conversations = SharedPreferencesUtil()
@@ -562,7 +628,7 @@ class ConversationProvider extends ChangeNotifier {
         _conversationPageOffset = result.conversations.length;
       }
 
-      if (requestId != _fetchRequestId) return;
+      if (!requestIsCurrent()) return;
       conversations = fetchedConversations;
       failedConversations = _mergeRetryableFailures(
         failedConversations,
@@ -586,7 +652,7 @@ class ConversationProvider extends ChangeNotifier {
       }
       _groupConversationsByDateWithoutNotify();
     } finally {
-      if (requestId == _fetchRequestId) {
+      if (requestIsCurrent()) {
         hasLoadedConversations = true;
         setLoadingConversations(false);
       }
@@ -702,7 +768,9 @@ class ConversationProvider extends ChangeNotifier {
   }
 
   Future<void> _loadInitialConversations() async {
+    final operationGeneration = _operationGeneration;
     await fetchConversations();
+    if (operationGeneration != _operationGeneration) return;
     await checkHasDailySummaries();
   }
 
@@ -909,10 +977,14 @@ class ConversationProvider extends ChangeNotifier {
     }
   }
 
-  Future<void> _applyFailedConversations(int requestId, Future<ConversationsFetchResult> request) async {
+  Future<void> _applyFailedConversations(
+    int requestId,
+    Future<ConversationsFetchResult> request, {
+    bool Function()? isCurrent,
+  }) async {
     try {
       final result = await request.timeout(_failedConversationsFetchTimeout);
-      if (requestId != _fetchRequestId || !result.succeeded) return;
+      if (requestId != _fetchRequestId || (isCurrent != null && !isCurrent()) || !result.succeeded) return;
       failedConversations = _mergeRetryableFailures(
         result.conversations,
         conversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
@@ -1281,6 +1353,8 @@ class ConversationProvider extends ChangeNotifier {
   @override
   void dispose() {
     _operationGeneration++;
+    _cachedProjectionLease?.close();
+    _cachedProjectionLease = null;
     _processingConversationWatchTimer?.cancel();
     _refreshDebounceTimer?.cancel();
     for (final poll in _processingRetryPolls.values) {
