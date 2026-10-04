@@ -4,11 +4,13 @@ import sys
 import types
 from pathlib import Path
 from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
+sys.modules.setdefault("database._client", MagicMock(db=MagicMock()))
 from utils.ella import exact_firebase_auth
 
 sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object, Connection=object, create_pool=None))

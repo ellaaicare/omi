@@ -1,10 +1,13 @@
 import ast
 import asyncio
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Awaitable, Callable, Optional
+from unittest.mock import MagicMock
 
+sys.modules.setdefault("database._client", MagicMock(db=MagicMock()))
 from utils.ella import scanner
 from utils.conversations import spoken_diagnostic as diagnostic
 
@@ -124,6 +127,19 @@ def test_default_disabled_and_invalid_window(monkeypatch):
             {"text": "I have chest pain"},
         ]
     )
+
+
+def test_default_disabled_never_opens_capture_or_claim_store(monkeypatch):
+    monkeypatch.delenv("ELLA_SPOKEN_DIAGNOSTIC_ENABLED", raising=False)
+    touched = []
+    monkeypatch.setattr(diagnostic, "_authority_ref", lambda *_args: touched.append("authority"))
+    monkeypatch.setattr(diagnostic, "_conversation_ref", lambda *_args: touched.append("conversation"))
+    monkeypatch.setattr(diagnostic, "_database", lambda: touched.append("transaction"))
+    assert diagnostic.reserve_for_segments("uid-test", "conversation-test", [{"text": diagnostic.PHRASE}]) is None
+    assert diagnostic.transition("uid-test", "a" * 64, "claimed", "rendering") is None
+    assert diagnostic.current_claim("uid-test", "a" * 64, "queued") is None
+    assert not diagnostic.is_diagnostic_window("uid-test", [{"text": diagnostic.PHRASE}])
+    assert touched == []
 
 
 def test_claim_once_across_rollover_and_render_once(monkeypatch):

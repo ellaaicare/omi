@@ -1,6 +1,9 @@
 import json
+import sys
 from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
+sys.modules.setdefault("database._client", MagicMock(db=MagicMock()))
 from ella.services.guardian_echo_classifier import EchoClassification
 from ella.services.guardian_playback_ledger import PlaybackCandidate
 from utils.ella.scanner import (

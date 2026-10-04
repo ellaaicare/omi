@@ -3,9 +3,11 @@ import sys
 import threading
 import types
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import MagicMock
 
 import pytest
 
+sys.modules.setdefault("database._client", MagicMock(db=MagicMock()))
 from utils.ella import scanner
 from utils.conversations import spoken_diagnostic
 

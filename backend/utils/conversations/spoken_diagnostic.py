@@ -10,17 +10,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from google.cloud.firestore_v1 import transactional
+from database._client import db
+from utils.conversations import capture_protocol
 
 
 def _capture_protocol():
-    from utils.conversations import capture_protocol
-
     return capture_protocol
 
 
 def _database():
-    from database._client import db
-
     return db
 
 
