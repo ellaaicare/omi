@@ -130,8 +130,50 @@ jobs:
               r'^(ASC_|AWS_|AZURE_|GOOGLE_APPLICATION_CREDENTIALS$|DATABASE_URL$|REDIS_URL$|'
               r'OPENAI_|FIREBASE_|SSH_|TAILSCALE_|VPN_|TUNNEL_|.*_PROXY$|PROXY_)'
           )
+
+          def blocked_environment_marker(keys):
+              categories = set()
+              count = 0
+              for key in keys:
+                  name = key.upper()
+                  if not forbidden.match(name):
+                      continue
+                  count += 1
+                  if name.startswith('ASC_'):
+                      categories.add('signing')
+                  elif name.startswith(('AWS_', 'AZURE_')) or name == 'GOOGLE_APPLICATION_CREDENTIALS':
+                      categories.add('cloud')
+                  elif name in ('DATABASE_URL', 'REDIS_URL'):
+                      categories.add('datastore')
+                  elif name.startswith(('OPENAI_', 'FIREBASE_')):
+                      categories.add('provider')
+                  elif name.startswith('SSH_'):
+                      categories.add('SSH')
+                  elif name.startswith(('TAILSCALE_', 'VPN_', 'TUNNEL_')):
+                      categories.add('private_route')
+                  else:
+                      categories.add('proxy')
+              bounded_count = str(count) if count < 10 else '10+'
+              return tuple(sorted(categories)), bounded_count
+
+          def blocked_environment_message(keys):
+              categories, count = blocked_environment_marker(keys)
+              return f'Blocked environment marker: categories={",".join(categories)}; matches={count}; diagnostics blocked.'
+
+          for fixture in ((), ('safe_marker',), ('asc_sample',), ('ASC_ONE', 'asc_two', 'openai_sample'),
+                          ('aws_sample', 'AZURE_SAMPLE', 'DATABASE_URL', 'SSH_SAMPLE', 'VPN_SAMPLE', 'A_PROXY')):
+              categories, count = blocked_environment_marker(fixture)
+              assert (count != '0') == any(forbidden.match(key.upper()) for key in fixture)
+          assert blocked_environment_marker(('asc_one', 'ASC_TWO')) == (('signing',), '2')
+          assert blocked_environment_marker(('aws_sample', 'DATABASE_URL', 'OPENAI_SAMPLE', 'ssh_sample',
+                                             'VPN_SAMPLE', 'A_PROXY')) == (
+              ('SSH', 'cloud', 'datastore', 'private_route', 'provider', 'proxy'), '6'
+          )
+          assert blocked_environment_marker(tuple(f'ASC_SAMPLE_{i}' for i in range(11))) == (('signing',), '10+')
+          assert 'SENTINEL_SHOULD_NOT_APPEAR' not in blocked_environment_message(('ASC_SENTINEL_SHOULD_NOT_APPEAR',))
+
           if any(forbidden.match(key.upper()) for key in os.environ):
-              raise SystemExit('Private credential, proxy, or tunnel environment detected; diagnostics blocked.')
+              raise SystemExit(blocked_environment_message(os.environ))
 
           interfaces = subprocess.run(['/sbin/ifconfig', '-l'], capture_output=True, text=True, check=True).stdout.split()
           if any(name.startswith(('utun', 'tun', 'tap', 'wg', 'tailscale', 'ppp')) for name in interfaces):
