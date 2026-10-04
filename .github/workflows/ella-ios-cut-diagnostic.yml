@@ -24,6 +24,87 @@ jobs:
       ELLA_EXPECTED_HEAD_SHA: e4e4fd5ffe66deec6224ba85fe63e146c6659ebc
       ELLA_EXPECTED_TREE_SHA: 402fe36803a6feb49454a77ff95bee5bbae6887d
       ELLA_EXPECTED_BASE_SHA: 62fa955aabd87160096006787eecf4974efcfaae
+      ELLA_CI_BOUNDARY_MARKER: |
+        import os
+        import re
+        import sys
+
+        boundaries = (
+            'BASELINE', 'AFTER_TARGET_CHECKOUT', 'AFTER_FLUTTER_SETUP',
+            'AFTER_FLUTTER_VERSION', 'AFTER_DEPENDENCIES',
+        )
+        if len(sys.argv) != 2 or sys.argv[1] not in boundaries:
+            raise SystemExit('Invalid fixed boundary marker; diagnostics blocked.')
+
+        forbidden = re.compile(
+            r'^(ASC_|AWS_|AZURE_|GOOGLE_APPLICATION_CREDENTIALS$|DATABASE_URL$|REDIS_URL$|'
+            r'OPENAI_|FIREBASE_|SSH_|TAILSCALE_|VPN_|TUNNEL_|.*_PROXY$|PROXY_)'
+        )
+
+        def blocked_environment_marker(keys):
+            categories = set()
+            count = 0
+            for key in keys:
+                name = key.upper()
+                if not forbidden.match(name):
+                    continue
+                count += 1
+                if name.startswith('ASC_'):
+                    categories.add('signing')
+                elif name.startswith(('AWS_', 'AZURE_')) or name == 'GOOGLE_APPLICATION_CREDENTIALS':
+                    categories.add('cloud')
+                elif name in ('DATABASE_URL', 'REDIS_URL'):
+                    categories.add('datastore')
+                elif name.startswith(('OPENAI_', 'FIREBASE_')):
+                    categories.add('provider')
+                elif name.startswith('SSH_'):
+                    categories.add('SSH')
+                elif name.startswith(('TAILSCALE_', 'VPN_', 'TUNNEL_')):
+                    categories.add('private_route')
+                else:
+                    categories.add('proxy')
+            bounded_count = str(count) if count < 10 else '10+'
+            return tuple(sorted(categories)), bounded_count
+
+        def blocked_ssh_markers(environment):
+            markers = set()
+            agent_socket = 'ABSENT'
+            for key, value in environment.items():
+                name = key.upper()
+                if not name.startswith('SSH_'):
+                    continue
+                if name == 'SSH_CLIENT':
+                    markers.add('CLIENT_METADATA')
+                elif name == 'SSH_CONNECTION':
+                    markers.add('CONNECTION_METADATA')
+                elif name == 'SSH_TTY':
+                    markers.add('TTY_METADATA')
+                elif name == 'SSH_AUTH_SOCK':
+                    markers.add('AGENT_SOCKET_MARKER')
+                    if value:
+                        agent_socket = 'NONEMPTY'
+                    elif agent_socket == 'ABSENT':
+                        agent_socket = 'EMPTY'
+                elif name == 'SSH_AGENT_PID':
+                    markers.add('AGENT_PID_MARKER')
+                elif name.startswith('SSH_ASKPASS'):
+                    markers.add('ASKPASS_MARKER')
+                elif name == 'SSH_TUNNEL':
+                    markers.add('TUNNEL_MARKER')
+                else:
+                    markers.add('OTHER_SSH_MARKER')
+            return tuple(sorted(markers)), agent_socket
+
+        categories, count = blocked_environment_marker(os.environ)
+        ssh_markers, agent_socket = blocked_ssh_markers(os.environ)
+        print(
+            f'BOUNDARY_MARKER boundary={sys.argv[1]} categories={",".join(categories) or "NONE"}; '
+            f'matches={count}; ssh_markers={",".join(ssh_markers) or "NONE"}; '
+            f'agent_socket={agent_socket}',
+            flush=True,
+        )
+        if categories:
+            raise SystemExit('Boundary marker found blocked environment; diagnostics blocked.')
       ELLA_CI_NETWORK_SANDBOX: >-
         (version 1) (allow default) (deny network*)
         (allow network-inbound (local ip "localhost:*"))
@@ -67,6 +148,16 @@ jobs:
           [[ -z "${ASC_KEY_ID:-}${ASC_ISSUER_ID:-}${ASC_KEY_PATH:-}${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}${SSH_AUTH_SOCK:-}${TAILSCALE_AUTHKEY:-}" ]]
           git diff --check "$ELLA_EXPECTED_BASE_SHA" HEAD
 
+      - name: Mark baseline after workflow provenance
+        run: |
+          set -euo pipefail
+          marker_sha="$(printf '%s' "$ELLA_CI_BOUNDARY_MARKER" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')"
+          [[ "$marker_sha" == e55904f56f659ba7d15691124aa061b019f1fe660de7bc4be681ea5739805c53 ]] || {
+            echo 'Boundary marker integrity failed; diagnostics blocked.' >&2
+            exit 1
+          }
+          /usr/bin/python3 -c "$ELLA_CI_BOUNDARY_MARKER" BASELINE
+
       - name: Checkout immutable cut 709 source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -74,6 +165,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           path: target-source
+
+      - name: Mark boundary after target checkout
+        run: |
+          set -euo pipefail
+          marker_sha="$(printf '%s' "$ELLA_CI_BOUNDARY_MARKER" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')"
+          [[ "$marker_sha" == e55904f56f659ba7d15691124aa061b019f1fe660de7bc4be681ea5739805c53 ]] || {
+            echo 'Boundary marker integrity failed; diagnostics blocked.' >&2
+            exit 1
+          }
+          /usr/bin/python3 -c "$ELLA_CI_BOUNDARY_MARKER" AFTER_TARGET_CHECKOUT
 
       - name: Verify immutable cut head, tree, base, and two-file delta
         id: target_identity
@@ -97,6 +198,16 @@ jobs:
           channel: stable
           cache: false
 
+      - name: Mark boundary after Flutter setup
+        run: |
+          set -euo pipefail
+          marker_sha="$(printf '%s' "$ELLA_CI_BOUNDARY_MARKER" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')"
+          [[ "$marker_sha" == e55904f56f659ba7d15691124aa061b019f1fe660de7bc4be681ea5739805c53 ]] || {
+            echo 'Boundary marker integrity failed; diagnostics blocked.' >&2
+            exit 1
+          }
+          /usr/bin/python3 -c "$ELLA_CI_BOUNDARY_MARKER" AFTER_FLUTTER_SETUP
+
       - name: Verify pinned Flutter version
         run: |
           set -euo pipefail
@@ -111,8 +222,28 @@ jobs:
           flutter --version
           dart --version
 
+      - name: Mark boundary after Flutter version verification
+        run: |
+          set -euo pipefail
+          marker_sha="$(printf '%s' "$ELLA_CI_BOUNDARY_MARKER" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')"
+          [[ "$marker_sha" == e55904f56f659ba7d15691124aa061b019f1fe660de7bc4be681ea5739805c53 ]] || {
+            echo 'Boundary marker integrity failed; diagnostics blocked.' >&2
+            exit 1
+          }
+          /usr/bin/python3 -c "$ELLA_CI_BOUNDARY_MARKER" AFTER_FLUTTER_VERSION
+
       - name: Resolve pinned Dart dependencies
         run: flutter pub get --enforce-lockfile
+
+      - name: Mark boundary after dependency resolution
+        run: |
+          set -euo pipefail
+          marker_sha="$(printf '%s' "$ELLA_CI_BOUNDARY_MARKER" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')"
+          [[ "$marker_sha" == e55904f56f659ba7d15691124aa061b019f1fe660de7bc4be681ea5739805c53 ]] || {
+            echo 'Boundary marker integrity failed; diagnostics blocked.' >&2
+            exit 1
+          }
+          /usr/bin/python3 -c "$ELLA_CI_BOUNDARY_MARKER" AFTER_DEPENDENCIES
 
       - name: Inventory hosted runner and prove test-local IPC with external denial
         id: isolation
