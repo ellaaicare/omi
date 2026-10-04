@@ -31,8 +31,22 @@ class SharedPreferencesUtil {
   static String _verifiedAiConsentScopeHash = '';
   static DateTime? _verifiedAiConsentAt;
   static int _aiConsentAuthorityGeneration = 0;
+  static int _aiConsentPresentationRevision = 0;
   static int _terminalAccountConsentAuthorityGeneration = 0;
   static final ValueNotifier<int> _aiConsentAuthorityChanges = ValueNotifier<int>(0);
+  static const Set<String> _aiConsentPresentationKeys = {
+    'uid',
+    'aiConsentAccepted',
+    'aiConsentReceiptId',
+    'aiConsentReceiptUid',
+    'aiConsentProfileBindingId',
+    'aiConsentServerDecidedAt',
+    'aiConsentContractVersion',
+    'aiConsentProcessorSetHash',
+    'aiConsentScopeVersion',
+    'aiConsentScopeHash',
+    'app_locale',
+  };
   static String _verifiedEllaProvisioningUid = '';
   static int _verifiedEllaProvisioningBindingRevision = 0;
   static String _verifiedEllaProvisioningPolicyRevision = '';
@@ -74,6 +88,7 @@ class SharedPreferencesUtil {
   set deviceIdHash(String value) => _preferences?.setString('deviceIdHash', value);
 
   static Future<void> init() async {
+    _aiConsentPresentationRevision++;
     _preferences = await SharedPreferences.getInstance();
     clearAiConsentServerVerification();
     _clearEllaProvisioningServerVerification();
@@ -88,6 +103,8 @@ class SharedPreferencesUtil {
 
   int get aiConsentAuthorityGeneration => _aiConsentAuthorityGeneration;
 
+  int get aiConsentPresentationRevision => _aiConsentPresentationRevision;
+
   int get terminalAccountConsentAuthorityGeneration => _terminalAccountConsentAuthorityGeneration;
 
   int get ellaProvisioningTerminalAuthorityGeneration => _ellaProvisioningTerminalAuthorityGeneration;
@@ -97,6 +114,7 @@ class SharedPreferencesUtil {
   @visibleForTesting
   static void resetProcessLocalAuthorityStateForTesting() {
     _aiConsentAuthorityGeneration = 0;
+    _aiConsentPresentationRevision = 0;
     _terminalAccountConsentAuthorityGeneration = 0;
     _aiConsentAuthorityChanges.value = 0;
     _ellaProvisioningTerminalAuthorityGeneration = 0;
@@ -1395,20 +1413,54 @@ class SharedPreferencesUtil {
   List<String> getStringList(String key, {List<String> defaultValue = const []}) =>
       _preferences?.getStringList(key) ?? defaultValue;
 
-  Future<bool> saveString(String key, String value) async => await _preferences?.setString(key, value) ?? false;
+  static void _advanceAiConsentPresentationForWrite(String key, Object value) {
+    final preferences = _preferences;
+    if (preferences == null || !_aiConsentPresentationKeys.contains(key)) return;
+    if (!preferences.containsKey(key)) {
+      _aiConsentPresentationRevision++;
+      return;
+    }
+    final previous = preferences.get(key);
+    final unchanged = previous is List<String> && value is List<String>
+        ? listEquals(previous, value)
+        : previous.runtimeType == value.runtimeType && previous == value;
+    if (!unchanged) _aiConsentPresentationRevision++;
+  }
 
-  Future<bool> saveInt(String key, int value) async => await _preferences?.setInt(key, value) ?? false;
+  Future<bool> saveString(String key, String value) {
+    _advanceAiConsentPresentationForWrite(key, value);
+    return Future<bool>.sync(() => _preferences?.setString(key, value) ?? Future.value(false));
+  }
 
-  Future<bool> saveBool(String key, bool value) async => await _preferences?.setBool(key, value) ?? false;
+  Future<bool> saveInt(String key, int value) {
+    _advanceAiConsentPresentationForWrite(key, value);
+    return Future<bool>.sync(() => _preferences?.setInt(key, value) ?? Future.value(false));
+  }
 
-  Future<bool> saveDouble(String key, double value) async => await _preferences?.setDouble(key, value) ?? false;
+  Future<bool> saveBool(String key, bool value) {
+    _advanceAiConsentPresentationForWrite(key, value);
+    return Future<bool>.sync(() => _preferences?.setBool(key, value) ?? Future.value(false));
+  }
 
-  Future<bool> saveStringList(String key, List<String> value) async =>
-      await _preferences?.setStringList(key, value) ?? false;
+  Future<bool> saveDouble(String key, double value) {
+    _advanceAiConsentPresentationForWrite(key, value);
+    return Future<bool>.sync(() => _preferences?.setDouble(key, value) ?? Future.value(false));
+  }
 
-  Future<bool> remove(String key) async => await _preferences?.remove(key) ?? false;
+  Future<bool> saveStringList(String key, List<String> value) {
+    _advanceAiConsentPresentationForWrite(key, value);
+    return Future<bool>.sync(() => _preferences?.setStringList(key, value) ?? Future.value(false));
+  }
+
+  Future<bool> remove(String key) {
+    if (_preferences?.containsKey(key) == true && _aiConsentPresentationKeys.contains(key)) {
+      _aiConsentPresentationRevision++;
+    }
+    return Future<bool>.sync(() => _preferences?.remove(key) ?? Future.value(false));
+  }
 
   Future<bool> clear() async {
+    _aiConsentPresentationRevision++;
     _invalidateAiConsentAuthority(terminal: true);
     return await _preferences?.clear() ?? false;
   }

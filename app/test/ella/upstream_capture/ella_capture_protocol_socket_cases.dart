@@ -2,7 +2,9 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:omi/backend/preferences.dart' as ella_preferences;
 import 'package:omi/ella/upstream_capture/ella_capture_protocol_socket.dart';
 import 'package:omi/ella/capture_host/ella_capture_host.dart';
 import 'package:omi/ella/upstream_capture/ella_capture_protocol_finalization.dart';
@@ -21,12 +23,16 @@ class _Transport implements IPureSocket {
   PureSocketStatus _status = PureSocketStatus.notConnected;
   final List<dynamic> sent = [];
   int stopCalls = 0;
+  bool connectResult = true;
+  Future<void> Function()? beforeConnectReturns;
 
   @override
   PureSocketStatus get status => _status;
 
   @override
   Future<bool> connect() async {
+    await beforeConnectReturns?.call();
+    if (!connectResult) return false;
     _status = PureSocketStatus.connected;
     listener?.onConnected();
     return true;
@@ -120,9 +126,13 @@ void registerEllaCaptureProtocolSocketCases() {
     expect(await harness.bind(), isTrue);
     final originEpoch = harness.authority.bindingEpoch;
     final transport = _Transport();
-    socket = EllaCaptureProtocolSocket.withTransport(16000, BleAudioCodec.pcm16, 'multi', transport,
-        hasOriginAuthority: () =>
-            harness.authority.hasCurrentAuthority && harness.authority.bindingEpoch == originEpoch);
+    socket = EllaCaptureProtocolSocket.withTransport(
+      16000,
+      BleAudioCodec.pcm16,
+      'multi',
+      transport,
+      hasOriginAuthority: () => harness.authority.hasCurrentAuthority && harness.authority.bindingEpoch == originEpoch,
+    );
     final start = socket.start();
     await _tick();
     expect(harness.runtime.captureDiagnostics.ready, isFalse);
@@ -152,8 +162,13 @@ void registerEllaCaptureProtocolSocketCases() {
     expect(await harness.bind(), isTrue);
     final epoch = harness.authority.bindingEpoch;
     final transport = _Transport();
-    socket = EllaCaptureProtocolSocket.withTransport(16000, BleAudioCodec.pcm16, 'multi', transport,
-        hasOriginAuthority: () => harness.authority.hasCurrentAuthority && harness.authority.bindingEpoch == epoch);
+    socket = EllaCaptureProtocolSocket.withTransport(
+      16000,
+      BleAudioCodec.pcm16,
+      'multi',
+      transport,
+      hasOriginAuthority: () => harness.authority.hasCurrentAuthority && harness.authority.bindingEpoch == epoch,
+    );
     final start = socket.start();
     await _tick();
     transport.serverStatus('capture_protocol_ready', fields: _authority);
@@ -163,6 +178,282 @@ void registerEllaCaptureProtocolSocketCases() {
     expect(await harness.bind(), isTrue);
     expect(socket.state, SocketServiceState.connected, reason: 'the old transport is still awaiting teardown');
     expect(harness.runtime.captureDiagnostics.ready, isFalse);
+  });
+
+  test('tracked diagnostics do not reappear after presentation-profile ABA', () async {
+    final dir = await Directory.systemTemp.createTemp('ella-capture-diagnostic-profile-');
+    EllaCaptureProtocolSocket? socket;
+    final harness = await EllaUpstreamCaptureHarness.boot(tempDir: dir, diagnosticSocket: () => socket);
+    addTearDown(() async {
+      await socket?.stop();
+      await harness.dispose();
+      await dir.delete(recursive: true);
+    });
+    expect(await harness.bind(), isTrue);
+    final transport = _Transport();
+    socket = EllaCaptureProtocolSocket.withTransport(
+      16000,
+      BleAudioCodec.pcm16,
+      'multi',
+      transport,
+      hasOriginAuthority: () => harness.authority.hasCurrentAuthority,
+    );
+    harness.runtime.trackDiagnosticSocketForTesting(socket);
+    final start = socket.start();
+    await _tick();
+    transport.serverStatus('capture_protocol_ready', fields: _authority);
+    await start;
+    expect(harness.runtime.captureDiagnostics.lastAttempt?.phase, EllaCaptureSocketAttemptPhase.captureReady);
+
+    await harness.ellaPreferences.saveString('aiConsentProfileBindingId', 'replacement-profile');
+    expect(harness.runtime.captureDiagnostics.lastAttempt, isNull);
+    await harness.ellaPreferences.saveString('aiConsentProfileBindingId', 'profile-binding-$accountA');
+    expect(
+      harness.runtime.captureDiagnostics.lastAttempt,
+      isNull,
+      reason: 'a returning profile label cannot resurrect the retired attempt',
+    );
+  });
+
+  test('consent A-to-B-to-A between reads retires the old socket attempt', () async {
+    final dir = await Directory.systemTemp.createTemp('ella-capture-diagnostic-consent-rollover-');
+    EllaCaptureProtocolSocket? socket;
+    final harness = await EllaUpstreamCaptureHarness.boot(tempDir: dir, diagnosticSocket: () => socket);
+    addTearDown(() async {
+      await socket?.stop();
+      await harness.dispose();
+      await dir.delete(recursive: true);
+    });
+    expect(await harness.bind(), isTrue);
+    final transport = _Transport();
+    socket = EllaCaptureProtocolSocket.withTransport(
+      16000,
+      BleAudioCodec.pcm16,
+      'multi',
+      transport,
+      hasOriginAuthority: () => harness.authority.hasCurrentAuthority,
+    );
+    harness.runtime.trackDiagnosticSocketForTesting(socket);
+    final start = socket.start();
+    await _tick();
+    transport.serverStatus('capture_protocol_ready', fields: _authority);
+    await start;
+    expect(harness.runtime.captureDiagnostics.lastAttempt?.phase, EllaCaptureSocketAttemptPhase.captureReady);
+
+    final before = harness.ellaPreferences.aiConsentPresentationRevision;
+    harness.ellaPreferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-b',
+      uid: accountA,
+      profileBindingId: 'profile-binding-b',
+      serverDecidedAt: '2026-07-28T00:00:00Z',
+    );
+    harness.ellaPreferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-$accountA',
+      uid: accountA,
+      profileBindingId: 'profile-binding-$accountA',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
+    );
+    expect(harness.ellaPreferences.aiConsentProfileBindingId, 'profile-binding-$accountA');
+    expect(harness.ellaPreferences.aiConsentPresentationRevision, greaterThan(before));
+    expect(harness.runtime.captureDiagnostics.lastAttempt, isNull);
+    expect(
+      harness.runtime.reuseProtocolSocketForTesting(
+        socket,
+        force: false,
+        codec: BleAudioCodec.pcm16,
+        sampleRate: 16000,
+        clientConversationId: null,
+      ),
+      same(socket),
+    );
+    expect(harness.runtime.captureDiagnostics.lastAttempt, isNull);
+  });
+
+  test('presentation revision changes only for relevant value or type mutations', () async {
+    SharedPreferences.setMockInitialValues({'app_locale': 'en'});
+    await ella_preferences.SharedPreferencesUtil.init();
+    final preferences = ella_preferences.SharedPreferencesUtil();
+    final initial = preferences.aiConsentPresentationRevision;
+    await preferences.saveString('app_locale', 'en');
+    await preferences.saveString('deviceName', 'unrelated');
+    await preferences.remove('aiConsentReceiptId');
+    expect(preferences.aiConsentPresentationRevision, initial);
+
+    final intWrite = preferences.saveInt('app_locale', 1);
+    expect(preferences.aiConsentPresentationRevision, initial + 1);
+    await intWrite;
+    await preferences.saveDouble('app_locale', 1.0);
+    expect(preferences.aiConsentPresentationRevision, initial + 2);
+    await preferences.saveStringList('app_locale', ['en']);
+    expect(preferences.aiConsentPresentationRevision, initial + 3);
+    await preferences.saveStringList('app_locale', ['en']);
+    expect(preferences.aiConsentPresentationRevision, initial + 3);
+    final removing = preferences.remove('app_locale');
+    expect(preferences.aiConsentPresentationRevision, initial + 4);
+    await removing;
+    await preferences.remove('app_locale');
+    expect(preferences.aiConsentPresentationRevision, initial + 4);
+    await preferences.saveBool('aiConsentAccepted', true);
+    expect(preferences.aiConsentPresentationRevision, initial + 5);
+    await preferences.saveBool('aiConsentAccepted', true);
+    expect(preferences.aiConsentPresentationRevision, initial + 5);
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-a');
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-b');
+    await preferences.saveString('aiConsentProfileBindingId', 'profile-a');
+    expect(preferences.aiConsentPresentationRevision, initial + 8);
+
+    final clearing = preferences.clear();
+    expect(preferences.aiConsentPresentationRevision, initial + 9);
+    await clearing;
+    final reinitializing = ella_preferences.SharedPreferencesUtil.init();
+    expect(preferences.aiConsentPresentationRevision, initial + 10);
+    await reinitializing;
+  });
+
+  test('presentation revision covers the fixed authority-bearing string keys only', () async {
+    SharedPreferences.setMockInitialValues({});
+    await ella_preferences.SharedPreferencesUtil.init();
+    final preferences = ella_preferences.SharedPreferencesUtil();
+    const relevant = [
+      'uid',
+      'aiConsentReceiptId',
+      'aiConsentReceiptUid',
+      'aiConsentProfileBindingId',
+      'aiConsentServerDecidedAt',
+      'aiConsentContractVersion',
+      'aiConsentProcessorSetHash',
+      'aiConsentScopeVersion',
+      'aiConsentScopeHash',
+      'app_locale',
+    ];
+    var revision = preferences.aiConsentPresentationRevision;
+    for (final key in relevant) {
+      final writing = preferences.saveString(key, 'value-a');
+      expect(preferences.aiConsentPresentationRevision, ++revision, reason: key);
+      await writing;
+      await preferences.saveString(key, 'value-a');
+      expect(preferences.aiConsentPresentationRevision, revision, reason: '$key unchanged');
+    }
+    for (final key in ['aiConsentAcceptedAt', 'aiConsentClientVersion', 'deviceName', 'cachedConversationsUid']) {
+      await preferences.saveString(key, 'unrelated');
+      expect(preferences.aiConsentPresentationRevision, revision, reason: key);
+    }
+  });
+
+  test('reinitialization retires a ready attempt before a late close event', () async {
+    final dir = await Directory.systemTemp.createTemp('ella-capture-diagnostic-reinit-');
+    EllaCaptureProtocolSocket? socket;
+    final harness = await EllaUpstreamCaptureHarness.boot(tempDir: dir, diagnosticSocket: () => socket);
+    addTearDown(() async {
+      await socket?.stop();
+      await harness.dispose();
+      await dir.delete(recursive: true);
+    });
+    expect(await harness.bind(), isTrue);
+    final transport = _Transport();
+    socket = EllaCaptureProtocolSocket.withTransport(
+      16000,
+      BleAudioCodec.pcm16,
+      'multi',
+      transport,
+      hasOriginAuthority: () => harness.authority.hasCurrentAuthority,
+    );
+    harness.runtime.trackDiagnosticSocketForTesting(socket);
+    final start = socket.start();
+    await _tick();
+    transport.serverStatus('capture_protocol_ready', fields: _authority);
+    await start;
+    expect(harness.runtime.captureDiagnostics.ready, isTrue);
+
+    final before = harness.ellaPreferences.aiConsentPresentationRevision;
+    await ella_preferences.SharedPreferencesUtil.init();
+    expect(harness.ellaPreferences.aiConsentPresentationRevision, greaterThan(before));
+    transport.serverClose(1011);
+    expect(harness.runtime.captureDiagnostics.lastAttempt, isNull);
+    expect(harness.runtime.captureDiagnostics.lastFailure, isNull);
+  });
+
+  test('composed non-force socket reuse keeps current diagnostics without reviving a retired owner', () async {
+    final dir = await Directory.systemTemp.createTemp('ella-capture-diagnostic-reuse-');
+    EllaCaptureProtocolSocket? socket;
+    final harness = await EllaUpstreamCaptureHarness.boot(tempDir: dir, diagnosticSocket: () => socket);
+    addTearDown(() async {
+      await socket?.stop();
+      await harness.dispose();
+      await dir.delete(recursive: true);
+    });
+    expect(await harness.bind(), isTrue);
+    final epoch = harness.authority.bindingEpoch;
+    final transport = _Transport();
+    socket = EllaCaptureProtocolSocket.withTransport(
+      16000,
+      BleAudioCodec.pcm16,
+      'multi',
+      transport,
+      hasOriginAuthority: () => harness.authority.hasCurrentAuthority && harness.authority.bindingEpoch == epoch,
+    );
+    harness.runtime.trackDiagnosticSocketForTesting(socket);
+    final start = socket.start();
+    await _tick();
+    transport.serverStatus('capture_protocol_ready', fields: _authority);
+    await start;
+    expect(harness.runtime.captureDiagnostics.lastAttempt?.phase, EllaCaptureSocketAttemptPhase.captureReady);
+    final beforeReuse = harness.runtime.socketOpenGenerationForTesting;
+
+    expect(
+      harness.runtime.reuseProtocolSocketForTesting(
+        socket,
+        force: false,
+        codec: BleAudioCodec.pcm16,
+        sampleRate: 16000,
+        clientConversationId: null,
+      ),
+      same(socket),
+    );
+    expect(harness.runtime.socketOpenGenerationForTesting, beforeReuse + 1);
+    expect(harness.runtime.captureDiagnostics.ready, isTrue);
+    expect(harness.runtime.captureDiagnostics.lastAttempt?.phase, EllaCaptureSocketAttemptPhase.captureReady);
+
+    expect(
+      harness.runtime.reuseProtocolSocketForTesting(
+        socket,
+        force: true,
+        codec: BleAudioCodec.pcm16,
+        sampleRate: 16000,
+        clientConversationId: null,
+      ),
+      isNull,
+    );
+    expect(harness.runtime.socketOpenGenerationForTesting, beforeReuse + 2);
+    expect(
+      harness.runtime.reuseProtocolSocketForTesting(
+        socket,
+        force: false,
+        codec: BleAudioCodec.pcm16,
+        sampleRate: 16000,
+        clientConversationId: null,
+      ),
+      same(socket),
+    );
+    expect(harness.runtime.socketOpenGenerationForTesting, beforeReuse + 3);
+    expect(harness.runtime.captureDiagnostics.lastAttempt, isNull,
+        reason: 'a reuse cannot revive an owner invalidated by an intervening replacement');
+
+    harness.authority.release();
+    expect(await harness.bind(), isTrue);
+    expect(
+      harness.runtime.reuseProtocolSocketForTesting(
+        socket,
+        force: false,
+        codec: BleAudioCodec.pcm16,
+        sampleRate: 16000,
+        clientConversationId: null,
+      ),
+      same(socket),
+      reason: 'reuse does not authorize or retag a retired transport',
+    );
+    expect(harness.runtime.captureDiagnostics.ready, isFalse);
+    expect(harness.runtime.captureDiagnostics.lastAttempt, isNull);
   });
 
   test('production factory replaces the upstream transport with a v2 backend URL', () async {
@@ -189,8 +480,11 @@ void registerEllaCaptureProtocolSocketCases() {
     final firstEpoch = harness.authority.bindingEpoch;
     harness.authority.release();
     expect(harness.authority.bind(accountA), isTrue);
-    expect(harness.authority.bindingEpoch, greaterThan(firstEpoch),
-        reason: 'same-UID rebind retires old socket authority');
+    expect(
+      harness.authority.bindingEpoch,
+      greaterThan(firstEpoch),
+      reason: 'same-UID rebind retires old socket authority',
+    );
   });
 
   test('handshake alone cannot publish Recording or send audio; exact ready permits ingress and drain', () async {
@@ -213,19 +507,13 @@ void registerEllaCaptureProtocolSocketCases() {
     expect(socket.state, SocketServiceState.connected);
     await socket.send(<int>[1, 2, 3]);
     expect(transport.sent.whereType<List<int>>(), [
-      <int>[1, 2, 3]
+      <int>[1, 2, 3],
     ]);
 
     final stop = socket.stop();
     await _tick();
-    expect(jsonDecode(transport.sent.last as String), {
-      'type': 'capture_drain',
-      ..._authority,
-    });
-    transport.serverStatus('capture_protocol_drained', fields: {
-      ..._authority,
-      'owner_token': 'stale-owner',
-    });
+    expect(jsonDecode(transport.sent.last as String), {'type': 'capture_drain', ..._authority});
+    transport.serverStatus('capture_protocol_drained', fields: {..._authority, 'owner_token': 'stale-owner'});
     await _tick();
     expect(transport.stopCalls, 0, reason: 'a mixed-owner drain cannot acknowledge this capture');
     transport.serverStatus('capture_protocol_drained', fields: _authority);
@@ -258,6 +546,58 @@ void registerEllaCaptureProtocolSocketCases() {
     expect(socket.lastAdmissionFailure?.reason, EllaCaptureSocketFailureReason.captureSocketClosedBeforeReady);
     expect(socket.lastAdmissionFailure?.closeCode, 1008);
     expect(socket.lastAdmissionFailure?.at.isUtc, isTrue);
+    expect(socket.lastAttempt?.phase, EllaCaptureSocketAttemptPhase.closedBeforeReady);
+    expect(socket.lastAttempt?.status, EllaCaptureSocketAttemptStatus.failed);
+    expect(socket.lastAttempt?.closeCode, 1008);
+  });
+
+  test('handshake failure and origin retirement remain distinct without changing capture admission', () async {
+    final unavailable = _Transport()..connectResult = false;
+    final failed = EllaCaptureProtocolSocket.withTransport(16000, BleAudioCodec.pcm16, 'multi', unavailable);
+    await failed.start();
+    expect(failed.lastAdmissionFailure?.reason, EllaCaptureSocketFailureReason.transportConnectFailed);
+    expect(failed.lastAttempt?.phase, EllaCaptureSocketAttemptPhase.transportUnavailable);
+    expect(failed.lastAttempt?.at.isUtc, isTrue);
+    expect(unavailable.sent, isEmpty);
+
+    var current = true;
+    final retired = _Transport()
+      ..beforeConnectReturns = () async {
+        current = false;
+      };
+    final stale = EllaCaptureProtocolSocket.withTransport(
+      16000,
+      BleAudioCodec.pcm16,
+      'multi',
+      retired,
+      hasOriginAuthority: () => current,
+    );
+    await stale.start();
+    expect(stale.lastAdmissionFailure?.reason, EllaCaptureSocketFailureReason.captureOriginRetired);
+    expect(stale.lastAttempt?.phase, EllaCaptureSocketAttemptPhase.originRetired);
+    expect(retired.stopCalls, 1);
+    expect(retired.sent, isEmpty);
+  });
+
+  test('ready and close phases are bounded to one attempt and ignore late ready', () async {
+    for (final closeCode in [1008, 1011, 1013, 999, 5000]) {
+      final transport = _Transport();
+      final socket = EllaCaptureProtocolSocket.withTransport(16000, BleAudioCodec.pcm16, 'multi', transport);
+      final start = socket.start();
+      await _tick();
+      expect(socket.lastAttempt?.phase, EllaCaptureSocketAttemptPhase.transportConnected);
+      transport.serverStatus('capture_protocol_ready', fields: _authority);
+      await start;
+      expect(socket.lastAttempt?.phase, EllaCaptureSocketAttemptPhase.captureReady);
+      expect(socket.lastAttempt?.status, EllaCaptureSocketAttemptStatus.ready);
+      transport.serverClose(closeCode);
+      expect(socket.lastAttempt?.phase, EllaCaptureSocketAttemptPhase.closedAfterReady);
+      expect(socket.lastAttempt?.closeCode, closeCode >= 1000 && closeCode <= 4999 ? closeCode : null);
+      transport.serverStatus('capture_protocol_ready', fields: _authority);
+      expect(socket.lastAttempt?.phase, EllaCaptureSocketAttemptPhase.closedAfterReady);
+      await socket.send(<int>[9]);
+      expect(transport.sent.whereType<List<int>>(), isEmpty);
+    }
   });
 
   test('invalid ready and missing ready both fail closed', () async {
@@ -470,8 +810,10 @@ void registerEllaCaptureProtocolSocketCases() {
         exactAuthority,
       }) async {
         requests++;
-        expect((conversationId, protocolVersion, generation, ownerToken),
-            ('conversation-a', 2, 'generation-a', 'owner-a'));
+        expect(
+          (conversationId, protocolVersion, generation, ownerToken),
+          ('conversation-a', 2, 'generation-a', 'owner-a'),
+        );
         expect(transportLost, isFalse);
         expect(expectedAuthenticatedUid, 'account-a');
         expect(identical(exactAuthority, verifier), isTrue);

@@ -6,6 +6,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'package:omi/backend/http/api/conversations.dart' as ella_api;
+import 'package:omi/backend/preferences.dart' as ella_preferences;
 import 'package:omi/ella/capture_host/ella_capture_host.dart';
 import 'package:omi/ella/upstream_capture/ella_capture_authority.dart';
 import 'package:omi/ella/upstream_capture/ella_capture_memory_bridge.dart';
@@ -280,14 +281,115 @@ class EllaUpstreamCaptureRuntime {
     final provider = _provider;
     if (provider == null) return const EllaCaptureDiagnosticsSnapshot.uninitialized();
     final socket = _activeProtocolSocket?.call() ?? _protocolSocket;
-    final current = authority.hasCurrentAuthority;
+    final owner = _diagnosticOwner;
+    final ownedCurrent = owner != null &&
+        identical(owner.socket, socket) &&
+        owner.openGeneration == _socketOpenGeneration &&
+        owner.uid == authority.boundUid &&
+        owner.bindingEpoch == authority.bindingEpoch &&
+        owner.profile == _currentDiagnosticProfile();
+    if (owner != null && !ownedCurrent) _diagnosticOwner = null;
+    final current = authority.hasCurrentAuthority &&
+        (socket == null || socket.hasOriginAuthority) &&
+        (owner == null ? !_diagnosticTracked && _activeProtocolSocket != null : ownedCurrent);
     return EllaCaptureDiagnosticsSnapshot.upstream(
-      ready: current && socket?.hasOriginAuthority == true && socket?.state == SocketServiceState.connected,
+      ready: current && socket?.state == SocketServiceState.connected,
       receivedBytes: current ? provider.lifetimeBleBytesReceived : null,
       sentBytes: current ? provider.lifetimeWsSocketBytesSent : null,
-      lastFailure: current && socket?.hasOriginAuthority == true ? socket?.lastAdmissionFailure : null,
+      lastFailure: current ? socket?.lastAdmissionFailure : null,
+      lastAttempt: current ? socket?.lastAttempt : null,
     );
   }
+
+  ({String uid, String profile, int generation, int presentationRevision})? _currentDiagnosticProfile() {
+    try {
+      final preferences = ella_preferences.SharedPreferencesUtil();
+      final uid = authority.boundUid;
+      final profile = preferences.aiConsentProfileBindingId;
+      if (uid == null || uid.isEmpty || preferences.uid != uid || profile.isEmpty) return null;
+      return (
+        uid: uid,
+        profile: profile,
+        generation: preferences.aiConsentAuthorityGeneration,
+        presentationRevision: preferences.aiConsentPresentationRevision,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _trackDiagnosticSocket(EllaCaptureProtocolSocket socket, int openGeneration) {
+    _diagnosticTracked = true;
+    final profile = _currentDiagnosticProfile();
+    _diagnosticOwner = profile == null
+        ? null
+        : (
+            socket: socket,
+            openGeneration: openGeneration,
+            uid: profile.uid,
+            bindingEpoch: authority.bindingEpoch,
+            profile: profile,
+          );
+  }
+
+  ({EllaCaptureProtocolSocket? reused, int openGeneration}) _beginSocketOpen(
+    EllaCaptureProtocolSocket? previous, {
+    required bool force,
+    required BleAudioCodec codec,
+    required int sampleRate,
+    required String? clientConversationId,
+  }) {
+    final openGeneration = ++_socketOpenGeneration;
+    if (previous != null &&
+        previous.state == SocketServiceState.connected &&
+        !force &&
+        previous.codec == codec &&
+        previous.sampleRate == sampleRate &&
+        previous.clientConversationId == clientConversationId) {
+      final owner = _diagnosticOwner;
+      if (owner != null &&
+          identical(owner.socket, previous) &&
+          owner.openGeneration == openGeneration - 1 &&
+          owner.uid == authority.boundUid &&
+          owner.bindingEpoch == authority.bindingEpoch &&
+          owner.profile == _currentDiagnosticProfile() &&
+          authority.hasCurrentAuthority &&
+          previous.hasOriginAuthority) {
+        _diagnosticOwner = (
+          socket: previous,
+          openGeneration: openGeneration,
+          uid: owner.uid,
+          bindingEpoch: owner.bindingEpoch,
+          profile: owner.profile,
+        );
+      }
+      return (reused: previous, openGeneration: openGeneration);
+    }
+    return (reused: null, openGeneration: openGeneration);
+  }
+
+  @visibleForTesting
+  EllaCaptureProtocolSocket? reuseProtocolSocketForTesting(
+    EllaCaptureProtocolSocket? previous, {
+    required bool force,
+    required BleAudioCodec codec,
+    required int sampleRate,
+    required String? clientConversationId,
+  }) =>
+      _beginSocketOpen(
+        previous,
+        force: force,
+        codec: codec,
+        sampleRate: sampleRate,
+        clientConversationId: clientConversationId,
+      ).reused;
+
+  @visibleForTesting
+  int get socketOpenGenerationForTesting => _socketOpenGeneration;
+
+  @visibleForTesting
+  void trackDiagnosticSocketForTesting(EllaCaptureProtocolSocket socket) =>
+      _trackDiagnosticSocket(socket, _socketOpenGeneration);
 
   final EllaCaptureMemoryLoader? _memoryLoader;
   final AccountCommitAuthority? Function()? _memoryAccountAuthority;
@@ -299,6 +401,14 @@ class EllaUpstreamCaptureRuntime {
   CaptureProvider? _provider;
   EllaCaptureProtocolSocket? _protocolSocket;
   EllaCaptureProtocolSocket? _finalizationSocket;
+  bool _diagnosticTracked = false;
+  ({
+    EllaCaptureProtocolSocket socket,
+    int openGeneration,
+    String uid,
+    int bindingEpoch,
+    ({String uid, String profile, int generation, int presentationRevision}) profile,
+  })? _diagnosticOwner;
   int _socketOpenGeneration = 0;
   Future<CaptureProvider>? _boot;
   StreamSubscription<EllaCaptureRevocation>? _revocationSubscription;
@@ -361,16 +471,17 @@ class EllaUpstreamCaptureRuntime {
           geolocation,
         }) async {
           if (_finalizationSocket != null) return null;
-          final openGeneration = ++_socketOpenGeneration;
           final previous = _protocolSocket;
+          final opening = _beginSocketOpen(
+            previous,
+            force: force,
+            codec: codec,
+            sampleRate: sampleRate,
+            clientConversationId: clientConversationId,
+          );
+          final openGeneration = opening.openGeneration;
+          if (opening.reused != null) return opening.reused;
           if (previous != null) {
-            if (previous.state == SocketServiceState.connected &&
-                !force &&
-                previous.codec == codec &&
-                previous.sampleRate == sampleRate &&
-                previous.clientConversationId == clientConversationId) {
-              return previous;
-            }
             await previous.stop(reason: 'capture socket replaced');
             if (openGeneration != _socketOpenGeneration) return null;
           }
@@ -396,6 +507,7 @@ class EllaUpstreamCaptureRuntime {
             onAdmissionFailure: (reason, closeCode) => _onCaptureProtocolFailure(socket, reason, closeCode),
           );
           _protocolSocket = socket;
+          _trackDiagnosticSocket(socket, openGeneration);
           await socket.start();
           return openGeneration == _socketOpenGeneration && socket.state == SocketServiceState.connected
               ? socket
@@ -541,6 +653,7 @@ class EllaUpstreamCaptureRuntime {
   Future<void> get pendingTeardown => _teardown;
 
   void _onRevoked(EllaCaptureRevocation revocation) {
+    _diagnosticOwner = null;
     memoryBridge.cancel();
     lastRevocation.value = revocation;
     // Frames are already refused synchronously by the gate; this only stops

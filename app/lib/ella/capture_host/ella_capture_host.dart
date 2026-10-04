@@ -79,6 +79,43 @@ enum EllaCaptureSocketFailureReason {
   final String code;
 }
 
+enum EllaCaptureSocketAttemptStatus { pending, ready, failed }
+
+enum EllaCaptureSocketAttemptPhase {
+  connecting('connecting'),
+  transportConnected('transport_connected'),
+  captureReady('capture_ready'),
+  transportUnavailable('transport_unavailable'),
+  originRetired('origin_retired'),
+  readyUnavailable('ready_unavailable'),
+  invalidReady('invalid_ready'),
+  closedBeforeReady('closed_before_ready'),
+  closedAfterReady('closed_after_ready'),
+  socketError('socket_error');
+
+  const EllaCaptureSocketAttemptPhase(this.code);
+  final String code;
+}
+
+/// One in-memory, content-free state for the current socket attempt only.
+class EllaCaptureSocketAttempt {
+  EllaCaptureSocketAttempt(this.phase, int? closeCode, DateTime at)
+      : closeCode = closeCode != null && closeCode >= 1000 && closeCode <= 4999 ? closeCode : null,
+        at = at.toUtc();
+
+  final EllaCaptureSocketAttemptPhase phase;
+  final int? closeCode;
+  final DateTime at;
+
+  EllaCaptureSocketAttemptStatus get status => switch (phase) {
+        EllaCaptureSocketAttemptPhase.connecting ||
+        EllaCaptureSocketAttemptPhase.transportConnected =>
+          EllaCaptureSocketAttemptStatus.pending,
+        EllaCaptureSocketAttemptPhase.captureReady => EllaCaptureSocketAttemptStatus.ready,
+        _ => EllaCaptureSocketAttemptStatus.failed,
+      };
+}
+
 /// Content-free support metadata. Unknown reasons and invalid codes are omitted.
 class EllaCaptureSocketFailure {
   const EllaCaptureSocketFailure(this.reason, this.closeCode, this.at);
@@ -103,13 +140,15 @@ class EllaCaptureDiagnosticsSnapshot {
         ready = false,
         receivedBytes = null,
         sentBytes = null,
-        lastFailure = null;
+        lastFailure = null,
+        lastAttempt = null;
 
   const EllaCaptureDiagnosticsSnapshot.upstream({
     required this.ready,
     required this.receivedBytes,
     required this.sentBytes,
     this.lastFailure,
+    this.lastAttempt,
   }) : initialized = true;
 
   final bool initialized;
@@ -117,6 +156,7 @@ class EllaCaptureDiagnosticsSnapshot {
   final int? receivedBytes;
   final int? sentBytes;
   final EllaCaptureSocketFailure? lastFailure;
+  final EllaCaptureSocketAttempt? lastAttempt;
 }
 
 class EllaCaptureHost {

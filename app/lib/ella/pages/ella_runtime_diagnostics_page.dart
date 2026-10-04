@@ -53,6 +53,8 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
 
   String _time(DateTime? value) => value?.toLocal().toIso8601String() ?? context.l10n.unknown;
 
+  String _utcTime(DateTime value) => value.toUtc().toIso8601String();
+
   String _transcriptionSocketState(String state) => switch (state) {
         'connected' => context.l10n.connected,
         'disconnected' => context.l10n.disconnected,
@@ -172,9 +174,11 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
               if (upstream != null)
                 _DiagnosticRow(
                   label: context.l10n.diagnosticsSocketAdmission,
-                  value: upstream.lastFailure == null
-                      ? context.l10n.unknown
-                      : '${upstream.lastFailure!.reason.code} · ${upstream.lastFailure!.closeCode ?? '-'}\n${_time(upstream.lastFailure!.at)}',
+                  value: upstream.lastAttempt != null
+                      ? '${upstream.lastAttempt!.phase.code} · ${upstream.lastAttempt!.status.name} · ${upstream.lastAttempt!.closeCode ?? context.l10n.unknown}\n${_utcTime(upstream.lastAttempt!.at)}'
+                      : upstream.lastFailure == null
+                          ? context.l10n.unknown
+                          : '${upstream.lastFailure!.reason.code} · ${upstream.lastFailure!.closeCode ?? '-'}\n${_utcTime(upstream.lastFailure!.at)}',
                 ),
               const SizedBox(height: 6),
               _DiagnosticRow(

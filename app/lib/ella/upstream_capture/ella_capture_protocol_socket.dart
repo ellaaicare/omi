@@ -75,6 +75,8 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
 
   @override
   Future start() async {
+    _lastAttempt = EllaCaptureSocketAttempt(EllaCaptureSocketAttemptPhase.connecting, null, DateTime.now());
+    _lastAdmissionFailure = null;
     if (!_hasOriginAuthority()) {
       _fail('capture_origin_retired');
       return;
@@ -87,10 +89,19 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
     _pendingDrain = null;
     _retiredConversationIds.clear();
     final waiter = _readyWaiter = Completer<bool>();
-    await super.start();
-    if (socket.status != PureSocketStatus.connected || !_hasOriginAuthority()) {
-      _fail('transport_connect_failed');
+    try {
+      await super.start();
+    } catch (_) {
+      _lastAttempt = EllaCaptureSocketAttempt(EllaCaptureSocketAttemptPhase.transportUnavailable, null, DateTime.now());
+      rethrow;
+    }
+    if (!_hasOriginAuthority()) {
+      _fail('capture_origin_retired');
       if (socket.status == PureSocketStatus.connected) await stop();
+      return;
+    }
+    if (socket.status != PureSocketStatus.connected) {
+      _fail('transport_connect_failed');
       return;
     }
     if (!await waiter.future.timeout(_timeout, onTimeout: () => false) || state != SocketServiceState.connected) {
@@ -116,6 +127,7 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
 
   Future<void> _stop(String? reason) async {
     _stopping = true;
+    if (!_failed) _lastAttempt = null;
     final canDrain = _ready && _hasOriginAuthority() && socket.status == PureSocketStatus.connected;
     _ready = false;
     final authority = _authority;
@@ -143,6 +155,9 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
   @override
   void onConnected() {
     // A transport handshake is not capture authority.
+    if (!_failed && !_stopping && _hasOriginAuthority()) {
+      _lastAttempt = EllaCaptureSocketAttempt(EllaCaptureSocketAttemptPhase.transportConnected, null, DateTime.now());
+    }
   }
 
   @override
@@ -186,6 +201,7 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
           _authority = next;
           final firstReady = !_ready;
           _ready = true;
+          _lastAttempt = EllaCaptureSocketAttempt(EllaCaptureSocketAttemptPhase.captureReady, null, DateTime.now());
           if (!(_readyWaiter?.isCompleted ?? true)) _readyWaiter!.complete(true);
           if (firstReady) super.onConnected();
         } else if (status == 'capture_protocol_drained') {
@@ -227,6 +243,16 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
     if (_failed || _stopping) return;
     _failed = true;
     _lastAdmissionFailure = EllaCaptureSocketFailure.fromReason(reason, closeCode, DateTime.now());
+    final phase = switch (reason) {
+      'capture_origin_retired' => EllaCaptureSocketAttemptPhase.originRetired,
+      'transport_connect_failed' => EllaCaptureSocketAttemptPhase.transportUnavailable,
+      'capture_protocol_ready_unavailable' => EllaCaptureSocketAttemptPhase.readyUnavailable,
+      'invalid_capture_protocol_ready' => EllaCaptureSocketAttemptPhase.invalidReady,
+      'capture_socket_closed_before_ready' => EllaCaptureSocketAttemptPhase.closedBeforeReady,
+      'capture_socket_closed' => EllaCaptureSocketAttemptPhase.closedAfterReady,
+      _ => EllaCaptureSocketAttemptPhase.socketError,
+    };
+    _lastAttempt = EllaCaptureSocketAttempt(phase, closeCode, DateTime.now());
     _ready = false;
     _completeWaiters();
     unawaited(
@@ -240,6 +266,8 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
 
   EllaCaptureSocketFailure? _lastAdmissionFailure;
   EllaCaptureSocketFailure? get lastAdmissionFailure => _lastAdmissionFailure;
+  EllaCaptureSocketAttempt? _lastAttempt;
+  EllaCaptureSocketAttempt? get lastAttempt => _lastAttempt;
 
   static ella_socket.CaptureProtocolAuthority? _readAuthority(Map<dynamic, dynamic> message) {
     final conversationId = message['conversation_id'];
