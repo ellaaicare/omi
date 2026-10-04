@@ -1,3 +1,4 @@
+import ast
 import asyncio
 import importlib.util
 import json
@@ -11,6 +12,8 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import List
 from unittest.mock import MagicMock, patch
+
+from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 BACKEND = Path(__file__).resolve().parents[2]
 
@@ -38,11 +41,14 @@ def _cell(value):
     return (lambda: value).__closure__[0]
 
 
-def _nested_function(relative_path: str, name: str, globals_: dict, closure_values: dict, *, argdefs=None):
+def _nested_function(
+    relative_path: str, name: str, globals_: dict, closure_values: dict, *, argdefs=None, shared_cells=None
+):
     code = _nested_code(relative_path, name)
     missing = set(code.co_freevars) - set(closure_values)
     assert not missing, f"missing closure values for {name}: {sorted(missing)}"
-    closure = tuple(_cell(closure_values[freevar]) for freevar in code.co_freevars)
+    shared_cells = shared_cells or {}
+    closure = tuple(shared_cells.get(freevar, _cell(closure_values[freevar])) for freevar in code.co_freevars)
     return types.FunctionType(code, {"__builtins__": __builtins__, **globals_}, name, argdefs, closure)
 
 
@@ -1256,6 +1262,7 @@ def test_production_reconnect_path_does_not_let_overlapping_socket_steal_authori
                 "generation_id": generation_id,
                 "session_id": session_id,
                 "uid": "uid-a",
+                "websocket_active": True,
             },
         )
 
@@ -1404,6 +1411,276 @@ def test_undelivered_capture_ready_does_not_release_after_authority_drift():
         is False
     )
     assert releases == []
+
+
+def _ready_admission_harness(send_error=None):
+    calls = []
+    diagnostics = []
+    socket = SimpleNamespace(client_state=WebSocketState.CONNECTED, application_state=WebSocketState.CONNECTED)
+
+    async def send_json(_payload):
+        calls.append(('send',))
+        if send_error is not None:
+            raise send_error
+
+    async def close(**options):
+        calls.append(('close', options['code']))
+
+    socket.send_json = send_json
+    socket.close = close
+
+    class Conversation:
+        def __init__(self, **values):
+            self.values = values
+
+        def dict(self):
+            return dict(self.values)
+
+    class ReadyEvent:
+        event_type = 'service_status'
+
+        def __init__(self, **values):
+            self.__dict__.update(values)
+
+        def to_json(self):
+            return {'private_body': 'never-log-event-body', **self.__dict__}
+
+    def record(name, result=True):
+        def operation(*args, **kwargs):
+            calls.append((name, args, kwargs))
+            return result
+
+        return operation
+
+    redis = SimpleNamespace(
+        get_in_progress_conversation_id=record('retrieve', ''),
+        claim_in_progress_conversation_id=record('claim'),
+        release_owned_in_progress_conversation_id=record('release'),
+    )
+    values = {
+        '_latency_log': lambda *_args, **_kwargs: None,
+        'capture_recovery_conversation_ids': set(),
+        'conversation_creation_timeout': 120,
+        'current_conversation_id': None,
+        'delivery_correlation': '0123456789abcdef',
+        'generation_id': 'generation-a',
+        'language': 'en',
+        'owner_token': 'private-owner-token',
+        'private_cloud_sync_enabled': False,
+        'session_id': 'private-session',
+        'source': None,
+        'uid': 'private-uid',
+        'websocket': socket,
+        'websocket_active': True,
+        'websocket_close_code': 1000,
+    }
+    shared_cells = {name: _cell(value) for name, value in values.items()}
+    globals_ = {
+        'CAPTURE_PROTOCOL_VERSION': 2,
+        'CaptureReconnectAuthorityBusy': CaptureReconnectAuthorityBusy,
+        'Conversation': Conversation,
+        'ConversationSource': SimpleNamespace(omi='omi', desktop='desktop'),
+        'ConversationStatus': SimpleNamespace(in_progress='in_progress'),
+        'MessageServiceStatusEvent': ReadyEvent,
+        'Structured': dict,
+        'WebSocketDisconnect': WebSocketDisconnect,
+        'WebSocketState': WebSocketState,
+        'asyncio': asyncio,
+        'conversations_db': SimpleNamespace(upsert_conversation=record('upsert')),
+        'datetime': datetime,
+        'install_capture_authority': record('install'),
+        'json': json,
+        'mark_capture_drained': record('drain'),
+        'print': lambda *args, **_kwargs: diagnostics.append(' '.join(str(arg) for arg in args)),
+        'redis_db': redis,
+        'retrieve_in_progress_conversation': lambda _uid: None,
+        'timezone': timezone,
+        'uuid': SimpleNamespace(uuid4=lambda: f'conversation-{sum(call[0] == "upsert" for call in calls)}'),
+    }
+    globals_['_capture_send_failure_diagnostic'] = _nested_function(
+        'routers/transcribe.py', '_capture_send_failure_diagnostic', globals_, {}
+    )
+    functions = {}
+    for name in (
+        '_asend_message_event',
+        '_publish_capture_protocol_ready',
+        '_create_new_in_progress_conversation',
+        '_prepare_in_progess_conversations',
+    ):
+        function = _nested_function('routers/transcribe.py', name, globals_, values, shared_cells=shared_cells)
+        if name == '_publish_capture_protocol_ready':
+            function.__kwdefaults__ = {'expected_conversation_id': None, 'adopt': False}
+        if name == '_create_new_in_progress_conversation':
+            function.__kwdefaults__ = {
+                'expected_conversation_id': None,
+                'expected_owner_id': None,
+                'replace_stale_conversation_id': None,
+                'new_owner_id': values['session_id'],
+                'adopt': True,
+            }
+        functions[name] = function
+        values[name] = function
+        shared_cells[name] = _cell(function)
+
+    async def admit_provider():
+        # Execute the actual production pre-provider guard, not a test copy of its condition.
+        module = ast.parse((BACKEND / 'routers/transcribe.py').read_text())
+        handler = next(
+            node for node in module.body if isinstance(node, ast.AsyncFunctionDef) and node.name == '_stream_handler'
+        )
+        guard = next(
+            node
+            for node in handler.body
+            if isinstance(node, ast.If)
+            and ast.unparse(node.test) == 'not websocket_active or websocket.client_state != WebSocketState.CONNECTED'
+        )
+        admission = ast.AsyncFunctionDef(
+            name='admit',
+            args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+            body=[guard, ast.parse("provider_dispatches.append('provider')").body[0]],
+            decorator_list=[],
+        )
+        scope = {
+            **globals_,
+            **{name: cell.cell_contents for name, cell in shared_cells.items()},
+            'provider_dispatches': [],
+        }
+        exec(
+            compile(ast.fix_missing_locations(ast.Module(body=[admission], type_ignores=[])), 'admission', 'exec'),
+            scope,
+        )
+        await scope['admit']()
+        return scope['provider_dispatches']
+
+    return SimpleNamespace(
+        calls=calls, diagnostics=diagnostics, cells=shared_cells, functions=functions, admit=admit_provider
+    )
+
+
+def test_failed_ready_retires_composed_preparation_without_second_install_or_provider():
+    for error in (
+        WebSocketDisconnect(code=1006, reason='never-log-client-reason'),
+        RuntimeError('never-log-error-text'),
+    ):
+        harness = _ready_admission_harness(error)
+        assert asyncio.run(harness.functions['_prepare_in_progess_conversations']()) is None
+        assert [call[0] for call in harness.calls] == [
+            'retrieve',
+            'upsert',
+            'claim',
+            'install',
+            'send',
+            'drain',
+            'release',
+        ]
+        assert harness.calls[-2][1] == ('private-uid', 'conversation-0', 'generation-a', 'private-owner-token')
+        assert harness.calls[-1][1] == ('private-uid', 'conversation-0', 'private-owner-token')
+        assert harness.cells['websocket_active'].cell_contents is False
+        assert harness.cells['websocket_close_code'].cell_contents == 1013
+        assert asyncio.run(harness.admit()) == []
+        assert harness.calls[-1] == ('close', 1013)
+        transport = [line for line in harness.diagnostics if line.startswith('[CAPTURE-TRANSPORT]')]
+        assert len(transport) == 1
+        diagnostic = json.loads(transport[0].split(' ', 1)[1])
+        assert diagnostic['message_type'] == 'service_status'
+        assert diagnostic['status'] == 'capture_protocol_ready'
+        assert diagnostic['exception_class'] == type(error).__name__
+        assert diagnostic['correlation'] == '0123456789abcdef'
+        for secret in (
+            'private-uid',
+            'private-session',
+            'private-owner-token',
+            'never-log-client-reason',
+            'never-log-error-text',
+            'never-log-event-body',
+        ):
+            assert secret not in transport[0]
+
+
+def test_retired_admission_callbacks_do_not_reinstall_or_create_but_disconnected_successor_remains_allowed():
+    harness = _ready_admission_harness()
+    harness.cells['websocket_active'].cell_contents = False
+    assert asyncio.run(harness.functions['_prepare_in_progess_conversations']()) is None
+    assert asyncio.run(harness.functions['_publish_capture_protocol_ready']('stale')) is False
+    assert asyncio.run(harness.functions['_create_new_in_progress_conversation']()) is False
+    assert harness.calls == []
+    assert (
+        asyncio.run(harness.functions['_create_new_in_progress_conversation'](adopt=False, new_owner_id=None)) is True
+    )
+    assert [call[0] for call in harness.calls] == ['upsert', 'claim']
+
+
+def test_ready_failure_on_timed_out_candidate_stops_replacement_preparation():
+    harness = _ready_admission_harness(WebSocketDisconnect(code=1006))
+    prepare = harness.functions['_prepare_in_progess_conversations']
+    create = harness.functions['_create_new_in_progress_conversation']
+    prepare.__globals__.update(
+        {
+            'retrieve_in_progress_conversation': lambda _uid: {
+                'id': 'expired-candidate',
+                'capture_owner_id': 'expired-owner',
+                'finished_at': datetime.now(timezone.utc) - timedelta(minutes=5),
+            },
+            'claim_capture_authority_for_reconnect': lambda *_args: True,
+            'drain_capture_persistence_batches': lambda *_args: None,
+        }
+    )
+    create.__globals__['conversations_db'].transfer_capture_conversation_owner = lambda *_args: True
+    create.__globals__['redis_db'].rotate_in_progress_conversation_id = lambda *_args: True
+    assert asyncio.run(prepare()) is None
+    assert [call[0] for call in harness.calls].count('upsert') == 1
+    assert [call[0] for call in harness.calls].count('install') == 1
+    assert [call[0] for call in harness.calls].count('drain') == 1
+    assert [call[0] for call in harness.calls].count('release') == 1
+    assert asyncio.run(harness.admit()) == []
+
+
+def test_retirement_on_last_preparation_pass_does_not_report_ownership_busy():
+    harness = _ready_admission_harness()
+    attempts = []
+
+    async def conflict_then_retire(**_kwargs):
+        attempts.append(True)
+        if len(attempts) == 3:
+            harness.cells['websocket_active'].cell_contents = False
+        return False
+
+    harness.cells['_create_new_in_progress_conversation'].cell_contents = conflict_then_retire
+    assert asyncio.run(harness.functions['_prepare_in_progess_conversations']()) is None
+    assert len(attempts) == 3
+    assert not any(call[0] == 'install' for call in harness.calls)
+    assert asyncio.run(harness.admit()) == []
+
+
+def test_successful_composed_ready_admits_provider_and_keeps_single_authority():
+    harness = _ready_admission_harness()
+    assert asyncio.run(harness.functions['_prepare_in_progess_conversations']()) is None
+    assert [call[0] for call in harness.calls] == ['retrieve', 'upsert', 'claim', 'install', 'send']
+    assert asyncio.run(harness.admit()) == ['provider']
+    assert harness.cells['websocket_active'].cell_contents is True
+    assert not any(line.startswith('[CAPTURE-TRANSPORT]') for line in harness.diagnostics)
+
+
+def test_send_diagnostic_rejects_untrusted_types_status_codes_and_states():
+    diagnostic = _nested_function(
+        'routers/transcribe.py', '_capture_send_failure_diagnostic', {'WebSocketState': WebSocketState}, {}
+    )
+    error = type('never-log-private-class', (RuntimeError,), {})('never-log-error-text')
+    error.code = 4999
+    error.reason = 'never-log-client-reason'
+    msg = SimpleNamespace(event_type='never-log-event', status='never-log-status')
+    socket = SimpleNamespace(client_state='never-log-state', application_state='never-log-state')
+    result = diagnostic(msg, error, socket, active=False)
+    assert result == {
+        'message_type': 'other',
+        'status': None,
+        'exception_class': 'OtherError',
+        'close_code': None,
+        'websocket_client_state': 'UNKNOWN',
+        'websocket_application_state': 'UNKNOWN',
+        'websocket_active': False,
+    }
+    assert 'never-log' not in json.dumps(result)
 
 
 def test_reconnect_conflict_is_converted_to_typed_temporary_close():
@@ -1729,6 +2006,7 @@ def test_production_reconnect_rotates_expired_drained_candidate_behind_terminal_
             "generation_id": "replacement-generation",
             "session_id": "replacement-owner",
             "uid": "uid-a",
+            "websocket_active": True,
         },
     )
 
@@ -1990,6 +2268,7 @@ def test_production_reconnect_adopts_owner_bound_legacy_successor_behind_expired
             "generation_id": "replacement-generation",
             "session_id": "replacement-owner",
             "uid": "uid-a",
+            "websocket_active": True,
         },
     )
 
