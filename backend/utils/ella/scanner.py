@@ -19,6 +19,7 @@ import requests
 from database.ella_postgres import create_dedicated_ella_postgres_pool
 from database.honcho_attestation import authority_credential
 from ella.services import guardian_echo_classifier, guardian_playback_ledger
+from utils.conversations import spoken_diagnostic
 
 from .config import ELLA_CONFIG
 
@@ -1508,8 +1509,6 @@ def send_to_scanner(
             return None
 
     diagnostic_claim = None
-    from utils.conversations import spoken_diagnostic
-
     if (
         emergency_reason is None
         and not formatted_recent_segments
