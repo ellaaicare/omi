@@ -154,23 +154,26 @@ void main() {
 
   test('a current socket transcript remains available after ordinary same-origin stop', () async {
     expect(await harness.bind(accountA), isTrue);
-    await harness.startPhone();
+    const phaseTimeout = Duration(seconds: 10);
+    final startPhone = harness.startPhone();
+    await requestStarted.future.timeout(phaseTimeout);
+    response.complete(null);
+    await requestFinished.future.timeout(phaseTimeout);
+    await startPhone.timeout(phaseTimeout);
+
     final recordingId = harness.provider.activeRecordingId;
     expect(recordingId, isNotNull);
     expect(harness.sockets.last.service.clientConversationId, recordingId);
-    response.complete(null);
 
     harness.socket!.emitServerMessage(
       '[{"id":"current-segment","text":"same-origin transcript","speaker":"SPEAKER_0",'
       '"is_user":false,"start":0.0,"end":1.0}]',
     );
-    await requestStarted.future;
-    await requestFinished.future;
-    await harness.settle();
+    await harness.settle().timeout(phaseTimeout);
     expect(harness.provider.segments.single.text, 'same-origin transcript');
 
-    expect(await harness.provider.stopStreamRecording(), isTrue);
-    await harness.settle();
+    expect(await harness.provider.stopStreamRecording().timeout(phaseTimeout), isTrue);
+    await harness.settle().timeout(phaseTimeout);
     expect(harness.authority.boundUid, accountA);
     expect(harness.provider.segments.single.text, 'same-origin transcript');
   });
