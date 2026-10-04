@@ -156,9 +156,42 @@ jobs:
               bounded_count = str(count) if count < 10 else '10+'
               return tuple(sorted(categories)), bounded_count
 
-          def blocked_environment_message(keys):
-              categories, count = blocked_environment_marker(keys)
-              return f'Blocked environment marker: categories={",".join(categories)}; matches={count}; diagnostics blocked.'
+          def blocked_ssh_markers(environment):
+              markers = set()
+              agent_socket = 'ABSENT'
+              for key, value in environment.items():
+                  name = key.upper()
+                  if not name.startswith('SSH_'):
+                      continue
+                  if name == 'SSH_CLIENT':
+                      markers.add('CLIENT_METADATA')
+                  elif name == 'SSH_CONNECTION':
+                      markers.add('CONNECTION_METADATA')
+                  elif name == 'SSH_TTY':
+                      markers.add('TTY_METADATA')
+                  elif name == 'SSH_AUTH_SOCK':
+                      markers.add('AGENT_SOCKET_MARKER')
+                      if value:
+                          agent_socket = 'NONEMPTY'
+                      elif agent_socket == 'ABSENT':
+                          agent_socket = 'EMPTY'
+                  elif name == 'SSH_AGENT_PID':
+                      markers.add('AGENT_PID_MARKER')
+                  elif name.startswith('SSH_ASKPASS'):
+                      markers.add('ASKPASS_MARKER')
+                  elif name == 'SSH_TUNNEL':
+                      markers.add('TUNNEL_MARKER')
+                  else:
+                      markers.add('OTHER_SSH_MARKER')
+              return tuple(sorted(markers)), agent_socket
+
+          def blocked_environment_message(environment):
+              categories, count = blocked_environment_marker(environment)
+              ssh_markers, agent_socket = blocked_ssh_markers(environment)
+              return (
+                  f'Blocked environment marker: categories={",".join(categories)}; matches={count}; '
+                  f'ssh_markers={",".join(ssh_markers) or "NONE"}; agent_socket={agent_socket}; diagnostics blocked.'
+              )
 
           for fixture in ((), ('safe_marker',), ('asc_sample',), ('ASC_ONE', 'asc_two', 'openai_sample'),
                           ('aws_sample', 'AZURE_SAMPLE', 'DATABASE_URL', 'SSH_SAMPLE', 'VPN_SAMPLE', 'A_PROXY')):
@@ -170,7 +203,23 @@ jobs:
               ('SSH', 'cloud', 'datastore', 'private_route', 'provider', 'proxy'), '6'
           )
           assert blocked_environment_marker(tuple(f'ASC_SAMPLE_{i}' for i in range(11))) == (('signing',), '10+')
-          assert 'SENTINEL_SHOULD_NOT_APPEAR' not in blocked_environment_message(('ASC_SENTINEL_SHOULD_NOT_APPEAR',))
+          assert blocked_ssh_markers({}) == ((), 'ABSENT')
+          assert blocked_ssh_markers({'ssh_auth_sock': ''}) == (('AGENT_SOCKET_MARKER',), 'EMPTY')
+          assert blocked_ssh_markers({'SSH_AUTH_SOCK': 'synthetic'}) == (('AGENT_SOCKET_MARKER',), 'NONEMPTY')
+          assert blocked_ssh_markers({'ssh_auth_sock': 'synthetic', 'SSH_AUTH_SOCK': ''}) == (
+              ('AGENT_SOCKET_MARKER',), 'NONEMPTY'
+          )
+          assert blocked_ssh_markers({'SSH_CLIENT': 'synthetic', 'SSH_CONNECTION': 'synthetic',
+                                      'SSH_TTY': 'synthetic', 'SSH_AGENT_PID': 'synthetic',
+                                      'SSH_ASKPASS': 'synthetic', 'SSH_TUNNEL': 'synthetic',
+                                      'SSH_UNKNOWN': 'synthetic'}) == (
+              ('AGENT_PID_MARKER', 'ASKPASS_MARKER', 'CLIENT_METADATA', 'CONNECTION_METADATA',
+               'OTHER_SSH_MARKER', 'TTY_METADATA', 'TUNNEL_MARKER'), 'ABSENT'
+          )
+          assert 'SENTINEL_SHOULD_NOT_APPEAR' not in blocked_environment_message({
+              'SSH_UNKNOWN_SENTINEL_SHOULD_NOT_APPEAR': 'SENTINEL_SHOULD_NOT_APPEAR',
+              'SSH_AUTH_SOCK': 'SENTINEL_SHOULD_NOT_APPEAR',
+          })
 
           if any(forbidden.match(key.upper()) for key in os.environ):
               raise SystemExit(blocked_environment_message(os.environ))
