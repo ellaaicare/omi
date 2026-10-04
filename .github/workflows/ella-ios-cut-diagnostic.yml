@@ -1,0 +1,688 @@
+name: Ella iOS cut 709 diagnostic gates
+
+on:
+  pull_request:
+    branches:
+      - release/testflight-850-necklace-recovery
+    paths:
+      - .github/workflows/ella-ios-cut-diagnostic.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ella-ios-cut-709-diagnostic-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  cut-diagnostics:
+    name: Immutable cut 709 source diagnostics (expected red)
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      ELLA_CI_FLUTTER_VERSION: 3.41.1
+      ELLA_EXPECTED_HEAD_SHA: e4e4fd5ffe66deec6224ba85fe63e146c6659ebc
+      ELLA_EXPECTED_TREE_SHA: 402fe36803a6feb49454a77ff95bee5bbae6887d
+      ELLA_EXPECTED_BASE_SHA: 62fa955aabd87160096006787eecf4974efcfaae
+      ELLA_CI_BOUNDARY_MARKER: |
+        import os
+        import re
+        import sys
+
+        boundaries = (
+            'BASELINE', 'AFTER_TARGET_CHECKOUT', 'AFTER_FLUTTER_SETUP',
+            'AFTER_FLUTTER_VERSION', 'AFTER_DEPENDENCIES',
+        )
+        if len(sys.argv) != 2 or sys.argv[1] not in boundaries:
+            raise SystemExit('Invalid fixed boundary marker; diagnostics blocked.')
+
+        forbidden = re.compile(
+            r'^(ASC_|AWS_|AZURE_|GOOGLE_APPLICATION_CREDENTIALS$|DATABASE_URL$|REDIS_URL$|'
+            r'OPENAI_|FIREBASE_|SSH_|TAILSCALE_|VPN_|TUNNEL_|.*_PROXY$|PROXY_)'
+        )
+
+        def blocked_environment_marker(keys):
+            categories = set()
+            count = 0
+            for key in keys:
+                name = key.upper()
+                if not forbidden.match(name):
+                    continue
+                count += 1
+                if name.startswith('ASC_'):
+                    categories.add('signing')
+                elif name.startswith(('AWS_', 'AZURE_')) or name == 'GOOGLE_APPLICATION_CREDENTIALS':
+                    categories.add('cloud')
+                elif name in ('DATABASE_URL', 'REDIS_URL'):
+                    categories.add('datastore')
+                elif name.startswith(('OPENAI_', 'FIREBASE_')):
+                    categories.add('provider')
+                elif name.startswith('SSH_'):
+                    categories.add('SSH')
+                elif name.startswith(('TAILSCALE_', 'VPN_', 'TUNNEL_')):
+                    categories.add('private_route')
+                else:
+                    categories.add('proxy')
+            bounded_count = str(count) if count < 10 else '10+'
+            return tuple(sorted(categories)), bounded_count
+
+        def blocked_ssh_markers(environment):
+            markers = set()
+            agent_socket = 'ABSENT'
+            for key, value in environment.items():
+                name = key.upper()
+                if not name.startswith('SSH_'):
+                    continue
+                if name == 'SSH_CLIENT':
+                    markers.add('CLIENT_METADATA')
+                elif name == 'SSH_CONNECTION':
+                    markers.add('CONNECTION_METADATA')
+                elif name == 'SSH_TTY':
+                    markers.add('TTY_METADATA')
+                elif name == 'SSH_AUTH_SOCK':
+                    markers.add('AGENT_SOCKET_MARKER')
+                    if value:
+                        agent_socket = 'NONEMPTY'
+                    elif agent_socket == 'ABSENT':
+                        agent_socket = 'EMPTY'
+                elif name == 'SSH_AGENT_PID':
+                    markers.add('AGENT_PID_MARKER')
+                elif name.startswith('SSH_ASKPASS'):
+                    markers.add('ASKPASS_MARKER')
+                elif name == 'SSH_TUNNEL':
+                    markers.add('TUNNEL_MARKER')
+                else:
+                    markers.add('OTHER_SSH_MARKER')
+            return tuple(sorted(markers)), agent_socket
+
+        categories, count = blocked_environment_marker(os.environ)
+        ssh_markers, agent_socket = blocked_ssh_markers(os.environ)
+        print(
+            f'BOUNDARY_MARKER boundary={sys.argv[1]} categories={",".join(categories) or "NONE"}; '
+            f'matches={count}; ssh_markers={",".join(ssh_markers) or "NONE"}; '
+            f'agent_socket={agent_socket}',
+            flush=True,
+        )
+        if categories:
+            raise SystemExit('Boundary marker found blocked environment; diagnostics blocked.')
+      ELLA_CI_NETWORK_SANDBOX: >-
+        (version 1) (allow default) (deny network*)
+        (allow network-inbound (local ip "localhost:*"))
+        (allow network-outbound (remote ip "localhost:*"))
+    defaults:
+      run:
+        shell: bash
+        working-directory: target-source/app
+
+    steps:
+      - name: Checkout reviewable workflow-only PR
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: workflow-source
+
+      - name: Verify workflow-only PR provenance
+        id: workflow_scope
+        working-directory: workflow-source
+        env:
+          ELLA_WORKFLOW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ELLA_WORKFLOW_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          ELLA_WORKFLOW_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          ELLA_WORKFLOW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          ELLA_WORKFLOW_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == pull_request && "$RUNNER_OS" == macOS ]]
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]
+          [[ "$GITHUB_REPOSITORY" == ellaaicare/omi && "$ELLA_WORKFLOW_HEAD_REPO" == ellaaicare/omi ]]
+          [[ "$ELLA_WORKFLOW_HEAD_REF" == codex/709-hosted-diagnostics ]]
+          [[ "$ELLA_WORKFLOW_BASE_REF" == release/testflight-850-necklace-recovery ]]
+          [[ "$ELLA_WORKFLOW_BASE_SHA" == "$ELLA_EXPECTED_BASE_SHA" ]]
+          [[ "$ELLA_WORKFLOW_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$ELLA_WORKFLOW_HEAD_SHA" ]]
+          [[ "$(git cat-file -t "$ELLA_EXPECTED_BASE_SHA")" == commit ]]
+          git merge-base --is-ancestor "$ELLA_EXPECTED_BASE_SHA" HEAD
+          [[ "$(git diff --name-status --no-renames "$ELLA_EXPECTED_BASE_SHA" HEAD)" == $'A\t.github/workflows/ella-ios-cut-diagnostic.yml' ]]
+          [[ -z "${ASC_KEY_ID:-}${ASC_ISSUER_ID:-}${ASC_KEY_PATH:-}${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}${SSH_AUTH_SOCK:-}${TAILSCALE_AUTHKEY:-}" ]]
+          git diff --check "$ELLA_EXPECTED_BASE_SHA" HEAD
+
+      - name: Mark baseline after workflow provenance
+        working-directory: workflow-source
+        run: |
+          set -euo pipefail
+          marker_sha="$(printf '%s' "$ELLA_CI_BOUNDARY_MARKER" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')"
+          [[ "$marker_sha" == e55904f56f659ba7d15691124aa061b019f1fe660de7bc4be681ea5739805c53 ]] || {
+            echo 'Boundary marker integrity failed; diagnostics blocked.' >&2
+            exit 1
+          }
+          /usr/bin/python3 -c "$ELLA_CI_BOUNDARY_MARKER" BASELINE
+
+      - name: Checkout immutable cut 709 source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: e4e4fd5ffe66deec6224ba85fe63e146c6659ebc
+          fetch-depth: 0
+          persist-credentials: false
+          path: target-source
+
+      - name: Mark boundary after target checkout
+        run: |
+          set -euo pipefail
+          marker_sha="$(printf '%s' "$ELLA_CI_BOUNDARY_MARKER" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')"
+          [[ "$marker_sha" == e55904f56f659ba7d15691124aa061b019f1fe660de7bc4be681ea5739805c53 ]] || {
+            echo 'Boundary marker integrity failed; diagnostics blocked.' >&2
+            exit 1
+          }
+          /usr/bin/python3 -c "$ELLA_CI_BOUNDARY_MARKER" AFTER_TARGET_CHECKOUT
+
+      - name: Verify immutable cut head, tree, base, and two-file delta
+        id: target_identity
+        working-directory: target-source
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$ELLA_EXPECTED_HEAD_SHA" ]]
+          [[ "$(git rev-parse HEAD^{tree})" == "$ELLA_EXPECTED_TREE_SHA" ]]
+          [[ "$(git rev-parse HEAD^)" == "$ELLA_EXPECTED_BASE_SHA" ]]
+          git diff --check "$ELLA_EXPECTED_BASE_SHA" HEAD
+          git diff --name-only "$ELLA_EXPECTED_BASE_SHA" HEAD > /tmp/ella-ios-source-ci-changed-files.txt
+          expected_paths=$'app/ios/Flutter/EllaUpstreamCapture.xcconfig\napp/pubspec.yaml'
+          [[ "$(cat /tmp/ella-ios-source-ci-changed-files.txt)" == "$expected_paths" ]]
+          printf '%s\n' "$ELLA_EXPECTED_HEAD_SHA" > /tmp/ella-ios-source-ci-head-sha.txt
+          printf '%s\n' "$ELLA_EXPECTED_BASE_SHA" > /tmp/ella-ios-source-ci-base-ref.txt
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.ELLA_CI_FLUTTER_VERSION }}
+          channel: stable
+          cache: false
+
+      - name: Mark boundary after Flutter setup
+        run: |
+          set -euo pipefail
+          marker_sha="$(printf '%s' "$ELLA_CI_BOUNDARY_MARKER" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')"
+          [[ "$marker_sha" == e55904f56f659ba7d15691124aa061b019f1fe660de7bc4be681ea5739805c53 ]] || {
+            echo 'Boundary marker integrity failed; diagnostics blocked.' >&2
+            exit 1
+          }
+          /usr/bin/python3 -c "$ELLA_CI_BOUNDARY_MARKER" AFTER_FLUTTER_SETUP
+
+      - name: Verify pinned Flutter version
+        run: |
+          set -euo pipefail
+
+          expected_flutter_version="$ELLA_CI_FLUTTER_VERSION"
+          actual_flutter_version="$(flutter --version | sed -n 's/^Flutter \([^ ]*\).*/\1/p')"
+          if [[ "$actual_flutter_version" != "$expected_flutter_version" ]]; then
+            echo "Ella source CI must pin Flutter $expected_flutter_version, found $actual_flutter_version." >&2
+            exit 1
+          fi
+
+          flutter --version
+          dart --version
+
+      - name: Mark boundary after Flutter version verification
+        run: |
+          set -euo pipefail
+          marker_sha="$(printf '%s' "$ELLA_CI_BOUNDARY_MARKER" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')"
+          [[ "$marker_sha" == e55904f56f659ba7d15691124aa061b019f1fe660de7bc4be681ea5739805c53 ]] || {
+            echo 'Boundary marker integrity failed; diagnostics blocked.' >&2
+            exit 1
+          }
+          /usr/bin/python3 -c "$ELLA_CI_BOUNDARY_MARKER" AFTER_FLUTTER_VERSION
+
+      - name: Resolve pinned Dart dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Mark boundary after dependency resolution
+        run: |
+          set -euo pipefail
+          marker_sha="$(printf '%s' "$ELLA_CI_BOUNDARY_MARKER" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')"
+          [[ "$marker_sha" == e55904f56f659ba7d15691124aa061b019f1fe660de7bc4be681ea5739805c53 ]] || {
+            echo 'Boundary marker integrity failed; diagnostics blocked.' >&2
+            exit 1
+          }
+          /usr/bin/python3 -c "$ELLA_CI_BOUNDARY_MARKER" AFTER_DEPENDENCIES
+
+      - name: Inventory hosted runner and prove test-local IPC with external denial
+        id: isolation
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import errno
+          import os
+          import re
+          import socket
+          import subprocess
+          import sys
+
+          forbidden = re.compile(
+              r'^(ASC_|AWS_|AZURE_|GOOGLE_APPLICATION_CREDENTIALS$|DATABASE_URL$|REDIS_URL$|'
+              r'OPENAI_|FIREBASE_|SSH_|TAILSCALE_|VPN_|TUNNEL_|.*_PROXY$|PROXY_)'
+          )
+
+          def blocked_environment_marker(keys):
+              categories = set()
+              count = 0
+              for key in keys:
+                  name = key.upper()
+                  if not forbidden.match(name):
+                      continue
+                  count += 1
+                  if name.startswith('ASC_'):
+                      categories.add('signing')
+                  elif name.startswith(('AWS_', 'AZURE_')) or name == 'GOOGLE_APPLICATION_CREDENTIALS':
+                      categories.add('cloud')
+                  elif name in ('DATABASE_URL', 'REDIS_URL'):
+                      categories.add('datastore')
+                  elif name.startswith(('OPENAI_', 'FIREBASE_')):
+                      categories.add('provider')
+                  elif name.startswith('SSH_'):
+                      categories.add('SSH')
+                  elif name.startswith(('TAILSCALE_', 'VPN_', 'TUNNEL_')):
+                      categories.add('private_route')
+                  else:
+                      categories.add('proxy')
+              bounded_count = str(count) if count < 10 else '10+'
+              return tuple(sorted(categories)), bounded_count
+
+          def blocked_ssh_markers(environment):
+              markers = set()
+              agent_socket = 'ABSENT'
+              for key, value in environment.items():
+                  name = key.upper()
+                  if not name.startswith('SSH_'):
+                      continue
+                  if name == 'SSH_CLIENT':
+                      markers.add('CLIENT_METADATA')
+                  elif name == 'SSH_CONNECTION':
+                      markers.add('CONNECTION_METADATA')
+                  elif name == 'SSH_TTY':
+                      markers.add('TTY_METADATA')
+                  elif name == 'SSH_AUTH_SOCK':
+                      markers.add('AGENT_SOCKET_MARKER')
+                      if value:
+                          agent_socket = 'NONEMPTY'
+                      elif agent_socket == 'ABSENT':
+                          agent_socket = 'EMPTY'
+                  elif name == 'SSH_AGENT_PID':
+                      markers.add('AGENT_PID_MARKER')
+                  elif name.startswith('SSH_ASKPASS'):
+                      markers.add('ASKPASS_MARKER')
+                  elif name == 'SSH_TUNNEL':
+                      markers.add('TUNNEL_MARKER')
+                  else:
+                      markers.add('OTHER_SSH_MARKER')
+              return tuple(sorted(markers)), agent_socket
+
+          def blocked_environment_message(environment):
+              categories, count = blocked_environment_marker(environment)
+              ssh_markers, agent_socket = blocked_ssh_markers(environment)
+              return (
+                  f'Blocked environment marker: categories={",".join(categories)}; matches={count}; '
+                  f'ssh_markers={",".join(ssh_markers) or "NONE"}; agent_socket={agent_socket}; diagnostics blocked.'
+              )
+
+          for fixture in ((), ('safe_marker',), ('asc_sample',), ('ASC_ONE', 'asc_two', 'openai_sample'),
+                          ('aws_sample', 'AZURE_SAMPLE', 'DATABASE_URL', 'SSH_SAMPLE', 'VPN_SAMPLE', 'A_PROXY')):
+              categories, count = blocked_environment_marker(fixture)
+              assert (count != '0') == any(forbidden.match(key.upper()) for key in fixture)
+          assert blocked_environment_marker(('asc_one', 'ASC_TWO')) == (('signing',), '2')
+          assert blocked_environment_marker(('aws_sample', 'DATABASE_URL', 'OPENAI_SAMPLE', 'ssh_sample',
+                                             'VPN_SAMPLE', 'A_PROXY')) == (
+              ('SSH', 'cloud', 'datastore', 'private_route', 'provider', 'proxy'), '6'
+          )
+          assert blocked_environment_marker(tuple(f'ASC_SAMPLE_{i}' for i in range(11))) == (('signing',), '10+')
+          assert blocked_ssh_markers({}) == ((), 'ABSENT')
+          assert blocked_ssh_markers({'ssh_auth_sock': ''}) == (('AGENT_SOCKET_MARKER',), 'EMPTY')
+          assert blocked_ssh_markers({'SSH_AUTH_SOCK': 'synthetic'}) == (('AGENT_SOCKET_MARKER',), 'NONEMPTY')
+          assert blocked_ssh_markers({'ssh_auth_sock': 'synthetic', 'SSH_AUTH_SOCK': ''}) == (
+              ('AGENT_SOCKET_MARKER',), 'NONEMPTY'
+          )
+          assert blocked_ssh_markers({'SSH_CLIENT': 'synthetic', 'SSH_CONNECTION': 'synthetic',
+                                      'SSH_TTY': 'synthetic', 'SSH_AGENT_PID': 'synthetic',
+                                      'SSH_ASKPASS': 'synthetic', 'SSH_TUNNEL': 'synthetic',
+                                      'SSH_UNKNOWN': 'synthetic'}) == (
+              ('AGENT_PID_MARKER', 'ASKPASS_MARKER', 'CLIENT_METADATA', 'CONNECTION_METADATA',
+               'OTHER_SSH_MARKER', 'TTY_METADATA', 'TUNNEL_MARKER'), 'ABSENT'
+          )
+          assert 'SENTINEL_SHOULD_NOT_APPEAR' not in blocked_environment_message({
+              'SSH_UNKNOWN_SENTINEL_SHOULD_NOT_APPEAR': 'SENTINEL_SHOULD_NOT_APPEAR',
+              'SSH_AUTH_SOCK': 'SENTINEL_SHOULD_NOT_APPEAR',
+          })
+
+          if any(forbidden.match(key.upper()) for key in os.environ):
+              raise SystemExit(blocked_environment_message(os.environ))
+
+          interfaces = subprocess.run(['/sbin/ifconfig', '-l'], capture_output=True, text=True, check=True).stdout.split()
+          if any(name.startswith(('utun', 'tun', 'tap', 'wg', 'tailscale', 'ppp')) for name in interfaces):
+              raise SystemExit('Tunnel or private network interface detected; diagnostics blocked.')
+
+          listeners = subprocess.run(
+              ['/usr/sbin/lsof', '-nP', '-iTCP', '-sTCP:LISTEN', '-F', 'n'], capture_output=True, text=True
+          )
+          if listeners.returncode not in (0, 1) or listeners.stderr:
+              raise SystemExit('Hosted listener inventory unavailable; diagnostics blocked.')
+          endpoints = [line[1:] for line in listeners.stdout.splitlines() if line.startswith('n')]
+          production_ports = {80, 443, 5432, 6379, 8000, 8080, 8100, 8200, 8765, 9000, 9090, 9092, 9200, 11434, 19001}
+          for endpoint in endpoints:
+              host, separator, port = endpoint.rpartition(':')
+              if not separator or not port.isdigit() or int(port) in production_ports:
+                  raise SystemExit('Unexpected or production-port listener detected; diagnostics blocked.')
+              if host.strip('[]') not in ('127.0.0.1', '::1', 'localhost'):
+                  raise SystemExit('Non-loopback listener detected; diagnostics blocked.')
+          print(f'HOSTED_INVENTORY_OK listeners={len(endpoints)}')
+
+          probe = '''import errno,socket,sys
+          for family,bind,connect in ((socket.AF_INET,'127.0.0.1','127.0.0.1'),
+                                      (socket.AF_INET6,'::1','::1')):
+              with socket.socket(family,socket.SOCK_STREAM) as listener:
+                  if family==socket.AF_INET6: listener.setsockopt(socket.IPPROTO_IPV6,socket.IPV6_V6ONLY,1)
+                  listener.bind((bind,0)); listener.listen(1)
+                  with socket.socket(family,socket.SOCK_STREAM) as client:
+                      client.settimeout(2); client.connect((connect,listener.getsockname()[1]))
+                      accepted,_=listener.accept(); accepted.close()
+          for family,address in ((socket.AF_INET,'203.0.113.1'),(socket.AF_INET6,'2001:db8::1')):
+              with socket.socket(family,socket.SOCK_STREAM) as client:
+                  client.settimeout(2)
+                  try: client.connect((address,443))
+                  except OSError as error:
+                      if error.errno not in (errno.EPERM,errno.EACCES): sys.exit(10)
+                  else: sys.exit(11)
+          print('SANDBOX_LOCAL_IPV4_IPV6_OK_EXTERNAL_PERMISSION_DENIED')'''
+          result = subprocess.run(
+              ['/usr/bin/sandbox-exec', '-p', os.environ['ELLA_CI_NETWORK_SANDBOX'],
+               sys.executable, '-c', probe], capture_output=True, text=True, timeout=20,
+          )
+          if result.returncode != 0 or result.stdout.strip() != 'SANDBOX_LOCAL_IPV4_IPV6_OK_EXTERNAL_PERMISSION_DENIED':
+              raise SystemExit('Sandboxed local IPC or external permission denial was not proven; tests blocked.')
+          print(result.stdout.strip())
+          PY
+
+      - name: Run app/test.sh setup and smoke tests
+        id: smoke
+        continue-on-error: true
+        run: ELLA_TEST_NO_PUB=true /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" ./test.sh
+
+      - name: Verify upstream capture files are byte-identical to the pin
+        id: upstream_identity
+        run: |
+          set -euo pipefail
+          # ellaaicare/ella-ai#1280: upstream-owned files (BasedHardware/omi pin) may differ only by the
+          # mechanical import relocation. Offline mode checks recorded upstream blob ids.
+          python3 ../scripts/verify_upstream_capture_identity.py
+
+      - name: Enforce pinned Dart formatting for changed source
+        id: formatting
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          # Upstream-owned files stay byte-identical to the pin (guarded above), never reformatted.
+          upstream_owned="$(awk -F '\t' 'NF == 4 { print $4 }' lib/upstream_capture/UPSTREAM_OWNED.txt)"
+          changed_dart_files=()
+          while IFS= read -r changed_path; do
+            if printf '%s\n' "$upstream_owned" | grep -qxF "$changed_path"; then
+              continue
+            fi
+            case "$changed_path" in
+              app/*.gen.dart|app/**/*.gen.dart|app/*.g.dart|app/**/*.g.dart) continue ;;
+              app/*.dart|app/**/*.dart) changed_dart_files+=("${changed_path#app/}") ;;
+            esac
+          done < /tmp/ella-ios-source-ci-changed-files.txt
+
+          if [[ "${#changed_dart_files[@]}" -eq 0 ]]; then
+            echo "No changed Dart files require formatting."
+            exit 0
+          fi
+
+          dart format --output=none --set-exit-if-changed --line-length 120 "${changed_dart_files[@]}"
+
+      - name: Run exact voice route, V2V, and adapter contracts with zero skips
+        id: voice_contracts
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          voice_tests=(
+            test/ella/services/ella_voice_audio_route_test.dart
+            test/ella/services/v2v_client_test.dart
+            test/ella/account_isolation_test.dart
+          )
+          /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" \
+            flutter test --no-pub --reporter=json "${voice_tests[@]}" \
+            | tee /tmp/ella-voice-route-tests.jsonl
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          completed = []
+          for line in Path('/tmp/ella-voice-route-tests.jsonl').read_text().splitlines():
+              event = json.loads(line)
+              if event.get('type') == 'testDone' and not event.get('hidden', False):
+                  completed.append(event)
+
+          skipped = [event for event in completed if event.get('skipped', False)]
+          failed = [event for event in completed if event.get('result') != 'success']
+          print(f'Ella voice route/V2V/adapter tests: {len(completed)} passed, {len(skipped)} skipped')
+          if not completed or skipped or failed:
+              raise SystemExit('Voice route/V2V/adapter test gate did not pass with zero skips.')
+          PY
+
+      - name: Verify protected test network sandbox
+        id: original_sandbox_check
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          if /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" \
+            /usr/bin/curl --fail --silent --show-error --max-time 5 https://api.github.com >/dev/null 2>&1; then
+            echo "Network sandbox did not block outbound traffic." >&2
+            exit 1
+          fi
+
+      - name: Enforce focused test collection counts
+        id: collection_counts
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          expected_issue_test_count=78
+          issue_test_count="$(find test/ella test/backend test/pages/onboarding/ella -type f -name '*_test.dart' | sort | tee /tmp/ella-issue-tests.txt | wc -l | tr -d ' ')"
+          if [[ "$issue_test_count" -ne "$expected_issue_test_count" ]]; then
+            cat /tmp/ella-issue-tests.txt
+            echo "Expected $expected_issue_test_count Ella/backend/onboarding source tests, found $issue_test_count." >&2
+            exit 1
+          fi
+
+          expected_app_test_count=123
+          all_app_test_count="$(find test -type f -name '*_test.dart' | sort | tee /tmp/ella-all-app-tests.txt | wc -l | tr -d ' ')"
+          if [[ "$all_app_test_count" -ne "$expected_app_test_count" ]]; then
+            cat /tmp/ella-all-app-tests.txt
+            echo "Expected $expected_app_test_count Flutter test files, found $all_app_test_count." >&2
+            exit 1
+          fi
+
+      - name: Analyze changed Ella iOS source with fatal warnings
+        id: changed_analyzer
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          changed_dart_files=()
+          while IFS= read -r changed_path; do
+            case "$changed_path" in
+              app/lib/l10n/app_localizations*.dart) continue ;;
+              app/*.dart|app/**/*.dart) changed_dart_files+=("${changed_path#app/}") ;;
+            esac
+          done < /tmp/ella-ios-source-ci-changed-files.txt
+
+          if [[ "${#changed_dart_files[@]}" -eq 0 ]]; then
+            echo "No changed Dart files require analysis."
+            exit 0
+          fi
+
+          /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" \
+            flutter analyze --no-pub --fatal-warnings --no-fatal-infos "${changed_dart_files[@]}"
+
+      - name: Run focused invite, entitlement, quota, consent, and routing tests
+        id: focused_tests
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          focused_tests=(
+            test/backend/audio_consent_guard_test.dart
+            test/backend/http/conversation_finalization_test.dart
+            test/backend/preferences_public_mode_test.dart
+            test/pages/onboarding/ella/ella_onboarding_consent_test.dart
+            test/pages/onboarding/ella/ella_onboarding_pilot_locale_test.dart
+            test/ella/widgets/ai_consent_sheet_test.dart
+            test/ella/services/ai_consent_policy_test.dart
+            test/ella/services/ai_consent_coordinator_test.dart
+            test/ella/services/ai_consent_active_session_lease_test.dart
+            test/ella/services/protected_egress_consent_test.dart
+            test/ella/services/ella_chat_consent_test.dart
+            test/ella/services/ella_invite_link_controller_test.dart
+            test/ella/services/ella_entitlement_service_test.dart
+            test/ella/services/ella_entitlement_provider_test.dart
+            test/ella/account_isolation_test.dart
+            test/services/wals/wal_account_isolation_test.dart
+            test/ella/public_build_call_paths_test.dart
+            test/ella/pages/ella_entitlement_gate_page_test.dart
+            test/ella/pages/ella_provisioning_gate_page_test.dart
+            test/ella/pages/home_provisioning_gate_test.dart
+            test/ella/services/ella_provisioning_service_test.dart
+            test/ella/services/guardian_mode_api_test.dart
+            test/ella/pages/ella_voice_quota_states_test.dart
+            test/ella/services/v2v_client_test.dart
+            test/ella/services/v2v_turn_reconciler_test.dart
+            test/ella/services/voice_session_startup_guard_test.dart
+            test/ella/widgets/v2v_fallback_dialog_test.dart
+            test/pages/conversation_detail/type_correction_terminal_receipt_test.dart
+            test/ella/upstream_capture/picker_periodic_discovery_test.dart
+            test/ella/pages/auth_invite_presentation_test.dart
+          )
+
+          expected_focused_test_count=30
+          if [[ "${#focused_tests[@]}" -ne "$expected_focused_test_count" ]]; then
+            echo "Focused source test manifest count drifted." >&2
+            exit 1
+          fi
+          for test_file in "${focused_tests[@]}"; do
+            [[ -f "$test_file" ]] || { echo "Missing focused test: $test_file" >&2; exit 1; }
+          done
+
+          /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub "${focused_tests[@]}"
+
+      - name: Run conflicting public and internal call-path configurations
+        id: conflicting_configs
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          conflicting_defines=(
+            --dart-define=ELLA_CALL_PATH_CONFIG_TEST=true
+            --dart-define=ELLA_ACCESS_DEMO_GALLERY=true
+            --dart-define=DEBUG_AUTO_CALL=true
+            --dart-define=ELLA_TODAY_DESIGN_PREVIEW=true
+            --dart-define=ELLA_ENTITLEMENT_STUBS=true
+            --dart-define=ELLA_HERMES_PROVISIONING_GATE=false
+          )
+
+          /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub \
+            test/ella/public_build_call_paths_test.dart \
+            "${conflicting_defines[@]}" \
+            --dart-define=ELLA_PUBLIC_BUILD=true \
+            --dart-define=ELLA_GUARDIAN_ENABLED=true
+
+          /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub \
+            test/ella/public_build_call_paths_test.dart \
+            "${conflicting_defines[@]}" \
+            --dart-define=ELLA_PUBLIC_BUILD=false
+
+          /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub \
+            test/ella/public_build_call_paths_test.dart \
+            "${conflicting_defines[@]}" \
+            --dart-define=ELLA_PUBLIC_BUILD=true \
+            --dart-define=ELLA_ENTITLEMENT_GATE=true \
+            --dart-define=ELLA_GUARDIAN_ENABLED=true
+
+      - name: Run full Flutter tests
+        id: full_flutter
+        continue-on-error: true
+        run: /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub
+
+      - name: Print exact-head gate receipt
+        id: exact_head_receipt
+        working-directory: target-source
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          head_sha="$(cat /tmp/ella-ios-source-ci-head-sha.txt)"
+          checked_out_head="$(git rev-parse HEAD)"
+          [[ "$checked_out_head" == "$head_sha" ]] || {
+            echo "Source CI checkout changed during gate: headSha=$head_sha checkedOutHead=$checked_out_head" >&2
+            exit 1
+          }
+          printf 'Ella source gate receipt: headSha=%s checkedOutHead=%s baseSha=%s\n' \
+            "$head_sha" "$checked_out_head" "$(cat /tmp/ella-ios-source-ci-base-ref.txt)"
+
+      - name: Report every outcome without waiving diagnostic failures
+        if: always()
+        working-directory: .
+        env:
+          WORKFLOW_SCOPE: ${{ steps.workflow_scope.outcome }}
+          TARGET_IDENTITY: ${{ steps.target_identity.outcome }}
+          ISOLATION: ${{ steps.isolation.outcome }}
+          SMOKE: ${{ steps.smoke.outcome }}
+          UPSTREAM_IDENTITY: ${{ steps.upstream_identity.outcome }}
+          FORMATTING: ${{ steps.formatting.outcome }}
+          VOICE_CONTRACTS: ${{ steps.voice_contracts.outcome }}
+          ORIGINAL_SANDBOX_CHECK: ${{ steps.original_sandbox_check.outcome }}
+          COLLECTION_COUNTS: ${{ steps.collection_counts.outcome }}
+          CHANGED_ANALYZER: ${{ steps.changed_analyzer.outcome }}
+          FOCUSED_TESTS: ${{ steps.focused_tests.outcome }}
+          CONFLICTING_CONFIGS: ${{ steps.conflicting_configs.outcome }}
+          FULL_FLUTTER: ${{ steps.full_flutter.outcome }}
+          EXACT_HEAD_RECEIPT: ${{ steps.exact_head_receipt.outcome }}
+          ELLA_WORKFLOW_EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo '### Cut 709 immutable hosted diagnostic outcomes'
+            echo
+            printf 'Workflow PR head: `%s`\n\n' "$ELLA_WORKFLOW_EVENT_HEAD_SHA"
+            printf 'Target cut: `%s` / tree `%s` / base `%s`\n\n' \
+              "$ELLA_EXPECTED_HEAD_SHA" "$ELLA_EXPECTED_TREE_SHA" "$ELLA_EXPECTED_BASE_SHA"
+            echo '| Gate | Raw outcome | Interpretation |'
+            echo '| --- | --- | --- |'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          failed=0
+          for prerequisite in WORKFLOW_SCOPE TARGET_IDENTITY ISOLATION UPSTREAM_IDENTITY; do
+            [[ "${!prerequisite}" == success ]] || failed=1
+          done
+          [[ "$SMOKE" == failure ]] || failed=1
+          for gate in FORMATTING VOICE_CONTRACTS ORIGINAL_SANDBOX_CHECK COLLECTION_COUNTS CHANGED_ANALYZER FOCUSED_TESTS CONFLICTING_CONFIGS FULL_FLUTTER EXACT_HEAD_RECEIPT; do
+            [[ "${!gate}" == success ]] || failed=1
+          done
+
+          changed_dart_count=unknown
+          if [[ -f /tmp/ella-ios-source-ci-changed-files.txt ]]; then
+            changed_dart_count="$(grep -Ec '^app/.*\.dart$' /tmp/ella-ios-source-ci-changed-files.txt || true)"
+          fi
+          for gate in WORKFLOW_SCOPE TARGET_IDENTITY ISOLATION SMOKE UPSTREAM_IDENTITY FORMATTING VOICE_CONTRACTS ORIGINAL_SANDBOX_CHECK COLLECTION_COUNTS CHANGED_ANALYZER FOCUSED_TESTS CONFLICTING_CONFIGS FULL_FLUTTER EXACT_HEAD_RECEIPT; do
+            interpretation=measured
+            if [[ "$gate" == SMOKE ]]; then interpretation='Expected red; inspect step log for exactly the two default-NO assertions and any additional failure'; fi
+            if [[ "$changed_dart_count" == 0 && ( "$gate" == FORMATTING || "$gate" == CHANGED_ANALYZER ) ]]; then interpretation='N/A: no changed Dart files'; fi
+            printf '| `%s` | `%s` | %s |\n' "$gate" "${!gate:-missing}" "$interpretation" >> "$GITHUB_STEP_SUMMARY"
+          done
+          if [[ "$failed" -ne 0 ]]; then
+            echo 'One or more prerequisite, smoke, or downstream outcomes require review; none is waived.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo 'This diagnostic never turns the two default-NO failures green; missing, cancelled, or skipped gates are not passes.' >> "$GITHUB_STEP_SUMMARY"
+          exit 1
