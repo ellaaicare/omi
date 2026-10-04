@@ -32,21 +32,21 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
     Duration timeout = _protocolTimeout,
     void Function(String reason, int? closeCode)? onAdmissionFailure,
     bool Function()? hasOriginAuthority,
-  }) : _timeout = timeout,
-       _onAdmissionFailure = onAdmissionFailure,
-       _hasOriginAuthority = hasOriginAuthority ?? _alwaysCurrent,
-       super.withSocket(
-         sampleRate,
-         codec,
-         language,
-         transport,
-         source: source,
-         clientConversationId: clientConversationId,
-         includeSpeechProfile: includeSpeechProfile,
-         customSttMode: customSttMode,
-         sttConfigId: sttConfigId,
-         geolocation: geolocation,
-       );
+  })  : _timeout = timeout,
+        _onAdmissionFailure = onAdmissionFailure,
+        _hasOriginAuthority = hasOriginAuthority ?? _alwaysCurrent,
+        super.withSocket(
+          sampleRate,
+          codec,
+          language,
+          transport,
+          source: source,
+          clientConversationId: clientConversationId,
+          includeSpeechProfile: includeSpeechProfile,
+          customSttMode: customSttMode,
+          sttConfigId: sttConfigId,
+          geolocation: geolocation,
+        );
 
   final Duration _timeout;
   final void Function(String reason, int? closeCode)? _onAdmissionFailure;
@@ -183,8 +183,7 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
           final current = _authority;
           final isInitial = current == null;
           final isIdempotent = current != null && _sameAuthority(current, next);
-          final isSuccessor =
-              current != null &&
+          final isSuccessor = current != null &&
               next != null &&
               current.protocolVersion == next.protocolVersion &&
               current.generation == next.generation &&
@@ -310,13 +309,14 @@ class EllaCaptureCompositeSocket extends CompositeTranscriptionSocket {
     String? suggestedTranscriptType = 'suggested_transcript',
     bool forwardRawAudioToSecondary = true,
     bool Function()? hasOriginAuthority,
-  }) => EllaCaptureCompositeSocket._(
-    _DrainablePrimarySocket(primarySocket, hasOriginAuthority: hasOriginAuthority),
-    secondarySocket: secondarySocket,
-    sttProvider: sttProvider,
-    suggestedTranscriptType: suggestedTranscriptType,
-    forwardRawAudioToSecondary: forwardRawAudioToSecondary,
-  );
+  }) =>
+      EllaCaptureCompositeSocket._(
+        _DrainablePrimarySocket(primarySocket, hasOriginAuthority: hasOriginAuthority),
+        secondarySocket: secondarySocket,
+        sttProvider: sttProvider,
+        suggestedTranscriptType: suggestedTranscriptType,
+        forwardRawAudioToSecondary: forwardRawAudioToSecondary,
+      );
 
   EllaCaptureCompositeSocket._(
     _DrainablePrimarySocket primary, {
@@ -324,8 +324,8 @@ class EllaCaptureCompositeSocket extends CompositeTranscriptionSocket {
     super.sttProvider,
     super.suggestedTranscriptType,
     super.forwardRawAudioToSecondary,
-  }) : _primary = primary,
-       super(primarySocket: primary);
+  })  : _primary = primary,
+        super(primarySocket: primary);
 
   final _DrainablePrimarySocket _primary;
 
@@ -334,7 +334,7 @@ class EllaCaptureCompositeSocket extends CompositeTranscriptionSocket {
 
 class _DrainablePrimarySocket implements IPureSocket, IPureSocketListener {
   _DrainablePrimarySocket(this._inner, {bool Function()? hasOriginAuthority})
-    : _hasOriginAuthority = hasOriginAuthority ?? EllaCaptureProtocolSocket._alwaysCurrent {
+      : _hasOriginAuthority = hasOriginAuthority ?? EllaCaptureProtocolSocket._alwaysCurrent {
     _inner.setListener(this);
   }
 

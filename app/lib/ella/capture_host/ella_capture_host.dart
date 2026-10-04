@@ -100,19 +100,20 @@ enum EllaCaptureSocketAttemptPhase {
 /// One in-memory, content-free state for the current socket attempt only.
 class EllaCaptureSocketAttempt {
   EllaCaptureSocketAttempt(this.phase, int? closeCode, DateTime at)
-    : closeCode = closeCode != null && closeCode >= 1000 && closeCode <= 4999 ? closeCode : null,
-      at = at.toUtc();
+      : closeCode = closeCode != null && closeCode >= 1000 && closeCode <= 4999 ? closeCode : null,
+        at = at.toUtc();
 
   final EllaCaptureSocketAttemptPhase phase;
   final int? closeCode;
   final DateTime at;
 
   EllaCaptureSocketAttemptStatus get status => switch (phase) {
-    EllaCaptureSocketAttemptPhase.connecting ||
-    EllaCaptureSocketAttemptPhase.transportConnected => EllaCaptureSocketAttemptStatus.pending,
-    EllaCaptureSocketAttemptPhase.captureReady => EllaCaptureSocketAttemptStatus.ready,
-    _ => EllaCaptureSocketAttemptStatus.failed,
-  };
+        EllaCaptureSocketAttemptPhase.connecting ||
+        EllaCaptureSocketAttemptPhase.transportConnected =>
+          EllaCaptureSocketAttemptStatus.pending,
+        EllaCaptureSocketAttemptPhase.captureReady => EllaCaptureSocketAttemptStatus.ready,
+        _ => EllaCaptureSocketAttemptStatus.failed,
+      };
 }
 
 /// Content-free support metadata. Unknown reasons and invalid codes are omitted.
@@ -135,12 +136,12 @@ class EllaCaptureSocketFailure {
 
 class EllaCaptureDiagnosticsSnapshot {
   const EllaCaptureDiagnosticsSnapshot.uninitialized()
-    : initialized = false,
-      ready = false,
-      receivedBytes = null,
-      sentBytes = null,
-      lastFailure = null,
-      lastAttempt = null;
+      : initialized = false,
+        ready = false,
+        receivedBytes = null,
+        sentBytes = null,
+        lastFailure = null,
+        lastAttempt = null;
 
   const EllaCaptureDiagnosticsSnapshot.upstream({
     required this.ready,

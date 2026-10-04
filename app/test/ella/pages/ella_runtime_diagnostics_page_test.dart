@@ -50,23 +50,22 @@ void main() {
       final api = MemoryArtworkApi(
         baseUrl: 'https://private-fixture.invalid',
         authorityProvider: () => authority,
-        request:
-            ({
-              required url,
-              required headers,
-              required body,
-              required method,
-              timeout,
-              retries,
-              requireAuthCheck,
-              expectedAuthenticatedUid,
-              exactAuthority,
-              onSendAttempt,
-            }) async {
-              requests++;
-              expect(method, 'GET');
-              return null;
-            },
+        request: ({
+          required url,
+          required headers,
+          required body,
+          required method,
+          timeout,
+          retries,
+          requireAuthCheck,
+          expectedAuthenticatedUid,
+          exactAuthority,
+          onSendAttempt,
+        }) async {
+          requests++;
+          expect(method, 'GET');
+          return null;
+        },
       );
       final ticket = MemoryArtworkQueueDiagnostics.begin(isCurrent: authority.isExactCurrent);
       await api.queueStatusWithDiagnostics(ticket);
