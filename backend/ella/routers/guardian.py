@@ -1614,6 +1614,9 @@ async def next_audio(uid: Optional[str] = None, authenticated_uid: str = Depends
             audio_ok = False
         if not audio_ok:
             return {"url": None}
+        final_claim = await _spoken_diagnostic_admitted(uid, claim_id, "queued", pool)
+        if not final_claim or final_claim.get("audio_sha256") != claim.get("audio_sha256"):
+            return {"url": None}
         try:
             ledger_pool = await _playback_ledger.get_pool()
             await _playback_ledger.record_fetched(
@@ -1625,9 +1628,6 @@ async def next_audio(uid: Optional[str] = None, authenticated_uid: str = Depends
             )
         except Exception:
             pass
-        final_claim = await _spoken_diagnostic_admitted(uid, claim_id, "queued", pool)
-        if not final_claim or final_claim.get("audio_sha256") != claim.get("audio_sha256"):
-            return {"url": None}
         return {
             "url": url,
             "id": row["id"],
@@ -1900,16 +1900,17 @@ def _spoken_diagnostic_audio_matches(path: str, expected_sha256: str) -> bool:
         return hashlib.file_digest(file, "sha256").hexdigest() == expected_sha256
 
 
+def _spoken_diagnostic_current_authority(uid: str, claim_id: str, state: str) -> Optional[dict]:
+    assert_current_ai_consent(uid)
+    return spoken_diagnostic.current_claim(uid, claim_id, state)
+
+
 async def _spoken_diagnostic_admitted(uid: str, claim_id: str, state: str, pool) -> Optional[dict]:
     try:
-        await run_in_threadpool(assert_current_ai_consent, uid)
-        claim = await run_in_threadpool(spoken_diagnostic.current_claim, uid, claim_id, state)
-        if not claim:
-            return None
         row = await pool.fetchrow("SELECT guardian_mode FROM users WHERE omi_uid = $1", uid)
         if row is None or _normalize_mode(row["guardian_mode"]) not in _SPOKEN_DIAGNOSTIC_MODES:
             return None
-        return claim
+        return await run_in_threadpool(_spoken_diagnostic_current_authority, uid, claim_id, state)
     except Exception:
         return None
 
