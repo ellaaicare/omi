@@ -149,6 +149,7 @@ jobs:
           git diff --check "$ELLA_EXPECTED_BASE_SHA" HEAD
 
       - name: Mark baseline after workflow provenance
+        working-directory: workflow-source
         run: |
           set -euo pipefail
           marker_sha="$(printf '%s' "$ELLA_CI_BOUNDARY_MARKER" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')"
