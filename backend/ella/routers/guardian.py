@@ -29,6 +29,7 @@ from typing import Any, Optional
 import asyncpg
 import httpx
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from ella.routers.resolve import resolve_user_routing
@@ -37,6 +38,7 @@ from database.ella_provisioning import EllaProvisioningRepository
 from database.honcho_attestation import authority_credential
 from ella.services.app_settings import TTS_PROVIDERS, build_effective_voice_settings
 from ella.services.ai_consent import assert_current_ai_consent
+from utils.conversations import spoken_diagnostic
 from ella.services import guardian_playback_ledger as _playback_ledger
 from ella.services.hermes_cloud import HermesCloudClient
 from ella.services.runtime_errors import ProvisioningError
@@ -579,6 +581,12 @@ class SynthesizeRequest(BaseModel):
     voice_id: Optional[str] = None
     provider: Optional[str] = None
     trace_id: Optional[str] = None
+
+
+class SpokenDiagnosticRequest(BaseModel):
+    uid: str
+    claim_id: str
+    response_version: str
 
 
 def _trace_id_from_metadata(metadata: Optional[dict], fallback: str) -> str:
@@ -1362,7 +1370,7 @@ async def next_audio(uid: Optional[str] = None, authenticated_uid: str = Depends
         """
         SELECT COUNT(*) FILTER (WHERE consumed_at IS NULL) AS pending
         FROM guardian_queue
-        WHERE uid = $1 AND priority != 'debug'
+        WHERE uid = $1 AND priority != 'debug' AND trigger_type IS DISTINCT FROM 'spoken_diagnostic'
         """,
         uid,
     )
@@ -1375,6 +1383,7 @@ async def next_audio(uid: Optional[str] = None, authenticated_uid: str = Depends
             SELECT id, url, priority, message, trigger_type, metadata, created_at
             FROM guardian_queue
             WHERE uid = $1 AND consumed_at IS NULL AND priority != 'debug'
+              AND trigger_type IS DISTINCT FROM 'spoken_diagnostic'
             ORDER BY
                 CASE priority WHEN 'urgent' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
                 created_at ASC
@@ -1417,6 +1426,7 @@ async def next_audio(uid: Optional[str] = None, authenticated_uid: str = Depends
                 SELECT id, url, priority, message, trigger_type, metadata, created_at
                 FROM guardian_queue
                 WHERE uid = $1 AND consumed_at IS NULL AND priority != 'debug'
+                  AND trigger_type IS DISTINCT FROM 'spoken_diagnostic'
                 ORDER BY
                     CASE priority WHEN 'urgent' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
                     created_at ASC
@@ -1566,6 +1576,58 @@ async def next_audio(uid: Optional[str] = None, authenticated_uid: str = Depends
         # Don't log empty polls (too noisy — iOS polls every 3s)
         return {"url": None}
 
+    if row["trigger_type"] == "spoken_diagnostic":
+        marker = row["metadata"]
+        if isinstance(marker, str):
+            try:
+                marker = json.loads(marker)
+            except (TypeError, ValueError):
+                marker = None
+        marker = marker if isinstance(marker, dict) else {}
+        diagnostic = marker.get("spoken_diagnostic")
+        claim_id = diagnostic.get("claim_id") if isinstance(diagnostic, dict) else None
+        claim = None
+        if (
+            isinstance(claim_id, str)
+            and diagnostic.get("response_version") == spoken_diagnostic.RESPONSE_VERSION
+            and row["id"] == spoken_diagnostic._queue_id(claim_id)
+        ):
+            claim = await _spoken_diagnostic_admitted(uid, claim_id, "queued", pool)
+        url = str(row["url"] or "")
+        prefix = f"{AUDIO_PUBLIC_URL}/{uid}/"
+        filename = url[len(prefix):] if url.startswith(prefix) else ""
+        path = os.path.join(AUDIO_BASE_DIR, uid, filename) if re.fullmatch(r"[0-9]+-[0-9a-f]{12}\.mp3", filename) else ""
+        try:
+            audio_ok = bool(
+                claim
+                and claim.get("queue_id") == row["id"]
+                and claim.get("audio_url") == url
+                and marker.get("audio_sha256") == claim.get("audio_sha256")
+                and row["priority"] == "normal"
+                and row["message"] == spoken_diagnostic.RESPONSE
+                and path
+                and await run_in_threadpool(_spoken_diagnostic_audio_matches, path, claim.get("audio_sha256"))
+            )
+        except Exception:
+            audio_ok = False
+        if not audio_ok:
+            return {"url": None}
+        try:
+            ledger_pool = await _playback_ledger.get_pool()
+            await _playback_ledger.record_fetched(
+                ledger_pool, uid=uid, playback_id=row["id"],
+                queue_item_id=row["id"], trace_id=row["id"],
+            )
+        except Exception:
+            pass
+        return {
+            "url": url, "id": row["id"], "trace_id": row["id"],
+            "priority": "normal", "message": spoken_diagnostic.RESPONSE,
+            "trigger_type": "spoken_diagnostic",
+            "metadata": {"source": "spoken_diagnostic", "response_version": spoken_diagnostic.RESPONSE_VERSION},
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        }
+
     print(
         f"[FLOW:GUARDIAN-POLL] uid={uid} popped id={row['id']} priority={row['priority']} latency={_elapsed}ms",
         flush=True,
@@ -1638,6 +1700,13 @@ async def enqueue(
     authority = _verify_key(x_guardian_key, key, subject_uid)
     uid = authority.require_uid(req.uid or req.userID, feature="Guardian enqueue")
     req.uid = uid
+
+    if (
+        req.trigger == "spoken_diagnostic"
+        or str(req.id or "").startswith("diagnostic_")
+        or "spoken_diagnostic" in (req.metadata or {})
+    ):
+        raise HTTPException(status_code=409, detail="spoken_diagnostic_requires_claim_endpoint")
 
     item_id = req.id or f"guardian_{uuid.uuid4().hex[:12]}"
     trace_id = _trace_id_from_metadata(req.metadata, item_id)
@@ -1799,6 +1868,138 @@ async def enqueue(
 # POST /v1/ella/guardian/upload
 # n8n uploads TTS audio binary (multipart form).
 # ---------------------------------------------------------------------------
+
+
+_SPOKEN_DIAGNOSTIC_MODES = {
+    "active_support", "cyborg", "demo", "chatbot", "memory_support", "maximum_awareness",
+}
+
+
+def _spoken_diagnostic_audio_matches(path: str, expected_sha256: str) -> bool:
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256 or ""):
+        return False
+    if not 0 < os.path.getsize(path) <= 4 * 1024 * 1024:
+        return False
+    with open(path, "rb") as file:
+        return hashlib.file_digest(file, "sha256").hexdigest() == expected_sha256
+
+
+async def _spoken_diagnostic_admitted(uid: str, claim_id: str, state: str, pool) -> Optional[dict]:
+    try:
+        await run_in_threadpool(assert_current_ai_consent, uid)
+        claim = await run_in_threadpool(spoken_diagnostic.current_claim, uid, claim_id, state)
+        if not claim:
+            return None
+        row = await pool.fetchrow("SELECT guardian_mode FROM users WHERE omi_uid = $1", uid)
+        if row is None or _normalize_mode(row["guardian_mode"]) not in _SPOKEN_DIAGNOSTIC_MODES:
+            return None
+        return claim
+    except Exception:
+        return None
+
+
+@router.post("/spoken-diagnostic")
+async def spoken_diagnostic_audio(
+    req: SpokenDiagnosticRequest,
+    x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
+    key: Optional[str] = Header(None, alias="X-Key"),
+    subject_uid: Optional[str] = Header(None, alias=ELLA_SUBJECT_UID_HEADER),
+):
+    """Render one server-fixed check-in from a live STT claim; never retry ambiguous TTS."""
+    authority = _verify_key(x_guardian_key, key, subject_uid)
+    uid = authority.require_uid(req.uid, feature="Spoken diagnostic")
+    if (
+        req.response_version != spoken_diagnostic.RESPONSE_VERSION
+        or not re.fullmatch(r"[0-9a-f]{64}", req.claim_id)
+    ):
+        raise HTTPException(status_code=409, detail="spoken_diagnostic_unavailable")
+    pool = await _get_pool()
+    if not await _spoken_diagnostic_admitted(uid, req.claim_id, "claimed", pool):
+        raise HTTPException(status_code=409, detail="spoken_diagnostic_unavailable")
+    rendering = await run_in_threadpool(
+        spoken_diagnostic.transition, uid, req.claim_id, "claimed", "rendering"
+    )
+    if not rendering:
+        raise HTTPException(status_code=409, detail="spoken_diagnostic_unavailable")
+
+    try:
+        if not ELLA_INTERNAL_VOICE_TTS_TOKEN:
+            raise RuntimeError("tts_authority_unavailable")
+        voice_settings = await run_in_threadpool(app_settings_db.get_voice_settings, uid)
+        effective = build_effective_voice_settings(uid, voice_settings)["effective_voice_settings"]
+        candidates = _guardian_tts_candidates(effective)
+        if not candidates:
+            raise RuntimeError("tts_provider_unavailable")
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                ELLA_INTERNAL_VOICE_TTS_URL,
+                json={"text": spoken_diagnostic.RESPONSE},
+                headers={
+                    "X-TTS-Provider": candidates[0],
+                    "X-Ella-Internal-Token": ELLA_INTERNAL_VOICE_TTS_TOKEN,
+                    "X-Ella-Subject-Uid": uid,
+                },
+                timeout=30.0,
+            )
+        if (
+            response.status_code >= 400
+            or not 0 < len(response.content) <= 4 * 1024 * 1024
+            or response.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "audio/mpeg"
+        ):
+            raise RuntimeError("tts_response_unavailable")
+    except Exception:
+        # The rendering claim is deliberately consumed even if the provider may have succeeded.
+        raise HTTPException(status_code=502, detail="spoken_diagnostic_render_failed") from None
+
+    if not await _spoken_diagnostic_admitted(uid, req.claim_id, "rendering", pool):
+        raise HTTPException(status_code=409, detail="spoken_diagnostic_unavailable")
+    audio_sha256 = hashlib.sha256(response.content).hexdigest()
+    try:
+        stored = await run_in_threadpool(_store_audio_content, uid, response.content)
+    except Exception:
+        raise HTTPException(status_code=503, detail="spoken_diagnostic_store_failed") from None
+    if not await _spoken_diagnostic_admitted(uid, req.claim_id, "rendering", pool):
+        raise HTTPException(status_code=409, detail="spoken_diagnostic_unavailable")
+    queued = await run_in_threadpool(
+        spoken_diagnostic.transition,
+        uid,
+        req.claim_id,
+        "rendering",
+        "queued",
+        update={"audio_sha256": audio_sha256, "audio_url": stored["url"]},
+    )
+    if not queued:
+        raise HTTPException(status_code=409, detail="spoken_diagnostic_unavailable")
+    queue_id = queued["queue_id"]
+    metadata = {
+        "spoken_diagnostic": {"claim_id": req.claim_id, "response_version": req.response_version},
+        "audio_sha256": audio_sha256,
+        "trace_id": queue_id,
+    }
+    try:
+        await pool.execute(
+            """
+            INSERT INTO guardian_queue (id, uid, url, priority, message, trigger_type, metadata)
+            VALUES ($1, $2, $3, 'normal', $4, 'spoken_diagnostic', $5::jsonb)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            queue_id, uid, stored["url"], spoken_diagnostic.RESPONSE, json.dumps(metadata),
+        )
+    except Exception:
+        raise HTTPException(status_code=503, detail="spoken_diagnostic_enqueue_failed") from None
+    try:
+        ledger_pool = await _playback_ledger.get_pool()
+        await _playback_ledger.record_generated(
+            ledger_pool, uid=uid, playback_id=queue_id, queue_item_id=queue_id,
+            audio_id=queue_id, trace_id=queue_id, purpose="spoken_diagnostic",
+            playback_text=spoken_diagnostic.RESPONSE, text_provenance="server_fixed",
+        )
+        await _playback_ledger.record_queued(
+            ledger_pool, uid=uid, playback_id=queue_id, queue_item_id=queue_id, trace_id=queue_id,
+        )
+    except Exception:
+        pass
+    return {"ok": True, "queue_id": queue_id, "response_version": req.response_version}
 
 
 @router.post("/synthesize")

@@ -1505,6 +1505,27 @@ def send_to_scanner(
             )
             return None
 
+    diagnostic_claim = None
+    from utils.conversations import spoken_diagnostic
+
+    if (
+        emergency_reason is None
+        and not formatted_recent_segments
+        and not wake_prefix_recent
+        and (scanner_window_text is None or spoken_diagnostic._normalized(scanner_window_text) == spoken_diagnostic.PHRASE)
+        and os.getenv("ELLA_SPOKEN_DIAGNOSTIC_ENABLED", "").strip().lower() == "true"
+    ):
+        diagnostic_window = spoken_diagnostic.is_diagnostic_window(uid, scanner_segments)
+    else:
+        diagnostic_window = False
+    if diagnostic_window:
+        try:
+            diagnostic_claim = spoken_diagnostic.reserve_for_segments(uid, str(conversation_id), scanner_segments)
+        except Exception:
+            diagnostic_claim = None
+        if diagnostic_claim is None:
+            return None
+
     _enqueue_wake_ack(uid, str(conversation_id), trace_id, scanner_segments)
 
     payload = {
@@ -1527,6 +1548,8 @@ def send_to_scanner(
         "typesafe_egress_authorized": typesafe_egress_authorized is True,
         "playback_candidates": playback_candidates,
     }
+    if diagnostic_claim is not None:
+        payload["spoken_diagnostic"] = diagnostic_claim
     if latency_metadata:
         payload["latency"] = latency_metadata
     if recent_segments is not None:
