@@ -1640,6 +1640,13 @@ def test_guardian_owner_or_service_reads_enforce_service_scope_and_owner(monkeyp
         ("POST", "/v1/ella/guardian/synthesize", {"uid": "uid-a", "text": "Hello"}, None, None),
         ("POST", "/v1/ella/guardian/upload", None, {"file": ("a.mp3", b"audio", "audio/mpeg")}, {"uid": "uid-a"}),
         ("POST", "/v1/ella/guardian/upload-json", {"uid": "uid-a", "audio_base64": "YXVkaW8="}, None, None),
+        (
+            "POST",
+            "/v1/ella/guardian/spoken-diagnostic",
+            {"uid": "uid-a", "claim_id": "a" * 64, "response_version": guardian.spoken_diagnostic.RESPONSE_VERSION},
+            None,
+            None,
+        ),
         ("GET", "/v1/ella/guardian/debug-events?uid=uid-a", None, None, None),
         ("POST", "/v1/ella/guardian/debug-trigger", {"uid": "uid-a"}, None, None),
         ("POST", "/v1/ella/guardian/deliver", {"uid": "uid-a"}, None, None),

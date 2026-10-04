@@ -206,6 +206,7 @@ ROUTE_GROUPS = (
         ("POST", "/v1/ella/guardian/deliver", "deliver"),
         ("POST", "/v1/ella/guardian/email/send", "email_send"),
         ("POST", "/v1/ella/guardian/trace/log", "log_pipeline_event"),
+        ("POST", "/v1/ella/guardian/spoken-diagnostic", "spoken_diagnostic_audio"),
     ),
     _group(
         "guardian",
