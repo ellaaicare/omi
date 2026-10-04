@@ -50,21 +50,23 @@ void main() {
       final api = MemoryArtworkApi(
         baseUrl: 'https://private-fixture.invalid',
         authorityProvider: () => authority,
-        request: (
-            {required url,
-            required headers,
-            required body,
-            required method,
-            timeout,
-            retries,
-            requireAuthCheck,
-            expectedAuthenticatedUid,
-            exactAuthority,
-            onSendAttempt}) async {
-          requests++;
-          expect(method, 'GET');
-          return null;
-        },
+        request:
+            ({
+              required url,
+              required headers,
+              required body,
+              required method,
+              timeout,
+              retries,
+              requireAuthCheck,
+              expectedAuthenticatedUid,
+              exactAuthority,
+              onSendAttempt,
+            }) async {
+              requests++;
+              expect(method, 'GET');
+              return null;
+            },
       );
       final ticket = MemoryArtworkQueueDiagnostics.begin(isCurrent: authority.isExactCurrent);
       await api.queueStatusWithDiagnostics(ticket);
@@ -73,22 +75,24 @@ void main() {
       final device = DeviceProvider(deviceService: _NoopDeviceService(), automaticallyReconnectOnReady: false);
       EllaCaptureHost.installForTesting(homeCaptureDockBuilder: (_) => const SizedBox.shrink());
       ApiTransportDiagnostics.lastError = 'private-runtime-type https://private.invalid';
-      await tester.pumpWidget(MultiProvider(
-        providers: [
-          ChangeNotifierProvider<CaptureProvider>.value(value: capture),
-          ChangeNotifierProvider<DeviceProvider>.value(value: device),
-        ],
-        child: MaterialApp(
-          theme: ellaThemeData(),
-          localizationsDelegates: AppLocalizations.localizationsDelegates,
-          supportedLocales: AppLocalizations.supportedLocales,
-          builder: (context, child) => MediaQuery(
-            data: MediaQuery.of(context).copyWith(textScaler: const TextScaler.linear(3)),
-            child: child!,
+      await tester.pumpWidget(
+        MultiProvider(
+          providers: [
+            ChangeNotifierProvider<CaptureProvider>.value(value: capture),
+            ChangeNotifierProvider<DeviceProvider>.value(value: device),
+          ],
+          child: MaterialApp(
+            theme: ellaThemeData(),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(textScaler: const TextScaler.linear(3)),
+              child: child!,
+            ),
+            home: const EllaRuntimeDiagnosticsPage(),
           ),
-          home: const EllaRuntimeDiagnosticsPage(),
         ),
-      ));
+      );
       await tester.pump();
       await tester.scrollUntilVisible(
         find.byKey(const Key('runtime-diagnostics-artwork-read')),
@@ -120,18 +124,20 @@ void main() {
     final capture = _DiagnosticsCaptureProvider('disconnected');
     final device = DeviceProvider(deviceService: _NoopDeviceService(), automaticallyReconnectOnReady: false);
     EllaCaptureHost.installForTesting(homeCaptureDockBuilder: (_) => const SizedBox.shrink());
-    await tester.pumpWidget(MultiProvider(
-      providers: [
-        ChangeNotifierProvider<CaptureProvider>.value(value: capture),
-        ChangeNotifierProvider<DeviceProvider>.value(value: device),
-        ChangeNotifierProvider(create: (_) => UserProvider()),
-      ],
-      child: const MaterialApp(
-        localizationsDelegates: AppLocalizations.localizationsDelegates,
-        supportedLocales: AppLocalizations.supportedLocales,
-        home: EllaSettingsPage(runtimeSideEffectsEnabled: false, authenticatedUidOverride: ''),
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<CaptureProvider>.value(value: capture),
+          ChangeNotifierProvider<DeviceProvider>.value(value: device),
+          ChangeNotifierProvider(create: (_) => UserProvider()),
+        ],
+        child: const MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: EllaSettingsPage(runtimeSideEffectsEnabled: false, authenticatedUidOverride: ''),
+        ),
       ),
-    ));
+    );
     await tester.pump();
     final entry = find.byKey(const Key('ella-runtime-diagnostics-entry'));
     await tester.scrollUntilVisible(entry, 180);
@@ -155,17 +161,19 @@ void main() {
       terminalReason: 'private-owner',
     );
     ConnectivityService().applyHealthProbeForTest(statusCode: 17);
-    await tester.pumpWidget(MultiProvider(
-      providers: [
-        ChangeNotifierProvider<CaptureProvider>.value(value: capture),
-        ChangeNotifierProvider<DeviceProvider>.value(value: device),
-      ],
-      child: const MaterialApp(
-        localizationsDelegates: AppLocalizations.localizationsDelegates,
-        supportedLocales: AppLocalizations.supportedLocales,
-        home: EllaRuntimeDiagnosticsPage(),
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<CaptureProvider>.value(value: capture),
+          ChangeNotifierProvider<DeviceProvider>.value(value: device),
+        ],
+        child: const MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: EllaRuntimeDiagnosticsPage(),
+        ),
       ),
-    ));
+    );
     await tester.pump();
     expect(find.textContaining('private-'), findsNothing);
     expect(find.textContaining('https://'), findsNothing);
@@ -184,6 +192,15 @@ void main() {
     expect(value.reason, EllaCaptureSocketFailureReason.captureSocketError);
     expect(value.closeCode, isNull);
     expect(value.at.isUtc, isTrue);
+    final attempt = EllaCaptureSocketAttempt(
+      EllaCaptureSocketAttemptPhase.closedBeforeReady,
+      6000,
+      DateTime.parse('2026-10-02T09:44:00-07:00'),
+    );
+    expect(attempt.phase.code, 'closed_before_ready');
+    expect(attempt.status, EllaCaptureSocketAttemptStatus.failed);
+    expect(attempt.closeCode, isNull);
+    expect(attempt.at.toIso8601String(), '2026-10-02T16:44:00.000Z');
   });
 
   for (final initialized in [false, true]) {
@@ -200,21 +217,31 @@ void main() {
                 receivedBytes: 321,
                 sentBytes: 123,
                 lastFailure: EllaCaptureSocketFailure.fromReason(
-                    'capture_socket_closed_before_ready', 1013, DateTime.utc(2026, 10, 2, 16, 44)),
+                  'capture_socket_closed_before_ready',
+                  1013,
+                  DateTime.utc(2026, 10, 2, 16, 44),
+                ),
+                lastAttempt: EllaCaptureSocketAttempt(
+                  EllaCaptureSocketAttemptPhase.closedBeforeReady,
+                  1013,
+                  DateTime.parse('2026-10-02T09:44:00-07:00'),
+                ),
               )
             : const EllaCaptureDiagnosticsSnapshot.uninitialized();
       });
-      await tester.pumpWidget(MultiProvider(
-        providers: [
-          ChangeNotifierProvider<CaptureProvider>.value(value: capture),
-          ChangeNotifierProvider<DeviceProvider>.value(value: device),
-        ],
-        child: const MaterialApp(
-          localizationsDelegates: AppLocalizations.localizationsDelegates,
-          supportedLocales: AppLocalizations.supportedLocales,
-          home: EllaRuntimeDiagnosticsPage(),
+      await tester.pumpWidget(
+        MultiProvider(
+          providers: [
+            ChangeNotifierProvider<CaptureProvider>.value(value: capture),
+            ChangeNotifierProvider<DeviceProvider>.value(value: device),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: EllaRuntimeDiagnosticsPage(),
+          ),
         ),
-      ));
+      );
       await tester.pump();
       expect(reads, greaterThan(0));
       expect(capture.metricsListeners, 0);
@@ -223,7 +250,8 @@ void main() {
       expect(find.textContaining('1.25 kbps'), findsNothing);
       if (initialized) {
         expect(find.textContaining('123 B'), findsOneWidget);
-        expect(find.textContaining('capture_socket_closed_before_ready · 1013'), findsOneWidget);
+        expect(find.textContaining('closed_before_ready · failed · 1013'), findsOneWidget);
+        expect(find.textContaining('2026-10-02T16:44:00.000Z'), findsOneWidget);
       } else {
         expect(find.textContaining('Unknown B'), findsWidgets);
         expect(find.textContaining('0 B/s'), findsNothing);

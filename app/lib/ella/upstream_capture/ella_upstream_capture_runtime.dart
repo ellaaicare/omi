@@ -6,6 +6,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'package:omi/backend/http/api/conversations.dart' as ella_api;
+import 'package:omi/backend/preferences.dart' as ella_preferences;
 import 'package:omi/ella/capture_host/ella_capture_host.dart';
 import 'package:omi/ella/upstream_capture/ella_capture_authority.dart';
 import 'package:omi/ella/upstream_capture/ella_capture_memory_bridge.dart';
@@ -46,9 +47,9 @@ class EllaUpstreamServicesBootstrap {
     Future<void> Function()? initializeManager,
     bool Function()? managerExists,
     Future<void> Function()? initializeConnectivity,
-  })  : _initializeManager = initializeManager ?? ServiceManager.init,
-        _managerExists = managerExists ?? _productionManagerExists,
-        _initializeConnectivity = initializeConnectivity ?? ConnectivityService().init;
+  }) : _initializeManager = initializeManager ?? ServiceManager.init,
+       _managerExists = managerExists ?? _productionManagerExists,
+       _initializeConnectivity = initializeConnectivity ?? ConnectivityService().init;
 
   final Future<void> Function() _initializeManager;
   final bool Function() _managerExists;
@@ -130,8 +131,7 @@ class EllaIsolatedSecureStorage extends FlutterSecureStorage {
     WebOptions? webOptions,
     AppleOptions? mOptions,
     WindowsOptions? wOptions,
-  }) async =>
-      null;
+  }) async => null;
 
   @override
   Future<void> write({
@@ -259,13 +259,13 @@ class EllaUpstreamCaptureRuntime {
     ],
     @visibleForTesting Future<CaptureProvider> Function()? bootForTesting,
     @visibleForTesting Future<DeviceConnection?> Function(String deviceId)? connectDeviceForTesting,
-  })  : _memoryLoader = memoryLoader,
-        _memoryAccountAuthority = memoryAccountAuthority,
-        _memoryRetryDelays = memoryRetryDelays,
-        _activeProtocolSocket = activeProtocolSocket,
-        _finalizationRequest = finalizationRequest,
-        _bootForTesting = bootForTesting,
-        _connectDeviceForTesting = connectDeviceForTesting;
+  }) : _memoryLoader = memoryLoader,
+       _memoryAccountAuthority = memoryAccountAuthority,
+       _memoryRetryDelays = memoryRetryDelays,
+       _activeProtocolSocket = activeProtocolSocket,
+       _finalizationRequest = finalizationRequest,
+       _bootForTesting = bootForTesting,
+       _connectDeviceForTesting = connectDeviceForTesting;
 
   static EllaUpstreamCaptureRuntime? _instance;
 
@@ -280,14 +280,59 @@ class EllaUpstreamCaptureRuntime {
     final provider = _provider;
     if (provider == null) return const EllaCaptureDiagnosticsSnapshot.uninitialized();
     final socket = _activeProtocolSocket?.call() ?? _protocolSocket;
-    final current = authority.hasCurrentAuthority;
+    final owner = _diagnosticOwner;
+    final ownedCurrent =
+        owner != null &&
+        identical(owner.socket, socket) &&
+        owner.openGeneration == _socketOpenGeneration &&
+        owner.uid == authority.boundUid &&
+        owner.bindingEpoch == authority.bindingEpoch &&
+        owner.profile == _currentDiagnosticProfile();
+    if (owner != null && !ownedCurrent) _diagnosticOwner = null;
+    final current =
+        authority.hasCurrentAuthority &&
+        socket?.hasOriginAuthority == true &&
+        (owner == null
+            ? !_diagnosticTracked && _activeProtocolSocket != null
+            : ownedCurrent);
     return EllaCaptureDiagnosticsSnapshot.upstream(
-      ready: current && socket?.hasOriginAuthority == true && socket?.state == SocketServiceState.connected,
+      ready: current && socket?.state == SocketServiceState.connected,
       receivedBytes: current ? provider.lifetimeBleBytesReceived : null,
       sentBytes: current ? provider.lifetimeWsSocketBytesSent : null,
-      lastFailure: current && socket?.hasOriginAuthority == true ? socket?.lastAdmissionFailure : null,
+      lastFailure: current ? socket?.lastAdmissionFailure : null,
+      lastAttempt: current ? socket?.lastAttempt : null,
     );
   }
+
+  ({String uid, String profile, int generation})? _currentDiagnosticProfile() {
+    try {
+      final preferences = ella_preferences.SharedPreferencesUtil();
+      final uid = authority.boundUid;
+      final profile = preferences.aiConsentProfileBindingId;
+      if (uid == null || uid.isEmpty || preferences.uid != uid || profile.isEmpty) return null;
+      return (uid: uid, profile: profile, generation: preferences.aiConsentAuthorityGeneration);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _trackDiagnosticSocket(EllaCaptureProtocolSocket socket, int openGeneration) {
+    _diagnosticTracked = true;
+    final profile = _currentDiagnosticProfile();
+    _diagnosticOwner = profile == null
+        ? null
+        : (
+            socket: socket,
+            openGeneration: openGeneration,
+            uid: profile.uid,
+            bindingEpoch: authority.bindingEpoch,
+            profile: profile,
+          );
+  }
+
+  @visibleForTesting
+  void trackDiagnosticSocketForTesting(EllaCaptureProtocolSocket socket) =>
+      _trackDiagnosticSocket(socket, _socketOpenGeneration);
 
   final EllaCaptureMemoryLoader? _memoryLoader;
   final AccountCommitAuthority? Function()? _memoryAccountAuthority;
@@ -299,6 +344,15 @@ class EllaUpstreamCaptureRuntime {
   CaptureProvider? _provider;
   EllaCaptureProtocolSocket? _protocolSocket;
   EllaCaptureProtocolSocket? _finalizationSocket;
+  bool _diagnosticTracked = false;
+  ({
+    EllaCaptureProtocolSocket socket,
+    int openGeneration,
+    String uid,
+    int bindingEpoch,
+    ({String uid, String profile, int generation}) profile,
+  })?
+  _diagnosticOwner;
   int _socketOpenGeneration = 0;
   Future<CaptureProvider>? _boot;
   StreamSubscription<EllaCaptureRevocation>? _revocationSubscription;
@@ -350,57 +404,59 @@ class EllaUpstreamCaptureRuntime {
       EllaUpstreamCaptureWiring(
         wal: wal,
         phoneMic: services.phoneMic,
-        openConversationSocket: ({
-          required BleAudioCodec codec,
-          required int sampleRate,
-          required String language,
-          required bool force,
-          String? source,
-          String? clientConversationId,
-          customSttConfig,
-          geolocation,
-        }) async {
-          if (_finalizationSocket != null) return null;
-          final openGeneration = ++_socketOpenGeneration;
-          final previous = _protocolSocket;
-          if (previous != null) {
-            if (previous.state == SocketServiceState.connected &&
-                !force &&
-                previous.codec == codec &&
-                previous.sampleRate == sampleRate &&
-                previous.clientConversationId == clientConversationId) {
-              return previous;
-            }
-            await previous.stop(reason: 'capture socket replaced');
-            if (openGeneration != _socketOpenGeneration) return null;
-          }
-          final originUid = authority.boundUid;
-          final originEpoch = authority.bindingEpoch;
-          protocolUnavailable.value = false;
-          late final EllaCaptureProtocolSocket socket;
-          bool isCurrent() =>
-              originUid != null &&
-              authority.boundUid == originUid &&
-              authority.bindingEpoch == originEpoch &&
-              authority.hasCurrentAuthority &&
-              identical(_protocolSocket, socket);
-          socket = createEllaCaptureProtocolSocket(
-            codec: codec,
-            sampleRate: sampleRate,
-            language: language,
-            source: source,
-            clientConversationId: clientConversationId,
-            customSttConfig: customSttConfig,
-            geolocation: geolocation,
-            hasOriginAuthority: isCurrent,
-            onAdmissionFailure: (reason, closeCode) => _onCaptureProtocolFailure(socket, reason, closeCode),
-          );
-          _protocolSocket = socket;
-          await socket.start();
-          return openGeneration == _socketOpenGeneration && socket.state == SocketServiceState.connected
-              ? socket
-              : null;
-        },
+        openConversationSocket:
+            ({
+              required BleAudioCodec codec,
+              required int sampleRate,
+              required String language,
+              required bool force,
+              String? source,
+              String? clientConversationId,
+              customSttConfig,
+              geolocation,
+            }) async {
+              if (_finalizationSocket != null) return null;
+              final openGeneration = ++_socketOpenGeneration;
+              final previous = _protocolSocket;
+              if (previous != null) {
+                if (previous.state == SocketServiceState.connected &&
+                    !force &&
+                    previous.codec == codec &&
+                    previous.sampleRate == sampleRate &&
+                    previous.clientConversationId == clientConversationId) {
+                  return previous;
+                }
+                await previous.stop(reason: 'capture socket replaced');
+                if (openGeneration != _socketOpenGeneration) return null;
+              }
+              final originUid = authority.boundUid;
+              final originEpoch = authority.bindingEpoch;
+              protocolUnavailable.value = false;
+              late final EllaCaptureProtocolSocket socket;
+              bool isCurrent() =>
+                  originUid != null &&
+                  authority.boundUid == originUid &&
+                  authority.bindingEpoch == originEpoch &&
+                  authority.hasCurrentAuthority &&
+                  identical(_protocolSocket, socket);
+              socket = createEllaCaptureProtocolSocket(
+                codec: codec,
+                sampleRate: sampleRate,
+                language: language,
+                source: source,
+                clientConversationId: clientConversationId,
+                customSttConfig: customSttConfig,
+                geolocation: geolocation,
+                hasOriginAuthority: isCurrent,
+                onAdmissionFailure: (reason, closeCode) => _onCaptureProtocolFailure(socket, reason, closeCode),
+              );
+              _protocolSocket = socket;
+              _trackDiagnosticSocket(socket, openGeneration);
+              await socket.start();
+              return openGeneration == _socketOpenGeneration && socket.state == SocketServiceState.connected
+                  ? socket
+                  : null;
+            },
         ensureDeviceConnection: (deviceId) => services.device.ensureConnection(deviceId),
         owner: CaptureSessionOwner(
           coordinator: RecordingTransferCoordinator.instance,
@@ -490,7 +546,8 @@ class EllaUpstreamCaptureRuntime {
         final conversations = await upstream_api.getConversations(statuses: [ConversationStatus.in_progress], limit: 1);
         provider.applyInProgressConversation(conversations.isNotEmpty ? conversations.first : null);
       },
-      audioCodecLoader: wiring.codec ??
+      audioCodecLoader:
+          wiring.codec ??
           (deviceId) async {
             final connection = await gatedDeviceConnection(deviceId);
             if (connection == null) return BleAudioCodec.pcm8;
@@ -541,6 +598,7 @@ class EllaUpstreamCaptureRuntime {
   Future<void> get pendingTeardown => _teardown;
 
   void _onRevoked(EllaCaptureRevocation revocation) {
+    _diagnosticOwner = null;
     memoryBridge.cancel();
     lastRevocation.value = revocation;
     // Frames are already refused synchronously by the gate; this only stops
@@ -691,8 +749,9 @@ class EllaUpstreamCaptureRuntime {
     if (!originIsCurrent()) {
       return EllaCaptureStartOutcome.unavailable;
     }
-    final connection = await (_connectDeviceForTesting?.call(device.id) ??
-        ServiceManager.instance().device.ensureConnection(device.id, force: true));
+    final connection =
+        await (_connectDeviceForTesting?.call(device.id) ??
+            ServiceManager.instance().device.ensureConnection(device.id, force: true));
     if (connection == null) return EllaCaptureStartOutcome.unavailable;
     if (!originIsCurrent()) {
       return EllaCaptureStartOutcome.unavailable;
@@ -728,8 +787,8 @@ bool captureProtocolRejectionIsPermanent(String reason, int? closeCode) =>
 
 class _CaptureProtocolAccountAuthority implements ExactAccountAuthorityVerifier {
   _CaptureProtocolAccountAuthority(this._socket, this._capture)
-      : uid = _capture.boundUid ?? '',
-        _bindingEpoch = _capture.bindingEpoch;
+    : uid = _capture.boundUid ?? '',
+      _bindingEpoch = _capture.bindingEpoch;
 
   @override
   final String uid;

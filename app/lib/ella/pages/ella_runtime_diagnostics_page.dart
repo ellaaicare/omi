@@ -53,11 +53,13 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
 
   String _time(DateTime? value) => value?.toLocal().toIso8601String() ?? context.l10n.unknown;
 
+  String _utcTime(DateTime value) => value.toUtc().toIso8601String();
+
   String _transcriptionSocketState(String state) => switch (state) {
-        'connected' => context.l10n.connected,
-        'disconnected' => context.l10n.disconnected,
-        _ => context.l10n.unknown,
-      };
+    'connected' => context.l10n.connected,
+    'disconnected' => context.l10n.disconnected,
+    _ => context.l10n.unknown,
+  };
 
   String _safeCode(String code) {
     const known = {
@@ -106,8 +108,8 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
           final backendProbe = connectivity.backendReachable == null
               ? context.l10n.unknown
               : connectivity.backendReachable!
-                  ? '${context.l10n.connected} · ${_safeStatus(connectivity.lastBackendProbeStatus)}'
-                  : '${context.l10n.disconnected} · ${_safeCode(connectivity.lastBackendProbeError)}';
+              ? '${context.l10n.connected} · ${_safeStatus(connectivity.lastBackendProbeStatus)}'
+              : '${context.l10n.disconnected} · ${_safeCode(connectivity.lastBackendProbeError)}';
           final apiResult = ApiTransportDiagnostics.lastStatusCode == null
               ? _safeCode(ApiTransportDiagnostics.lastError)
               : _safeStatus(ApiTransportDiagnostics.lastStatusCode);
@@ -154,8 +156,8 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
                 value: upstream == null
                     ? context.l10n.diagnosticsLegacyCapture
                     : upstream.initialized
-                        ? context.l10n.diagnosticsUpstreamCapture
-                        : context.l10n.diagnosticsCaptureUninitialized,
+                    ? context.l10n.diagnosticsUpstreamCapture
+                    : context.l10n.diagnosticsCaptureUninitialized,
               ),
               _DiagnosticRow(
                 label: upstream == null ? context.l10n.diagnosticsBleRate : context.l10n.diagnosticsAudioReceived,
@@ -172,15 +174,18 @@ class _EllaRuntimeDiagnosticsPageState extends State<EllaRuntimeDiagnosticsPage>
               if (upstream != null)
                 _DiagnosticRow(
                   label: context.l10n.diagnosticsSocketAdmission,
-                  value: upstream.lastFailure == null
+                  value: upstream.lastAttempt != null
+                      ? '${upstream.lastAttempt!.phase.code} · ${upstream.lastAttempt!.status.name} · ${upstream.lastAttempt!.closeCode ?? context.l10n.unknown}\n${_utcTime(upstream.lastAttempt!.at)}'
+                      : upstream.lastFailure == null
                       ? context.l10n.unknown
-                      : '${upstream.lastFailure!.reason.code} · ${upstream.lastFailure!.closeCode ?? '-'}\n${_time(upstream.lastFailure!.at)}',
+                      : '${upstream.lastFailure!.reason.code} · ${upstream.lastFailure!.closeCode ?? '-'}\n${_utcTime(upstream.lastFailure!.at)}',
                 ),
               const SizedBox(height: 6),
               _DiagnosticRow(
                 key: const Key('runtime-diagnostics-device-counts'),
                 label: context.l10n.deviceDiagnostics,
-                value: 'scansStarted=${DebugLogManager.deviceScansStarted.clamp(0, 1000000)} '
+                value:
+                    'scansStarted=${DebugLogManager.deviceScansStarted.clamp(0, 1000000)} '
                     'scansStopped=${DebugLogManager.deviceScansStopped.clamp(0, 1000000)}\n'
                     'candidatesSeen=${DebugLogManager.deviceCandidatesSeen.clamp(0, 1000000)} '
                     'candidatesAdmitted=${DebugLogManager.deviceCandidatesAdmitted.clamp(0, 1000000)}',
@@ -201,20 +206,20 @@ class _DiagnosticRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 10),
-        child: EllaCardSurface(
-          borderRadius: 14,
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(label, style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w700)),
-                const SizedBox(height: 4),
-                SelectableText(value, style: EllaTextStyles.caption),
-              ],
-            ),
-          ),
+    padding: const EdgeInsets.only(bottom: 10),
+    child: EllaCardSurface(
+      borderRadius: 14,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label, style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 4),
+            SelectableText(value, style: EllaTextStyles.caption),
+          ],
         ),
-      );
+      ),
+    ),
+  );
 }

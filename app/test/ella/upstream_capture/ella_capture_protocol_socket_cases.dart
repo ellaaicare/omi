@@ -21,12 +21,16 @@ class _Transport implements IPureSocket {
   PureSocketStatus _status = PureSocketStatus.notConnected;
   final List<dynamic> sent = [];
   int stopCalls = 0;
+  bool connectResult = true;
+  Future<void> Function()? beforeConnectReturns;
 
   @override
   PureSocketStatus get status => _status;
 
   @override
   Future<bool> connect() async {
+    await beforeConnectReturns?.call();
+    if (!connectResult) return false;
     _status = PureSocketStatus.connected;
     listener?.onConnected();
     return true;
@@ -120,9 +124,13 @@ void registerEllaCaptureProtocolSocketCases() {
     expect(await harness.bind(), isTrue);
     final originEpoch = harness.authority.bindingEpoch;
     final transport = _Transport();
-    socket = EllaCaptureProtocolSocket.withTransport(16000, BleAudioCodec.pcm16, 'multi', transport,
-        hasOriginAuthority: () =>
-            harness.authority.hasCurrentAuthority && harness.authority.bindingEpoch == originEpoch);
+    socket = EllaCaptureProtocolSocket.withTransport(
+      16000,
+      BleAudioCodec.pcm16,
+      'multi',
+      transport,
+      hasOriginAuthority: () => harness.authority.hasCurrentAuthority && harness.authority.bindingEpoch == originEpoch,
+    );
     final start = socket.start();
     await _tick();
     expect(harness.runtime.captureDiagnostics.ready, isFalse);
@@ -152,8 +160,13 @@ void registerEllaCaptureProtocolSocketCases() {
     expect(await harness.bind(), isTrue);
     final epoch = harness.authority.bindingEpoch;
     final transport = _Transport();
-    socket = EllaCaptureProtocolSocket.withTransport(16000, BleAudioCodec.pcm16, 'multi', transport,
-        hasOriginAuthority: () => harness.authority.hasCurrentAuthority && harness.authority.bindingEpoch == epoch);
+    socket = EllaCaptureProtocolSocket.withTransport(
+      16000,
+      BleAudioCodec.pcm16,
+      'multi',
+      transport,
+      hasOriginAuthority: () => harness.authority.hasCurrentAuthority && harness.authority.bindingEpoch == epoch,
+    );
     final start = socket.start();
     await _tick();
     transport.serverStatus('capture_protocol_ready', fields: _authority);
@@ -163,6 +176,41 @@ void registerEllaCaptureProtocolSocketCases() {
     expect(await harness.bind(), isTrue);
     expect(socket.state, SocketServiceState.connected, reason: 'the old transport is still awaiting teardown');
     expect(harness.runtime.captureDiagnostics.ready, isFalse);
+  });
+
+  test('tracked diagnostics do not reappear after presentation-profile ABA', () async {
+    final dir = await Directory.systemTemp.createTemp('ella-capture-diagnostic-profile-');
+    EllaCaptureProtocolSocket? socket;
+    final harness = await EllaUpstreamCaptureHarness.boot(tempDir: dir, diagnosticSocket: () => socket);
+    addTearDown(() async {
+      await socket?.stop();
+      await harness.dispose();
+      await dir.delete(recursive: true);
+    });
+    expect(await harness.bind(), isTrue);
+    final transport = _Transport();
+    socket = EllaCaptureProtocolSocket.withTransport(
+      16000,
+      BleAudioCodec.pcm16,
+      'multi',
+      transport,
+      hasOriginAuthority: () => harness.authority.hasCurrentAuthority,
+    );
+    harness.runtime.trackDiagnosticSocketForTesting(socket);
+    final start = socket.start();
+    await _tick();
+    transport.serverStatus('capture_protocol_ready', fields: _authority);
+    await start;
+    expect(harness.runtime.captureDiagnostics.lastAttempt?.phase, EllaCaptureSocketAttemptPhase.captureReady);
+
+    await harness.ellaPreferences.saveString('aiConsentProfileBindingId', 'replacement-profile');
+    expect(harness.runtime.captureDiagnostics.lastAttempt, isNull);
+    await harness.ellaPreferences.saveString('aiConsentProfileBindingId', 'profile-binding-$accountA');
+    expect(
+      harness.runtime.captureDiagnostics.lastAttempt,
+      isNull,
+      reason: 'a returning profile label cannot resurrect the retired attempt',
+    );
   });
 
   test('production factory replaces the upstream transport with a v2 backend URL', () async {
@@ -189,8 +237,11 @@ void registerEllaCaptureProtocolSocketCases() {
     final firstEpoch = harness.authority.bindingEpoch;
     harness.authority.release();
     expect(harness.authority.bind(accountA), isTrue);
-    expect(harness.authority.bindingEpoch, greaterThan(firstEpoch),
-        reason: 'same-UID rebind retires old socket authority');
+    expect(
+      harness.authority.bindingEpoch,
+      greaterThan(firstEpoch),
+      reason: 'same-UID rebind retires old socket authority',
+    );
   });
 
   test('handshake alone cannot publish Recording or send audio; exact ready permits ingress and drain', () async {
@@ -213,19 +264,13 @@ void registerEllaCaptureProtocolSocketCases() {
     expect(socket.state, SocketServiceState.connected);
     await socket.send(<int>[1, 2, 3]);
     expect(transport.sent.whereType<List<int>>(), [
-      <int>[1, 2, 3]
+      <int>[1, 2, 3],
     ]);
 
     final stop = socket.stop();
     await _tick();
-    expect(jsonDecode(transport.sent.last as String), {
-      'type': 'capture_drain',
-      ..._authority,
-    });
-    transport.serverStatus('capture_protocol_drained', fields: {
-      ..._authority,
-      'owner_token': 'stale-owner',
-    });
+    expect(jsonDecode(transport.sent.last as String), {'type': 'capture_drain', ..._authority});
+    transport.serverStatus('capture_protocol_drained', fields: {..._authority, 'owner_token': 'stale-owner'});
     await _tick();
     expect(transport.stopCalls, 0, reason: 'a mixed-owner drain cannot acknowledge this capture');
     transport.serverStatus('capture_protocol_drained', fields: _authority);
@@ -258,6 +303,58 @@ void registerEllaCaptureProtocolSocketCases() {
     expect(socket.lastAdmissionFailure?.reason, EllaCaptureSocketFailureReason.captureSocketClosedBeforeReady);
     expect(socket.lastAdmissionFailure?.closeCode, 1008);
     expect(socket.lastAdmissionFailure?.at.isUtc, isTrue);
+    expect(socket.lastAttempt?.phase, EllaCaptureSocketAttemptPhase.closedBeforeReady);
+    expect(socket.lastAttempt?.status, EllaCaptureSocketAttemptStatus.failed);
+    expect(socket.lastAttempt?.closeCode, 1008);
+  });
+
+  test('handshake failure and origin retirement remain distinct without changing capture admission', () async {
+    final unavailable = _Transport()..connectResult = false;
+    final failed = EllaCaptureProtocolSocket.withTransport(16000, BleAudioCodec.pcm16, 'multi', unavailable);
+    await failed.start();
+    expect(failed.lastAdmissionFailure?.reason, EllaCaptureSocketFailureReason.transportConnectFailed);
+    expect(failed.lastAttempt?.phase, EllaCaptureSocketAttemptPhase.transportUnavailable);
+    expect(failed.lastAttempt?.at.isUtc, isTrue);
+    expect(unavailable.sent, isEmpty);
+
+    var current = true;
+    final retired = _Transport()
+      ..beforeConnectReturns = () async {
+        current = false;
+      };
+    final stale = EllaCaptureProtocolSocket.withTransport(
+      16000,
+      BleAudioCodec.pcm16,
+      'multi',
+      retired,
+      hasOriginAuthority: () => current,
+    );
+    await stale.start();
+    expect(stale.lastAdmissionFailure?.reason, EllaCaptureSocketFailureReason.captureOriginRetired);
+    expect(stale.lastAttempt?.phase, EllaCaptureSocketAttemptPhase.originRetired);
+    expect(retired.stopCalls, 1);
+    expect(retired.sent, isEmpty);
+  });
+
+  test('ready and close phases are bounded to one attempt and ignore late ready', () async {
+    for (final closeCode in [1008, 1011, 1013, 999, 5000]) {
+      final transport = _Transport();
+      final socket = EllaCaptureProtocolSocket.withTransport(16000, BleAudioCodec.pcm16, 'multi', transport);
+      final start = socket.start();
+      await _tick();
+      expect(socket.lastAttempt?.phase, EllaCaptureSocketAttemptPhase.transportConnected);
+      transport.serverStatus('capture_protocol_ready', fields: _authority);
+      await start;
+      expect(socket.lastAttempt?.phase, EllaCaptureSocketAttemptPhase.captureReady);
+      expect(socket.lastAttempt?.status, EllaCaptureSocketAttemptStatus.ready);
+      transport.serverClose(closeCode);
+      expect(socket.lastAttempt?.phase, EllaCaptureSocketAttemptPhase.closedAfterReady);
+      expect(socket.lastAttempt?.closeCode, closeCode >= 1000 && closeCode <= 4999 ? closeCode : null);
+      transport.serverStatus('capture_protocol_ready', fields: _authority);
+      expect(socket.lastAttempt?.phase, EllaCaptureSocketAttemptPhase.closedAfterReady);
+      await socket.send(<int>[9]);
+      expect(transport.sent.whereType<List<int>>(), isEmpty);
+    }
   });
 
   test('invalid ready and missing ready both fail closed', () async {
@@ -460,30 +557,33 @@ void registerEllaCaptureProtocolSocketCases() {
     final resultFuture = finalizeEllaCaptureProtocolConversation(
       socket: socket,
       exactAuthority: verifier,
-      request: ({
-        required conversationId,
-        required protocolVersion,
-        required generation,
-        required ownerToken,
-        required transportLost,
-        expectedAuthenticatedUid,
-        exactAuthority,
-      }) async {
-        requests++;
-        expect((conversationId, protocolVersion, generation, ownerToken),
-            ('conversation-a', 2, 'generation-a', 'owner-a'));
-        expect(transportLost, isFalse);
-        expect(expectedAuthenticatedUid, 'account-a');
-        expect(identical(exactAuthority, verifier), isTrue);
-        return ella_schema.CreateConversationResponse.fromJson({
-          'messages': const [],
-          'conversation': {
-            'id': conversationId,
-            'created_at': '2026-09-29T00:00:00Z',
-            'structured': {'title': 'Moment', 'overview': '', 'emoji': '', 'category': 'other'},
+      request:
+          ({
+            required conversationId,
+            required protocolVersion,
+            required generation,
+            required ownerToken,
+            required transportLost,
+            expectedAuthenticatedUid,
+            exactAuthority,
+          }) async {
+            requests++;
+            expect(
+              (conversationId, protocolVersion, generation, ownerToken),
+              ('conversation-a', 2, 'generation-a', 'owner-a'),
+            );
+            expect(transportLost, isFalse);
+            expect(expectedAuthenticatedUid, 'account-a');
+            expect(identical(exactAuthority, verifier), isTrue);
+            return ella_schema.CreateConversationResponse.fromJson({
+              'messages': const [],
+              'conversation': {
+                'id': conversationId,
+                'created_at': '2026-09-29T00:00:00Z',
+                'structured': {'title': 'Moment', 'overview': '', 'emoji': '', 'category': 'other'},
+              },
+            });
           },
-        });
-      },
     );
     await _tick();
     transport.serverStatus('capture_protocol_drained', fields: _authority);
@@ -510,27 +610,28 @@ void registerEllaCaptureProtocolSocketCases() {
     final result = await finalizeEllaCaptureProtocolConversation(
       socket: socket,
       exactAuthority: verifier,
-      request: ({
-        required conversationId,
-        required protocolVersion,
-        required generation,
-        required ownerToken,
-        required transportLost,
-        expectedAuthenticatedUid,
-        exactAuthority,
-      }) async {
-        requests++;
-        expect(transportLost, isTrue);
-        expect((conversationId, generation, ownerToken), ('conversation-a', 'generation-a', 'owner-a'));
-        verifier.current = false;
-        return ella_schema.CreateConversationResponse.fromJson({
-          'conversation': {
-            'id': conversationId,
-            'created_at': '2026-09-29T00:00:00Z',
-            'structured': {'title': 'Moment', 'overview': '', 'emoji': '', 'category': 'other'},
+      request:
+          ({
+            required conversationId,
+            required protocolVersion,
+            required generation,
+            required ownerToken,
+            required transportLost,
+            expectedAuthenticatedUid,
+            exactAuthority,
+          }) async {
+            requests++;
+            expect(transportLost, isTrue);
+            expect((conversationId, generation, ownerToken), ('conversation-a', 'generation-a', 'owner-a'));
+            verifier.current = false;
+            return ella_schema.CreateConversationResponse.fromJson({
+              'conversation': {
+                'id': conversationId,
+                'created_at': '2026-09-29T00:00:00Z',
+                'structured': {'title': 'Moment', 'overview': '', 'emoji': '', 'category': 'other'},
+              },
+            });
           },
-        });
-      },
     );
     expect(result, isNull);
     expect(requests, 1);
@@ -547,18 +648,19 @@ void registerEllaCaptureProtocolSocketCases() {
     final resultFuture = finalizeEllaCaptureProtocolConversation(
       socket: socket,
       exactAuthority: verifier,
-      request: ({
-        required conversationId,
-        required protocolVersion,
-        required generation,
-        required ownerToken,
-        required transportLost,
-        expectedAuthenticatedUid,
-        exactAuthority,
-      }) async {
-        verifier.current = false;
-        throw ExactAccountAuthorityChangedException('account changed');
-      },
+      request:
+          ({
+            required conversationId,
+            required protocolVersion,
+            required generation,
+            required ownerToken,
+            required transportLost,
+            expectedAuthenticatedUid,
+            exactAuthority,
+          }) async {
+            verifier.current = false;
+            throw ExactAccountAuthorityChangedException('account changed');
+          },
     );
     await _tick();
     transport.serverStatus('capture_protocol_drained', fields: _authority);
