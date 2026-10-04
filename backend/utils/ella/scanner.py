@@ -1319,6 +1319,8 @@ def send_to_scanner(
     latency_metadata: Optional[dict] = None,
     guardian_mode: object = _GUARDIAN_MODE_UNSET,
     typesafe_egress_authorized: bool = False,
+    origin_generation: Optional[str] = None,
+    origin_owner_token: Optional[str] = None,
 ) -> Optional[int]:
     """
     Send transcript segments to Ella scanner agent.
@@ -1512,7 +1514,10 @@ def send_to_scanner(
         emergency_reason is None
         and not formatted_recent_segments
         and not wake_prefix_recent
-        and (scanner_window_text is None or spoken_diagnostic._normalized(scanner_window_text) == spoken_diagnostic.PHRASE)
+        and (
+            scanner_window_text is None
+            or spoken_diagnostic._normalized(scanner_window_text) == spoken_diagnostic.PHRASE
+        )
         and os.getenv("ELLA_SPOKEN_DIAGNOSTIC_ENABLED", "").strip().lower() == "true"
     ):
         diagnostic_window = spoken_diagnostic.is_diagnostic_window(uid, scanner_segments)
@@ -1520,7 +1525,13 @@ def send_to_scanner(
         diagnostic_window = False
     if diagnostic_window:
         try:
-            diagnostic_claim = spoken_diagnostic.reserve_for_segments(uid, str(conversation_id), scanner_segments)
+            diagnostic_claim = spoken_diagnostic.reserve_for_segments(
+                uid,
+                str(conversation_id),
+                scanner_segments,
+                origin_generation=origin_generation,
+                origin_owner_token=origin_owner_token,
+            )
         except Exception:
             diagnostic_claim = None
         if diagnostic_claim is None:

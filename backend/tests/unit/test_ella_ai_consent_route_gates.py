@@ -397,6 +397,10 @@ def test_active_stt_audio_stops_at_terminal_or_retryable_consent_boundary():
     assert "segment_buffers.clear()" in stream_source
     assert stream_source.count("await _run_sync_provider_with_current_consent(") == 2
     assert "scanner_dispatch_queue.enqueue(" in stream_source
+    assert "_scanner_dispatch_item(" in stream_source
+    item_source = _function_source(BACKEND / "routers" / "transcribe.py", "_scanner_dispatch_item")
+    assert '"origin_generation": generation_id' in item_source
+    assert '"origin_owner_token": owner_token' in item_source
     assert "_dispatch_scanner_with_current_consent(" in stream_source
     assert stream_source.index("scanner_dispatch_queue.enqueue(") < stream_source.index(
         "await websocket.send_json([segment.dict() for segment in updated_segments])"

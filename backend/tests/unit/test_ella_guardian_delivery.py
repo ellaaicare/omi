@@ -645,14 +645,17 @@ def test_spoken_diagnostic_requires_current_authority_before_tts(monkeypatch):
     monkeypatch.setattr(guardian, "_spoken_diagnostic_admitted", denied)
     monkeypatch.setattr(guardian.httpx, "AsyncClient", _FakeAsyncClient)
     with pytest.raises(HTTPException) as error:
-        asyncio.run(guardian.spoken_diagnostic_audio(
-            guardian.SpokenDiagnosticRequest(
-                uid="uid-1", claim_id="a" * 64,
-                response_version=guardian.spoken_diagnostic.RESPONSE_VERSION,
-            ),
-            x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
-            subject_uid="uid-1",
-        ))
+        asyncio.run(
+            guardian.spoken_diagnostic_audio(
+                guardian.SpokenDiagnosticRequest(
+                    uid="uid-1",
+                    claim_id="a" * 64,
+                    response_version=guardian.spoken_diagnostic.RESPONSE_VERSION,
+                ),
+                x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+                subject_uid="uid-1",
+            )
+        )
     assert error.value.status_code == 409
     assert _FakeAsyncClient.posts == []
 
@@ -690,14 +693,19 @@ def test_spoken_diagnostic_ambiguous_tts_is_consumed_once(monkeypatch):
     monkeypatch.setattr(guardian.httpx, "AsyncClient", AmbiguousClient)
     monkeypatch.setattr(guardian, "ELLA_INTERNAL_VOICE_TTS_TOKEN", "test-internal-tts-token")
     request = guardian.SpokenDiagnosticRequest(
-        uid="uid-1", claim_id="a" * 64,
+        uid="uid-1",
+        claim_id="a" * 64,
         response_version=guardian.spoken_diagnostic.RESPONSE_VERSION,
     )
     for expected_status in (502, 409):
         with pytest.raises(HTTPException) as error:
-            asyncio.run(guardian.spoken_diagnostic_audio(
-                request, x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY, subject_uid="uid-1",
-            ))
+            asyncio.run(
+                guardian.spoken_diagnostic_audio(
+                    request,
+                    x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+                    subject_uid="uid-1",
+                )
+            )
         assert error.value.status_code == expected_status
     assert attempts == [1]
 
@@ -712,7 +720,7 @@ def test_spoken_diagnostic_one_render_and_post_tts_authority(monkeypatch, revoke
 
     async def admitted(_uid, _claim_id, required, _pool):
         state["reads"] += 1
-        if revoke_after_tts and state["reads"] > 1:
+        if revoke_after_tts and state["reads"] > 2:
             return None
         return {"queue_id": "diagnostic_a"} if state["value"] == required else None
 
@@ -730,25 +738,76 @@ def test_spoken_diagnostic_one_render_and_post_tts_authority(monkeypatch, revoke
     monkeypatch.setattr(guardian, "ELLA_INTERNAL_VOICE_TTS_TOKEN", "test-internal-tts-token")
     monkeypatch.setattr(guardian, "_store_audio_content", lambda *_args: {"url": "https://audio.test/fixed.mp3"})
     request = guardian.SpokenDiagnosticRequest(
-        uid="uid-1", claim_id="a" * 64,
+        uid="uid-1",
+        claim_id="a" * 64,
         response_version=guardian.spoken_diagnostic.RESPONSE_VERSION,
     )
     if revoke_after_tts:
         with pytest.raises(HTTPException) as error:
-            asyncio.run(guardian.spoken_diagnostic_audio(
-                request, x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY, subject_uid="uid-1",
-            ))
+            asyncio.run(
+                guardian.spoken_diagnostic_audio(
+                    request,
+                    x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+                    subject_uid="uid-1",
+                )
+            )
         assert error.value.status_code == 409
         assert pool.executed == []
     else:
-        result = asyncio.run(guardian.spoken_diagnostic_audio(
-            request, x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY, subject_uid="uid-1",
-        ))
+        result = asyncio.run(
+            guardian.spoken_diagnostic_audio(
+                request,
+                x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+                subject_uid="uid-1",
+            )
+        )
         assert result["queue_id"] == "diagnostic_a"
         assert len(pool.executed) == 1
         assert pool.executed[0][1][3] == guardian.spoken_diagnostic.RESPONSE
     assert len(_FakeAsyncClient.posts) == 1
     assert _FakeAsyncClient.posts[0][1]["json"] == {"text": guardian.spoken_diagnostic.RESPONSE}
+
+
+def test_spoken_diagnostic_revocation_during_voice_settings_prevents_tts(monkeypatch):
+    state = {"value": "claimed", "revoked": False}
+
+    async def get_pool():
+        return _FakePool(user_row={"guardian_mode": "active_support"})
+
+    async def admitted(_uid, _claim_id, required, _pool):
+        return {"queue_id": "diagnostic_a"} if not state["revoked"] and state["value"] == required else None
+
+    def transition(_uid, _claim_id, expected, next_state, **_kwargs):
+        assert state["value"] == expected
+        state["value"] = next_state
+        return {"queue_id": "diagnostic_a", "state": next_state}
+
+    def voice_settings(_uid):
+        state["revoked"] = True
+        return {}
+
+    _FakeAsyncClient.posts = []
+    monkeypatch.setattr(guardian, "_get_pool", get_pool)
+    monkeypatch.setattr(guardian, "_spoken_diagnostic_admitted", admitted)
+    monkeypatch.setattr(guardian.spoken_diagnostic, "transition", transition)
+    monkeypatch.setattr(guardian.app_settings_db, "get_voice_settings", voice_settings)
+    monkeypatch.setattr(guardian.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(guardian, "ELLA_INTERNAL_VOICE_TTS_TOKEN", "test-internal-tts-token")
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            guardian.spoken_diagnostic_audio(
+                guardian.SpokenDiagnosticRequest(
+                    uid="uid-1",
+                    claim_id="a" * 64,
+                    response_version=guardian.spoken_diagnostic.RESPONSE_VERSION,
+                ),
+                x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+                subject_uid="uid-1",
+            )
+        )
+    assert error.value.status_code == 409
+    assert state["value"] == "rendering"
+    assert _FakeAsyncClient.posts == []
 
 
 def test_generic_queue_cannot_forge_diagnostic_marker(monkeypatch):
@@ -757,18 +816,22 @@ def test_generic_queue_cannot_forge_diagnostic_marker(monkeypatch):
 
     monkeypatch.setattr(guardian, "_get_pool", unexpected_pool)
     with pytest.raises(HTTPException) as error:
-        asyncio.run(guardian.enqueue(
-            guardian.EnqueueRequest(
-                uid="uid-1", url="https://example.test/audio.mp3", trigger="spoken_diagnostic",
-            ),
-            x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
-            subject_uid="uid-1",
-        ))
+        asyncio.run(
+            guardian.enqueue(
+                guardian.EnqueueRequest(
+                    uid="uid-1",
+                    url="https://example.test/audio.mp3",
+                    trigger="spoken_diagnostic",
+                ),
+                x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+                subject_uid="uid-1",
+            )
+        )
     assert error.value.status_code == 409
 
 
-@pytest.mark.parametrize("revoked", [False, True])
-def test_spoken_diagnostic_fetch_rechecks_authority_and_audio(monkeypatch, tmp_path, revoked):
+@pytest.mark.parametrize("revoked_at", ["never", "initial", "after_hash"])
+def test_spoken_diagnostic_fetch_rechecks_authority_and_audio(monkeypatch, tmp_path, revoked_at):
     claim_id = "a" * 64
     queue_id = guardian.spoken_diagnostic._queue_id(claim_id)
     filename = "123-a1b2c3d4e5f6.mp3"
@@ -779,10 +842,17 @@ def test_spoken_diagnostic_fetch_rechecks_authority_and_audio(monkeypatch, tmp_p
     (directory / filename).write_bytes(audio)
     url = f"https://audio.test/uid-1/{filename}"
     row = {
-        "id": queue_id, "uid": "uid-1", "url": url, "priority": "normal",
-        "message": guardian.spoken_diagnostic.RESPONSE, "trigger_type": "spoken_diagnostic",
+        "id": queue_id,
+        "uid": "uid-1",
+        "url": url,
+        "priority": "normal",
+        "message": guardian.spoken_diagnostic.RESPONSE,
+        "trigger_type": "spoken_diagnostic",
         "metadata": {
-            "spoken_diagnostic": {"claim_id": claim_id, "response_version": guardian.spoken_diagnostic.RESPONSE_VERSION},
+            "spoken_diagnostic": {
+                "claim_id": claim_id,
+                "response_version": guardian.spoken_diagnostic.RESPONSE_VERSION,
+            },
             "audio_sha256": digest,
         },
         "created_at": datetime.now(timezone.utc),
@@ -798,16 +868,23 @@ def test_spoken_diagnostic_fetch_rechecks_authority_and_audio(monkeypatch, tmp_p
     async def get_pool():
         return QueuePool()
 
+    calls = []
+
     async def admitted(*_args):
-        return None if revoked else {"queue_id": queue_id, "audio_url": url, "audio_sha256": digest}
+        calls.append(1)
+        return (
+            None
+            if revoked_at == "initial" or (revoked_at == "after_hash" and len(calls) > 1)
+            else {"queue_id": queue_id, "audio_url": url, "audio_sha256": digest}
+        )
 
     monkeypatch.setattr(guardian, "_get_pool", get_pool)
     monkeypatch.setattr(guardian, "_spoken_diagnostic_admitted", admitted)
     monkeypatch.setattr(guardian, "AUDIO_PUBLIC_URL", "https://audio.test")
     monkeypatch.setattr(guardian, "AUDIO_BASE_DIR", str(tmp_path))
     result = asyncio.run(guardian.next_audio(uid="uid-1", authenticated_uid="uid-1"))
-    assert result["url"] == (None if revoked else url)
-    if not revoked:
+    assert result["url"] == (url if revoked_at == "never" else None)
+    if revoked_at == "never":
         assert result["trigger_type"] == "spoken_diagnostic"
 
 

@@ -1595,8 +1595,10 @@ async def next_audio(uid: Optional[str] = None, authenticated_uid: str = Depends
             claim = await _spoken_diagnostic_admitted(uid, claim_id, "queued", pool)
         url = str(row["url"] or "")
         prefix = f"{AUDIO_PUBLIC_URL}/{uid}/"
-        filename = url[len(prefix):] if url.startswith(prefix) else ""
-        path = os.path.join(AUDIO_BASE_DIR, uid, filename) if re.fullmatch(r"[0-9]+-[0-9a-f]{12}\.mp3", filename) else ""
+        filename = url[len(prefix) :] if url.startswith(prefix) else ""
+        path = (
+            os.path.join(AUDIO_BASE_DIR, uid, filename) if re.fullmatch(r"[0-9]+-[0-9a-f]{12}\.mp3", filename) else ""
+        )
         try:
             audio_ok = bool(
                 claim
@@ -1615,14 +1617,23 @@ async def next_audio(uid: Optional[str] = None, authenticated_uid: str = Depends
         try:
             ledger_pool = await _playback_ledger.get_pool()
             await _playback_ledger.record_fetched(
-                ledger_pool, uid=uid, playback_id=row["id"],
-                queue_item_id=row["id"], trace_id=row["id"],
+                ledger_pool,
+                uid=uid,
+                playback_id=row["id"],
+                queue_item_id=row["id"],
+                trace_id=row["id"],
             )
         except Exception:
             pass
+        final_claim = await _spoken_diagnostic_admitted(uid, claim_id, "queued", pool)
+        if not final_claim or final_claim.get("audio_sha256") != claim.get("audio_sha256"):
+            return {"url": None}
         return {
-            "url": url, "id": row["id"], "trace_id": row["id"],
-            "priority": "normal", "message": spoken_diagnostic.RESPONSE,
+            "url": url,
+            "id": row["id"],
+            "trace_id": row["id"],
+            "priority": "normal",
+            "message": spoken_diagnostic.RESPONSE,
             "trigger_type": "spoken_diagnostic",
             "metadata": {"source": "spoken_diagnostic", "response_version": spoken_diagnostic.RESPONSE_VERSION},
             "created_at": row["created_at"].isoformat() if row["created_at"] else None,
@@ -1871,7 +1882,12 @@ async def enqueue(
 
 
 _SPOKEN_DIAGNOSTIC_MODES = {
-    "active_support", "cyborg", "demo", "chatbot", "memory_support", "maximum_awareness",
+    "active_support",
+    "cyborg",
+    "demo",
+    "chatbot",
+    "memory_support",
+    "maximum_awareness",
 }
 
 
@@ -1908,17 +1924,12 @@ async def spoken_diagnostic_audio(
     """Render one server-fixed check-in from a live STT claim; never retry ambiguous TTS."""
     authority = _verify_key(x_guardian_key, key, subject_uid)
     uid = authority.require_uid(req.uid, feature="Spoken diagnostic")
-    if (
-        req.response_version != spoken_diagnostic.RESPONSE_VERSION
-        or not re.fullmatch(r"[0-9a-f]{64}", req.claim_id)
-    ):
+    if req.response_version != spoken_diagnostic.RESPONSE_VERSION or not re.fullmatch(r"[0-9a-f]{64}", req.claim_id):
         raise HTTPException(status_code=409, detail="spoken_diagnostic_unavailable")
     pool = await _get_pool()
     if not await _spoken_diagnostic_admitted(uid, req.claim_id, "claimed", pool):
         raise HTTPException(status_code=409, detail="spoken_diagnostic_unavailable")
-    rendering = await run_in_threadpool(
-        spoken_diagnostic.transition, uid, req.claim_id, "claimed", "rendering"
-    )
+    rendering = await run_in_threadpool(spoken_diagnostic.transition, uid, req.claim_id, "claimed", "rendering")
     if not rendering:
         raise HTTPException(status_code=409, detail="spoken_diagnostic_unavailable")
 
@@ -1931,6 +1942,8 @@ async def spoken_diagnostic_audio(
         if not candidates:
             raise RuntimeError("tts_provider_unavailable")
         async with httpx.AsyncClient() as client:
+            if not await _spoken_diagnostic_admitted(uid, req.claim_id, "rendering", pool):
+                raise HTTPException(status_code=409, detail="spoken_diagnostic_unavailable")
             response = await client.post(
                 ELLA_INTERNAL_VOICE_TTS_URL,
                 json={"text": spoken_diagnostic.RESPONSE},
@@ -1947,6 +1960,8 @@ async def spoken_diagnostic_audio(
             or response.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "audio/mpeg"
         ):
             raise RuntimeError("tts_response_unavailable")
+    except HTTPException:
+        raise
     except Exception:
         # The rendering claim is deliberately consumed even if the provider may have succeeded.
         raise HTTPException(status_code=502, detail="spoken_diagnostic_render_failed") from None
@@ -1983,19 +1998,33 @@ async def spoken_diagnostic_audio(
             VALUES ($1, $2, $3, 'normal', $4, 'spoken_diagnostic', $5::jsonb)
             ON CONFLICT (id) DO NOTHING
             """,
-            queue_id, uid, stored["url"], spoken_diagnostic.RESPONSE, json.dumps(metadata),
+            queue_id,
+            uid,
+            stored["url"],
+            spoken_diagnostic.RESPONSE,
+            json.dumps(metadata),
         )
     except Exception:
         raise HTTPException(status_code=503, detail="spoken_diagnostic_enqueue_failed") from None
     try:
         ledger_pool = await _playback_ledger.get_pool()
         await _playback_ledger.record_generated(
-            ledger_pool, uid=uid, playback_id=queue_id, queue_item_id=queue_id,
-            audio_id=queue_id, trace_id=queue_id, purpose="spoken_diagnostic",
-            playback_text=spoken_diagnostic.RESPONSE, text_provenance="server_fixed",
+            ledger_pool,
+            uid=uid,
+            playback_id=queue_id,
+            queue_item_id=queue_id,
+            audio_id=queue_id,
+            trace_id=queue_id,
+            purpose="spoken_diagnostic",
+            playback_text=spoken_diagnostic.RESPONSE,
+            text_provenance="server_fixed",
         )
         await _playback_ledger.record_queued(
-            ledger_pool, uid=uid, playback_id=queue_id, queue_item_id=queue_id, trace_id=queue_id,
+            ledger_pool,
+            uid=uid,
+            playback_id=queue_id,
+            queue_item_id=queue_id,
+            trace_id=queue_id,
         )
     except Exception:
         pass

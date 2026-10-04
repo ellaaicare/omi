@@ -14,11 +14,13 @@ from google.cloud.firestore_v1 import transactional
 
 def _capture_protocol():
     from utils.conversations import capture_protocol
+
     return capture_protocol
 
 
 def _database():
     from database._client import db
+
     return db
 
 
@@ -29,6 +31,7 @@ def _authority_ref(uid: str):
 def _conversation_ref(uid: str, conversation_id: str):
     return _capture_protocol()._conversation_ref(uid, conversation_id)
 
+
 PHRASE = "silver lantern check in"
 RESPONSE = "Spoken check-in is working."
 RESPONSE_VERSION = "ella.spoken_diagnostic.v1"
@@ -36,6 +39,10 @@ MAX_WINDOW = timedelta(minutes=10)
 CLAIM_TTL = timedelta(seconds=60)
 _RUN_ID = re.compile(r"[a-z0-9][a-z0-9-]{5,63}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -137,11 +144,25 @@ def _claim_live(claim: dict, authority: dict, conversation: dict, now: datetime)
 
 
 @transactional
-def _reserve(transaction, uid: str, conversation_id: str, config: DiagnosticConfig, now: datetime) -> Optional[dict]:
-    return _reserve_tx(transaction, uid, conversation_id, config, now)
+def _reserve(
+    transaction,
+    uid: str,
+    conversation_id: str,
+    config: DiagnosticConfig,
+    origin_generation: str,
+    origin_owner_token: str,
+) -> Optional[dict]:
+    return _reserve_tx(transaction, uid, conversation_id, config, origin_generation, origin_owner_token)
 
 
-def _reserve_tx(transaction, uid: str, conversation_id: str, config: DiagnosticConfig, now: datetime) -> Optional[dict]:
+def _reserve_tx(
+    transaction,
+    uid: str,
+    conversation_id: str,
+    config: DiagnosticConfig,
+    origin_generation: str,
+    origin_owner_token: str,
+) -> Optional[dict]:
     authority_ref = _authority_ref(uid)
     conversation_ref = _conversation_ref(uid, conversation_id)
     claim_id = _claim_id(uid, config.run_id)
@@ -151,9 +172,20 @@ def _reserve_tx(transaction, uid: str, conversation_id: str, config: DiagnosticC
     claim_snapshot = claim_ref.get(transaction=transaction)
     if claim_snapshot.exists or not authority_snapshot.exists or not conversation_snapshot.exists:
         return None
+    now = _utc_now()
+    if _config_for(uid, now) != config:
+        return None
     authority = authority_snapshot.to_dict() or {}
     conversation = conversation_snapshot.to_dict() or {}
-    if not _live_tuple(authority, conversation, conversation_id, now):
+    if (
+        not origin_generation
+        or not origin_owner_token
+        or authority.get("generation") != origin_generation
+        or authority.get("owner_token") != origin_owner_token
+        or conversation.get("capture_generation") != origin_generation
+        or conversation.get("capture_owner_token") != origin_owner_token
+        or not _live_tuple(authority, conversation, conversation_id, now)
+    ):
         return None
     expires_at = min(config.ends_at, now + CLAIM_TTL)
     claim = {
@@ -168,15 +200,34 @@ def _reserve_tx(transaction, uid: str, conversation_id: str, config: DiagnosticC
         "expires_at": expires_at,
     }
     transaction.create(claim_ref, claim)
-    return {"claim_id": claim_id, "queue_id": claim["queue_id"], "expires_at": expires_at.isoformat(), "response_version": RESPONSE_VERSION}
+    return {
+        "claim_id": claim_id,
+        "queue_id": claim["queue_id"],
+        "expires_at": expires_at.isoformat(),
+        "response_version": RESPONSE_VERSION,
+    }
 
 
-def reserve_for_segments(uid: str, conversation_id: str, segments: list[dict], *, firestore_db=None) -> Optional[dict]:
-    now = datetime.now(timezone.utc)
-    config = _config_for(uid, now)
+def reserve_for_segments(
+    uid: str,
+    conversation_id: str,
+    segments: list[dict],
+    *,
+    origin_generation: Optional[str] = None,
+    origin_owner_token: Optional[str] = None,
+    firestore_db=None,
+) -> Optional[dict]:
+    config = _config_for(uid, _utc_now())
     if config is None or not _phrase_in_segments(segments):
         return None
-    return _reserve((firestore_db or _database()).transaction(), uid, conversation_id, config, now)
+    return _reserve(
+        (firestore_db or _database()).transaction(),
+        uid,
+        conversation_id,
+        config,
+        str(origin_generation or ""),
+        str(origin_owner_token or ""),
+    )
 
 
 def _phrase_in_segments(segments: list[dict]) -> bool:
@@ -186,15 +237,31 @@ def _phrase_in_segments(segments: list[dict]) -> bool:
 
 
 def is_diagnostic_window(uid: str, segments: list[dict]) -> bool:
-    return _config_for(uid, datetime.now(timezone.utc)) is not None and _phrase_in_segments(segments)
+    return _config_for(uid, _utc_now()) is not None and _phrase_in_segments(segments)
 
 
 @transactional
-def _transition(transaction, uid: str, claim_id: str, expected: str, next_state: str, now: datetime, update: Optional[dict] = None) -> Optional[dict]:
-    return _transition_tx(transaction, uid, claim_id, expected, next_state, now, update)
+def _transition(
+    transaction,
+    uid: str,
+    claim_id: str,
+    expected: str,
+    next_state: str,
+    config: DiagnosticConfig,
+    update: Optional[dict] = None,
+) -> Optional[dict]:
+    return _transition_tx(transaction, uid, claim_id, expected, next_state, config, update)
 
 
-def _transition_tx(transaction, uid: str, claim_id: str, expected: str, next_state: str, now: datetime, update: Optional[dict] = None) -> Optional[dict]:
+def _transition_tx(
+    transaction,
+    uid: str,
+    claim_id: str,
+    expected: str,
+    next_state: str,
+    config: DiagnosticConfig,
+    update: Optional[dict] = None,
+) -> Optional[dict]:
     authority_ref = _authority_ref(uid)
     claim_ref = _claim_ref(uid, claim_id)
     authority_snapshot = authority_ref.get(transaction=transaction)
@@ -207,8 +274,10 @@ def _transition_tx(transaction, uid: str, claim_id: str, expected: str, next_sta
     if not conversation_id:
         return None
     conversation_snapshot = _conversation_ref(uid, conversation_id).get(transaction=transaction)
+    now = _utc_now()
     if (
         not conversation_snapshot.exists
+        or _config_for(uid, now) != config
         or claim.get("state") != expected
         or claim_id != _claim_id(uid, str(claim.get("run_id") or ""))
         or not _claim_live(claim, authority, conversation_snapshot.to_dict() or {}, now)
@@ -219,28 +288,32 @@ def _transition_tx(transaction, uid: str, claim_id: str, expected: str, next_sta
     return {**claim, **values}
 
 
-def transition(uid: str, claim_id: str, expected: str, next_state: str, *, update: Optional[dict] = None, firestore_db=None) -> Optional[dict]:
-    now = datetime.now(timezone.utc)
-    config = _config_for(uid, now)
+def transition(
+    uid: str, claim_id: str, expected: str, next_state: str, *, update: Optional[dict] = None, firestore_db=None
+) -> Optional[dict]:
+    config = _config_for(uid, _utc_now())
     if config is None or claim_id != _claim_id(uid, config.run_id):
         return None
-    return _transition((firestore_db or _database()).transaction(), uid, claim_id, expected, next_state, now, update)
+    return _transition((firestore_db or _database()).transaction(), uid, claim_id, expected, next_state, config, update)
 
 
 def current_claim(uid: str, claim_id: str, required_state: str, *, firestore_db=None) -> Optional[dict]:
-    now = datetime.now(timezone.utc)
-    config = _config_for(uid, now)
+    config = _config_for(uid, _utc_now())
     if config is None or claim_id != _claim_id(uid, config.run_id):
         return None
-    return _current_claim((firestore_db or _database()).transaction(), uid, claim_id, required_state, now)
+    return _current_claim((firestore_db or _database()).transaction(), uid, claim_id, required_state, config)
 
 
 @transactional
-def _current_claim(transaction, uid: str, claim_id: str, required_state: str, now: datetime) -> Optional[dict]:
-    return _current_claim_tx(transaction, uid, claim_id, required_state, now)
+def _current_claim(
+    transaction, uid: str, claim_id: str, required_state: str, config: DiagnosticConfig
+) -> Optional[dict]:
+    return _current_claim_tx(transaction, uid, claim_id, required_state, config)
 
 
-def _current_claim_tx(transaction, uid: str, claim_id: str, required_state: str, now: datetime) -> Optional[dict]:
+def _current_claim_tx(
+    transaction, uid: str, claim_id: str, required_state: str, config: DiagnosticConfig
+) -> Optional[dict]:
     claim_snapshot = _claim_ref(uid, claim_id).get(transaction=transaction)
     authority_snapshot = _authority_ref(uid).get(transaction=transaction)
     if not claim_snapshot.exists or not authority_snapshot.exists:
@@ -250,7 +323,12 @@ def _current_claim_tx(transaction, uid: str, claim_id: str, required_state: str,
         return None
     authority = authority_snapshot.to_dict() or {}
     conversation_id = str(claim.get("conversation_id") or "")
-    conversation_snapshot = _conversation_ref(uid, conversation_id).get(transaction=transaction) if conversation_id else None
+    conversation_snapshot = (
+        _conversation_ref(uid, conversation_id).get(transaction=transaction) if conversation_id else None
+    )
     if not conversation_snapshot or not conversation_snapshot.exists:
+        return None
+    now = _utc_now()
+    if _config_for(uid, now) != config:
         return None
     return claim if _claim_live(claim, authority, conversation_snapshot.to_dict() or {}, now) else None
