@@ -1258,6 +1258,31 @@ void main() {
     expect(transcript.focusNode!.hasFocus, isTrue);
   });
 
+  testWidgets('legacy unbound sheet leaks a changed account provider list', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    var uid = _uid;
+    final oldSegment = _segment('old-owner', 'old owner private text');
+    await fixture.pump(tester, authenticatedUid: () => uid);
+    fixture.makeNecklaceLive(segments: [oldSegment]);
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('upstream-capture-view-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('old owner private text'), findsOneWidget);
+
+    uid = 'uid-b';
+    oldSegment.text = 'edited old owner private text';
+    fixture.provider.segments.remove(oldSegment);
+    fixture.provider.segments.add(_segment('replacement-owner', 'replacement owner private text'));
+    fixture.provider.onConnected();
+    await tester.pump();
+
+    expect(find.text('old owner private text'), findsNothing);
+    expect(find.text('edited old owner private text'), findsNothing);
+    expect(find.text('replacement owner private text'), findsNothing);
+  });
+
   testWidgets('Stop and Disconnect report their own in-progress states', (tester) async {
     final fixture = await _DockFixture.create(tester);
     final stop = Completer<void>();
