@@ -140,6 +140,7 @@ class EllaUpstreamCaptureHarness {
   bool protocolV2 = false;
   EllaCaptureProtocolSocket? Function()? diagnosticSocket;
   EllaCaptureMemoryLoader? memoryLoader;
+  Future<void> Function(CaptureProvider)? refreshConversation;
   AccountCommitAuthority? Function()? memoryAccountAuthority;
   List<Duration>? memoryRetryDelays;
   String? processedMemoryId;
@@ -157,6 +158,7 @@ class EllaUpstreamCaptureHarness {
     bool protocolV2 = false,
     EllaCaptureProtocolSocket? Function()? diagnosticSocket,
     EllaCaptureMemoryLoader? memoryLoader,
+    Future<void> Function(CaptureProvider)? refreshConversation,
     AccountCommitAuthority? Function()? memoryAccountAuthority,
     List<Duration>? memoryRetryDelays,
     String? processedMemoryId,
@@ -167,6 +169,7 @@ class EllaUpstreamCaptureHarness {
     harness.protocolV2 = protocolV2;
     harness.diagnosticSocket = diagnosticSocket;
     harness.memoryLoader = memoryLoader;
+    harness.refreshConversation = refreshConversation;
     harness.memoryAccountAuthority = memoryAccountAuthority;
     harness.memoryRetryDelays = memoryRetryDelays;
     harness.processedMemoryId = processedMemoryId;
@@ -313,7 +316,7 @@ class EllaUpstreamCaptureHarness {
         ),
         codec: (deviceId) async => BleAudioCodec.pcm16,
         microphonePermission: () async => true,
-        refreshConversation: (_) async {},
+        refreshConversation: refreshConversation ?? (_) async {},
         processInProgressConversation: protocolV2
             ? null
             : () async {
