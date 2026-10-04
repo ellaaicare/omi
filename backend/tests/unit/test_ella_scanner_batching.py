@@ -3,10 +3,13 @@ import sys
 import threading
 import types
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import MagicMock
 
 import pytest
 
+sys.modules.setdefault("database._client", MagicMock(db=MagicMock()))
 from utils.ella import scanner
+from utils.conversations import spoken_diagnostic
 
 
 class _FakeResponse:
@@ -52,6 +55,56 @@ def test_guardian_trace_service_caller_uses_scoped_key(monkeypatch):
         "X-Ella-Subject-Uid": "uid-a",
     }
     assert posts[0][1]["timeout"] == scanner.GUARDIAN_TRACE_LOG_TIMEOUT_S
+
+
+def test_server_claim_marker_is_once_only_and_failed_claim_never_dispatches(monkeypatch):
+    posts = []
+    claims = [
+        {"claim_id": "a" * 64, "queue_id": "diagnostic_a", "response_version": spoken_diagnostic.RESPONSE_VERSION},
+        None,
+    ]
+    captured_origin = []
+    _disable_trace(monkeypatch)
+    monkeypatch.setenv("ELLA_SPOKEN_DIAGNOSTIC_ENABLED", "true")
+    monkeypatch.setattr(spoken_diagnostic, "is_diagnostic_window", lambda *_args: True)
+    monkeypatch.setattr(
+        spoken_diagnostic,
+        "reserve_for_segments",
+        lambda *_args, **kwargs: (captured_origin.append(kwargs), claims.pop(0))[1],
+    )
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner, "SCANNER_AMBIENT_BATCH_WORDS", 1)
+    monkeypatch.setattr(scanner, "select_playback_ledger_candidates", lambda *_args: [])
+    monkeypatch.setattr(
+        scanner, "_post_scanner_webhook", lambda _url, json, **_kwargs: (posts.append(json), _FakeResponse())[1]
+    )
+    segments = [{"text": "silver lantern check in", "speaker": "SPEAKER_1"}]
+    assert (
+        scanner.send_to_scanner(
+            "uid-1",
+            "conversation-1",
+            segments,
+            guardian_mode="active_support",
+            origin_generation="generation-a",
+            origin_owner_token="owner-a",
+        )
+        == 200
+    )
+    assert posts[0]["spoken_diagnostic"]["claim_id"] == "a" * 64
+    scanner.send_to_scanner(
+        "uid-1",
+        "conversation-1",
+        segments,
+        guardian_mode="active_support",
+        origin_generation="generation-a",
+        origin_owner_token="owner-a",
+    )
+    assert len(posts) == 1
+    assert claims == []
+    assert captured_origin == [
+        {"origin_generation": "generation-a", "origin_owner_token": "owner-a"},
+        {"origin_generation": "generation-a", "origin_owner_token": "owner-a"},
+    ]
 
 
 def test_guardian_trace_service_caller_fails_closed_without_configured_key(monkeypatch):

@@ -339,6 +339,17 @@ class ScannerDispatchQueue:
                 self._queue.task_done()
 
 
+def _scanner_dispatch_item(uid, conversation_id, segments, generation_id, owner_token, latency_metadata):
+    return {
+        "uid": uid,
+        "conversation_id": conversation_id,
+        "segments": [segment.dict() for segment in segments],
+        "origin_generation": generation_id,
+        "origin_owner_token": owner_token,
+        "latency_metadata": latency_metadata,
+    }
+
+
 class AiConsentSessionAuthority:
     """Bound provider egress to a periodically refreshed session authority."""
 
@@ -3117,12 +3128,9 @@ async def _stream_handler(
             if transcript_segments:
                 # ====== ELLA INTEGRATION: Send chunks to scanner ======
                 scanner_dispatch_queued = scanner_dispatch_queue.enqueue(
-                    {
-                        "uid": uid,
-                        "conversation_id": batch_conversation_id,
-                        "segments": [s.dict() for s in transcript_segments],
-                        "latency_metadata": _latency_metadata(),
-                    }
+                    _scanner_dispatch_item(
+                        uid, batch_conversation_id, transcript_segments, generation_id, owner_token, _latency_metadata()
+                    )
                 )
                 if scanner_dispatch_queued:
                     if first_transcript_dispatched_at is None:

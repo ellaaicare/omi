@@ -49,6 +49,7 @@ on:
       - "backend/utils/conversations/process_conversation.py"
       - "backend/utils/conversations/postprocess_conversation.py"
       - "backend/utils/conversations/merge_conversations.py"
+      - "backend/utils/conversations/spoken_diagnostic.py"
       - "backend/routers/conversations.py"
       - "backend/routers/developer.py"
       - "backend/routers/users.py"
@@ -158,6 +159,7 @@ on:
       - "backend/tests/unit/test_conversation_processing_callers.py"
       - "backend/tests/unit/test_ella_conversation_corrections.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
+      - "backend/tests/unit/test_spoken_diagnostic_claim.py"
       - "backend/tests/unit/test_ella_canonical_context.py"
       - "backend/tests/unit/test_ella_canonical_omi.py"
       - "backend/tests/unit/test_ella_debug_metadata.py"
@@ -239,6 +241,7 @@ on:
       - "backend/utils/conversations/process_conversation.py"
       - "backend/utils/conversations/postprocess_conversation.py"
       - "backend/utils/conversations/merge_conversations.py"
+      - "backend/utils/conversations/spoken_diagnostic.py"
       - "backend/routers/conversations.py"
       - "backend/routers/developer.py"
       - "backend/routers/users.py"
@@ -348,6 +351,7 @@ on:
       - "backend/tests/unit/test_conversation_processing_callers.py"
       - "backend/tests/unit/test_ella_conversation_corrections.py"
       - "backend/tests/unit/test_ella_guardian_delivery.py"
+      - "backend/tests/unit/test_spoken_diagnostic_claim.py"
       - "backend/tests/unit/test_ella_canonical_context.py"
       - "backend/tests/unit/test_ella_canonical_omi.py"
       - "backend/tests/unit/test_ella_debug_metadata.py"
@@ -485,6 +489,7 @@ jobs:
           utils/conversations/process_conversation.py
           utils/conversations/postprocess_conversation.py
           utils/conversations/merge_conversations.py
+          utils/conversations/spoken_diagnostic.py
           routers/pusher.py routers/transcribe.py routers/integration.py routers/workflow.py
           utils/stt/session_delivery.py tests/unit/test_stt_session_delivery.py
           ella/__init__.py
@@ -499,6 +504,7 @@ jobs:
           ella/routers/escalations.py
           ella/routers/hermes_cloud_enrichment.py
           ella/routers/guardian.py
+          tests/unit/test_spoken_diagnostic_claim.py
           ella/services/guardian_playback_ledger.py
           ella/services/guardian_echo_classifier.py
           ella/routers/invites.py
@@ -583,6 +589,7 @@ jobs:
           utils/conversations/process_conversation.py
           utils/conversations/postprocess_conversation.py
           utils/conversations/merge_conversations.py
+          utils/conversations/spoken_diagnostic.py
           ella/__init__.py
           ella/routers/auto_provision.py ella/routers/callbacks.py
           ella/routers/ai_consent.py ella/routers/canonical_events.py ella/routers/chat.py
@@ -645,6 +652,7 @@ jobs:
           tests/unit/test_ella_incident_1182_voice_diagnostics_auth.py
           tests/unit/test_ella_escalations_router_auth.py
           tests/unit/test_ella_guardian_delivery.py
+          tests/unit/test_spoken_diagnostic_claim.py
           tests/unit/test_ella_reviewed_route_integration.py
           tests/unit/test_ella_runtime_route_isolation.py
           tests/unit/test_ella_scanner_batching.py
@@ -1533,8 +1541,25 @@ jobs:
             grep -Fqx "$required_id" <<<"$correction_ids"
           done
           pytest tests/unit/test_ella_conversation_corrections.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 49
+          test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 62
           pytest tests/unit/test_ella_guardian_delivery.py -v
+          spoken_diagnostic_ids="$(pytest --collect-only -q tests/unit/test_spoken_diagnostic_claim.py | sed '/^$/d')"
+          required_spoken_diagnostic_ids=(
+            "tests/unit/test_spoken_diagnostic_claim.py::test_default_disabled_and_invalid_window"
+            "tests/unit/test_spoken_diagnostic_claim.py::test_default_disabled_never_opens_capture_or_claim_store"
+            "tests/unit/test_spoken_diagnostic_claim.py::test_claim_once_across_rollover_and_render_once"
+            "tests/unit/test_spoken_diagnostic_claim.py::test_revoked_expired_or_replaced_capture_fails_closed"
+            "tests/unit/test_spoken_diagnostic_claim.py::test_old_generation_cannot_claim_under_replacement_same_conversation"
+            "tests/unit/test_spoken_diagnostic_claim.py::test_transaction_retry_time_expiry_fails_closed"
+            "tests/unit/test_spoken_diagnostic_claim.py::test_persisted_stt_queue_item_cannot_claim_replaced_same_conversation"
+          )
+          for required_id in "${required_spoken_diagnostic_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$spoken_diagnostic_ids"
+          done
+          test "$(grep -c '::' <<<"$spoken_diagnostic_ids")" -eq 7
+          pytest tests/unit/test_spoken_diagnostic_claim.py -v |
+            tee /tmp/spoken-diagnostic-claim-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/spoken-diagnostic-claim-pytest.log
           guardian_delivery_claim_ids="$(
             pytest --collect-only -q tests/postgres/test_guardian_delivery_claim_postgres.py |
               sed '/^$/d'
@@ -1634,7 +1659,10 @@ jobs:
           grep -Fqx \
             "tests/unit/test_ella_scanner_batching.py::test_scanner_webhook_ignores_proxy_environment_and_rejects_redirect" \
             <<<"$scanner_batching_ids"
-          test "$(grep -c '::' <<<"$scanner_batching_ids")" -eq 56
+          grep -Fqx \
+            "tests/unit/test_ella_scanner_batching.py::test_server_claim_marker_is_once_only_and_failed_claim_never_dispatches" \
+            <<<"$scanner_batching_ids"
+          test "$(grep -c '::' <<<"$scanner_batching_ids")" -eq 57
           pytest tests/unit/test_ella_scanner_batching.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_scanner_echo_suppression.py | grep -c '::')" -eq 17
           pytest tests/unit/test_ella_scanner_echo_suppression.py -v
