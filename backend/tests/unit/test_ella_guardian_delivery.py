@@ -4,7 +4,7 @@ import sys
 import types
 from pathlib import Path
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -35,7 +35,9 @@ _POLICY_SPEC = importlib.util.spec_from_file_location("ella.services.escalation_
 policy = importlib.util.module_from_spec(_POLICY_SPEC)
 assert _POLICY_SPEC and _POLICY_SPEC.loader
 sys.modules.setdefault("ella", types.ModuleType("ella"))
-sys.modules.setdefault("ella.services", types.ModuleType("ella.services"))
+services_package = sys.modules.setdefault("ella.services", types.ModuleType("ella.services"))
+if not hasattr(services_package, "__path__"):
+    services_package.__path__ = [str(_BACKEND / "ella" / "services")]
 sys.modules["ella.services.escalation_policy"] = policy
 _POLICY_SPEC.loader.exec_module(policy)
 
@@ -105,8 +107,6 @@ guardian_playback_ledger_stub.record_queued = _stub_ledger_record_queued
 guardian_playback_ledger_stub.record_fetched = _stub_ledger_record_fetched
 guardian_playback_ledger_stub.record_playback_receipt = _stub_ledger_record_playback_receipt
 guardian_playback_ledger_stub.get_played_candidates = _stub_ledger_get_played_candidates
-sys.modules["ella.services.guardian_playback_ledger"] = guardian_playback_ledger_stub
-setattr(sys.modules["ella.services"], "guardian_playback_ledger", guardian_playback_ledger_stub)
 
 
 class _ProvisioningError(Exception):
@@ -148,7 +148,11 @@ _ROUTER_PATH = _BACKEND / "ella" / "routers" / "guardian.py"
 _ROUTER_SPEC = importlib.util.spec_from_file_location("ella_guardian_under_test", _ROUTER_PATH)
 guardian = importlib.util.module_from_spec(_ROUTER_SPEC)
 assert _ROUTER_SPEC and _ROUTER_SPEC.loader
-_ROUTER_SPEC.loader.exec_module(guardian)
+with patch.dict(sys.modules, {"ella.services.guardian_playback_ledger": guardian_playback_ledger_stub}):
+    with patch.object(
+        sys.modules["ella.services"], "guardian_playback_ledger", guardian_playback_ledger_stub, create=True
+    ):
+        _ROUTER_SPEC.loader.exec_module(guardian)
 
 
 class _FakePool:
@@ -174,6 +178,12 @@ class _FakePool:
     async def execute(self, query, *args):
         self.executed.append((query, args))
         return "OK"
+
+
+def test_playback_ledger_stub_is_scoped_to_guardian_router_load():
+    assert guardian._playback_ledger is guardian_playback_ledger_stub
+    assert sys.modules.get("ella.services.guardian_playback_ledger") is not guardian_playback_ledger_stub
+    assert getattr(sys.modules["ella.services"], "guardian_playback_ledger", None) is not guardian_playback_ledger_stub
 
 
 class _ClaimPool:
