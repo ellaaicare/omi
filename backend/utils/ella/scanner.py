@@ -952,6 +952,7 @@ def _apply_ambient_batching(
     *,
     wake_prefix_recent: Optional[bool] = None,
     credible_emergency: Optional[str] = None,
+    diagnostic_candidate: bool = False,
     now: Optional[float] = None,
 ) -> tuple[Optional[List[dict]], dict]:
     now = now if now is not None else time.time()
@@ -966,6 +967,15 @@ def _apply_ambient_batching(
         "batch_target_words": SCANNER_AMBIENT_BATCH_WORDS,
         "immediate_reason": immediate_reason,
     }
+
+    if diagnostic_candidate:
+        return scanner_segments, {
+            **base_metadata,
+            "batch_size": len(scanner_segments),
+            "batch_word_count": _word_count(combined_text),
+            "flush_reason": "diagnostic_candidate",
+            "rate_limit_status": "bypassed_for_diagnostic",
+        }
 
     if not SCANNER_AMBIENT_BATCHING_ENABLED:
         return scanner_segments, {
@@ -1415,6 +1425,20 @@ def send_to_scanner(
         )
         return None
 
+    diagnostic_candidate = bool(
+        emergency_reason is None
+        and not formatted_recent_segments
+        and not wake_prefix_recent
+        and origin_generation
+        and origin_owner_token
+        and (
+            scanner_window_text is None
+            or spoken_diagnostic._normalized(scanner_window_text) == spoken_diagnostic.PHRASE
+        )
+        and os.getenv("ELLA_SPOKEN_DIAGNOSTIC_ENABLED", "").strip().lower() == "true"
+        and spoken_diagnostic.is_diagnostic_window(uid, scanner_segments)
+    )
+
     scanner_segments, batch_metadata = _apply_ambient_batching(
         uid,
         str(conversation_id),
@@ -1423,6 +1447,7 @@ def send_to_scanner(
         trace_id,
         wake_prefix_recent=wake_prefix_recent,
         credible_emergency=emergency_reason,
+        diagnostic_candidate=diagnostic_candidate,
     )
     if not scanner_segments:
         _log_trace_event(
@@ -1522,6 +1547,8 @@ def send_to_scanner(
         diagnostic_window = spoken_diagnostic.is_diagnostic_window(uid, scanner_segments)
     else:
         diagnostic_window = False
+    if diagnostic_candidate and not diagnostic_window:
+        return None
     if diagnostic_window:
         try:
             diagnostic_claim = spoken_diagnostic.reserve_for_segments(
