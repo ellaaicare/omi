@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from typing import Awaitable, Callable, Optional
 from unittest.mock import MagicMock
 
+import pytest
+
 sys.modules.setdefault("database._client", MagicMock(db=MagicMock()))
 from utils.ella import scanner
 from utils.conversations import spoken_diagnostic as diagnostic
@@ -108,6 +110,205 @@ def fixture(monkeypatch):
         lambda owner, at: config if owner == uid and config.starts_at <= at < config.ends_at else None,
     )
     return now, uid, conversation_id, store, config
+
+
+def _scanner_fixture(monkeypatch, posts):
+    monkeypatch.setenv("ELLA_SPOKEN_DIAGNOSTIC_ENABLED", "true")
+    monkeypatch.setattr(
+        diagnostic, "_reserve", lambda _transaction, *args: diagnostic._reserve_tx(Transaction(), *args)
+    )
+    monkeypatch.setattr(diagnostic, "_database", lambda: SimpleNamespace(transaction=lambda: Transaction()))
+    monkeypatch.setattr(scanner, "SCANNER_WEBHOOK_KEY", "configured-scanner-webhook-key")
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner, "SCANNER_AMBIENT_BATCHING_ENABLED", True)
+    monkeypatch.setattr(scanner, "SCANNER_AMBIENT_BATCH_WORDS", 70)
+    monkeypatch.setattr(scanner, "SCANNER_AMBIENT_BATCH_SECONDS", 10.0)
+    monkeypatch.setattr(scanner, "select_playback_ledger_candidates", lambda *_args: [])
+    monkeypatch.setattr(scanner, "_log_trace_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scanner, "_enqueue_wake_ack", lambda *_args: None)
+    monkeypatch.setattr(
+        scanner,
+        "_post_scanner_webhook",
+        lambda _url, json, **_kwargs: (posts.append(json), SimpleNamespace(status_code=200, headers={}))[1],
+    )
+    scanner.reset_scanner_batch_state()
+
+
+def _send_diagnostic(
+    uid, conversation_id, *, origin_generation="generation-1", origin_owner_token="owner-token", **kwargs
+):
+    return scanner.send_to_scanner(
+        uid,
+        conversation_id,
+        [{"text": diagnostic.PHRASE, "speaker": "SPEAKER_1"}],
+        guardian_mode="active_support",
+        origin_generation=origin_generation,
+        origin_owner_token=origin_owner_token,
+        **kwargs,
+    )
+
+
+def test_exact_live_diagnostic_bypasses_default_ambient_batch_once(monkeypatch):
+    _now, uid, conversation_id, store, _config = fixture(monkeypatch)
+    posts = []
+    _scanner_fixture(monkeypatch, posts)
+
+    assert _send_diagnostic(uid, conversation_id) == 200
+    assert len(posts) == 1
+    assert posts[0]["scanner_batch"]["flush_reason"] == "diagnostic_candidate"
+    assert posts[0]["scanner_batch"]["batch_word_count"] == 4
+    assert [segment["text"] for segment in posts[0]["segments"]] == [diagnostic.PHRASE]
+    assert posts[0]["spoken_diagnostic"]["response_version"] == diagnostic.RESPONSE_VERSION
+    assert _send_diagnostic(uid, conversation_id) is None
+    assert len(posts) == 1
+    assert len([key for key in store if "spoken_diagnostic_claims" in key]) == 1
+    scanner.reset_scanner_batch_state()
+
+
+def test_diagnostic_does_not_flush_or_join_existing_ambient_buffer(monkeypatch):
+    _now, uid, conversation_id, _store, _config = fixture(monkeypatch)
+    posts = []
+    _scanner_fixture(monkeypatch, posts)
+    monkeypatch.setattr(scanner, "SCANNER_AMBIENT_BATCH_SECONDS", 999.0)
+    assert (
+        scanner.send_to_scanner(
+            uid, conversation_id, [{"text": "quiet afternoon coffee table"}], guardian_mode="active_support"
+        )
+        is None
+    )
+    assert len(scanner._SCANNER_BATCHES) == 1
+    key = next(iter(scanner._SCANNER_BATCHES))
+    buffered = list(scanner._SCANNER_BATCHES[key]["segments"])
+
+    assert _send_diagnostic(uid, conversation_id) == 200
+    assert scanner._SCANNER_BATCHES[key]["segments"] == buffered
+    assert [segment["text"] for segment in posts[0]["segments"]] == [diagnostic.PHRASE]
+
+    monkeypatch.setattr(scanner, "SCANNER_AMBIENT_BATCH_WORDS", 5)
+    assert scanner.send_to_scanner(uid, conversation_id, [{"text": "later"}], guardian_mode="active_support") == 200
+    assert [segment["text"] for segment in posts[1]["segments"]] == ["quiet afternoon coffee table", "later"]
+    assert "spoken_diagnostic" not in posts[1]
+    scanner.reset_scanner_batch_state()
+
+
+def test_ordinary_four_words_still_defer_at_default_threshold(monkeypatch):
+    _now, uid, conversation_id, store, _config = fixture(monkeypatch)
+    posts = []
+    _scanner_fixture(monkeypatch, posts)
+
+    assert (
+        scanner.send_to_scanner(
+            uid, conversation_id, [{"text": "quiet afternoon coffee table"}], guardian_mode="active_support"
+        )
+        is None
+    )
+    assert posts == []
+    assert len(scanner._SCANNER_BATCHES) == 1
+    assert not any("spoken_diagnostic_claims" in key for key in store)
+    scanner.reset_scanner_batch_state()
+
+
+@pytest.mark.parametrize(
+    "segments",
+    [
+        [{"text": "silver lantern"}, {"text": "check in"}],
+        [{"text": diagnostic.PHRASE}, {"text": "more speech"}],
+    ],
+)
+def test_split_or_mixed_phrase_never_bypasses_ambient_batch(monkeypatch, segments):
+    _now, uid, conversation_id, store, _config = fixture(monkeypatch)
+    posts = []
+    _scanner_fixture(monkeypatch, posts)
+
+    assert (
+        scanner.send_to_scanner(
+            uid,
+            conversation_id,
+            segments,
+            guardian_mode="active_support",
+            origin_generation="generation-1",
+            origin_owner_token="owner-token",
+        )
+        is None
+    )
+    assert posts == []
+    assert len(scanner._SCANNER_BATCHES) == 1
+    assert not any("spoken_diagnostic_claims" in key for key in store)
+    scanner.reset_scanner_batch_state()
+
+
+@pytest.mark.parametrize("condition", ["disabled", "wrong_owner", "expired", "missing_origin", "stale_origin"])
+def test_noneligible_diagnostic_never_claims_or_dispatches(monkeypatch, condition):
+    now, uid, conversation_id, store, _config = fixture(monkeypatch)
+    posts = []
+    _scanner_fixture(monkeypatch, posts)
+    if condition == "disabled":
+        monkeypatch.delenv("ELLA_SPOKEN_DIAGNOSTIC_ENABLED")
+    elif condition == "wrong_owner":
+        uid = "different-owner"
+    elif condition == "expired":
+        monkeypatch.setattr(diagnostic, "_utc_now", lambda: now + timedelta(minutes=6))
+    kwargs = {}
+    if condition == "missing_origin":
+        kwargs["origin_generation"] = ""
+    elif condition == "stale_origin":
+        kwargs["origin_generation"] = "stale-generation"
+
+    assert _send_diagnostic(uid, conversation_id, **kwargs) is None
+    assert posts == []
+    assert not any("spoken_diagnostic_claims" in key for key in store)
+    scanner.reset_scanner_batch_state()
+
+
+def test_forced_ordinary_flush_does_not_create_diagnostic_claim(monkeypatch):
+    _now, uid, conversation_id, store, _config = fixture(monkeypatch)
+    posts = []
+    _scanner_fixture(monkeypatch, posts)
+    monkeypatch.setattr(scanner, "SCANNER_AMBIENT_BATCH_WORDS", 1)
+
+    assert _send_diagnostic("different-owner", conversation_id) == 200
+    assert len(posts) == 1
+    assert posts[0]["scanner_batch"]["flush_reason"] == "word_threshold"
+    assert "spoken_diagnostic" not in posts[0]
+    assert not any("spoken_diagnostic_claims" in key for key in store)
+    scanner.reset_scanner_batch_state()
+
+
+def test_window_expiring_after_batch_bypass_fails_closed(monkeypatch):
+    _now, uid, conversation_id, store, _config = fixture(monkeypatch)
+    posts = []
+    _scanner_fixture(monkeypatch, posts)
+    checks = iter([True, False])
+    monkeypatch.setattr(diagnostic, "is_diagnostic_window", lambda *_args: next(checks))
+
+    assert _send_diagnostic(uid, conversation_id) is None
+    assert posts == []
+    assert not any("spoken_diagnostic_claims" in key for key in store)
+    scanner.reset_scanner_batch_state()
+
+
+def test_confirmed_echo_suppresses_diagnostic_before_claim(monkeypatch):
+    _now, uid, conversation_id, store, _config = fixture(monkeypatch)
+    posts = []
+    _scanner_fixture(monkeypatch, posts)
+    monkeypatch.setattr(scanner, "select_playback_ledger_candidates", lambda *_args: [{"playback_id": "played"}])
+    monkeypatch.setattr(
+        scanner,
+        "_classify_playback_source_for_dispatch",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            fail_open=False,
+            is_confirmed_echo=True,
+            source="ella_playback",
+            matched_playback_ids=["played"],
+            reason_code="confirmed_echo",
+            confidence=1.0,
+        ),
+    )
+
+    assert _send_diagnostic(uid, conversation_id) is None
+    assert posts == []
+    assert not any("spoken_diagnostic_claims" in key for key in store)
+    scanner.reset_scanner_batch_state()
 
 
 def test_default_disabled_and_invalid_window(monkeypatch):
