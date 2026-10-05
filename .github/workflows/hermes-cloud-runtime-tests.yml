@@ -1545,6 +1545,19 @@ jobs:
           pytest tests/unit/test_ella_guardian_delivery.py -v
           spoken_diagnostic_ids="$(pytest --collect-only -q tests/unit/test_spoken_diagnostic_claim.py | sed '/^$/d')"
           required_spoken_diagnostic_ids=(
+            "tests/unit/test_spoken_diagnostic_claim.py::test_exact_live_diagnostic_bypasses_default_ambient_batch_once"
+            "tests/unit/test_spoken_diagnostic_claim.py::test_diagnostic_does_not_flush_or_join_existing_ambient_buffer"
+            "tests/unit/test_spoken_diagnostic_claim.py::test_ordinary_four_words_still_defer_at_default_threshold"
+            "tests/unit/test_spoken_diagnostic_claim.py::test_split_or_mixed_phrase_never_bypasses_ambient_batch[segments0]"
+            "tests/unit/test_spoken_diagnostic_claim.py::test_split_or_mixed_phrase_never_bypasses_ambient_batch[segments1]"
+            "tests/unit/test_spoken_diagnostic_claim.py::test_noneligible_diagnostic_never_claims_or_dispatches[disabled]"
+            "tests/unit/test_spoken_diagnostic_claim.py::test_noneligible_diagnostic_never_claims_or_dispatches[wrong_owner]"
+            "tests/unit/test_spoken_diagnostic_claim.py::test_noneligible_diagnostic_never_claims_or_dispatches[expired]"
+            "tests/unit/test_spoken_diagnostic_claim.py::test_noneligible_diagnostic_never_claims_or_dispatches[missing_origin]"
+            "tests/unit/test_spoken_diagnostic_claim.py::test_noneligible_diagnostic_never_claims_or_dispatches[stale_origin]"
+            "tests/unit/test_spoken_diagnostic_claim.py::test_forced_ordinary_flush_does_not_create_diagnostic_claim"
+            "tests/unit/test_spoken_diagnostic_claim.py::test_window_expiring_after_batch_bypass_fails_closed"
+            "tests/unit/test_spoken_diagnostic_claim.py::test_confirmed_echo_suppresses_diagnostic_before_claim"
             "tests/unit/test_spoken_diagnostic_claim.py::test_default_disabled_and_invalid_window"
             "tests/unit/test_spoken_diagnostic_claim.py::test_default_disabled_never_opens_capture_or_claim_store"
             "tests/unit/test_spoken_diagnostic_claim.py::test_claim_once_across_rollover_and_render_once"
@@ -1556,7 +1569,7 @@ jobs:
           for required_id in "${required_spoken_diagnostic_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$spoken_diagnostic_ids"
           done
-          test "$(grep -c '::' <<<"$spoken_diagnostic_ids")" -eq 7
+          test "$(grep -c '::' <<<"$spoken_diagnostic_ids")" -eq 20
           pytest tests/unit/test_spoken_diagnostic_claim.py -v |
             tee /tmp/spoken-diagnostic-claim-pytest.log
           ! grep -Eq '[0-9]+ skipped' /tmp/spoken-diagnostic-claim-pytest.log
