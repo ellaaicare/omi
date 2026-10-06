@@ -81,6 +81,7 @@ from utils.conversations.capture_protocol import (
     complete_rotated_capture,
     flush_capture_before_drained,
     install_capture_authority,
+    is_current_capture_owner,
     mark_capture_drained,
     renew_capture_authority,
     require_capture_protocol_before_creation,
@@ -97,7 +98,13 @@ from utils.capture_buffer import (
 from utils.ella.memory_artwork_storage import acquire_memory_artwork_publication_lock
 from utils.ella.scanner_keyterms import cache_status as scanner_keyterm_cache_status
 from utils.ella.scanner_keyterms import combine_deepgram_keyterms, get_scanner_keyterms
-from utils.ella.scanner import credible_emergency_reason_with_context, send_to_scanner
+from utils.ella.ambient_deadline import AmbientDeadlines
+from utils.ella.scanner import (
+    ambient_batch_is_current,
+    credible_emergency_reason_with_context,
+    discard_ambient_batch,
+    send_to_scanner,
+)
 from utils.notifications import send_credit_limit_notification, send_silent_user_notification
 from utils.other import endpoints as auth
 from utils.other.storage import get_profile_audio_if_exists, get_user_has_speech_profile
@@ -251,7 +258,8 @@ class ScannerDispatchQueue:
             self._emergency_context_segments = []
             self._emergency_context_conversation_id = conversation_id
             self._emergency_context_observed_at = None
-        item["recent_segments"] = list(self._emergency_context_segments)
+        if not item.get('ambient_batch_id'):
+            item["recent_segments"] = list(self._emergency_context_segments)
         current_segments = item.get("segments")
         self._emergency_context_segments = self._next_emergency_context(
             self._emergency_context_segments,
@@ -709,6 +717,7 @@ async def _stream_handler(
     selected_stt_language: Optional[str] = None
     selected_stt_model: Optional[str] = None
     current_conversation_id = None
+    ambient_deadlines = None
     capture_drained = False
     conversation_finalize_tasks: set[asyncio.Task] = set()
     first_audio_frame_at: Optional[float] = None
@@ -1486,6 +1495,8 @@ async def _stream_handler(
 
         if adopt:
             current_conversation_id = new_conversation_id
+            if ambient_deadlines is not None:
+                ambient_deadlines.discard_except(new_conversation_id)
 
         predecessor_id = expected_conversation_id or replace_stale_conversation_id
         if adopt and not await _publish_capture_protocol_ready(
@@ -1768,6 +1779,8 @@ async def _stream_handler(
         close_code, reason, retryable = _ai_consent_websocket_contract(exc)
         if not ai_consent_egress_rejected.is_set():
             accepting_capture = False
+            if ambient_deadlines is not None:
+                ambient_deadlines.close()
             websocket_active = False
             websocket_close_code = close_code
             ai_consent_egress_rejected.set()
@@ -1797,11 +1810,48 @@ async def _stream_handler(
         )
 
     async def dispatch_scanner_item(provider_kwargs: dict) -> None:
+        item = dict(provider_kwargs)
+        batch_id = item.get('ambient_batch_id')
+        deferred = False
+
+        def schedule_deferred(receipt):
+            nonlocal deferred
+            deferred = True
+            ambient_deadlines.schedule_from_thread(item, receipt)
+
+        def guarded_scanner_call(**kwargs):
+            if batch_id:
+                if not ambient_capture_active(item):
+                    discard_ambient_batch(item, batch_id)
+                    return None
+            kwargs['on_ambient_deferred'] = schedule_deferred
+            return send_to_scanner(**kwargs)
+
+        if batch_id:
+            if not ambient_capture_active(item):
+                ambient_deadlines.complete(item, batch_id)
+                return
+            try:
+                owned = await run_in_threadpool(
+                    is_current_capture_owner,
+                    uid,
+                    item['conversation_id'],
+                    item['origin_generation'],
+                    item['origin_owner_token'],
+                )
+            except Exception:
+                _delivery_log('scanner_dispatch_suppressed', terminal_reason='capture_owner_authority_unavailable')
+                ambient_deadlines.complete(item, batch_id)
+                return
+            if not owned or not ambient_capture_active(item):
+                ambient_deadlines.complete(item, batch_id)
+                return
+        # Resolve mode and consent AFTER the potentially blocking owner read.
         await _dispatch_scanner_with_current_consent(
             uid,
             resolve_ai_consent_egress_decision,
             reject_stt_egress,
-            send_to_scanner,
+            guarded_scanner_call,
             on_consent_rejected=lambda: _delivery_log(
                 "scanner_dispatch_suppressed",
                 terminal_reason="ai_consent_egress_rejected",
@@ -1818,12 +1868,29 @@ async def _stream_handler(
             mode_loader=_load_authoritative_guardian_mode,
             provider_kwargs=provider_kwargs,
         )
+        # Authority failures before provider invocation must not retain text.
+        # A still-pending backpressure receipt is rescheduled by the callback.
+        if batch_id and not deferred:
+            ambient_deadlines.complete(item, batch_id)
+
+    def ambient_capture_active(item: dict) -> bool:
+        return bool(
+            websocket_active
+            and accepting_capture
+            and item.get('uid') == uid
+            and item.get('conversation_id') == current_conversation_id
+            and item.get('origin_generation') == generation_id
+            and item.get('origin_owner_token') == owner_token
+        )
 
     scanner_dispatch_queue = ScannerDispatchQueue(
         dispatch_scanner_item,
         emergency_predicate=_scanner_dispatch_item_is_credible_emergency,
     )
     scanner_dispatch_queue.start()
+    ambient_deadlines = AmbientDeadlines(
+        scanner_dispatch_queue.enqueue, discard_ambient_batch, ambient_capture_active, ambient_batch_is_current
+    )
 
     def stream_transcript(segments):
         nonlocal realtime_segment_buffers
@@ -3679,6 +3746,7 @@ async def _stream_handler(
                                 websocket_close_code = 1008
                                 break
                             accepting_capture = False
+                            ambient_deadlines.close()
                             capture_drain_tasks: set[asyncio.Task] = set()
                             capture_drain_complete = asyncio.Event()
 
@@ -3914,6 +3982,7 @@ async def _stream_handler(
             if transcription_seconds > 0 or words_to_record > 0:
                 record_usage(uid, transcription_seconds=transcription_seconds, words_transcribed=words_to_record)
         websocket_active = False
+        ambient_deadlines.close()
         await scanner_dispatch_queue.close()
         if not ai_consent_monitor_task.done():
             ai_consent_monitor_task.cancel()
