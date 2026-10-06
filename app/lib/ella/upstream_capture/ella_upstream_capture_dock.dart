@@ -792,9 +792,9 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
                     context,
                     key: const Key('upstream-capture-view-transcript'),
                     focusNode: _transcriptFocusNode,
-                    onPressed: () => _openTranscript(provider, session!),
+                    onPressed: () => _openTranscript(provider, session),
                     icon: Icons.subject_rounded,
-                    label: session!.source != 'phone'
+                    label: session.source != 'phone'
                         ? context.l10n.todayDockTranscriptNecklace
                         : context.l10n.todayDockTranscriptPhone,
                     compactLabel: context.l10n.transcript,
@@ -806,7 +806,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
                         ? null
                         : () => _run(
                               _DockOperation.finishing,
-                              () => _runtime.finishCaptureSession(session!),
+                              () => _runtime.finishCaptureSession(session),
                               failureMessage: context.l10n.upstreamCaptureUnavailable,
                             ),
                     icon: Icons.check_circle_outline_rounded,
