@@ -58,6 +58,9 @@ bool _matchesPin(_Entry entry, List<int> localBytes, Set<String> rels) {
   return _gitBlobId(original) == entry.blob;
 }
 
+bool _matchesDeclaredBytes(_Entry entry, List<int> localBytes, Set<String> rels) =>
+    entry.kind == 'patched' ? _gitBlobId(localBytes) == entry.localBlob : _matchesPin(entry, localBytes, rels);
+
 void main() {
   test('manifest pins BasedHardware/omi at f16699a and lists the vendored stack', () {
     final text = _manifest.readAsStringSync();
@@ -121,6 +124,7 @@ void main() {
         'app/ios/Runner/PigeonCommunicator.g.swift',
         'app/lib/upstream_capture/gen/pigeon_communicator.g.dart',
         'app/lib/upstream_capture/services/capture/capture_coordinator.dart',
+        'app/lib/upstream_capture/services/capture/capture_controller.dart',
       },
     );
     expect(
@@ -152,7 +156,11 @@ void main() {
     expect(patchedByPath['app/lib/upstream_capture/services/capture/capture_coordinator.dart']!.blob,
         '17c33870dd18366a03cd599bcec9befb512f0b39');
     expect(patchedByPath['app/lib/upstream_capture/services/capture/capture_coordinator.dart']!.localBlob,
-        'c86b5ab4c2fbd5b23635b755cd46de32e0ed33ae');
+        'b0b79a5bd6acd748329bddb093ffe60c55b66765');
+    expect(patchedByPath['app/lib/upstream_capture/services/capture/capture_controller.dart']!.blob,
+        'dee714b169e4f4e45777399f72db4672599fed3a');
+    expect(patchedByPath['app/lib/upstream_capture/services/capture/capture_controller.dart']!.localBlob,
+        '139ddbe23bbaa0a7d40f2fd43ae032423688d5ee');
   });
 
   test('scripts/verify_upstream_capture_identity.py passes on this checkout', () async {
@@ -192,7 +200,7 @@ void main() {
     expect(entries.where((e) => e.kind != 'patched').every((e) => e.localBlob == null), isTrue);
   });
 
-  group('the identity check rejects everything except the mechanical relocation', () {
+  group('the identity check rejects changes to declared controller bytes', () {
     late _Entry controller;
     late List<int> bytes;
     late Set<String> rels;
@@ -202,18 +210,18 @@ void main() {
       rels = _relocatedRels(entries);
       controller = entries.firstWhere((e) => e.upstreamPath == 'app/lib/services/capture/capture_controller.dart');
       bytes = File('$_repoRoot/${controller.localPath}').readAsBytesSync();
-      expect(_matchesPin(controller, bytes, rels), isTrue);
+      expect(_matchesDeclaredBytes(controller, bytes, rels), isTrue);
     });
 
     test('a one-byte behavior change is detected', () {
       final source = utf8.decode(bytes);
       final patched = source.replaceFirst('if (!_admitsCapture(revision)) return;', 'if (false) return;');
       expect(patched, isNot(source));
-      expect(_matchesPin(controller, utf8.encode(patched), rels), isFalse);
+      expect(_matchesDeclaredBytes(controller, utf8.encode(patched), rels), isFalse);
     });
 
     test('reformatting (whitespace only) is detected', () {
-      expect(_matchesPin(controller, utf8.encode('${utf8.decode(bytes)}\n'), rels), isFalse);
+      expect(_matchesDeclaredBytes(controller, utf8.encode('${utf8.decode(bytes)}\n'), rels), isFalse);
     });
 
     test('relocating an import of a NON-vendored file is detected', () {
@@ -221,7 +229,7 @@ void main() {
       const logger = "'package:omi/utils/logger.dart'";
       expect(source, contains(logger));
       final patched = source.replaceFirst(logger, "'package:omi/upstream_capture/utils/logger.dart'");
-      expect(_matchesPin(controller, utf8.encode(patched), rels), isFalse);
+      expect(_matchesDeclaredBytes(controller, utf8.encode(patched), rels), isFalse);
     });
 
     test('pointing a relocated import at a different vendored file is detected', () {
@@ -229,12 +237,12 @@ void main() {
       const seams = "'package:omi/upstream_capture/services/capture/capture_seams.dart'";
       expect(source, contains(seams));
       final patched = source.replaceFirst(seams, "'package:omi/upstream_capture/services/capture/capture_policy.dart'");
-      expect(_matchesPin(controller, utf8.encode(patched), rels), isFalse);
+      expect(_matchesDeclaredBytes(controller, utf8.encode(patched), rels), isFalse);
     });
 
     test('an extra adapter import injected into an upstream file is detected', () {
       final patched = "import 'package:omi/ella/services/ella_audio_emission_gate.dart';\n${utf8.decode(bytes)}";
-      expect(_matchesPin(controller, utf8.encode(patched), rels), isFalse);
+      expect(_matchesDeclaredBytes(controller, utf8.encode(patched), rels), isFalse);
     });
   });
 

@@ -65,6 +65,24 @@ void main() {
     expect(h.processCalls, 3);
   });
 
+  test('real Finish reset retires the presentation window even when the WAL second is reused', () async {
+    final session = await h.startPhone();
+    h.injectPhoneFrames(10, sessionId: session);
+    await h.settle();
+    final before = h.provider.captureWindowGeneration;
+    h.provider.testSessionStartSeconds = 42;
+    final originalTimestamp = h.provider.activeCaptureSessionId;
+    await h.runtime.finishConversation();
+    await h.settle();
+    final after = h.provider.captureWindowGeneration;
+    expect(after, greaterThan(before));
+    // Reusing the clock second cannot restore an already-retired identity.
+    h.provider.testSessionStartSeconds = 42;
+    expect(h.provider.activeCaptureSessionId, originalTimestamp);
+    expect(h.provider.captureWindowGeneration, after);
+    expect(h.processCalls, 1);
+  });
+
   test('necklace: after finishing a pendant conversation the pendant capture restarts', () async {
     final link = await h.connectPendant();
     for (var i = 0; i < 3; i++) {
