@@ -651,6 +651,7 @@ def test_disconnect_rotation_keeps_deferred_consent_predecessor_retryable_until_
         {
             "_latency_log": lambda *_args, **_kwargs: None,
             "_publish_capture_protocol_ready": publish_ready,
+            "ambient_deadlines": None,
             "current_conversation_id": "conversation-a",
             "language": "en",
             "private_cloud_sync_enabled": False,
@@ -1108,6 +1109,7 @@ def test_capture_owner_is_initialized_before_reconnect_preparation_uses_it():
         {
             "_latency_log": lambda *_args, **_kwargs: None,
             "_publish_capture_protocol_ready": publish_capture_protocol_ready,
+            "ambient_deadlines": None,
             "current_conversation_id": "stale",
             "language": "en",
             "private_cloud_sync_enabled": False,
@@ -1685,6 +1687,7 @@ def test_production_reconnect_rotates_expired_drained_candidate_behind_terminal_
         {
             "_latency_log": lambda *_args, **_kwargs: None,
             "_publish_capture_protocol_ready": publish_ready,
+            "ambient_deadlines": None,
             "current_conversation_id": None,
             "language": "en",
             "private_cloud_sync_enabled": False,

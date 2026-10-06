@@ -10,9 +10,10 @@ import os
 import re
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Iterator, List, Optional
+from typing import Callable, Iterator, List, Optional
 
 import requests
 
@@ -285,7 +286,7 @@ _CREDIBLE_EMERGENCY_TAIL = re.compile(
     re.IGNORECASE,
 )
 _DURATION_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)(?P<unit>ms|s|m|h)")
-_SCANNER_BATCHES: dict[tuple[str, str, str], dict] = {}
+_SCANNER_BATCHES: dict[tuple[str, str, str, str, str], dict] = {}
 _SCANNER_RATE_LIMIT_UNTIL = {
     "global": 0.0,
     "users": {},
@@ -828,12 +829,49 @@ def scanner_model_name() -> str:
     )
 
 
-def _scanner_batch_key(uid: str, conversation_id: str, device_type: str) -> tuple[str, str, str]:
-    return (str(uid), str(conversation_id), str(device_type or "omi"))
+def _scanner_batch_key(uid, conversation_id, device_type, generation=None, owner_token=None) -> tuple:
+    return (str(uid), str(conversation_id), str(device_type or "omi"), str(generation or ""), str(owner_token or ""))
+
+
+def discard_ambient_batch(item: dict, batch_id: str) -> None:
+    """Discard only the matching capture's pending batch, never a replacement."""
+    key = _scanner_batch_key(
+        item['uid'],
+        item['conversation_id'],
+        item.get('device_type', 'omi'),
+        item.get('origin_generation'),
+        item.get('origin_owner_token'),
+    )
+    with _SCANNER_STATE_LOCK:
+        batch = _SCANNER_BATCHES.get(key)
+        if batch and batch['id'] == batch_id:
+            _SCANNER_BATCHES.pop(key)
+            batch['segments'].clear()
+
+
+def ambient_batch_is_current(item: dict, batch_id: str) -> bool:
+    key = _scanner_batch_key(
+        item['uid'],
+        item['conversation_id'],
+        item.get('device_type', 'omi'),
+        item.get('origin_generation'),
+        item.get('origin_owner_token'),
+    )
+    with _SCANNER_STATE_LOCK:
+        batch = _SCANNER_BATCHES.get(key)
+        return bool(batch and batch['id'] == batch_id)
+
+
+def _pending_ambient_segments(uid, conversation_id, device_type, generation, owner_token, batch_id) -> List[dict]:
+    key = _scanner_batch_key(uid, conversation_id, device_type, generation, owner_token)
+    with _SCANNER_STATE_LOCK:
+        batch = _SCANNER_BATCHES.get(key)
+        return list(batch['segments']) if batch and batch['id'] == batch_id else []
 
 
 def _new_ambient_batch(now: float) -> dict:
     return {
+        "id": uuid.uuid4().hex,
         "segments": [],
         "started_at": now,
         "last_at": now,
@@ -953,6 +991,9 @@ def _apply_ambient_batching(
     wake_prefix_recent: Optional[bool] = None,
     credible_emergency: Optional[str] = None,
     diagnostic_candidate: bool = False,
+    origin_generation: Optional[str] = None,
+    origin_owner_token: Optional[str] = None,
+    ambient_batch_id: Optional[str] = None,
     now: Optional[float] = None,
 ) -> tuple[Optional[List[dict]], dict]:
     now = now if now is not None else time.time()
@@ -968,7 +1009,7 @@ def _apply_ambient_batching(
         "immediate_reason": immediate_reason,
     }
 
-    if diagnostic_candidate:
+    if diagnostic_candidate and not ambient_batch_id:
         return scanner_segments, {
             **base_metadata,
             "batch_size": len(scanner_segments),
@@ -977,7 +1018,7 @@ def _apply_ambient_batching(
             "rate_limit_status": "bypassed_for_diagnostic",
         }
 
-    if not SCANNER_AMBIENT_BATCHING_ENABLED:
+    if not SCANNER_AMBIENT_BATCHING_ENABLED and not ambient_batch_id:
         return scanner_segments, {
             **base_metadata,
             "batch_size": len(scanner_segments),
@@ -986,7 +1027,7 @@ def _apply_ambient_batching(
             "rate_limit_status": "not_checked",
         }
 
-    if immediate_reason:
+    if immediate_reason and not ambient_batch_id:
         return scanner_segments, {
             **base_metadata,
             "batch_size": len(scanner_segments),
@@ -995,13 +1036,16 @@ def _apply_ambient_batching(
             "rate_limit_status": "bypassed_for_immediate",
         }
 
-    key = _scanner_batch_key(uid, conversation_id, device_type)
+    key = _scanner_batch_key(uid, conversation_id, device_type, origin_generation, origin_owner_token)
     with _SCANNER_STATE_LOCK:
         batch = _SCANNER_BATCHES.get(key)
+        if ambient_batch_id and (not batch or batch['id'] != ambient_batch_id):
+            return None, {**base_metadata, 'flush_reason': 'stale_batch'}
         if not batch:
             batch = _new_ambient_batch(now)
             _SCANNER_BATCHES[key] = batch
-        _append_to_ambient_batch(batch, scanner_segments, now)
+        if not ambient_batch_id:
+            _append_to_ambient_batch(batch, scanner_segments, now)
         flush_reason = _ambient_flush_reason(batch, now)
         batch_word_count = int(batch.get("word_count") or 0)
         batch_size = len(batch.get("segments") or [])
@@ -1010,6 +1054,16 @@ def _apply_ambient_batching(
         global_until = float(_SCANNER_RATE_LIMIT_UNTIL.get("global") or 0.0)
         user_until = float(_SCANNER_RATE_LIMIT_UNTIL.get("users", {}).get(str(uid)) or 0.0)
         backpressure_remaining_s = max(0.0, max(global_until, user_until) - now)
+        delay_seconds = max(
+            0.01,
+            backpressure_remaining_s,
+            0 if flush_reason else SCANNER_AMBIENT_BATCH_SECONDS - (now - batch_started_at),
+        )
+        deferred_receipt = {
+            'batch_id': batch['id'],
+            'delay_seconds': delay_seconds,
+            'deadline_monotonic': time.monotonic() + delay_seconds,
+        }
         if backpressure_remaining_s > 0:
             if batch_word_count >= SCANNER_AMBIENT_BATCH_MAX_WORDS:
                 _SCANNER_BATCHES.pop(key, None)
@@ -1030,6 +1084,7 @@ def _apply_ambient_batching(
                 "rate_limit_status": "active",
                 "backpressure_remaining_s": round(backpressure_remaining_s, 3),
                 "batch_age_s": round(now - batch_started_at, 3),
+                "_deferred": deferred_receipt,
             }
 
         if not flush_reason:
@@ -1040,6 +1095,7 @@ def _apply_ambient_batching(
                 "flush_reason": "pending",
                 "rate_limit_status": "not_limited",
                 "batch_age_s": round(now - batch_started_at, 3),
+                "_deferred": deferred_receipt,
             }
 
         dispatch_segments = list(batch.get("segments") or [])
@@ -1332,6 +1388,8 @@ def send_to_scanner(
     typesafe_egress_authorized: bool = False,
     origin_generation: Optional[str] = None,
     origin_owner_token: Optional[str] = None,
+    ambient_batch_id: Optional[str] = None,
+    on_ambient_deferred: Optional[Callable[[dict], None]] = None,
 ) -> Optional[int]:
     """
     Send transcript segments to Ella scanner agent.
@@ -1353,6 +1411,10 @@ def send_to_scanner(
     if not ELLA_CONFIG.scanner_enabled:
         return None
 
+    if ambient_batch_id:
+        segments = _pending_ambient_segments(
+            uid, conversation_id, device_type, origin_generation, origin_owner_token, ambient_batch_id
+        )
     if not segments:
         return None
 
@@ -1416,6 +1478,17 @@ def send_to_scanner(
         formatted_recent_segments = emergency_context_segments
         scanner_segments = emergency_context_segments + emergency_current_segments
     if not guardian_mode_enabled and not emergency_only_dispatch:
+        if ambient_batch_id:
+            discard_ambient_batch(
+                {
+                    'uid': uid,
+                    'conversation_id': conversation_id,
+                    'device_type': device_type,
+                    'origin_generation': origin_generation,
+                    'origin_owner_token': origin_owner_token,
+                },
+                ambient_batch_id,
+            )
         _log_trace_event(
             trace_id=trace_id,
             uid=uid,
@@ -1448,7 +1521,13 @@ def send_to_scanner(
         wake_prefix_recent=wake_prefix_recent,
         credible_emergency=emergency_reason,
         diagnostic_candidate=diagnostic_candidate,
+        origin_generation=origin_generation,
+        origin_owner_token=origin_owner_token,
+        ambient_batch_id=ambient_batch_id,
     )
+    deferred_receipt = batch_metadata.pop('_deferred', None)
+    if deferred_receipt and on_ambient_deferred:
+        on_ambient_deferred(deferred_receipt)
     if not scanner_segments:
         _log_trace_event(
             trace_id=trace_id,

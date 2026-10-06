@@ -127,6 +127,8 @@ on:
       - "backend/utils/ella/canonical_omi.py"
       - "backend/utils/ella/exact_firebase_auth.py"
       - "backend/utils/ella/scanner.py"
+      - "backend/utils/ella/ambient_deadline.py"
+      - "backend/tests/unit/test_ambient_deadline.py"
       - "backend/utils/ella/scanner_keyterms.py"
       - "backend/ella/docs/HERMES_BROKER_PROTOTYPE_RUNBOOK.md"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
@@ -319,6 +321,8 @@ on:
       - "backend/utils/ella/canonical_omi.py"
       - "backend/utils/ella/exact_firebase_auth.py"
       - "backend/utils/ella/scanner.py"
+      - "backend/utils/ella/ambient_deadline.py"
+      - "backend/tests/unit/test_ambient_deadline.py"
       - "backend/utils/ella/scanner_keyterms.py"
       - "backend/ella/docs/HERMES_BROKER_PROTOTYPE_RUNBOOK.md"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
@@ -1679,6 +1683,17 @@ jobs:
           pytest tests/unit/test_ella_scanner_batching.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_scanner_echo_suppression.py | grep -c '::')" -eq 17
           pytest tests/unit/test_ella_scanner_echo_suppression.py -v
+
+      - name: Run owner-bound ambient quiet deadline regressions
+        run: |
+          set -euo pipefail
+          python -m compileall -q utils/ella/ambient_deadline.py
+          black --check --line-length 120 --skip-string-normalization utils/ella/ambient_deadline.py tests/unit/test_ambient_deadline.py
+          pytest --collect-only -q tests/unit/test_ambient_deadline.py | tee /tmp/ambient-deadline-collected.log
+          test "$(grep -c '::' /tmp/ambient-deadline-collected.log)" -eq 36
+          pytest tests/unit/test_ambient_deadline.py -v | tee /tmp/ambient-deadline-pytest.log
+          grep -Eq '36 passed' /tmp/ambient-deadline-pytest.log
+          ! grep -Eq '[0-9]+ skipped|[0-9]+ failed' /tmp/ambient-deadline-pytest.log
 
       - name: Run preserved artwork contracts and additive style consent gate
         run: |

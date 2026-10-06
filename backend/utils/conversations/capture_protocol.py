@@ -148,6 +148,49 @@ def _lease_expired(data: Dict[str, Any], now: datetime, field: str = 'lease_expi
     return not isinstance(expires_at, datetime) or _aware(expires_at) <= now
 
 
+@transactional
+def _current_capture_owner_transaction(
+    transaction,
+    authority_ref,
+    conversation_ref,
+    conversation_id: str,
+    generation: str,
+    owner_token: str,
+    now: Optional[datetime] = None,
+) -> bool:
+    authority_snapshot = authority_ref.get(transaction=transaction)
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    if not authority_snapshot.exists or not conversation_snapshot.exists:
+        return False
+    authority = authority_snapshot.to_dict() or {}
+    conversation = conversation_snapshot.to_dict() or {}
+    now = now or datetime.now(timezone.utc)
+    return bool(
+        generation
+        and owner_token
+        and authority.get('state') == 'active'
+        and conversation.get('capture_state') == 'active'
+        and _authority_tuple_matches(authority, conversation_id, generation, owner_token)
+        and _conversation_tuple_matches(conversation, conversation_id, generation, owner_token)
+        and _status_value(conversation.get('status')) == 'in_progress'
+        and str(conversation.get('capture_owner_id') or '') == owner_token
+        and not _lease_expired(authority, now)
+        and not _lease_expired(conversation, now, 'capture_lease_expires_at')
+    )
+
+
+def is_current_capture_owner(uid: str, conversation_id: str, generation: str, owner_token: str) -> bool:
+    """Read a consistent live capture tuple before delayed scanner egress."""
+    return _current_capture_owner_transaction(
+        db.transaction(),
+        _authority_ref(uid),
+        _conversation_ref(uid, conversation_id),
+        conversation_id,
+        generation,
+        owner_token,
+    )
+
+
 def _authority_live_for_reconnect(authority: Dict[str, Any], now: datetime) -> bool:
     state = str(authority.get('state') or '')
     if state in {'drained', 'terminal'}:
