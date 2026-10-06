@@ -3,6 +3,17 @@ name: Hermes Cloud Runtime Tests
 on:
   pull_request:
     paths:
+      - "backend/database/standard_talk_playback_references.py"
+      - "backend/database/standard_talk_playback_authority.py"
+      - "backend/ella/services/standard_talk_playback.py"
+      - "backend/tests/unit/test_standard_talk_playback_composition.py"
+      - "backend/tests/postgres/test_standard_talk_playback_composition_postgres.py"
+      - "backend/migrations/020_create_standard_talk_playback_references.sql"
+      - "backend/tests/unit/test_standard_talk_playback_references.py"
+      - "backend/tests/postgres/test_standard_talk_playback_references_postgres.py"
+      - "backend/ella/docs/STANDARD_TALK_PLAYBACK_REFERENCES.md"
+      - "backend/ella/docs/standard_talk_spoken_vectors.json"
+      - "backend/test.sh"
       - "app/ios/Runner.xcodeproj/project.pbxproj"
       - "app/ios/Runner/GuardianMode/GuardianAuthenticatedTransport.swift"
       - "app/ios/Runner/GuardianMode/GuardianModeManager.swift"
@@ -195,6 +206,17 @@ on:
   push:
     branches: [main]
     paths:
+      - "backend/database/standard_talk_playback_references.py"
+      - "backend/database/standard_talk_playback_authority.py"
+      - "backend/ella/services/standard_talk_playback.py"
+      - "backend/tests/unit/test_standard_talk_playback_composition.py"
+      - "backend/tests/postgres/test_standard_talk_playback_composition_postgres.py"
+      - "backend/migrations/020_create_standard_talk_playback_references.sql"
+      - "backend/tests/unit/test_standard_talk_playback_references.py"
+      - "backend/tests/postgres/test_standard_talk_playback_references_postgres.py"
+      - "backend/ella/docs/STANDARD_TALK_PLAYBACK_REFERENCES.md"
+      - "backend/ella/docs/standard_talk_spoken_vectors.json"
+      - "backend/test.sh"
       - "app/ios/Runner.xcodeproj/project.pbxproj"
       - "app/ios/Runner/GuardianMode/GuardianAuthenticatedTransport.swift"
       - "app/ios/Runner/GuardianMode/GuardianModeManager.swift"
@@ -506,6 +528,13 @@ jobs:
           ella/routers/guardian.py
           tests/unit/test_spoken_diagnostic_claim.py
           ella/services/guardian_playback_ledger.py
+          database/standard_talk_playback_references.py
+          database/standard_talk_playback_authority.py
+          ella/services/standard_talk_playback.py
+          tests/unit/test_standard_talk_playback_composition.py
+          tests/postgres/test_standard_talk_playback_composition_postgres.py
+          tests/unit/test_standard_talk_playback_references.py
+          tests/postgres/test_standard_talk_playback_references_postgres.py
           ella/services/guardian_echo_classifier.py
           ella/routers/invites.py
           ella/routers/memory_reinterpretation.py
@@ -1593,6 +1622,76 @@ jobs:
           pytest tests/unit/test_guardian_echo_classifier.py -v
           test "$(pytest --collect-only -q tests/postgres/test_guardian_playback_ledger_postgres.py | grep -c '::')" -eq 13
           pytest tests/postgres/test_guardian_playback_ledger_postgres.py -v
+          test "$(pytest --collect-only -q tests/unit/test_standard_talk_playback_references.py | grep -c '::')" -eq 42
+          pytest tests/unit/test_standard_talk_playback_references.py -v
+          standard_talk_reference_ids="$(
+            pytest --collect-only -q tests/postgres/test_standard_talk_playback_references_postgres.py |
+              sed '/^$/d'
+          )"
+          required_standard_talk_reference_ids=(
+            "tests/postgres/test_standard_talk_playback_references_postgres.py::test_two_pools_issue_and_claim_exactly_once_and_response_loss_never_renews"
+            "tests/postgres/test_standard_talk_playback_references_postgres.py::test_database_clock_expiry_blocks_claim_and_late_publication"
+            "tests/postgres/test_standard_talk_playback_references_postgres.py::test_exact_coordinate_and_digest_mismatch_cannot_claim_or_publish[uid]"
+            "tests/postgres/test_standard_talk_playback_references_postgres.py::test_exact_coordinate_and_digest_mismatch_cannot_claim_or_publish[event_id]"
+            "tests/postgres/test_standard_talk_playback_references_postgres.py::test_exact_coordinate_and_digest_mismatch_cannot_claim_or_publish[source_identity]"
+            "tests/postgres/test_standard_talk_playback_references_postgres.py::test_exact_coordinate_and_digest_mismatch_cannot_claim_or_publish[canonical_text_sha256]"
+            "tests/postgres/test_standard_talk_playback_references_postgres.py::test_exact_coordinate_and_digest_mismatch_cannot_claim_or_publish[runtime_authority_sha256]"
+            "tests/postgres/test_standard_talk_playback_references_postgres.py::test_exact_coordinate_and_digest_mismatch_cannot_claim_or_publish[consent_receipt_sha256]"
+            "tests/postgres/test_standard_talk_playback_references_postgres.py::test_revoked_original_claim_cannot_publish_after_same_tuple_aba"
+            "tests/postgres/test_standard_talk_playback_references_postgres.py::test_failed_claim_and_wrong_claim_never_produce_another_candidate"
+            "tests/postgres/test_standard_talk_playback_references_postgres.py::test_blocked_row_update_rechecks_database_expiry_after_lock_release"
+            "tests/postgres/test_standard_talk_playback_references_postgres.py::test_caller_transaction_rollback_preserves_atomic_publication_and_no_plaintext_columns"
+            "tests/postgres/test_standard_talk_playback_references_postgres.py::test_unchanged_locked_row_naturally_expires_before_transition[store-transaction-claim]"
+            "tests/postgres/test_standard_talk_playback_references_postgres.py::test_unchanged_locked_row_naturally_expires_before_transition[store-transaction-publish]"
+            "tests/postgres/test_standard_talk_playback_references_postgres.py::test_unchanged_locked_row_naturally_expires_before_transition[caller-transaction-claim]"
+            "tests/postgres/test_standard_talk_playback_references_postgres.py::test_unchanged_locked_row_naturally_expires_before_transition[caller-transaction-publish]"
+          )
+          for required_id in "${required_standard_talk_reference_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$standard_talk_reference_ids"
+          done
+          test "$(grep -c '::' <<<"$standard_talk_reference_ids")" -eq 16
+          pytest tests/postgres/test_standard_talk_playback_references_postgres.py -v |
+            tee /tmp/standard-talk-reference-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/standard-talk-reference-pytest.log
+          test "$(pytest --collect-only -q tests/unit/test_standard_talk_playback_composition.py | grep -c '::')" -eq 20
+          pytest tests/unit/test_standard_talk_playback_composition.py -v
+          standard_talk_composition_ids="$(
+            pytest --collect-only -q tests/postgres/test_standard_talk_playback_composition_postgres.py |
+              sed '/^$/d'
+          )"
+          required_standard_talk_composition_ids=(
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_actual_composition_publishes_once_atomically_without_played_evidence"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_late_change_denies_publication_and_leaves_no_ledger[canonical_text]"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_late_change_denies_publication_and_leaves_no_ledger[role]"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_late_change_denies_publication_and_leaves_no_ledger[source]"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_late_change_denies_publication_and_leaves_no_ledger[session]"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_late_change_denies_publication_and_leaves_no_ledger[other_owner]"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_late_change_denies_publication_and_leaves_no_ledger[consent]"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_late_change_denies_publication_and_leaves_no_ledger[entitlement]"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_late_change_denies_publication_and_leaves_no_ledger[target]"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_late_change_denies_publication_and_leaves_no_ledger[invitation]"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_late_change_denies_publication_and_leaves_no_ledger[epoch_aba]"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_ledger_failure_rolls_back_publication_and_caller_connection_does_not_reacquire"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_fresh_post_work_consent_denial_prevents_any_publication"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_revoke_while_waiting_for_owner_lock_is_observed_before_transition[issue]"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_revoke_while_waiting_for_owner_lock_is_observed_before_transition[claim]"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_revoke_while_waiting_for_owner_lock_is_observed_before_transition[publish]"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_synced_regrant_epoch_aba_cannot_publish_original_claim"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_synced_mirror_revision_change_with_same_epoch_cannot_adopt_original_claim"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_legacy_generated_helper_still_upserts_and_started_makes_candidate"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_missing_mirror_denies_without_bootstrap_even_with_stale_snapshot"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_snapshot_binding_change_before_lock_is_rechecked_from_actual_row"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_changed_server_normalization_after_claim_cannot_publish"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_preexisting_playback_id_denies_and_rolls_back_protected_publication"
+            "tests/postgres/test_standard_talk_playback_composition_postgres.py::test_actual_two_connection_ledger_insert_race_rolls_back_protected_publication"
+          )
+          for required_id in "${required_standard_talk_composition_ids[@]}"; do
+            grep -Fqx "$required_id" <<<"$standard_talk_composition_ids"
+          done
+          test "$(grep -c '::' <<<"$standard_talk_composition_ids")" -eq 24
+          pytest tests/postgres/test_standard_talk_playback_composition_postgres.py -v |
+            tee /tmp/standard-talk-composition-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/standard-talk-composition-pytest.log
           test "$(pytest --collect-only -q tests/postgres/test_guardian_echo_classifier_scanner_e2e_postgres.py | grep -c '::')" -eq 5
           pytest tests/postgres/test_guardian_echo_classifier_scanner_e2e_postgres.py -v
           escalation_auth_ids="$(pytest --collect-only -q tests/unit/test_ella_escalations_router_auth.py | sed '/^$/d')"

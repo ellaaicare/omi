@@ -1,0 +1,15 @@
+{
+  "contract": "standard-talk-utf16-500-emoji-v1",
+  "proposal_only": true,
+  "vectors": [
+    {"id": "plain", "input": "  A quiet afternoon.  ", "spoken": "A quiet afternoon."},
+    {"id": "emoji_spaces", "input": "Hello \ud83d\ude00  there", "spoken": "Hello there"},
+    {"id": "joined_emoji", "input": "A \ud83d\udc69\u200d\ud83d\udcbb day", "spoken": "A day"},
+    {"id": "combining", "input": "Cafe\u0301", "spoken": "Cafe\u0301"},
+    {"id": "tabs_preserved", "input": "Hello\t  there", "spoken": "Hello\t there"},
+    {"id": "emoji_only", "input": "\ud83d\ude00\ufe0f", "error": "empty_spoken_text"},
+    {"id": "astral_whole_boundary", "repeat_prefix": "x", "prefix_count": 498, "suffix": "\ud83d\ude00tail", "spoken_repeat": "x", "spoken_count": 498},
+    {"id": "astral_split_boundary", "repeat_prefix": "x", "prefix_count": 499, "suffix": "\ud83d\ude00tail", "error": "invalid_unicode"},
+    {"id": "bmp_limit", "repeat_prefix": "x", "prefix_count": 500, "suffix": "tail", "spoken_repeat": "x", "spoken_count": 500}
+  ]
+}

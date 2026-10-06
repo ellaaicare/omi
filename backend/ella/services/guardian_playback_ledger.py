@@ -28,6 +28,7 @@ error receipts from this module — callers must not log `playback_text`.
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -190,6 +191,18 @@ async def _maybe_run_retention_cleanup(pool: asyncpg.Pool) -> None:
         )
 
 
+@asynccontextmanager
+async def _generated_connection(pool: asyncpg.Pool, connection: Optional[asyncpg.Connection]):
+    if connection is not None:
+        if not connection.is_in_transaction():
+            raise ValueError("playback_ledger_transaction_required")
+        yield connection
+        return
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            yield conn
+
+
 async def record_generated(
     pool: asyncpg.Pool,
     *,
@@ -201,14 +214,36 @@ async def record_generated(
     purpose: Optional[str] = None,
     playback_text: Optional[str] = None,
     text_provenance: Optional[str] = None,
+    connection: Optional[asyncpg.Connection] = None,
+    require_new: bool = False,
 ) -> None:
     """Record TTS generation. Not evidence of playback."""
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            existing = await _fetch_owner_row(conn, uid, playback_id)
-            _assert_owned(existing, uid, playback_id)
-            await conn.execute(
+    async with _generated_connection(pool, connection) as conn:
+        if require_new:
+            row = await conn.fetchrow(
                 """
+                INSERT INTO guardian_playback_ledger (
+                    uid, playback_id, queue_item_id, audio_id, trace_id,
+                    status, purpose, playback_text, text_provenance, generated_at
+                ) VALUES ($1, $2, $3, $4, $5, 'generated', $6, $7, $8, NOW())
+                ON CONFLICT (uid, playback_id) DO NOTHING RETURNING id
+                """,
+                uid,
+                playback_id,
+                queue_item_id,
+                audio_id,
+                trace_id,
+                purpose,
+                playback_text,
+                text_provenance,
+            )
+            if row is None:
+                raise ValueError("playback_ledger_candidate_conflict")
+            return
+        existing = await _fetch_owner_row(conn, uid, playback_id)
+        _assert_owned(existing, uid, playback_id)
+        await conn.execute(
+            """
                 INSERT INTO guardian_playback_ledger (
                     uid, playback_id, queue_item_id, audio_id, trace_id,
                     status, purpose, playback_text, text_provenance,
@@ -220,17 +255,18 @@ async def record_generated(
                     audio_id = COALESCE(EXCLUDED.audio_id, guardian_playback_ledger.audio_id),
                     trace_id = COALESCE(EXCLUDED.trace_id, guardian_playback_ledger.trace_id),
                     updated_at = NOW()
-                """,
-                uid,
-                playback_id,
-                queue_item_id,
-                audio_id,
-                trace_id,
-                purpose,
-                playback_text,
-                text_provenance,
-            )
-    await _maybe_run_retention_cleanup(pool)
+            """,
+            uid,
+            playback_id,
+            queue_item_id,
+            audio_id,
+            trace_id,
+            purpose,
+            playback_text,
+            text_provenance,
+        )
+    if connection is None:
+        await _maybe_run_retention_cleanup(pool)
 
 
 async def record_queued(
