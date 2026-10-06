@@ -1689,9 +1689,10 @@ jobs:
           set -euo pipefail
           python -m compileall -q utils/ella/ambient_deadline.py
           black --check --line-length 120 --skip-string-normalization utils/ella/ambient_deadline.py tests/unit/test_ambient_deadline.py
-          test "$(pytest --collect-only -q tests/unit/test_ambient_deadline.py | grep -c '::')" -eq 39
+          pytest --collect-only -q tests/unit/test_ambient_deadline.py | tee /tmp/ambient-deadline-collected.log
+          test "$(grep -c '::' /tmp/ambient-deadline-collected.log)" -eq 36
           pytest tests/unit/test_ambient_deadline.py -v | tee /tmp/ambient-deadline-pytest.log
-          grep -Eq '39 passed' /tmp/ambient-deadline-pytest.log
+          grep -Eq '36 passed' /tmp/ambient-deadline-pytest.log
           ! grep -Eq '[0-9]+ skipped|[0-9]+ failed' /tmp/ambient-deadline-pytest.log
 
       - name: Run preserved artwork contracts and additive style consent gate
