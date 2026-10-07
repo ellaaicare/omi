@@ -446,6 +446,8 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
     required String failureMessage,
   }) async {
     if (_busy) return;
+    final originUid = _uid;
+    final originEpoch = _runtime.authority.bindingEpoch;
     _actionFeedback();
     setState(() {
       _operation = operation;
@@ -454,7 +456,9 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
     try {
       await action();
     } catch (_) {
-      if (mounted) setState(() => _message = failureMessage);
+      if (mounted && _uid == originUid && _runtime.authority.bindingEpoch == originEpoch) {
+        setState(() => _message = failureMessage);
+      }
     } finally {
       if (mounted) setState(() => _operation = _DockOperation.idle);
     }
@@ -539,8 +543,9 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
     }
   }
 
-  Future<void> _openTranscript(CaptureProvider provider, {required bool necklace}) async {
-    if (!mounted || _transcriptOpen) return;
+  Future<void> _openTranscript(CaptureProvider provider, EllaCaptureSessionView session) async {
+    bool isCurrent() => mounted && _uid == session.uid && _runtime.isCurrentCaptureSession(session);
+    if (!isCurrent() || _transcriptOpen) return;
     _transcriptOpen = true;
     final originUid = _uid;
     final originAuthority = (widget.guardianAuthorityProvider ?? WalOwnerAuthority.active)();
@@ -556,8 +561,11 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
         ),
         builder: (sheetContext) => _TranscriptSheet(
           provider: provider,
-          sourceLabel:
-              necklace ? sheetContext.l10n.todayDockTranscriptNecklace : sheetContext.l10n.todayDockTranscriptPhone,
+          presentationChanges: Listenable.merge([_runtime.lastRevocation, _runtime.finishPending]),
+          isCurrent: isCurrent,
+          sourceLabel: session.source != 'phone'
+              ? sheetContext.l10n.todayDockTranscriptNecklace
+              : sheetContext.l10n.todayDockTranscriptPhone,
           onClose: () {
             if (closing || !sheetContext.mounted || ModalRoute.of(sheetContext)?.isCurrent != true) return false;
             closing = true;
@@ -579,7 +587,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
         _DockOperation.connecting => context.l10n.upstreamCaptureConnecting,
         _DockOperation.stopping => context.l10n.upstreamCaptureStopping,
         _DockOperation.disconnecting => context.l10n.upstreamCaptureDisconnecting,
-        _DockOperation.finishing => context.l10n.upstreamCaptureFinishing,
+        _DockOperation.finishing => _runtime.isFinishingFor(_uid) ? context.l10n.upstreamCaptureFinishing : null,
       };
 
   Widget _actionLabel(BuildContext context, String label, {required String compactLabel}) => Text(
@@ -655,26 +663,36 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
       );
     }
     return AnimatedBuilder(
-      animation: provider,
+      animation: Listenable.merge([provider, _runtime.lastRevocation, _runtime.finishPending]),
       builder: (context, _) {
+        final candidate = _runtime.captureSession;
+        final session = candidate?.uid == _uid ? candidate : null;
         final state = provider.recordingState;
-        final phoneActive = state == RecordingState.record || provider.isPhoneMicBatchRecording;
+        final phoneActive =
+            state == RecordingState.record || state == RecordingState.interrupted || provider.isPhoneMicBatchRecording;
         final necklaceBound = state == RecordingState.deviceRecord || provider.havingRecordingDevice;
-        final phoneLive =
-            (state == RecordingState.record && provider.transcriptServiceReady) || provider.isPhoneMicBatchRecording;
-        final necklaceLive = state == RecordingState.deviceRecord && provider.transcriptServiceReady;
-        final live = phoneLive || necklaceLive;
+        final phoneLive = session != null &&
+            ((state == RecordingState.record && provider.transcriptServiceReady) || provider.isPhoneMicBatchRecording);
+        final necklaceLive = session != null && state == RecordingState.deviceRecord && provider.transcriptServiceReady;
+        final live = session != null && (phoneLive || necklaceLive);
+        final transcriptAvailable = session != null && (live || provider.segments.isNotEmpty);
+        final finishing = _runtime.isFinishingFor(_uid);
+        final canFinish = session != null && !_busy && _runtime.canFinishSession(session);
         final initializing = state == RecordingState.initialising;
-        final operationLabel = _operationLabel(context);
+        final operationLabel = finishing ? context.l10n.upstreamCaptureFinishing : _operationLabel(context);
         final status = operationLabel ??
             (_protocolMessageActive && _message != null ? _message : null) ??
             (phoneLive
                 ? context.l10n.upstreamCaptureRecordingPhone
                 : necklaceLive
                     ? context.l10n.upstreamCaptureRecordingNecklace
-                    : (state == RecordingState.record || state == RecordingState.deviceRecord || initializing)
-                        ? context.l10n.upstreamCaptureConnectingTranscription
-                        : _message);
+                    : session != null && state == RecordingState.interrupted
+                        ? context.l10n.transcriptionPausedReconnecting
+                        : (session != null &&
+                                    (state == RecordingState.record || state == RecordingState.deviceRecord)) ||
+                                initializing
+                            ? context.l10n.upstreamCaptureConnectingTranscription
+                            : _message);
         final detail = operationLabel != null
             ? null
             : live && provider.segments.isEmpty && !_protocolMessageActive
@@ -767,27 +785,28 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
                         compactPresentation: true,
                       ),
               ),
-              if (live) ...[
+              if (transcriptAvailable) ...[
                 const SizedBox(height: 8),
                 _AdaptiveActionPair(
                   first: _secondaryAction(
                     context,
                     key: const Key('upstream-capture-view-transcript'),
                     focusNode: _transcriptFocusNode,
-                    onPressed: () => _openTranscript(provider, necklace: necklaceLive),
+                    onPressed: () => _openTranscript(provider, session),
                     icon: Icons.subject_rounded,
-                    label:
-                        necklaceLive ? context.l10n.todayDockTranscriptNecklace : context.l10n.todayDockTranscriptPhone,
+                    label: session.source != 'phone'
+                        ? context.l10n.todayDockTranscriptNecklace
+                        : context.l10n.todayDockTranscriptPhone,
                     compactLabel: context.l10n.transcript,
                   ),
                   second: _DockPrimaryAction(
                     buttonKey: const Key('upstream-capture-finish'),
                     captureAdmission: _capturePressAdmission,
-                    onPressed: _busy
+                    onPressed: !canFinish
                         ? null
                         : () => _run(
                               _DockOperation.finishing,
-                              _runtime.finishConversation,
+                              () => _runtime.finishCaptureSession(session),
                               failureMessage: context.l10n.upstreamCaptureUnavailable,
                             ),
                     icon: Icons.check_circle_outline_rounded,
@@ -919,9 +938,17 @@ class _AdaptiveActionPair extends StatelessWidget {
 }
 
 class _TranscriptSheet extends StatelessWidget {
-  const _TranscriptSheet({required this.provider, required this.sourceLabel, required this.onClose});
+  const _TranscriptSheet({
+    required this.provider,
+    required this.sourceLabel,
+    required this.onClose,
+    required this.isCurrent,
+    required this.presentationChanges,
+  });
 
   final CaptureProvider provider;
+  final bool Function() isCurrent;
+  final Listenable presentationChanges;
   final String sourceLabel;
   final bool Function() onClose;
 
@@ -970,8 +997,11 @@ class _TranscriptSheet extends StatelessWidget {
               const SizedBox(height: 12),
               Expanded(
                 child: AnimatedBuilder(
-                  animation: provider,
+                  animation: Listenable.merge([provider, presentationChanges]),
                   builder: (context, _) {
+                    if (!isCurrent()) {
+                      return Center(child: Text(context.l10n.upstreamCaptureUnavailable));
+                    }
                     final segments = provider.segments;
                     if (segments.isEmpty) {
                       final listening = (provider.recordingState == RecordingState.record ||
@@ -1143,13 +1173,13 @@ class _WhispersRow extends StatelessWidget {
 }
 
 class _DockPrimaryAction extends StatefulWidget {
-  const _DockPrimaryAction({
+  _DockPrimaryAction({
     required this.buttonKey,
     required this.captureAdmission,
     required this.onPressed,
     required this.icon,
     required this.label,
-  });
+  }) : super(key: ValueKey<Key>(buttonKey));
 
   final Key buttonKey;
   final bool Function() Function() captureAdmission;

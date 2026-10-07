@@ -2,6 +2,34 @@
 
 Tracks ellaaicare/ella-ai#1280.
 
+## Transcript continuity: guarded Finish admission
+
+The Ella dock retains read-only transcript access while its socket recovers.
+That presentation change must not turn a queued Finish into processing for a
+replacement account or conversation. The Ella runtime supplies a synchronous
+owner/binding/recording/window predicate; the coordinator evaluates it when the
+event dequeues, before transition or effects. False or throwing predicates deny
+the event without effects. Unguarded existing callers retain their behavior.
+The controller forwards the optional predicate and reports rejected admission
+as a failure, rather than treating it as a saved conversation. A read-only
+monotonic presentation generation advances on capture-session roll, conversation
+replacement, reset and user-data clear; same-conversation refresh leaves it
+unchanged. This prevents seconds-based WAL timestamps from admitting a replaced
+window. The WAL timestamp itself is unchanged. No reducer,
+WAL processing, transport or consent policy is changed. The predicate is not
+rechecked after each effect: phone Finish intentionally retires its own session
+while executing. Existing emission authority checks remain in force.
+
+| File | Pin blob (unchanged upstream) | Reviewed local blob |
+| --- | --- | --- |
+| `app/lib/services/capture/capture_controller.dart` | `dee714b169e4f4e45777399f72db4672599fed3a` | `139ddbe23bbaa0a7d40f2fd43ae032423688d5ee` |
+| `app/lib/services/capture/capture_coordinator.dart` | `17c33870dd18366a03cd599bcec9befb512f0b39` | `b0b79a5bd6acd748329bddb093ffe60c55b66765` |
+
+The controller is explicitly declared `patched` for this forwarding seam; the
+coordinator layers this guard on its existing documented patches. The manifest
+still verifies the unchanged upstream pin and exact local blobs. Queue admission
+regressions live in Ella-owned `ella_capture_finish_admission_test.dart`.
+
 ## Behavior patches to upstream-owned files
 
 **One**, tracking ellaaicare/ella-ai#1280 RUN-009:
