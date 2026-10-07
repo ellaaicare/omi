@@ -836,7 +836,9 @@ jobs:
           set -euo pipefail
           collected="$(pytest --collect-only -q tests/unit/test_ella_chat_terminal_completion.py | grep -c '::')"
           test "$collected" -eq 20
-          pytest tests/unit/test_ella_chat_terminal_completion.py -v
+          pytest tests/unit/test_ella_chat_terminal_completion.py -v | tee /tmp/ella-chat-terminal-pytest.log
+          grep -Eq '(^|[^0-9])20 passed' /tmp/ella-chat-terminal-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/ella-chat-terminal-pytest.log
 
       - name: Run incident 1182 mounted-route exploit controls
         run: |
