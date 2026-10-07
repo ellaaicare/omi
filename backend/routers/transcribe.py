@@ -3743,6 +3743,7 @@ async def _stream_handler(
                                 generation_id,
                                 owner_token,
                             ):
+                                _delivery_log('capture_drain_rejected', reason='tuple_mismatch')
                                 websocket_close_code = 1008
                                 break
                             accepting_capture = False
@@ -3765,6 +3766,7 @@ async def _stream_handler(
                                 capture_drain_complete,
                                 timeout=10.0,
                             ):
+                                _delivery_log('capture_drain_rejected', reason='persistence_timeout')
                                 websocket_close_code = 1011
                                 break
                             if not mark_capture_drained(
@@ -3773,6 +3775,7 @@ async def _stream_handler(
                                 generation_id,
                                 owner_token,
                             ):
+                                _delivery_log('capture_drain_rejected', reason='authority_rejected')
                                 websocket_close_code = 1008
                                 break
                             if not redis_db.release_owned_in_progress_conversation_id(
@@ -3780,6 +3783,7 @@ async def _stream_handler(
                                 exact_conversation_id,
                                 session_id,
                             ):
+                                _delivery_log('capture_drain_rejected', reason='redis_owner_release_rejected')
                                 websocket_close_code = 1008
                                 break
                             capture_drained = True
