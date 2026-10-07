@@ -61,6 +61,7 @@ on:
       - "backend/ella/routers/debug_metadata.py"
       - "backend/ella/routers/ai_consent.py"
       - "backend/ella/routers/chat.py"
+      - "backend/tests/unit/test_ella_chat_terminal_completion.py"
       - "backend/ella/routers/escalations.py"
       - "backend/ella/routers/guardian.py"
       - "backend/ella/services/guardian_playback_ledger.py"
@@ -256,6 +257,7 @@ on:
       - "backend/ella/routers/debug_metadata.py"
       - "backend/ella/routers/ai_consent.py"
       - "backend/ella/routers/chat.py"
+      - "backend/tests/unit/test_ella_chat_terminal_completion.py"
       - "backend/ella/routers/escalations.py"
       - "backend/ella/routers/guardian.py"
       - "backend/ella/services/guardian_playback_ledger.py"
@@ -828,6 +830,15 @@ jobs:
             tests/unit/test_capture_webhook_delivery.py \
             -v | tee /tmp/capture-buffer-retention-pytest.log
           ! grep -Eq '[0-9]+ skipped' /tmp/capture-buffer-retention-pytest.log
+
+      - name: Run exact chat terminal completion regressions
+        run: |
+          set -euo pipefail
+          collected="$(pytest --collect-only -q tests/unit/test_ella_chat_terminal_completion.py | grep -c '::')"
+          test "$collected" -eq 20
+          pytest tests/unit/test_ella_chat_terminal_completion.py -v | tee /tmp/ella-chat-terminal-pytest.log
+          grep -Eq '(^|[^0-9])20 passed' /tmp/ella-chat-terminal-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/ella-chat-terminal-pytest.log
 
       - name: Run incident 1182 mounted-route exploit controls
         run: |

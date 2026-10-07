@@ -242,8 +242,8 @@ def test_empty_hermes_stream_rechecks_consent_before_nonstream_fallback(
             return None
 
         async def aiter_lines(self):
-            if False:
-                yield ""
+            # Recovery is eligible only after a valid empty stream terminal.
+            yield "data: [DONE]"
 
     class Client:
         def __init__(self, *args, **kwargs):
