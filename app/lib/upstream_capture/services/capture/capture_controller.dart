@@ -477,6 +477,12 @@ class CaptureController extends ChangeNotifier
   /// conversation so the pipeline can be joined without timing heuristics.
   String? get activeRecordingId => _recordingTelemetry.recordingId;
 
+  int _captureWindowGeneration = 0;
+
+  /// Read-only presentation identity. Unlike the WAL timestamp, this advances
+  /// even when a different conversation replaces a window in the same second.
+  int get captureWindowGeneration => _captureWindowGeneration;
+
   @visibleForTesting
   set testSessionStartSeconds(int v) => _sessionStartSeconds = v;
 
@@ -784,6 +790,7 @@ class CaptureController extends ChangeNotifier
   bool _deviceIdentityStale(int? revision) => revision != null && _deviceIdentityRevision != revision;
 
   void _rollCaptureSession(String identity) {
+    _captureWindowGeneration++;
     _sessionOwner?.replaceSession(identity);
   }
 
@@ -846,6 +853,7 @@ class CaptureController extends ChangeNotifier
   }
 
   Future _resetStateVariables() async {
+    _captureWindowGeneration++;
     _stopInProgressConversationRefresh();
     segments = [];
     photos = [];
@@ -2234,6 +2242,7 @@ class CaptureController extends ChangeNotifier
   }
 
   void clearUserData() {
+    _captureWindowGeneration++;
     segments = [];
     photos = [];
     hasTranscripts = false;
@@ -2551,8 +2560,9 @@ class CaptureController extends ChangeNotifier
   /// Finish the live capture: the one stop for the live page and the Home button. A phone
   /// recording is stopped and processed before a pendant it took over from resumes, so the
   /// processing request reaches the phone's conversation, not the pendant's next one.
-  Future<void> finishCapture() async {
-    final outcome = await _capture.dispatch(const FinishRequested());
+  Future<void> finishCapture({bool Function()? isCurrent}) async {
+    final outcome = await _capture.dispatch(FinishRequested(isCurrent: isCurrent));
+    if (isCurrent != null && !outcome.admitted) throw StateError('capture Finish authority changed');
     outcome.throwIfFailed();
   }
 
@@ -3132,6 +3142,7 @@ class CaptureController extends ChangeNotifier
   /// hermetic capture scenarios that control the conversation boundary.
   void applyInProgressConversation(ServerConversation? nextConversation) {
     if (_conversation?.id != nextConversation?.id) {
+      _captureWindowGeneration++;
       suggestionsBySegmentId.clear();
       _manualSpeakerDefaults.clear();
     }

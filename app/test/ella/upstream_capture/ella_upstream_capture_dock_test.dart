@@ -29,6 +29,8 @@ import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/device.dart';
 import 'package:omi/upstream_capture/backend/preferences.dart' as upstream;
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart';
+import 'package:omi/upstream_capture/backend/schema/conversation.dart';
+import 'package:omi/upstream_capture/backend/schema/structured.dart';
 import 'package:omi/upstream_capture/backend/schema/transcript_segment.dart';
 import 'package:omi/upstream_capture/providers/capture_provider.dart';
 import 'package:omi/upstream_capture/services/capture/capture_seams.dart';
@@ -77,6 +79,44 @@ class _PressTestAuthority extends EllaCaptureAuthority {
   int epoch = 0;
   @override
   int get bindingEpoch => epoch;
+}
+
+class _DockSessionAuthority extends EllaCaptureAuthority {
+  _DockSessionAuthority() : super(authenticatedUid: () => _uid, sessionStartAllowed: (_) => false);
+  bool current = true;
+  int epoch = 0;
+  @override
+  bool get hasCurrentAuthority => current;
+  @override
+  String? get boundUid => current ? _uid : null;
+  @override
+  int get bindingEpoch => epoch;
+}
+
+/// Explicit committed-session seam. Existing dock tests mark recordingState
+/// directly; real sessions get these identities from the capture coordinator.
+class _DockCaptureProvider extends CaptureProvider {
+  _DockCaptureProvider({super.connectivity, super.bleListeners, super.preferences});
+  String recordingIdentity = 'recording-1';
+  String? windowIdentity = 'window-1';
+  bool captureReady = true;
+  @override
+  bool get transcriptServiceReady => captureReady;
+  @override
+  String? get activeRecordingId => recordingIdentity;
+  @override
+  String? get activeCaptureSessionId => windowIdentity;
+  @override
+  String? get liveCaptureSource => switch (recordingState) {
+        RecordingState.record || RecordingState.interrupted => 'phone',
+        RecordingState.deviceRecord => 'omi',
+        _ => null,
+      };
+
+  void markSocketRecovering() {
+    captureReady = false;
+    updateRecordingState(recordingState == RecordingState.record ? RecordingState.interrupted : recordingState);
+  }
 }
 
 class _PickerService implements legacy_service.IDeviceService {
@@ -160,6 +200,8 @@ class _DockRuntime extends EllaUpstreamCaptureRuntime {
   _DockRuntime({required super.authority, required this.capture});
 
   final CaptureProvider capture;
+  @override
+  CaptureProvider get provider => capture;
   Future<CaptureProvider> Function()? bootOverride;
   Future<List<BtDevice>> Function()? discoverOverride;
   Future<EllaCaptureStartOutcome> Function(String uid)? startPhoneOverride;
@@ -190,14 +232,17 @@ class _DockRuntime extends EllaUpstreamCaptureRuntime {
   Future<void> disconnectNecklace({String? deviceId}) => disconnectNecklaceOverride?.call() ?? Future.value();
 
   @override
-  Future<void> finishConversation() => finishOverride?.call() ?? Future.value();
+  Future<void> finishConversation({bool Function()? isCurrent}) {
+    if (isCurrent != null && !isCurrent()) return Future.error(StateError('retired capture'));
+    return finishOverride?.call() ?? Future.value();
+  }
 }
 
 class _DockFixture {
   _DockFixture({required this.connectivity, required this.provider, required this.authority, required this.runtime});
 
   final StreamController<bool> connectivity;
-  final CaptureProvider provider;
+  final _DockCaptureProvider provider;
   final EllaCaptureAuthority authority;
   final _DockRuntime runtime;
 
@@ -206,7 +251,7 @@ class _DockFixture {
     await fork.SharedPreferencesUtil.init();
     await upstream.SharedPreferencesUtil.init();
     final connectivity = StreamController<bool>.broadcast();
-    final provider = CaptureProvider(
+    final provider = _DockCaptureProvider(
       connectivity: CaptureConnectivityBoundary(
         initiallyConnected: true,
         changes: connectivity.stream,
@@ -215,8 +260,7 @@ class _DockFixture {
       bleListeners: _NoBleListeners(),
       preferences: upstream.SharedPreferencesUtil(),
     );
-    final authority =
-        authorityOverride ?? EllaCaptureAuthority(authenticatedUid: () => _uid, sessionStartAllowed: (_) => false);
+    final authority = authorityOverride ?? _DockSessionAuthority();
     final runtime = _DockRuntime(authority: authority, capture: provider);
     final fixture = _DockFixture(
       connectivity: connectivity,
@@ -1221,6 +1265,196 @@ void main() {
     await tester.pump();
     expect(picker.service.discovers, 2);
     expect(find.text('Compass'), findsOneWidget);
+  });
+
+  testWidgets('real conversation replacement retires sheet despite identical recording and WAL timestamp',
+      (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    await fixture.pump(tester);
+    fixture.makeNecklaceLive();
+    ServerConversation snapshot(String id, String text) => ServerConversation(
+          id: id,
+          createdAt: DateTime.utc(2026, 10, 6),
+          structured: Structured('Synthetic title', 'Synthetic overview'),
+          transcriptSegments: [_segment('segment-$id', text)],
+        );
+    fixture.provider.applyInProgressConversation(snapshot('window-a', 'Synthetic original words'));
+    final original = fixture.runtime.captureSession!;
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('upstream-capture-view-transcript')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    fixture.provider.applyInProgressConversation(snapshot('window-a', 'Synthetic same-window revision'));
+    await tester.pump();
+    expect(fixture.runtime.isCurrentCaptureSession(original), isTrue);
+    expect(find.text('Synthetic same-window revision'), findsOneWidget);
+    fixture.provider.applyInProgressConversation(snapshot('window-b', 'Synthetic replacement words'));
+    await tester.pump();
+    expect(fixture.provider.activeRecordingId, original.recordingId);
+    expect(fixture.provider.activeCaptureSessionId, 'window-1');
+    expect(fixture.runtime.isCurrentCaptureSession(original), isFalse);
+    expect(find.text('Synthetic same-window revision'), findsNothing);
+    expect(find.text('Synthetic replacement words'), findsNothing);
+    expect(find.text('Recording is unavailable right now.'), findsOneWidget);
+  });
+
+  testWidgets('real reset changes presentation generation even when timestamp and recording are reused',
+      (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    fixture.makePhoneLive();
+    final original = fixture.runtime.captureSession!;
+    fixture.provider.clearUserData();
+    fixture.makePhoneLive();
+    final replacement = fixture.runtime.captureSession!;
+    expect(replacement.recordingId, original.recordingId);
+    expect(fixture.provider.activeCaptureSessionId, 'window-1');
+    expect(replacement.windowId, greaterThan(original.windowId));
+    expect(fixture.runtime.isCurrentCaptureSession(original), isFalse);
+  });
+
+  for (final necklace in [false, true]) {
+    testWidgets('retained ${necklace ? 'necklace' : 'phone'} transcript survives socket recovery', (tester) async {
+      final fixture = await _DockFixture.create(tester);
+      await fixture.pump(tester);
+      necklace ? fixture.makeNecklaceLive() : fixture.makePhoneLive();
+      fixture.provider.segments.add(_segment('retained-1', 'Synthetic retained words'));
+      fixture.provider.markSocketRecovering();
+      await tester.pump();
+      expect(find.byKey(const Key('upstream-capture-view-transcript')), findsOneWidget);
+      expect(find.byKey(const Key('upstream-capture-status')), findsOneWidget);
+      expect(find.text('Recording with your necklace'), findsNothing);
+      await tester.tap(find.byKey(const Key('upstream-capture-view-transcript')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.text('Synthetic retained words'), findsOneWidget);
+      expect(find.text(necklace ? 'Transcript · Necklace' : 'Transcript · iPhone'), findsWidgets);
+      fixture.provider.captureReady = true;
+      fixture.provider.onConnected();
+      await tester.pump();
+      expect(find.text('Synthetic retained words'), findsOneWidget);
+      expect(fixture.provider.segments, hasLength(1));
+    });
+  }
+
+  for (final retirement in ['account', 'consent', 'recording', 'window', 'binding']) {
+    testWidgets('open transcript redacts on $retirement retirement', (tester) async {
+      final fixture = await _DockFixture.create(tester);
+      var signedIn = _uid;
+      await fixture.pump(tester, authenticatedUid: () => signedIn);
+      fixture.makeNecklaceLive(segments: [_segment('retained-1', 'Synthetic previous session')]);
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('upstream-capture-view-transcript')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.text('Synthetic previous session'), findsOneWidget);
+      switch (retirement) {
+        case 'account':
+          signedIn = 'uid-b';
+        case 'consent':
+          (fixture.authority as _DockSessionAuthority).current = false;
+        case 'recording':
+          fixture.provider.recordingIdentity = 'recording-2';
+        case 'window':
+          fixture.provider.clearUserData();
+        case 'binding':
+          (fixture.authority as _DockSessionAuthority).epoch++;
+      }
+      fixture.provider.markSocketRecovering();
+      await tester.pump();
+      expect(find.text('Synthetic previous session'), findsNothing);
+      expect(find.text('Recording is unavailable right now.'), findsOneWidget);
+    });
+  }
+
+  testWidgets('pending recovery Finish survives remount and dispatches only once', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final completion = Completer<void>();
+    var calls = 0;
+    fixture.runtime.finishOverride = () {
+      calls++;
+      return completion.future;
+    };
+    await fixture.pump(tester);
+    fixture.makeNecklaceLive(segments: [_segment('retained-1', 'Synthetic retained words')]);
+    fixture.provider.markSocketRecovering();
+    await tester.pump();
+    final session = fixture.runtime.captureSession!;
+    await tester.tap(find.byKey(const Key('upstream-capture-finish')));
+    await tester.pump();
+    final joined = fixture.runtime.finishCaptureSession(session);
+    expect(calls, 1);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await fixture.pump(tester);
+    expect(find.text('Finishing and saving…'), findsOneWidget);
+    final button = tester.widget<FilledButton>(find.byKey(const Key('upstream-capture-finish')));
+    expect(button.onPressed, isNull);
+    completion.complete();
+    await joined;
+    await tester.pump();
+    expect(calls, 1);
+    expect(fixture.runtime.canFinishSession(session), isFalse);
+    fixture.provider.clearUserData();
+    fixture.makeNecklaceLive();
+    expect(fixture.runtime.canFinishSession(fixture.runtime.captureSession!), isTrue);
+  });
+
+  testWidgets('uncertain failed Finish preserves words without allowing same-session replay', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    var calls = 0;
+    fixture.runtime.finishOverride = () async {
+      calls++;
+      throw StateError('synthetic save failure');
+    };
+    await fixture.pump(tester);
+    fixture.makeNecklaceLive(segments: [_segment('retained-1', 'Synthetic retained words')]);
+    fixture.provider.markSocketRecovering();
+    await tester.pump();
+    final session = fixture.runtime.captureSession!;
+    await tester.tap(find.byKey(const Key('upstream-capture-finish')));
+    await tester.pump();
+    expect(fixture.provider.segments.single.text, 'Synthetic retained words');
+    expect(fixture.runtime.finishPending.value, isFalse);
+    await fixture.runtime.finishCaptureSession(session);
+    expect(calls, 1);
+    expect(find.text('Finishing and saving…'), findsNothing);
+  });
+
+  testWidgets('synchronous owner retirement at Finish notification prevents dispatch', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    fixture.makePhoneLive();
+    var calls = 0;
+    fixture.runtime.finishOverride = () async {
+      calls++;
+    };
+    fixture.runtime.finishPending.addListener(() {
+      if (fixture.runtime.finishPending.value) (fixture.authority as _DockSessionAuthority).current = false;
+    });
+    await fixture.runtime.finishCaptureSession(fixture.runtime.captureSession!);
+    expect(calls, 0);
+    expect(fixture.runtime.finishPending.value, isFalse);
+  });
+
+  testWidgets('late failed Finish cannot publish saving or failure for replacement account', (tester) async {
+    final fixture = await _DockFixture.create(tester);
+    final completion = Completer<void>();
+    var signedIn = _uid;
+    fixture.runtime.finishOverride = () => completion.future;
+    await fixture.pump(tester, authenticatedUid: () => signedIn);
+    fixture.makePhoneLive();
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('upstream-capture-finish')));
+    await tester.pump();
+    expect(find.text('Finishing and saving…'), findsOneWidget);
+    signedIn = 'uid-b';
+    (fixture.authority as _DockSessionAuthority).epoch++;
+    fixture.provider.markSocketRecovering();
+    await tester.pump();
+    expect(find.text('Finishing and saving…'), findsNothing);
+    expect(find.byKey(const Key('upstream-capture-view-transcript')), findsNothing);
+    completion.completeError(StateError('synthetic previous-account failure'));
+    await tester.pump();
+    expect(find.text('Recording is unavailable right now.'), findsNothing);
+    expect(find.text('Finishing and saving…'), findsNothing);
   });
 
   testWidgets('transcript uses a scrollable sheet and restores focus without growing the dock', (tester) async {

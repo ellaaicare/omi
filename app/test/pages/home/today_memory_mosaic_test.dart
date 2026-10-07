@@ -5115,6 +5115,27 @@ class _IntegratedHomeDockRuntime extends EllaUpstreamCaptureRuntime {
 
   final upstream_capture.CaptureProvider capture;
 
+  // This layout fixture marks recording states directly. Simulate a committed
+  // presentation identity; consent, admission, protocol and saving are tested
+  // by the runtime/controller suites, not by this Home geometry harness.
+  @override
+  EllaCaptureSessionView? get captureSession {
+    final source = switch (capture.recordingState) {
+      upstream_capture.RecordingState.record || upstream_capture.RecordingState.interrupted => 'phone',
+      upstream_capture.RecordingState.deviceRecord => 'omi',
+      _ => null,
+    };
+    if (source == null) return null;
+    return EllaCaptureSessionView(
+      uid: 'test-user',
+      bindingEpoch: 0,
+      recordingId: 'home-layout-recording',
+      windowId: 0,
+      source: source,
+      canFinish: true,
+    );
+  }
+
   @override
   Future<upstream_capture.CaptureProvider> ensureBooted() async => capture;
 }

@@ -603,7 +603,12 @@ class PhoneStopRequested extends CaptureEvent {
 /// `finishCapture`: stop and process the phone conversation before a pendant
 /// it took over from resumes.
 class FinishRequested extends CaptureEvent {
-  const FinishRequested();
+  const FinishRequested({this.isCurrent});
+
+  /// Optional owner/window admission, evaluated when this queued event runs.
+  /// A phone Finish intentionally retires its session during its effects, so
+  /// this is an execution-start guard, not a per-effect identity check.
+  final bool Function()? isCurrent;
 }
 
 /// `pauseCapture`: pause whichever source currently owns capture.
@@ -1391,6 +1396,13 @@ class CaptureCoordinator {
   }
 
   Future<CaptureDispatchOutcome> _run(CaptureEvent event) async {
+    if (event is FinishRequested && event.isCurrent != null) {
+      try {
+        if (!event.isCurrent!()) return CaptureDispatchOutcome.denied(_state);
+      } catch (_) {
+        return CaptureDispatchOutcome.denied(_state);
+      }
+    }
     late final CaptureEnvironment env;
     final CaptureTransition transition;
     try {

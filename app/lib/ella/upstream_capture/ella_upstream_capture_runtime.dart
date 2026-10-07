@@ -40,6 +40,34 @@ import 'package:omi/utils/logger.dart';
 
 enum EllaCaptureStartOutcome { started, consentRequired, unavailable }
 
+/// Content-free identity for a current capture's presentation and Finish action.
+/// Socket readiness is deliberately absent: retained words survive recovery.
+class EllaCaptureSessionView {
+  const EllaCaptureSessionView({
+    required this.uid,
+    required this.bindingEpoch,
+    required this.recordingId,
+    required this.windowId,
+    required this.source,
+    required this.canFinish,
+  });
+
+  final String uid;
+  final int bindingEpoch;
+  final String recordingId;
+  final int windowId;
+  final String source;
+  final bool canFinish;
+
+  bool matches(EllaCaptureSessionView? other) =>
+      other != null &&
+      uid == other.uid &&
+      bindingEpoch == other.bindingEpoch &&
+      recordingId == other.recordingId &&
+      windowId == other.windowId &&
+      source == other.source;
+}
+
 /// Recovers the one upstream partial-init state: ServiceManager installs its
 /// singleton before awaiting ConnectivityService.init().
 class EllaUpstreamServicesBootstrap {
@@ -418,6 +446,74 @@ class EllaUpstreamCaptureRuntime {
   CaptureProvider? get provider => _provider;
   String? get boundOwnerId => authority.boundUid;
 
+  final ValueNotifier<bool> finishPending = ValueNotifier<bool>(false);
+  EllaCaptureSessionView? _finishingSession;
+  EllaCaptureSessionView? _finishedSession;
+  Future<void>? _finishSessionFuture;
+
+  EllaCaptureSessionView? get captureSession {
+    final currentProvider = provider;
+    final uid = authority.boundUid;
+    if (!authority.hasCurrentAuthority || currentProvider == null || uid == null) return null;
+    final recordingId = currentProvider.activeRecordingId;
+    final source = currentProvider.liveCaptureSource;
+    if (recordingId == null || source == null) return null;
+    return EllaCaptureSessionView(
+      uid: uid,
+      bindingEpoch: authority.bindingEpoch,
+      recordingId: recordingId,
+      windowId: currentProvider.captureWindowGeneration,
+      source: source,
+      canFinish: currentProvider.isPhoneMicBatchRecording || currentProvider.activeCaptureSessionId != null,
+    );
+  }
+
+  bool isCurrentCaptureSession(EllaCaptureSessionView session) => session.matches(captureSession);
+
+  bool isFinishingFor(String uid) =>
+      finishPending.value &&
+      _finishingSession?.uid == uid &&
+      _finishingSession?.bindingEpoch == authority.bindingEpoch &&
+      authority.hasCurrentAuthority;
+
+  bool canFinishSession(EllaCaptureSessionView session) =>
+      isCurrentCaptureSession(session) &&
+      captureSession?.canFinish == true &&
+      !finishPending.value &&
+      !session.matches(_finishedSession);
+
+  /// Join only this session's in-flight Finish. Never queue a second finalization
+  /// behind a pending request, including after a dock remount.
+  Future<void> finishCaptureSession(EllaCaptureSessionView session) {
+    if (!isCurrentCaptureSession(session)) return Future<void>.value();
+    final pending = _finishSessionFuture;
+    if (pending != null) return session.matches(_finishingSession) ? pending : Future<void>.value();
+    if (!canFinishSession(session)) return Future<void>.value();
+    final completion = Completer<void>();
+    _finishingSession = session;
+    _finishSessionFuture = completion.future;
+    finishPending.value = true;
+    () async {
+      try {
+        // A listener notified above may retire the owner synchronously.
+        if (isCurrentCaptureSession(session)) {
+          // Once submitted, an error may follow partial durable side effects.
+          // Keep the fence; a new owner/window must never be an implicit retry.
+          _finishedSession = session;
+          await finishConversation(isCurrent: () => isCurrentCaptureSession(session));
+        }
+        completion.complete();
+      } catch (error, stack) {
+        completion.completeError(error, stack);
+      } finally {
+        _finishingSession = null;
+        _finishSessionFuture = null;
+        finishPending.value = false;
+      }
+    }();
+    return completion.future;
+  }
+
   /// Boots the vendored stack once; later calls join the same future.
   Future<CaptureProvider> ensureBooted() {
     final existing = _boot;
@@ -760,13 +856,13 @@ class EllaUpstreamCaptureRuntime {
   }
 
   /// Upstream's single "finish the live capture" action (processes the conversation).
-  Future<void> finishConversation() async {
+  Future<void> finishConversation({bool Function()? isCurrent}) async {
     final provider = _provider;
     if (provider == null) return;
     final finishing = _protocolSocket;
     _finalizationSocket = finishing;
     try {
-      await provider.finishCapture();
+      await provider.finishCapture(isCurrent: isCurrent);
     } finally {
       if (identical(_finalizationSocket, finishing)) _finalizationSocket = null;
     }
