@@ -190,6 +190,7 @@ on:
       - "backend/tests/postgres/test_guardian_echo_classifier_scanner_e2e_postgres.py"
       - "backend/tests/unit/test_capture_buffer_retention.py"
       - "backend/tests/unit/test_capture_incident_1210_regressions.py"
+      - "backend/tests/unit/test_capture_drain_diagnostics.py"
       - "backend/tests/unit/test_capture_protocol_v2_live.py"
       - "backend/tests/unit/test_capture_task_sync_idempotency.py"
       - "backend/tests/unit/test_capture_webhook_delivery.py"
@@ -384,6 +385,7 @@ on:
       - "backend/tests/postgres/test_guardian_echo_classifier_scanner_e2e_postgres.py"
       - "backend/tests/unit/test_capture_buffer_retention.py"
       - "backend/tests/unit/test_capture_incident_1210_regressions.py"
+      - "backend/tests/unit/test_capture_drain_diagnostics.py"
       - "backend/tests/unit/test_capture_protocol_v2_live.py"
       - "backend/tests/unit/test_capture_task_sync_idempotency.py"
       - "backend/tests/unit/test_capture_webhook_delivery.py"
@@ -567,6 +569,7 @@ jobs:
           utils/other/endpoints.py
           tests/unit/test_capture_buffer_retention.py
           tests/unit/test_capture_incident_1210_regressions.py
+          tests/unit/test_capture_drain_diagnostics.py
           tests/unit/test_ella_reviewed_route_integration.py
 
       - name: Validate formatting and OpenAPI contract
@@ -637,6 +640,7 @@ jobs:
           tests/unit/test_ella_callbacks_summary_update.py
           tests/unit/test_capture_buffer_retention.py
           tests/unit/test_capture_incident_1210_regressions.py
+          tests/unit/test_capture_drain_diagnostics.py
           tests/unit/test_capture_protocol_v2_live.py
           tests/unit/test_capture_task_sync_idempotency.py
           tests/unit/test_capture_webhook_delivery.py
@@ -704,6 +708,7 @@ jobs:
             pytest --collect-only -q \
               tests/unit/test_capture_buffer_retention.py \
               tests/unit/test_capture_incident_1210_regressions.py \
+              tests/unit/test_capture_drain_diagnostics.py \
               tests/unit/test_capture_protocol_v2_live.py \
               tests/unit/test_stt_session_delivery.py \
               tests/unit/test_capture_task_sync_idempotency.py \
@@ -711,6 +716,14 @@ jobs:
               sed '/^$/d'
           )"
           required_capture_ids=(
+            "tests/unit/test_capture_drain_diagnostics.py::test_drain_tuple_mismatch_is_distinct_and_never_changes_ownership[protocol_version]"
+            "tests/unit/test_capture_drain_diagnostics.py::test_drain_tuple_mismatch_is_distinct_and_never_changes_ownership[conversation_id]"
+            "tests/unit/test_capture_drain_diagnostics.py::test_drain_tuple_mismatch_is_distinct_and_never_changes_ownership[generation]"
+            "tests/unit/test_capture_drain_diagnostics.py::test_drain_tuple_mismatch_is_distinct_and_never_changes_ownership[owner_token]"
+            "tests/unit/test_capture_drain_diagnostics.py::test_successor_takeover_during_drain_never_releases_or_acknowledges_successor"
+            "tests/unit/test_capture_drain_diagnostics.py::test_redis_owner_release_failure_never_claims_completed_drain"
+            "tests/unit/test_capture_drain_diagnostics.py::test_persistence_timeout_remains_1011_without_authority_or_redis_release"
+            "tests/unit/test_capture_drain_diagnostics.py::test_successful_drain_retains_exact_acknowledgment_and_no_failure_diagnostic"
             "tests/unit/test_capture_buffer_retention.py::test_capture_batch_waits_for_all_persistence_guards_without_clearing_buffers"
             "tests/unit/test_capture_buffer_retention.py::test_capture_batch_acknowledges_once_after_persistence_and_preserves_new_arrivals"
             "tests/unit/test_capture_buffer_retention.py::test_transcribe_acknowledges_only_after_database_persistence_and_never_logs_content"
@@ -801,13 +814,14 @@ jobs:
             "tests/unit/test_capture_task_sync_idempotency.py::test_real_auto_sync_batch_old_worker_after_successor_creates_one_external_item[todoist]"
             "tests/unit/test_capture_webhook_delivery.py::test_capture_developer_webhook_failure_is_not_acknowledged"
           )
-          test "$(grep -c '::' <<<"$capture_ids")" -eq 113
+          test "$(grep -c '::' <<<"$capture_ids")" -eq 121
           for required_id in "${required_capture_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$capture_ids"
           done
           pytest \
             tests/unit/test_capture_buffer_retention.py \
             tests/unit/test_capture_incident_1210_regressions.py \
+            tests/unit/test_capture_drain_diagnostics.py \
             tests/unit/test_capture_protocol_v2_live.py \
             tests/unit/test_stt_session_delivery.py \
             tests/unit/test_capture_task_sync_idempotency.py \
