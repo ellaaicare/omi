@@ -901,11 +901,13 @@ async def _produce_hermes_chat_events(
                     return
 
                 terminal_seen = False
+                done_seen = False
                 async for line in response.aiter_lines():
                     if not line.startswith("data: "):
                         continue
                     payload = line[6:].strip()
                     if payload == "[DONE]":
+                        done_seen = True
                         break
                     try:
                         data = json.loads(payload)
@@ -914,6 +916,8 @@ async def _produce_hermes_chat_events(
                     choices = data.get("choices") or []
                     if not choices:
                         continue
+                    if terminal_seen and (choices[0].get("delta") or {}).get("content"):
+                        raise RuntimeError("hermes_stream_incomplete")
                     finish_reason = choices[0].get("finish_reason")
                     if finish_reason is not None:
                         terminal_seen = True
@@ -925,7 +929,7 @@ async def _produce_hermes_chat_events(
                         text.append(content)
                         yield f"data: {content.replace(chr(10), '__CRLF__')}\n\n"
 
-                if text and not terminal_seen:
+                if not terminal_seen and (text or not done_seen):
                     raise RuntimeError("hermes_stream_missing_terminal")
 
         full_text = "".join(text).strip()
