@@ -189,11 +189,15 @@ def test_effect_receipt_read_abort_retries_fresh_transaction_without_bypassing_o
     monkeypatch.setattr(capture_protocol.db, 'transaction', transaction)
     if failure == 'clock_crossed':
 
-        class Clock:
+        class Clock(datetime):
             @staticmethod
             def now(tz):
                 return now + timedelta(seconds=31 if len(transactions) > 1 else 0)
 
+        authority.data['finalization_lease_expires_at'] = Clock.fromtimestamp(expiry.timestamp(), timezone.utc)
+        conversation.data['capture_finalization_lease_expires_at'] = Clock.fromtimestamp(
+            expiry.timestamp(), timezone.utc
+        )
         monkeypatch.setattr(capture_protocol, 'datetime', Clock)
 
     def complete():
