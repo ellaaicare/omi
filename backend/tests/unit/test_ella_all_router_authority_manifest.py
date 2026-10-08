@@ -102,6 +102,7 @@ ROUTE_GROUPS = (
         "firebase_exact_owner_with_consent",
         "staged_public",
         ("POST", "/v1/ella/chat/stream", "ella_chat_stream"),
+        ("POST", "/v1/ella/chat/voice-turns", "persist_v2v_voice_turn"),
     ),
     _group(
         "chat",

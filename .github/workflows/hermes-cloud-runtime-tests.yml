@@ -62,6 +62,8 @@ on:
       - "backend/ella/routers/ai_consent.py"
       - "backend/ella/routers/chat.py"
       - "backend/tests/unit/test_ella_chat_terminal_completion.py"
+      - "backend/tests/unit/test_ella_v2v_turn_persistence.py"
+      - "app/test/fixtures/canonical_ordering_mixed_legacy.json"
       - "backend/ella/routers/escalations.py"
       - "backend/ella/routers/guardian.py"
       - "backend/ella/services/guardian_playback_ledger.py"
@@ -258,6 +260,8 @@ on:
       - "backend/ella/routers/ai_consent.py"
       - "backend/ella/routers/chat.py"
       - "backend/tests/unit/test_ella_chat_terminal_completion.py"
+      - "backend/tests/unit/test_ella_v2v_turn_persistence.py"
+      - "app/test/fixtures/canonical_ordering_mixed_legacy.json"
       - "backend/ella/routers/escalations.py"
       - "backend/ella/routers/guardian.py"
       - "backend/ella/services/guardian_playback_ledger.py"
@@ -839,6 +843,21 @@ jobs:
           pytest tests/unit/test_ella_chat_terminal_completion.py -v | tee /tmp/ella-chat-terminal-pytest.log
           grep -Eq '(^|[^0-9])20 passed' /tmp/ella-chat-terminal-pytest.log
           ! grep -Eq '[0-9]+ skipped' /tmp/ella-chat-terminal-pytest.log
+
+      - name: Run exact Iris voice persistence contract regressions
+        env:
+          ELLA_TEST_POSTGRES_HOST: 127.0.0.1
+          ELLA_TEST_POSTGRES_PORT: "5432"
+          ELLA_TEST_POSTGRES_USER: postgres
+          ELLA_TEST_POSTGRES_PASSWORD: postgres
+          ELLA_TEST_POSTGRES_DATABASE: hermes_cloud_test
+        run: |
+          set -euo pipefail
+          collected="$(pytest --collect-only -q tests/unit/test_ella_v2v_turn_persistence.py | grep -c '::')"
+          test "$collected" -eq 42
+          pytest tests/unit/test_ella_v2v_turn_persistence.py -v | tee /tmp/ella-iris-voice-contract-pytest.log
+          grep -Eq '(^|[^0-9])42 passed' /tmp/ella-iris-voice-contract-pytest.log
+          ! grep -Eq '[0-9]+ skipped' /tmp/ella-iris-voice-contract-pytest.log
 
       - name: Run incident 1182 mounted-route exploit controls
         run: |
