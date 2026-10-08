@@ -847,6 +847,9 @@ MOUNTED_ROUTE_CONTRACT = {
     ("chat", "POST", "/v1/ella/chat/stream"): _contract(
         "ella_chat_stream", "ella.services.ai_consent:require_current_ai_consent"
     ),
+    ("chat", "POST", "/v1/ella/chat/voice-turns"): _contract(
+        "persist_v2v_voice_turn", "ella.services.ai_consent:require_current_ai_consent"
+    ),
     ("chat", "GET", "/v1/ella/chat/history"): _contract(
         "ella_chat_history", "utils.ella.exact_firebase_auth:get_exact_firebase_uid"
     ),
@@ -985,7 +988,7 @@ def test_real_mounted_route_manifest_has_exact_paths_authorities_and_no_duplicat
                 assert dependencies, f"unclassified authority: {key}"
 
     assert set(actual) == set(MOUNTED_ROUTE_CONTRACT)
-    assert len(actual) == len(MOUNTED_ROUTE_CONTRACT) == 52
+    assert len(actual) == len(MOUNTED_ROUTE_CONTRACT) == 53
     assert len(path_methods) == len(set(path_methods)), Counter(path_methods)
 
 
