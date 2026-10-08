@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from google.api_core.exceptions import Aborted, PermissionDenied
+from google.cloud.firestore_v1.transaction import _Transactional
 
 BACKEND = Path(__file__).resolve().parents[2]
 
@@ -94,6 +96,136 @@ def _updated(document, transaction, ref):
         if set_ref is ref:
             result = dict(values)
     return result
+
+
+class _SdkTransaction(_Transaction):
+    """Exercise the actual installed transactional decorator without network I/O."""
+
+    _read_only = False
+    _max_attempts = 5
+    _id = b'synthetic-transaction'
+
+    def __init__(self):
+        super().__init__()
+        self.commits = 0
+        self.rollbacks = 0
+
+    def _clean_up(self):
+        pass
+
+    def _begin(self, retry_id=None):
+        pass
+
+    def _commit(self):
+        self.commits += 1
+        for ref, update in self.updates:
+            ref.data.update(update)
+
+    def _rollback(self):
+        self.rollbacks += 1
+
+
+@pytest.mark.parametrize(
+    'failure', ['transient', 'reclaimed', 'expired', 'clock_crossed', 'operation_changed', 'persistent', 'permission']
+)
+def test_effect_receipt_read_abort_retries_fresh_transaction_without_bypassing_owner(
+    capture_protocol, monkeypatch, failure
+):
+    assert isinstance(capture_protocol._complete_finalization_effect_transaction, _Transactional)
+    now = datetime.now(timezone.utc)
+    expiry = now + timedelta(seconds=30)
+    authority = _Document(
+        {
+            **_authority(state='finalizing'),
+            'finalization_claim_token': 'claim-a',
+            'finalization_lease_expires_at': expiry,
+        }
+    )
+    conversation = _Document(
+        {
+            **_conversation(state='finalizing', status='completed'),
+            'capture_finalization_claim_token': 'claim-a',
+            'capture_finalization_lease_expires_at': expiry,
+            'transcript_segments': [{'id': 'synthetic-segment', 'text': 'synthetic fixture'}],
+            'capture_finalization_effects': {
+                'post:ella_postprocess_webhook': {
+                    'state': 'claimed',
+                    'claim_token': 'claim-a',
+                    'operation_token': 'operation-a',
+                }
+            },
+        }
+    )
+    original_get = conversation.get
+    reads = []
+    transactions = []
+
+    def get(transaction=None):
+        reads.append(transaction)
+        if failure == 'permission':
+            raise PermissionDenied('synthetic denied read')
+        if len(reads) == 1 or failure == 'persistent':
+            if failure == 'reclaimed':
+                authority.data['finalization_claim_token'] = 'claim-b'
+                conversation.data['capture_finalization_claim_token'] = 'claim-b'
+            if failure == 'expired':
+                authority.data['finalization_lease_expires_at'] = now - timedelta(seconds=1)
+                conversation.data['capture_finalization_lease_expires_at'] = now - timedelta(seconds=1)
+            if failure == 'operation_changed':
+                conversation.data['capture_finalization_effects']['post:ella_postprocess_webhook'][
+                    'operation_token'
+                ] = 'operation-b'
+            raise Aborted('synthetic transaction read contention')
+        return original_get(transaction=transaction)
+
+    def transaction():
+        value = _SdkTransaction()
+        transactions.append(value)
+        return value
+
+    monkeypatch.setattr(conversation, 'get', get)
+    monkeypatch.setattr(capture_protocol, '_authority_ref', lambda uid: authority)
+    monkeypatch.setattr(capture_protocol, '_conversation_ref', lambda uid, conversation_id: conversation)
+    monkeypatch.setattr(capture_protocol.db, 'transaction', transaction)
+    if failure == 'clock_crossed':
+
+        class Clock:
+            @staticmethod
+            def now(tz):
+                return now + timedelta(seconds=31 if len(transactions) > 1 else 0)
+
+        monkeypatch.setattr(capture_protocol, 'datetime', Clock)
+
+    def complete():
+        return capture_protocol.complete_capture_finalization_effect(
+            'synthetic-user',
+            'capture-a',
+            'generation-a',
+            'owner-a',
+            'claim-a',
+            'post:ella_postprocess_webhook',
+            'operation-a',
+            None,
+        )
+
+    if failure == 'persistent':
+        with pytest.raises(Aborted):
+            complete()
+        assert len(transactions) == 3
+    elif failure == 'permission':
+        with pytest.raises(PermissionDenied):
+            complete()
+        assert len(transactions) == 1
+    else:
+        assert complete() is (failure == 'transient')
+        assert len(transactions) == 2
+    assert len(set(map(id, transactions))) == len(transactions)
+    assert transactions[0].rollbacks == 1
+    assert transactions[0].commits == 0
+    assert conversation.data['transcript_segments'] == [{'id': 'synthetic-segment', 'text': 'synthetic fixture'}]
+    receipt = conversation.data['capture_finalization_effects']['post:ella_postprocess_webhook']
+    assert receipt['state'] == ('completed' if failure == 'transient' else 'claimed')
+    assert sum(len(value.updates) for value in transactions) == (1 if failure == 'transient' else 0)
 
 
 def test_capture_protocol_rejects_pre_v2_and_unattested_v2_before_creation(capture_protocol, monkeypatch):

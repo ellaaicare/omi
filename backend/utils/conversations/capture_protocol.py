@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, Optional, Set
 
-from google.api_core.exceptions import InvalidArgument
+from google.api_core.exceptions import Aborted, InvalidArgument
 from google.cloud.firestore_v1 import transactional
 
 from database._client import db
@@ -1084,19 +1084,29 @@ def complete_capture_finalization_effect(
     operation_token: str,
     result: Any,
 ) -> bool:
-    return _complete_finalization_effect_transaction(
-        db.transaction(),
-        _authority_ref(uid),
-        _conversation_ref(uid, conversation_id),
-        conversation_id,
-        generation,
-        owner_token,
-        claim_token,
-        effect_id,
-        operation_token,
-        result,
-        datetime.now(timezone.utc),
-    )
+    authority_ref = _authority_ref(uid)
+    conversation_ref = _conversation_ref(uid, conversation_id)
+    # The SDK retries Aborted at commit, but not while reading the transaction
+    # body. Retry only this receipt transaction, never the already-run effect.
+    for attempt in range(3):
+        try:
+            return _complete_finalization_effect_transaction(
+                db.transaction(),
+                authority_ref,
+                conversation_ref,
+                conversation_id,
+                generation,
+                owner_token,
+                claim_token,
+                effect_id,
+                operation_token,
+                result,
+                datetime.now(timezone.utc),
+            )
+        except Aborted:
+            if attempt == 2:
+                raise
+    raise AssertionError('capture effect receipt transaction retry exhausted')
 
 
 @transactional
