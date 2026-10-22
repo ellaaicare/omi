@@ -2,8 +2,6 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart';
-
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/conversation.dart';
@@ -157,7 +155,7 @@ class LocalWalSyncImpl implements LocalWalSync {
           break;
         }
       }
-      Logger.debug("${low} - ${high} - ${syncedOffset} - ${chunkFrameCount} - ${_framesPerSecond}");
+      Logger.debug("$low - $high - $syncedOffset - $chunkFrameCount - $_framesPerSecond");
 
       Wal wal;
       var walIdx =
@@ -318,6 +316,8 @@ class LocalWalSyncImpl implements LocalWalSync {
     }
 
     var resp = SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
+    Object? firstBatchError;
+    var processedAnyBatch = false;
 
     var steps = 3;
     for (var i = wals.length - 1; i >= 0; i -= steps) {
@@ -363,6 +363,9 @@ class LocalWalSyncImpl implements LocalWalSync {
 
       if (files.isEmpty) {
         Logger.debug("Files are empty");
+        firstBatchError ??= Exception('Stored audio file is missing or corrupted');
+        await _saveWalsToFile();
+        listener.onWalUpdated();
         continue;
       }
 
@@ -371,6 +374,7 @@ class LocalWalSyncImpl implements LocalWalSync {
       listener.onWalUpdated();
       try {
         var partialRes = await syncLocalFiles(files);
+        processedAnyBatch = true;
 
         resp.newConversationIds
             .addAll(partialRes.newConversationIds.where((id) => !resp.newConversationIds.contains(id)));
@@ -389,6 +393,7 @@ class LocalWalSyncImpl implements LocalWalSync {
           }
         }
       } catch (e) {
+        firstBatchError ??= e;
         Logger.debug('Local WAL sync batch failed: $e, continuing with remaining files');
         for (var j = left; j <= right; j++) {
           if (j < wals.length) {
@@ -397,11 +402,17 @@ class LocalWalSyncImpl implements LocalWalSync {
             wals[j].syncEtaSeconds = null;
           }
         }
+        await _saveWalsToFile();
+        listener.onWalUpdated();
         continue;
       }
 
       await _saveWalsToFile();
       listener.onWalUpdated();
+    }
+
+    if (!processedAnyBatch && firstBatchError != null) {
+      throw firstBatchError;
     }
 
     progress?.onWalSyncedProgress(1.0);
@@ -416,33 +427,42 @@ class LocalWalSyncImpl implements LocalWalSync {
   }) async {
     await _flush();
 
-    var walToSync = _wals.where((w) => w == wal).toList().first;
+    var walToSync = _wals.where((w) => w.id == wal.id).firstOrNull;
+    if (walToSync == null) {
+      throw Exception('Stored audio file is no longer available');
+    }
 
     var resp = SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
 
-    late File walFile;
-    if (wal.filePath == null) {
-      Logger.debug("file path is not found. wal id ${wal.id}");
-      wal.status = WalStatus.corrupted;
+    File? walFile;
+    if (walToSync.filePath == null) {
+      Logger.debug("file path is not found. wal id ${walToSync.id}");
+      walToSync.status = WalStatus.corrupted;
     }
     try {
-      final fullPath = await Wal.getFilePath(wal.filePath);
+      final fullPath = await Wal.getFilePath(walToSync.filePath);
       if (fullPath == null) {
-        Logger.debug("could not construct file path for wal id ${wal.id}");
-        wal.status = WalStatus.corrupted;
+        Logger.debug("could not construct file path for wal id ${walToSync.id}");
+        walToSync.status = WalStatus.corrupted;
       } else {
         File file = File(fullPath);
         if (!file.existsSync()) {
           Logger.debug("file $fullPath does not exist");
-          wal.status = WalStatus.corrupted;
+          walToSync.status = WalStatus.corrupted;
         } else {
           walFile = file;
-          wal.isSyncing = true;
+          walToSync.isSyncing = true;
         }
       }
     } catch (e) {
-      wal.status = WalStatus.corrupted;
+      walToSync.status = WalStatus.corrupted;
       Logger.debug(e.toString());
+    }
+
+    if (walFile == null) {
+      await _saveWalsToFile();
+      listener.onWalUpdated();
+      throw Exception('Stored audio file is missing or corrupted');
     }
 
     listener.onWalUpdated();
