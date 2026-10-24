@@ -23,7 +23,7 @@ The `candidate/` paths map directly to backend deployment paths. Do not copy the
 python3 -B -m unittest discover -s backend/experiments/ella_queue_resilience_v4/tests -q
 ```
 
-53 offline tests passed at this revision; the integrated source and private control helpers have independent source PASS with rollout held. These run actual candidate lifecycle, activation, repository, graph guard, source-CAS, model-entry and canonical-continuation functions against a synthetic serializable store.
+54 offline tests passed at this revision; the integrated source and private control helpers have independent source PASS with rollout held. These run actual candidate lifecycle, activation, repository, graph guard, source-CAS, model-entry and canonical-continuation functions against a synthetic serializable store.
 
 Boundary doubles replace Firestore, transcript decoding, native identity helpers, product source binding, transition construction, sanitizer/canonical-source projection and the canonical writer. No SDK credentials, provider, customer data or live backend is used. The included serving hold file is a pinned test fixture.
 

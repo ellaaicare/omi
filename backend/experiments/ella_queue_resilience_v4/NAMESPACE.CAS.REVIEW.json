@@ -1,0 +1,54 @@
+{
+  "contract": "ella-namespace-acceptance-and-cas-preflight-independent-review-v2",
+  "reviewed_at": "2026-10-24T09:14:11.538163+00:00",
+  "verdict": "NARROW_SOURCE_PASS_FOR_ONE_PINNED_ISOLATED_QUALIFICATION",
+  "pins": {
+    "control/firestore_namespace_acceptance.py": "f31710f0858757e4f989137f975980176ad40daaea8025c4ea148f8efcda0d99",
+    "candidate/ella/services/summary_writeback.py": "2377762a6c251521cdf81901a9307b33ae61c6de634ec430a2438a214331cae8",
+    "tests/test_integrated_queue.py": "5b204b4dc8505ef6b16a69f8792316be7aff9baac10c4972db1973e1d36ea7a3"
+  },
+  "independent_offline_suite": {
+    "passed": 54,
+    "elapsed_seconds": 0.23,
+    "log": "review/NAMESPACE.AND.CAS.PREFLIGHT.TESTS.actual.log",
+    "sha256": "d57b314bfb9a00bb55e3497f5525e78314500763f7eaad26160c41f708b118fd"
+  },
+  "namespace_findings": [
+    "Namespace remaps every application topcollection under ella_queue_v4_qualification/<exactrun>/q_<collection>. Inspected lifecycle/activation/provenance paths use supplieddb/nativechildrefs; no escape to productionpolicy/users/outbox found.",
+    "Syntheticowner/source/stock/provenance/admission/claim/begin/finish records only. No service.enrich, workerstartup, model/gateway, remoteagent/provision or delete call exists in inspected harness graph. Standardfixture decoding is pure.",
+    "Parentreports15actualstagedimports withexistingclient and unchanged credentialmetadata; review doesnot independently attest runtimebootstrap. Caller must use exactstaged reviewed modules and samealreadybootstrappedauthority.",
+    "Distinctq_outbox/other topcollectionIDs prevent normalworker rootoutbox or namedcollectiongroup matching. Copied441source checked for collectiongroup consumers: fcm_tokens only, no conversations consumer found. This is sourceboundaryreview, not Cloudtriggerconfig audit.",
+    "RunID is controller-pinned before submission and rootcreated once. Unknownresult requires readonlysame-namespace reconciliation; never invoke newrandomrun or replay oldnamespace automatically."
+  ],
+  "retry_probe_resolution": {
+    "initial_issue": "BodyAborted is not retried by inspectedSDK; initialtestwould fail beforecommit.",
+    "successor": "Inject first Aborted at private testtransaction._commit BEFORE actualRPC, then invoke originalcommit on retry. Patchonly one newlycreatedtesttransaction; no sharedSDK/client/productionprocess monkeypatch.",
+    "independent_localSDK_check": {
+      "callback_invocations": 2,
+      "commit_attempts": 2,
+      "actual_fake_commits": 1,
+      "real_client_instantiated": false,
+      "network_calls": 0
+    },
+    "boundary": "Proves decorator retry behavior for injectedprecommit condition, not actualserver contention, unknownservercommit or duplicateprovider-send safety. ActualLinux SDK matching semanticssource was provided by parent, not independently queried here."
+  },
+  "summary_cas_hardening": [
+    "Semantic summaryCAS now requires livequeuegraph at invocation entry OUTSIDE genericdatastoreerror fallback. Inneratomictransactionguard and explicitQueueAttemptFenceRejected rethrow remain.",
+    "ActualsummaryCAS negative test closedgraph+matchingpendingreceipt+forcedgenerictransactionfailure rejects before datastorewrapper invocation and before canonicalwriter; both callcounts0.",
+    "Alreadyowned writer acceptedbeforeclosure may still settle sameaccepted token/payload/source/currentpostimage; priorcontinuation tests stillpass. New invocation/changed-image repair cannot usegenericerror to bypassphaseclosure.",
+    "Other12coreV3filepins unchanged; source-only privatecontrols/backlogcaller reviews remain separatelyapplicable."
+  ],
+  "execution_scope": [
+    "Existinguserauthority permits rootbackendoperator to run ONE exactpinned freshqualification via existingclient under its actualwriter/resourceguards. This sourceverdict doesnot execute test, deploy, restart, activateproductionpolicy, admit savedbacklog, settle realresource or invoke a provider.",
+    "Retain runID/sourcepins and completeactualoutput/exception metadata. Onfailure preserve partialsyntheticrecords and do readonlyreconciliation; no deletion/cleanup/retry inferred.",
+    "ActualnamespacedSDK qualification result, realprodservingpreimage/importchecks, migration/terminalresourceprovenance and correctagent canonicalwriteback/UI evidence remain outstanding. No end-to-end success claimed."
+  ],
+  "review_effects": {
+    "real_db_calls": 0,
+    "provider_calls": 0,
+    "live_mutations": 0,
+    "network_calls": 0,
+    "git_actions": 0,
+    "candidate_edits": 0
+  }
+}

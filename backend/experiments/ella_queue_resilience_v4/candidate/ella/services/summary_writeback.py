@@ -698,6 +698,10 @@ async def write_conversation_summary_cas(
     semantic_publication_original_candidate: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Commit a source CAS with a durable receipt, then reconcile canonical storage."""
+    if semantic_publication_authority_guard is not None:
+        # Outside transaction-error fallback: a new closed-graph invocation
+        # cannot treat an unrelated read failure as accepted continuation.
+        await asyncio.to_thread(require_queue_graph, uid, conversation_id)
     sanitized = sanitize_summary_update(title=title, overview=overview, emoji=emoji, category=category)
     if sanitized.category is not None:
         try:

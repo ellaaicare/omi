@@ -1,8 +1,8 @@
 {
   "contract": "ella-queue-v4-review-package-v1",
-  "state": "INTEGRATED_AND_PRIVATE_CONTROLS_AND_BACKLOG_CALLER_SOURCE_PASS_ROLLOUT_HELD",
+  "state": "REVIEWED_54_CHECK_SUCCESSOR_STAGED_NOT_DEPLOYED",
   "serving_snapshot_commit": "ec0247ead8ef19a4419cdaac0cc807eb795ab7bc",
-  "test_count": 53,
+  "test_count": 54,
   "files": [
     {
       "path": "BACKLOG.CALLER.REVIEW.json",
@@ -20,14 +20,19 @@
       "bytes": 6628
     },
     {
+      "path": "NAMESPACE.CAS.REVIEW.json",
+      "sha256": "8a33ff326a35dc490eaa256603584ac4f0e0e87c6f3a2bfe8149274e339fe8a1",
+      "bytes": 4552
+    },
+    {
       "path": "README.md",
-      "sha256": "54d066e099e8210504fa3721f3d7961514d7554d2869c6ae4f61c92d9755728c",
+      "sha256": "d2f1092d8c03d103d12ae52be4ac4da5cd813d62a8f7cc5c245564078e7c02bf",
       "bytes": 4451
     },
     {
       "path": "ROLLOUT.md",
-      "sha256": "cd99425c255049ed26b2a48b06854dbe6ac13269e7e29440476103aa7464380c",
-      "bytes": 7172
+      "sha256": "af886fb26a397843102bd93a8999bd56492e81ea0833414c340f3f413fbccb33",
+      "bytes": 7419
     },
     {
       "path": "baseline/ella/services/transcript_processing_hold.py",
@@ -101,8 +106,8 @@
     },
     {
       "path": "candidate/ella/services/summary_writeback.py",
-      "sha256": "2810214c628079912aebb5d049f0547fc2850bbb69a557a03a05b62801f73cc8",
-      "bytes": 102658
+      "sha256": "2377762a6c251521cdf81901a9307b33ae61c6de634ec430a2438a214331cae8",
+      "bytes": 102941
     },
     {
       "path": "control/queue_policy_transition.py",
@@ -116,8 +121,8 @@
     },
     {
       "path": "tests/test_integrated_queue.py",
-      "sha256": "6d3db47b5be8cffe79457e25ee2f5341344eead94fdcaa61c9b2007317be82b2",
-      "bytes": 69650
+      "sha256": "5b204b4dc8505ef6b16a69f8792316be7aff9baac10c4972db1973e1d36ea7a3",
+      "bytes": 70832
     }
   ],
   "reviews": {

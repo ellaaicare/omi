@@ -1,6 +1,6 @@
 # Exact rollout handoff — no live action performed
 
-Audience: the verified external Atlas live writer. Codex infrastructure coordination is a separate role. Do not execute this through an unverified recipient, old recovery launcher or alternate route.
+Backend-only rollout is authorized through the existing Ella backend operator and writer lock. External Atlas remains sole LIVE n8n writer; this rollout has no n8n changes. Do not bypass any denied access route or use an old recovery launcher.
 
 ## Pinned inputs
 
@@ -11,9 +11,9 @@ Audience: the verified external Atlas live writer. Codex infrastructure coordina
 
 ## Completed validation
 
-Independent source reviews passed the integration, private controls and narrow backlog caller. All 53 offline tests passed. The fork's selected `backend/test.sh` suite passed 165 tests; 10 PostgreSQL canary tests skipped without a test database. GitHub had no check runs; that is not CI PASS.
+Independent source reviews passed the integration, private controls and narrow backlog caller. All 54 offline tests passed. The fork's selected `backend/test.sh` suite passed 165 tests; 10 PostgreSQL canary tests skipped without a test database. GitHub had no check runs; that is not CI PASS.
 
-Test doubles and limits are in README and the review receipts. No real Firestore retries, application import acceptance, provider result, deployment or physical device success is claimed.
+Test doubles and limits are in README and the review receipts. Actual acceptance on October 24: 15 service-interpreter imports passed; seven qualification cases passed in a dedicated synthetic Firestore namespace. The SDK retry case injects a pre-RPC commit Aborted; it is not real server contention. No provider result, deployment or physical device success is claimed at this publication.
 
 ## Stage 1: source/import and code-only acceptance
 

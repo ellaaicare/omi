@@ -1633,6 +1633,35 @@ class IntegratedQueueTests(unittest.TestCase):
                 scope['_body'](tx, *args)
             self.assertEqual(tx.writes, [])
 
+    def test_closed_invocation_cannot_use_generic_transaction_failure_fallback(self):
+        self.owner('one')
+        job = self.claim(self.job('one'))
+        self.begin(job)
+        scope, args, path, version = self.publication_fixture(job)
+        self.finish(job)
+        transaction_calls = []
+        canonical_calls = []
+
+        def fail_before_guard(*a, **k):
+            transaction_calls.append(1)
+            raise RuntimeError('synthetic datastore read failure')
+
+        scope['conversations_db'].update_conversation_with_builder = fail_before_guard
+
+        def canonical(*a, **k):
+            canonical_calls.append(1)
+            return {'ok': True}
+
+        token = self.future._worker_job.set(job)
+        try:
+            with self.assertRaises(self.fence.FenceRejected):
+                asyncio.run(scope['write_conversation_summary_cas'](**args, canonical_writer=canonical))
+            self.assertEqual(transaction_calls, [])
+            self.assertEqual(canonical_calls, [])
+            self.assertEqual(self.db.rows[path]['summary_writeback_receipt']['status'], 'pending_reconciliation')
+        finally:
+            self.future._worker_job.reset(token)
+
 
 if __name__ == '__main__':
     unittest.main()
