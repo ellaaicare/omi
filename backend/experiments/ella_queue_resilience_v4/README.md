@@ -43,8 +43,10 @@ The fourteenth source file updates only the private saved-backlog helper's `read
 Diagnostic successor: three files deployed at 11:00:03 UTC after independent source review and 61 offline tests. Known provisioning failures retain bounded, closed inner-rejection codes/frames on their exact failed job and new tombstone. Arbitrary exception strings, transcript/prompt/result bodies, URLs and credentials are rejected. This adds no retry or processing authority and leaves prior quarantines untouched. No authority deadline change was made: current read-only resolution/revalidation took 1026/808ms and did not reproduce the historical 15-second hypothesis. Actual enhanced writeback is still unqualified.
 
 
-## Reviewed deadline and transport successor (not deployed)
+## Reviewed deadline and transport successor
 
 The successor has 83 offline tests and independent source review. One exact worker attempt shares its existing 600-second wall ceiling across generator and verifier, removing the contradictory default 120-second adapter cutoff only in that trusted context. Manual callers and shorter explicit limits remain bounded. Provider execution stays at 90 seconds, the owned child at 100, and the normal gateway response allowance is 105. All owner, source, lease, consent, route and publication guards remain required.
 
 The host preserves the validated caller output-token cap instead of expanding 1,600 to 8,192. Closed diagnostics distinguish absolute expiry from HTTP inactivity and retain partial byte counts without content. HTTP 200 is not completion. No enhanced writeback was confirmed from the failed verification. Source review does not establish the provider-delay cause, real token sufficiency or serving success. See `DEADLINE.REVIEW.SUMMARY.json`.
+
+Current serving and verification state is recorded separately in `DEPLOYMENT.STATUS.json`; source-review summaries retain their predeployment assessment.

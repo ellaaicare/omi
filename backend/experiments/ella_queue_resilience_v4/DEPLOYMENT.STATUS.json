@@ -1,0 +1,13 @@
+{
+  "state": "SCOPED_CORRECTION_DEPLOYED_SINGLE_VERIFICATION_FAILED",
+  "source_commit": "ab155adeea0d587c02943e53cb4d41045269af1e",
+  "backend_code_install_utc": "2026-10-24T12:21:31Z",
+  "host_code_install_utc": "2026-10-24T12:22:02Z",
+  "health": "two backend health endpoints200 after graceful existing-unit restart; host fresh imports passed without gateway restart",
+  "effects": "no credential,account-route,consent or n8n changes; original source/stock/quarantines preserved",
+  "verification": "one fresh approved saved-memory admission; original agent route matched; providerHTTP200+EOF13928B then response_nonterminal_or_tool, surfaced503; no enhanced canonical writeback",
+  "remaining_unsubmitted": 16,
+  "historical_cause": "finish_reason and usage unrecorded; length not confirmed",
+  "resource_limit": "new unknown attempt remains held until execution-detachment proof; per-job quarantine is preserved, not erased or replayed",
+  "next": "metadata-only successor and historical provider-log metadata; do not batch on health or providerHTTP200"
+}

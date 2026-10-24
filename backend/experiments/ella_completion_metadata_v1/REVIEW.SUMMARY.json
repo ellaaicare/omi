@@ -1,0 +1,11 @@
+{
+  "state": "SOURCE_REVIEW_PASS_NOT_DEPLOYED",
+  "tests": 13,
+  "review_sha256": "f59ea338caccce78977fb5ca52a459461b6bacbbc539415f3ceb7a0eaf7c1960",
+  "scope": "metadata projection only; unchanged strict terminal acceptance, owner context, routing,1600 requested cap and600/90 deadlines",
+  "import_interpreter": "gateway Python3.11.14",
+  "staged_import_network_attempts": 0,
+  "staged_import_credential_discovery_attempts": 0,
+  "raw_personal_content_exported": false,
+  "live_inference_or_serving_acceptance": false
+}

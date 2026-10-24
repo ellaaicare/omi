@@ -1,0 +1,45 @@
+{
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "58605176e91216b0014b2202e27cd2f8fd67346231331d10ff68cfa9a19f2068",
+      "bytes": 1312
+    },
+    {
+      "path": "REVIEW.SUMMARY.json",
+      "sha256": "345c3403499673fa68408f80f631240372c32ffa0389caeaa624a31952faf694",
+      "bytes": 522
+    },
+    {
+      "path": "baseline/semantic_openrouter_transport.py.source",
+      "sha256": "2d528179d4e5fe96e5d6050ce06d5cbaaa8c35a647810a08b3295025de9a7fc5",
+      "bytes": 11415
+    },
+    {
+      "path": "baseline/semantic_role_worker.py.source",
+      "sha256": "f4e27b0e80cc3fe5ed46410f3d8bd71fb93bf11c70676cc1d66c7f385f799853",
+      "bytes": 16014
+    },
+    {
+      "path": "candidate/semantic_openrouter_transport.py",
+      "sha256": "6cc479ad127e0e77cf8069dd974e3aa3430ad2e42673514ef5ad3336319a4a04",
+      "bytes": 13467
+    },
+    {
+      "path": "candidate/semantic_role_worker.py",
+      "sha256": "a8ddc5e343e63a36a2c5be4f737e19ac0900b44e5d5ce07b70427e26aaef4a9f",
+      "bytes": 22250
+    },
+    {
+      "path": "tests/test_completion_metadata.py",
+      "sha256": "15dc99aa35284a563ff78a7c2238cbd18949b7524fa65199d271dc79272f438d",
+      "bytes": 5681
+    },
+    {
+      "path": "tests/test_transport_regressions.py",
+      "sha256": "9267d0c33f54ac4795da01f534742c785a6c05841a62d28c11cb955f3bf81137",
+      "bytes": 7831
+    }
+  ],
+  "state": "REVIEWED_METADATA_ONLY_OVERLAY"
+}

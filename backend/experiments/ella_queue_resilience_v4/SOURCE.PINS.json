@@ -1,6 +1,6 @@
 {
   "contract": "ella-queue-v4-review-package-v1",
-  "state": "DEADLINE_TRANSPORT_SUCCESSOR_SOURCE_REVIEWED_NOT_DEPLOYED",
+  "state": "DEPLOYED_POSTFIX_VERIFICATION_FAILED",
   "serving_snapshot_commit": "ec0247ead8ef19a4419cdaac0cc807eb795ab7bc",
   "test_count": 83,
   "files": [
@@ -25,6 +25,11 @@
       "bytes": 1580
     },
     {
+      "path": "DEPLOYMENT.STATUS.json",
+      "sha256": "949821cbb605aa76b690f92f0724e2f1018dd07605238a7830cfa46fde1b6931",
+      "bytes": 1062
+    },
+    {
       "path": "DIAGNOSTIC.REVIEW.SUMMARY.json",
       "sha256": "e57555d473ac53d73a7aea19b4464dd26ac1fbb4a8eed5c6984c37855c0c9fb9",
       "bytes": 1010
@@ -41,8 +46,8 @@
     },
     {
       "path": "README.md",
-      "sha256": "2556a6a4db6b74838d3fb4dc97e85357bc7a54d244c5ada56d2f75e3abe93605",
-      "bytes": 6092
+      "sha256": "d2a41d4ef6700a25b312c6d44ad39e84e2210ab3e9346ae7b0f7720b043c2bc7",
+      "bytes": 6232
     },
     {
       "path": "ROLLOUT.md",

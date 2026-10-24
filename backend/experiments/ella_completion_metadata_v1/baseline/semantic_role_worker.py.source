@@ -1,0 +1,201 @@
+"""Owned finite semantic worker; private request via pipe; validated result and content-free diagnostic retained locally."""
+import hashlib
+import json
+import sys
+import types
+from pathlib import Path
+
+# Fresh subprocess imports only opt-in modules. Do not execute the ordinary
+# gateway package initializers (session/config/delivery imports) in this worker.
+for name,path in [('gateway',Path(__file__).resolve().parents[1]),('gateway.platforms',Path(__file__).resolve().parent)]:
+    package=types.ModuleType(name);package.__path__=[str(path)];sys.modules[name]=package
+from gateway.platforms.semantic_direct_role import execute, _read_config_snapshot
+
+import os
+import stat
+import time
+
+STATIC_CODES={'SemanticRoleHold': ['semantic_actual_model_changed', 'semantic_configured_endpoint_unsupported', 'semantic_configured_primary_unsupported', 'semantic_configured_route_mismatch', 'semantic_nonstream_role_required', 'semantic_profile_configuration_changed', 'semantic_profile_selector_changed', 'semantic_role_input_capacity', 'semantic_role_message_invalid', 'semantic_role_nonce_invalid', 'semantic_role_request_invalid', 'semantic_role_worker_held', 'semantic_route_configuration_invalid', 'semantic_runtime_policy_witness_mismatch', 'semantic_runtime_policy_witness_missing', 'semantic_server_profile_missing', 'semantic_tools_forbidden'], 'IsolationHold': ['assembled_capture_unavailable', 'auth_file_too_large', 'auth_file_unsafe', 'auth_path_invalid', 'auth_snapshot_changed', 'auth_snapshot_unavailable', 'authority_or_fixture_unqualified', 'completed_content_coverage', 'completed_delta_after_done', 'completed_diagnostic_shape', 'completed_empty_snapshot_shape', 'completed_event_after_terminal', 'completed_event_shape', 'completed_item_coverage', 'completed_item_duplicate', 'completed_item_identity', 'completed_item_mismatch', 'completed_item_not_done', 'completed_item_text_mismatch', 'completed_message_status', 'completed_part_done_mismatch', 'completed_part_duplicate', 'completed_part_identity', 'completed_part_missing', 'completed_part_shape', 'completed_reasoning_status', 'completed_response_identity', 'completed_response_status', 'completed_sequence', 'completed_terminal_failure', 'completed_text_capacity', 'completed_text_done_mismatch', 'completed_text_mismatch', 'completed_tool_item', 'completed_unknown_event', 'configured_model_invalid', 'credential_expiring', 'credential_pool_ambiguous', 'credential_pool_unavailable', 'credential_snapshot_changed', 'credential_source_unqualified', 'credential_unavailable_or_expiring', 'credential_unqualified', 'diagnostic_capture_unavailable', 'provider_http_failure', 'provider_terminal_failure', 'provider_transport_failure', 'request_already_consumed_or_cap', 'request_invalid', 'request_not_reviewed', 'response_bound_exceeded', 'response_compression_invalid', 'response_compression_trailing_data', 'response_compression_truncated', 'response_content_invalid', 'response_encoding_invalid', 'response_event_after_completed', 'response_incomplete_or_oversize', 'response_invalid', 'response_line_oversize', 'response_message_invalid', 'response_metadata_observer_failed', 'response_nonterminal_or_tool', 'response_sse_framing_invalid', 'response_sse_unterminated', 'response_text_mismatch', 'response_tool_event', 'runtime_authority_changed']}
+
+class RetentionHold(RuntimeError):
+    pass
+
+def signature(meta):
+    return (meta.st_dev,meta.st_ino,meta.st_uid,meta.st_gid,meta.st_mode,meta.st_nlink,meta.st_size,meta.st_mtime_ns,meta.st_ctime_ns)
+
+from gateway.platforms.completed_items import validate_lifecycle_diagnostic
+
+def project_diagnostic(value):
+    if type(value) is not dict:raise RetentionHold()
+    phases={'admission','opening_client','opening_response','reading_stream','closing_response','closing_client','postcheck'}
+    phase=value.get('phase')
+    if phase not in phases:raise RetentionHold()
+    out={'phase':phase}
+    for key in ('terminal_seen','terminal_validated','function_return_ready','eof','sequence_truncated'):
+        if type(value.get(key)) is not bool:raise RetentionHold()
+        out[key]=value[key]
+    allowed_events={'response.created','response.in_progress','response.output_item.added','response.output_item.done','response.content_part.added','response.content_part.done','response.output_text.delta','response.output_text.done','response.completed','response.failed','response.incomplete','error','other_event'}
+    counts=value.get('event_counts')
+    if type(counts) is not dict or set(counts)-allowed_events:raise RetentionHold()
+    if any(type(v) is not int or not 0<=v<=1000000 for v in counts.values()):raise RetentionHold()
+    out['event_counts']=counts.copy()
+    meta=value.get('protocol_metadata')
+    if meta is not None:
+        if type(meta) is not dict:raise RetentionHold()
+        status=meta.get('status')
+        if status is not None and (type(status) is not int or not 100<=status<=599):raise RetentionHold()
+        stage=meta.get('parsing_stage')
+        if stage not in {'before_response','request','headers','decode','decoded_eof','sse','completed','eof_without_terminal'}:raise RetentionHold()
+        out['http_status']=status;out['parsing_stage']=stage
+        for key in ('wire_bytes','decoded_bytes'):
+            n=meta.get(key)
+            if type(n) is not int or not 0<=n<=2000000:raise RetentionHold()
+            out[key]=n
+    checks=value.get('terminal_checks')
+    keys={'model_matches','status_completed','id_valid','output_shape','tool_free','message_shape','content_shape','text_equal'}
+    if checks is not None:
+        if type(checks) is not dict or set(checks)!=keys or any(type(v) is not bool for v in checks.values()):raise RetentionHold()
+        out['terminal_checks']=checks.copy()
+    category=value.get('terminal_output_category')
+    if category is not None:
+        if category not in {'terminal_non_mapping','missing','null','non_list','empty','non_mapping_item','nonempty_mapping_list'}:raise RetentionHold()
+        out['terminal_output_category']=category
+    structure=value.get('terminal_structure')
+    if structure is not None:
+        if type(structure) is not dict or set(structure)!={'version','output_category','output_count','truncated','items'} or type(structure['version']) is not int or structure['version']!=1 or structure['output_category']!=category or type(structure['truncated']) is not bool:raise RetentionHold()
+        count=structure['output_count']
+        if count is not None and (type(count) is not int or not 0<=count<=1000000):raise RetentionHold()
+        rows=structure['items']
+        if type(rows) is not list or len(rows)>32:raise RetentionHold()
+        for row in rows:
+            if type(row) is not dict or set(row)!={'type','content_count','content_types','text_bytes'} or row['type'] not in {'non_mapping','message','reasoning','function_call','custom_tool_call','web_search_call','other'}:raise RetentionHold()
+            for key in ('content_count','text_bytes'):
+                n=row[key]
+                if n is not None and (type(n) is not int or not 0<=n<=2000000):raise RetentionHold()
+            if type(row['content_types']) is not list or len(row['content_types'])>32 or any(c not in {'output_text','refusal','non_mapping','other'} for c in row['content_types']):raise RetentionHold()
+        out['terminal_structure']=structure.copy()
+    exception=value.get('exception')
+    if exception is not None:
+        if type(exception) is not list or len(exception)>3:raise RetentionHold()
+        safe=[]
+        allowed_classes={'IsolationHold','ReadTimeout','ConnectTimeout','WriteTimeout','PoolTimeout','ReadError','WriteError','ConnectError','RemoteProtocolError','LocalProtocolError','DecodingError','UnicodeDecodeError','JSONDecodeError','TypeError','AttributeError','ValueError','RuntimeError','KeyboardInterrupt','CancelledError','TimeoutError','OSError','ConnectionError','other_exception'}
+        functions={'send','_send','_bounded_decoded_chunks','authority','_credential','_read_snapshot','external'}
+        for item in exception:
+            if type(item) is not dict or item.get('class') not in allowed_classes:raise RetentionHold()
+            locations=item.get('locations')
+            if type(locations) is not list or len(locations)>8:raise RetentionHold()
+            fixed=[]
+            for location in locations:
+                if type(location) is not dict or location.get('module') not in {'candidate','external'} or location.get('function') not in functions:raise RetentionHold()
+                line=location.get('line')
+                if line is not None and (type(line) is not int or not 1<=line<=10000):raise RetentionHold()
+                fixed.append({'module':location['module'],'function':location['function'],'line':line})
+            safe.append({'class':item['class'],'locations':fixed})
+        out['exception']=safe
+    if 'completed_lifecycle' in value:
+        try:out['completed_lifecycle']=validate_lifecycle_diagnostic(value['completed_lifecycle'])
+        except ValueError:raise RetentionHold() from None
+    return out
+
+class DurableOperation:
+    """Private one-use record. No completed replay/retrieval or automatic rearm."""
+    def __init__(self, root, binding):
+        root=Path(root)
+        if not root.is_absolute() or '..' in root.parts:raise RetentionHold()
+        self.fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY)
+        try:
+            for part in root.parts[1:]:
+                child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=self.fd)
+                os.close(self.fd);self.fd=child
+            meta=os.fstat(self.fd)
+            if meta.st_uid!=os.getuid() or stat.S_IMODE(meta.st_mode)!=0o700:raise RetentionHold()
+            self.root=root;self.identity=(meta.st_dev,meta.st_ino);self.binding=binding
+            self.key=binding['nonce'];self.dispatched=False;self.completed=False;self.persisted=False
+            self.write('START',{'binding':binding,'stage':'prepared','automatic_retry':False})
+        except BaseException:
+            os.close(self.fd);self.fd=None;raise
+    def stable(self):
+        opened=os.fstat(self.fd);linked=self.root.lstat()
+        if ((opened.st_dev,opened.st_ino)!=self.identity or (linked.st_dev,linked.st_ino)!=self.identity
+            or not stat.S_ISDIR(linked.st_mode) or linked.st_uid!=os.getuid() or stat.S_IMODE(linked.st_mode)!=0o700):raise RetentionHold()
+    def write(self, suffix, value):
+        self.stable()
+        raw=json.dumps(value,ensure_ascii=False,allow_nan=False,sort_keys=True,separators=(',',':')).encode()
+        if len(raw)>700000:raise RetentionHold()
+        name=self.key+'.'+suffix+'.json'
+        fd=os.open(name,os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=self.fd)
+        try:
+            captured=os.fstat(fd)
+            with os.fdopen(fd,'wb',closefd=False) as out:out.write(raw);out.flush();os.fsync(fd)
+            os.lseek(fd,0,os.SEEK_SET);readback=os.read(fd,700001);after=os.fstat(fd)
+            linked=os.stat(name,dir_fd=self.fd,follow_symlinks=False)
+            if (signature(after)!=signature(linked) or (after.st_dev,after.st_ino)!=(captured.st_dev,captured.st_ino)
+                or after.st_uid!=os.getuid() or stat.S_IMODE(after.st_mode)!=0o600 or after.st_nlink!=1 or readback!=raw):raise RetentionHold()
+            self.stable();os.fsync(self.fd)
+        finally:os.close(fd)
+    def dispatch(self,stage):
+        if stage!='pre_dispatch' or self.dispatched:raise RetentionHold()
+        self.write('DISPATCH',{'binding':self.binding,'stage':'provider_dispatch_reserved','provider_outcome_unknown':True})
+        self.dispatched=True
+    def __call__(self,value):
+        projected=project_diagnostic(value)
+        self.write('DIAGNOSTIC',{'binding':self.binding,'diagnostic':projected})
+        self.persisted=True
+    def complete(self,result):
+        if not self.dispatched or not self.persisted:raise RetentionHold()
+        self.write('COMPLETED',{'binding':self.binding,'stage':'validated_worker_result','result':result,'gateway_response_delivered':False})
+        self.completed=True
+    def failure(self,error):
+        classes={'SemanticRoleHold','IsolationHold','RetentionHold','ValueError','TypeError','KeyError','OSError','PermissionError','TimeoutError','BrokenPipeError','CancelledError','KeyboardInterrupt'}
+        label=type(error).__name__ if type(error).__name__ in classes else 'other_exception'
+        self.write('HOLD',{'binding':self.binding,'stage':'terminal_retained_delivery_unknown' if self.completed else 'provider_outcome_unknown' if self.dispatched else 'pre_dispatch',
+                          'error_class':label,'error_code':error.args[0] if type(error).__name__ in STATIC_CODES and len(error.args)==1 and type(error.args[0]) is str and error.args[0] in STATIC_CODES[type(error).__name__] else 'unclassified','diagnostic_persisted':self.persisted,'automatic_retry':False,'provider_outcome_unknown':self.dispatched and not self.completed})
+    def close(self):
+        if self.fd is not None:os.close(self.fd);self.fd=None
+
+def operation_binding(control):
+    nonce=control['nonce']
+    if not isinstance(nonce,str) or len(nonce)!=64 or any(c not in '0123456789abcdef' for c in nonce):raise RetentionHold()
+    role=control['role'];profile=control['profile'];session=control['session']
+    if role not in ('generator','verifier','learning_generator','learning_verifier'):raise RetentionHold()
+    if any(not isinstance(v,str) or not v or len(v)>256 for v in (profile,session)):raise RetentionHold()
+    body=control['request_body'];messages=body['messages']
+    if len(messages)!=1:raise RetentionHold()
+    request=json.loads(messages[0]['content'])
+    if not isinstance(request,dict):raise RetentionHold()
+    config_sha=control['config_sha256']
+    if not isinstance(config_sha,str) or len(config_sha)!=64 or any(c not in '0123456789abcdef' for c in config_sha):raise RetentionHold()
+    canonical=json.dumps(request,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
+    return {'profile':profile,'config_sha256':config_sha,'request_sha256':hashlib.sha256(canonical).hexdigest(),
+            'wire_request_sha256':hashlib.sha256(json.dumps(body,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()).hexdigest(),
+            'role':role,'nonce':nonce,'session':session,'owner_authority':'not_established_by_gateway_retention'}
+
+def main():
+    operation=None
+    try:
+        raw=sys.stdin.buffer.read(250001)
+        if len(raw)>250000:raise ValueError()
+        control=json.loads(raw)
+        auth=Path(control['auth_path']);config=Path(control['config_path'])
+        if hashlib.sha256(_read_config_snapshot(config)).hexdigest()!=control['config_sha256']:raise ValueError()
+        binding=operation_binding(control)
+        # Existing server-selected profile directory; resource must be provisioned
+        # separately mode0700. No lazy directory creation or caller-selected path.
+        operation=DurableOperation(config.parent/'semantic-role-results',binding)
+        result=execute(request_body=control['request_body'],session=control['session'],role=control['role'],nonce=control['nonce'],
+            profile=control['profile'],auth_path=auth,config_path=config,
+            revalidate_config=lambda:(control['profile'],str(auth),str(config)),lifecycle_observer=operation.dispatch,diagnostic_observer=operation)
+        encoded=json.dumps(result,ensure_ascii=False,allow_nan=False).encode()
+        if len(encoded)>650000:raise ValueError()
+        operation.complete(result)
+        sys.stdout.buffer.write(encoded);sys.stdout.buffer.flush()
+        return 0
+    except BaseException as error:
+        if operation is not None:
+            try:operation.failure(error)
+            except BaseException:pass  # Partial evidence remains HOLD; no retry.
+        return 2
+    finally:
+        if operation is not None:operation.close()
+
+if __name__=='__main__':sys.exit(main())
