@@ -1,0 +1,15 @@
+{
+  "contract": "ella-reviewed-overlay-pins-v1",
+  "files": {
+    "README.md": "3a57caefafd73c6592380d3a7147f216fc55657e62b15a21e547614cf4cfbce0",
+    "REVIEW.SUMMARY.json": "a874d514d862dd757ac90d62cd881a6b6ab78ddcf662ebf3e198ba7a4657ccc4",
+    "baseline/ella/services/semantic_operation_budget.py": "db029f0a748d2a3f8a87712c8df1cca7b4b5929e935112094a4f793628880878",
+    "baseline/ella/services/semantic_producer_ledger.py.source": "bac56df9726256db03c6fb97a00ef078c8afd0f808e2941d84afc0f1a0799151",
+    "baseline/ella/services/semantic_retained_integration.py.source": "61be1529638cf83b81acc2cddd8aaf23a31b016d9a2304d1f5892440667d957d",
+    "baseline/ella/services/semantic_self_hosted_runtime.py.source": "42db97802e6f91f2f4a334442d8791d34313726666230045088700b5abc87e02",
+    "candidate/ella/services/semantic_producer_ledger.py.source": "dce031d70dfda4577a92c7d5ec02c5c2e11cf4424d557b4ae7d340d68bb15bb3",
+    "candidate/ella/services/semantic_retained_integration.py.source": "d39c7b4dcaa94d052b555e283efa8aefa34b60088d776337409f64663672766f",
+    "candidate/ella/services/semantic_self_hosted_runtime.py.source": "53351e96fb2b64effdb05db4e53b56d0e9745187ce241fb9646f1a71b342f93b",
+    "tests/test_context_fences.py": "8a8d5af0bfde2fd0de1a48b237f84eccb28459f493810903ba1c76507ef8369f"
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "state": "PASS_ISOLATED_CONTEXT_READ_SOURCE_NOT_DEPLOYMENT",
+  "pins": {
+    "semantic_producer_ledger.py": {
+      "baseline": "bac56df9726256db03c6fb97a00ef078c8afd0f808e2941d84afc0f1a0799151",
+      "candidate": "dce031d70dfda4577a92c7d5ec02c5c2e11cf4424d557b4ae7d340d68bb15bb3"
+    },
+    "semantic_retained_integration.py": {
+      "baseline": "61be1529638cf83b81acc2cddd8aaf23a31b016d9a2304d1f5892440667d957d",
+      "candidate": "d39c7b4dcaa94d052b555e283efa8aefa34b60088d776337409f64663672766f"
+    },
+    "semantic_self_hosted_runtime.py": {
+      "baseline": "42db97802e6f91f2f4a334442d8791d34313726666230045088700b5abc87e02",
+      "candidate": "53351e96fb2b64effdb05db4e53b56d0e9745187ce241fb9646f1a71b342f93b"
+    }
+  },
+  "test_sha256": "5b3be466d7cf0f67c43858bcfa199421e081ac93cb16b4da2dfa60bcb302500d",
+  "independent_test_count": 14,
+  "independent_pass": true,
+  "test_seconds": 0.466,
+  "findings": [
+    "Internal source-only logical hook requires callable, exact current trusted budget/schema2/contract2. Live ownsource binding read and independent resample, capturedbudgetobject identity+remaining/source checks before/after, cancellationchecks retained. No caching.",
+    "Known retained coordinator supplies hook only when trusted budget exists; full context current closure still used by actual bridge authority.",
+    "Trusted v2 budgeted generator/verifier bridge uses fresh revalidated expectedidentity immediately before HTTP, fresh fullauthority before canonicalwrite and after canonicalreadback. Legacy/manual/learning turns retain fivechecks.",
+    "Full _authority and ledger.issue_publication AST identical baseline. Finalpublication rehydrates context inside sourceCAS and reconstructs exact stored generator/verifier requests and semantic verdict.",
+    "Bounded pure parsing/ACK/eventconstruction between response and canonicalauthority introduces no actual I/O; original model/owner/scope/receipt/graph/source/CAS guards unchanged.",
+    "No HostReadBudget480, wholeoperation600, provider90, HTTP105, child100, output4096 or resultbyte limits changed.",
+    "Baselineledger byte-identical to previously reviewed deadline-v1 ledger; otherbase hashes match supplied currentbaseline manifest."
+  ],
+  "tests_boundaries": [
+    "Actual run_versioned_producer, DurableServerLedger, TrustedRuntimeAdapter, bridge/_authority and v3produce executed with explicit fake semantic leaf/runtime/HTTP/DB/event/graph adapters.",
+    "Retained outer coordinator/factory hook wiring is inspected in source, not executed through real service factories by this suite.",
+    "Rig counted fullcontext reads21\u21928 in modeled producer/bridge composition with same2model/2canonical/1publication happy effects. This is not deployed wholejob read count or nested server runtime sample measurement.",
+    "Context mutations before/duringmodel, precanonical/readback, betweenroles, verifier/finalpublication rejected at retained fences. Hookowner/schema/source/resample/budgetidentity/lease-change/deadline/cancel/closedgraph negativespass.",
+    "Synthetic25second read model demonstrates reduced redundant reads fits unchanged480/600 while modeledbaselineexhausts; it does not prove historicalstagecost or futurelatency/modelsuccess."
+  ],
+  "remaining_rollout_gates": [
+    "Exact servingbaseline preimages, actual service interpreter fullmodule imports, independent controller/rollback and healthy source/policy readback before livechange.",
+    "Actual per-stage timing/endtoend enhancement remains unqualified; no oldquarantine replay or retainedresultapply from source review.",
+    "Optionalhook is private trusted function input, never expose wirebool/UIDbinding as authority.",
+    "Current context/owner/consent/source changes must continue failclosed at actualeffect/publication boundaries."
+  ],
+  "reviewer_live_effects": 0
+}
