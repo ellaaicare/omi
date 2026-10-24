@@ -69,7 +69,7 @@ Unknown provider outcomes still must not be retried blindly. The correction is t
 
 ## Isolated correction under development
 
-The first implemented component is a pure attempt-fence transition core, outside serving code. Fifteen synthetic tests currently pass; the independent reviewer found a persisted-state validation defect in the first revision, now corrected locally and awaiting re-review. It is **not integrated, independently approved, deployed or a complete queue fix**.
+The first implemented component is a pure attempt-fence transition core, outside serving code. Seventeen synthetic tests currently pass. Independent review found and then verified correction of persisted-state validation defects; its final verdict is **pure-core source PASS, not integrated**. Transaction adapters, remote acknowledgement validation, canonical completion, resource fences and migration remain unqualified. It is **not deployed or a complete queue fix**.
 
 Required integrated behavior:
 
