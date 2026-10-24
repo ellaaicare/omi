@@ -1,0 +1,1784 @@
+"""Server-authoritative consent for third-party AI processing."""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import logging
+import os
+import secrets
+import threading
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Callable, Literal, Optional, Protocol
+
+from fastapi import Depends, Header, HTTPException
+from fastapi.responses import JSONResponse
+from google.cloud.firestore_v1 import transactional
+
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid
+
+ConsentDecision = Literal["granted", "declined", "revoked", "deleted"]
+ConsentAuthorityState = Literal[
+    "authorized",
+    "declined",
+    "revoked",
+    "deleted",
+    "not_accepted",
+    "reconsent_required",
+    "unavailable",
+]
+
+logger = logging.getLogger(__name__)
+
+# Prior consent versions are immutable history. V10 replaces the xAI artwork
+# recipient with the owner-only OpenAI Codex artwork designer, so stale v9
+# receipts cannot authorize selected-memory artwork egress. V11 adds the
+# TypeSafe (Jev), via OpenRouter processor for Guardian/Whispers conversation
+# safety classification. V10 remains valid for every processor it named, while
+# TypeSafe egress requires the exact v11 contract.
+LEGACY_POLICY_VERSION_V7 = "ai-data-processors-v7"
+LEGACY_POLICY_VERSION_V8 = "ai-data-processors-v8"
+LEGACY_POLICY_VERSION_V9 = "ai-data-processors-v9"
+LEGACY_POLICY_VERSION_V10 = "ai-data-processors-v10"
+CURRENT_POLICY_VERSION = "ai-data-processors-v11"
+# This is the only policy constant that invalidates a prior explicit grant.
+# Adding processors, changing descriptive scope metadata, or deploying code
+# must not silently revoke consent. A human-reviewed material policy change
+# must add its version to this order and deliberately bump this minimum.
+CONSENT_POLICY_VERSION_ORDER = (
+    LEGACY_POLICY_VERSION_V7,
+    LEGACY_POLICY_VERSION_V8,
+    LEGACY_POLICY_VERSION_V9,
+    LEGACY_POLICY_VERSION_V10,
+    CURRENT_POLICY_VERSION,
+)
+MINIMUM_REQUIRED_POLICY_VERSION = LEGACY_POLICY_VERSION_V10
+LEGACY_V10_CANONICAL_PROCESSOR_SET = (
+    "deepgram:stt|soniox:stt|speechmatics:stt|firebase:auth-infrastructure|"
+    "hermes-self-hosted:agent-runtime|honcho-self-hosted:memory-context|ella-self-hosted-tts:tts|"
+    "nous-hermes-cloud:managed-agent-runtime|hermes-profile-memory:profile-scoped-memory|"
+    "openai-codex:managed-agent-model-memory-illustration|photon:messaging-delivery|"
+    "openrouter:model-routing|google-gemini:language-live-voice|openai:language-live-voice|"
+    "groq:language|xai-grok:language-live-voice|"
+    "inworld:tts|elevenlabs:tts-fallback"
+)
+LEGACY_V10_PROCESSOR_SET_HASH = f"sha256:{hashlib.sha256(LEGACY_V10_CANONICAL_PROCESSOR_SET.encode()).hexdigest()}"
+CANONICAL_PROCESSOR_SET = (
+    "deepgram:stt|soniox:stt|speechmatics:stt|firebase:auth-infrastructure|"
+    "hermes-self-hosted:agent-runtime|honcho-self-hosted:memory-context|ella-self-hosted-tts:tts|"
+    "nous-hermes-cloud:managed-agent-runtime|hermes-profile-memory:profile-scoped-memory|"
+    "openai-codex:managed-agent-model-memory-illustration|photon:messaging-delivery|"
+    "openrouter:model-routing|google-gemini:language-live-voice|openai:language-live-voice|"
+    "groq:language|xai-grok:language-live-voice|"
+    "inworld:tts|elevenlabs:tts-fallback|typesafe:guardian-whispers-safety-classification"
+)
+CURRENT_PROCESSOR_SET_HASH = f"sha256:{hashlib.sha256(CANONICAL_PROCESSOR_SET.encode()).hexdigest()}"
+CURRENT_SCOPE_VERSION = "managed-cloud-internal-pilot-v4"
+CANONICAL_SCOPE = (
+    "profile_binding=server-profile-v1|runtime_provider=hermes_cloud|"
+    "model_route=openai-codex/gpt-5.6-terra|memory_provider=hermes_profile_scoped_memory|"
+    "photon_scope=shared_test_line_explicit_contact_v1;allow_all=false;caregiver=false;attachments=false|"
+    "artwork_provider=openai-codex/gpt-image-2-medium;reasoning_host=openai-codex/gpt-5.6-luna;"
+    "source=selected_memory_summary_only;raw_audio=false;source_photos=false"
+)
+CURRENT_SCOPE_HASH = f"sha256:{hashlib.sha256(CANONICAL_SCOPE.encode()).hexdigest()}"
+MANAGED_CLOUD_RUNTIME_PROVIDER = "hermes_cloud"
+MANAGED_CLOUD_MODEL_ROUTE = "openai-codex/gpt-5.6-terra"
+MANAGED_CLOUD_MEMORY_PROVIDER = "hermes_profile_scoped_memory"
+MANAGED_CLOUD_PHOTON_SCOPE = "shared_test_line_explicit_contact_v1;allow_all=false;caregiver=false;attachments=false"
+
+PROCESSORS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "deepgram",
+        "legal_recipient": "Deepgram",
+        "function": "Speech transcription",
+        "data": "Live or stored microphone audio",
+        "provider_aliases": ["deepgram", "deepgram-streaming"],
+        "third_party": True,
+    },
+    {
+        "id": "soniox",
+        "legal_recipient": "Soniox",
+        "function": "Speech transcription",
+        "data": "Live or stored microphone audio",
+        "provider_aliases": ["soniox", "soniox-streaming"],
+        "third_party": True,
+    },
+    {
+        "id": "speechmatics",
+        "legal_recipient": "Speechmatics",
+        "function": "Speech transcription",
+        "data": "Live or stored microphone audio",
+        "provider_aliases": ["speechmatics", "speechmatics-streaming"],
+        "third_party": True,
+    },
+    {
+        "id": "firebase",
+        "legal_recipient": "Google Firebase",
+        "function": "Authentication and service infrastructure",
+        "data": "Account and service metadata",
+        "provider_aliases": ["firebase", "google-firebase"],
+        "third_party": True,
+    },
+    {
+        "id": "hermes-self-hosted",
+        "legal_recipient": "Ella self-hosted Hermes",
+        "function": "Agent reasoning",
+        "data": "Messages, transcripts, and selected memory context",
+        "provider_aliases": ["hermes", "hermes-self-hosted", "hermes-retained", "hermes-isolated"],
+        "third_party": False,
+    },
+    {
+        "id": "honcho-self-hosted",
+        "legal_recipient": "Ella self-hosted Honcho",
+        "function": "Memory context",
+        "data": "Derived text and selected memory relationships",
+        "provider_aliases": ["honcho", "honcho-self-hosted"],
+        "third_party": False,
+    },
+    {
+        "id": "ella-self-hosted-tts",
+        "legal_recipient": "Ella self-hosted voice synthesis",
+        "function": "Voice synthesis",
+        "data": "Response text",
+        "provider_aliases": ["fish-audio", "fish-audio-s1", "fish-audio-s2", "kokoro"],
+        "third_party": False,
+    },
+    {
+        "id": "nous-hermes-cloud",
+        "legal_recipient": "Nous Research / Hermes Cloud",
+        "function": "Managed agent runtime",
+        "data": ("What the person says or types, details they choose to share, " "and basic session information"),
+        "provider_aliases": ["hermes-cloud", "hermes_cloud", "nous-hermes-cloud"],
+        "third_party": True,
+    },
+    {
+        "id": "hermes-profile-memory",
+        "legal_recipient": "Nous Research / Hermes Cloud",
+        "function": "Built-in profile-scoped memory and context inside the managed Hermes Cloud runtime",
+        "data": (
+            "Profile-bound conversation text, saved facts, derived memory context, and session identifiers "
+            "needed to retrieve memory for the same account/profile scope"
+        ),
+        "provider_aliases": ["hermes-profile-memory", "hermes_profile_scoped_memory"],
+        "third_party": True,
+    },
+    {
+        "id": "openai-codex",
+        "legal_recipient": "OpenAI",
+        "function": "Managed agent processing and saved-memory illustration",
+        "data": (
+            "Model input and output, plus a selected memory title and summary for an illustration, through the "
+            "approved OpenAI Codex OAuth route; no raw microphone audio or source photos for artwork"
+        ),
+        "provider_aliases": [
+            "openai-codex",
+            "openai-codex/gpt-5.6-terra",
+            "openai-codex/gpt-5.6-luna",
+            "gpt-image-2-medium",
+        ],
+        "third_party": True,
+    },
+    {
+        "id": "photon",
+        "legal_recipient": "Photon",
+        "function": "Test/shared-line message delivery",
+        "data": "Message content and messaging identifiers for one explicitly allowed test contact",
+        "provider_aliases": ["photon", "hermes-cloud-photon"],
+        "third_party": True,
+    },
+    {
+        "id": "openrouter",
+        "legal_recipient": "OpenRouter",
+        "function": "Model routing",
+        "data": "Messages, transcripts, and selected memory context",
+        "provider_aliases": ["openrouter"],
+        "third_party": True,
+    },
+    {
+        "id": "google-gemini",
+        "legal_recipient": "Google Gemini",
+        "function": "Language processing and live voice",
+        "data": "Text, selected context, or live microphone audio",
+        "provider_aliases": ["gemini", "gemini-live", "gemini-native-live", "google-gemini"],
+        "third_party": True,
+    },
+    {
+        "id": "openai",
+        "legal_recipient": "OpenAI",
+        "function": "Language processing and live voice",
+        "data": "Text, selected context, or live microphone audio",
+        "provider_aliases": ["openai", "openai-native-realtime"],
+        "third_party": True,
+    },
+    {
+        "id": "groq",
+        "legal_recipient": "Groq",
+        "function": "Language processing",
+        "data": "Text and selected context",
+        "provider_aliases": ["groq"],
+        "third_party": True,
+    },
+    {
+        "id": "xai-grok",
+        "legal_recipient": "xAI Grok",
+        "function": "Language processing and live voice",
+        "data": "Text, selected context, or live microphone audio",
+        "provider_aliases": ["grok", "grok-voice", "xai", "xai-grok", "xai-tts"],
+        "third_party": True,
+    },
+    {
+        "id": "typesafe",
+        "legal_recipient": "TypeSafe (Jev), via OpenRouter",
+        "function": "Conversation safety classification for Guardian and Whispers",
+        "data": "Conversation transcript text windows (no audio)",
+        "provider_aliases": ["typesafe", "typesafe-jev", "jev"],
+        "third_party": True,
+    },
+    {
+        "id": "inworld",
+        "legal_recipient": "Inworld AI",
+        "function": "Voice synthesis",
+        "data": "Response text",
+        "provider_aliases": ["inworld"],
+        "third_party": True,
+    },
+    {
+        "id": "elevenlabs",
+        "legal_recipient": "ElevenLabs",
+        "function": "Fallback voice synthesis",
+        "data": "Response text",
+        "provider_aliases": ["elevenlabs"],
+        "third_party": True,
+    },
+)
+
+LEGACY_V10_PROCESSOR_IDS = tuple(str(processor["id"]) for processor in PROCESSORS if processor["id"] != "typesafe")
+CURRENT_PROCESSOR_IDS = tuple(str(processor["id"]) for processor in PROCESSORS)
+TYPESAFE_PROCESSOR_ID = "typesafe"
+TYPESAFE_POLICY_VERSION = "ai-data-processors-v11"
+TYPESAFE_PROCESSOR_SET_HASH = CURRENT_PROCESSOR_SET_HASH
+
+
+@dataclass(frozen=True)
+class ConsentPolicyContract:
+    version: str
+    processor_set_hash: str
+    canonical_processor_set: str
+    scope_version: str
+    scope_hash: str
+    processor_ids: tuple[str, ...]
+
+
+SUPPORTED_CONSENT_POLICY_CONTRACTS = {
+    LEGACY_POLICY_VERSION_V10: ConsentPolicyContract(
+        version=LEGACY_POLICY_VERSION_V10,
+        processor_set_hash=LEGACY_V10_PROCESSOR_SET_HASH,
+        canonical_processor_set=LEGACY_V10_CANONICAL_PROCESSOR_SET,
+        scope_version=CURRENT_SCOPE_VERSION,
+        scope_hash=CURRENT_SCOPE_HASH,
+        processor_ids=LEGACY_V10_PROCESSOR_IDS,
+    ),
+    CURRENT_POLICY_VERSION: ConsentPolicyContract(
+        version=CURRENT_POLICY_VERSION,
+        processor_set_hash=CURRENT_PROCESSOR_SET_HASH,
+        canonical_processor_set=CANONICAL_PROCESSOR_SET,
+        scope_version=CURRENT_SCOPE_VERSION,
+        scope_hash=CURRENT_SCOPE_HASH,
+        processor_ids=CURRENT_PROCESSOR_IDS,
+    ),
+}
+
+
+def consent_policy_contract(
+    policy_version: Any,
+    processor_set_hash: Any,
+    scope_version: Any,
+    scope_hash: Any,
+) -> Optional[ConsentPolicyContract]:
+    contract = SUPPORTED_CONSENT_POLICY_CONTRACTS.get(str(policy_version or ""))
+    if contract is None:
+        return None
+    if not (
+        hmac.compare_digest(str(processor_set_hash or ""), contract.processor_set_hash)
+        and hmac.compare_digest(str(scope_version or ""), contract.scope_version)
+        and hmac.compare_digest(str(scope_hash or ""), contract.scope_hash)
+    ):
+        return None
+    return contract
+
+
+def managed_runtime_policy_contracts(
+    policy_version: Any,
+    processor_set_hash: Any,
+    scope_version: Any,
+    scope_hash: Any,
+) -> tuple[ConsentPolicyContract, ...]:
+    """Return the exact and compatible runtime contracts for one receipt.
+
+    V11 adds only the separately enforced TypeSafe processor. The managed
+    runtime provider, model route, memory provider, and Photon scope remain the
+    exact v10 contract, so a v10/v11 transition must not rotate runtime
+    authority or reprovision an existing binding.
+    """
+    consent_contract = consent_policy_contract(
+        policy_version,
+        processor_set_hash,
+        scope_version,
+        scope_hash,
+    )
+    v10 = SUPPORTED_CONSENT_POLICY_CONTRACTS[LEGACY_POLICY_VERSION_V10]
+    v11 = SUPPORTED_CONSENT_POLICY_CONTRACTS[CURRENT_POLICY_VERSION]
+    if consent_contract not in {v10, v11}:
+        return ()
+    if not (
+        v10.scope_version == v11.scope_version
+        and hmac.compare_digest(v10.scope_hash, v11.scope_hash)
+        and set(v11.processor_ids) - set(v10.processor_ids) == {TYPESAFE_PROCESSOR_ID}
+        and set(v10.processor_ids).issubset(v11.processor_ids)
+        and all(
+            value in CANONICAL_SCOPE
+            for value in (
+                f"runtime_provider={MANAGED_CLOUD_RUNTIME_PROVIDER}",
+                f"model_route={MANAGED_CLOUD_MODEL_ROUTE}",
+                f"memory_provider={MANAGED_CLOUD_MEMORY_PROVIDER}",
+                f"photon_scope={MANAGED_CLOUD_PHOTON_SCOPE}",
+            )
+        )
+    ):
+        return ()
+    other = v11 if consent_contract == v10 else v10
+    return consent_contract, other
+
+
+def managed_runtime_policy_contract(
+    policy_version: Any,
+    processor_set_hash: Any,
+    scope_version: Any,
+    scope_hash: Any,
+) -> Optional[ConsentPolicyContract]:
+    """Return the canonical lineage used for newly-created runtime targets."""
+    contracts = managed_runtime_policy_contracts(
+        policy_version,
+        processor_set_hash,
+        scope_version,
+        scope_hash,
+    )
+    if not contracts:
+        return None
+    return SUPPORTED_CONSENT_POLICY_CONTRACTS[LEGACY_POLICY_VERSION_V10]
+
+
+def is_exact_v11_upgrade_decline(submission: "ConsentSubmission") -> bool:
+    return bool(
+        submission.decision == "declined"
+        and consent_policy_contract(
+            submission.policy_version,
+            submission.processor_set_hash,
+            submission.scope_version,
+            submission.scope_hash,
+        )
+        == SUPPORTED_CONSENT_POLICY_CONTRACTS[CURRENT_POLICY_VERSION]
+    )
+
+
+ACCOUNT_DELETION_CONTRACT = {
+    "method": "DELETE",
+    "path": "/v1/users/delete-account",
+    "scope": "account_and_user_data",
+}
+
+
+def build_account_deletion_request_id() -> str:
+    return f"aidel_{secrets.token_hex(16)}"
+
+
+def build_account_deletion_receipt(
+    *,
+    request_id: Optional[str] = None,
+    server_completed_at: Optional[str] = None,
+    now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> dict[str, str]:
+    """Return a non-identifying receipt for a completed synchronous deletion."""
+    return {
+        "request_id": request_id or build_account_deletion_request_id(),
+        "status": "completed",
+        "scope": ACCOUNT_DELETION_CONTRACT["scope"],
+        "server_completed_at": server_completed_at or now().astimezone(timezone.utc).isoformat(),
+    }
+
+
+class ConsentPolicyMismatch(ValueError):
+    pass
+
+
+class ConsentIdempotencyConflict(ValueError):
+    pass
+
+
+class ConsentAccountDeleted(ValueError):
+    pass
+
+
+class ConsentAuthorityUnavailable(RuntimeError):
+    pass
+
+
+class ManagedCloudConsentError(ValueError):
+    def __init__(self, code: str, *, retryable: bool = False):
+        super().__init__(code)
+        self.code = code
+        self.retryable = retryable
+
+
+def _valid_server_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        decided_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return decided_at.tzinfo is not None
+
+
+def derive_profile_binding_id(*, account_uid: str, profile_uid: str) -> str:
+    """Derive an opaque, stable binding from server-owned account/profile authority."""
+    account_uid = str(account_uid or "").strip()
+    profile_uid = str(profile_uid or "").strip()
+    if not account_uid or not profile_uid:
+        raise ManagedCloudConsentError("managed_cloud_profile_binding_missing")
+    digest = hashlib.sha256(
+        f"ella-managed-cloud-profile-v1\x1f{account_uid}\x1f{profile_uid}".encode("utf-8")
+    ).hexdigest()
+    return f"aipb_{digest[:32]}"
+
+
+_firestore_db: Any = None
+
+
+def configure_firestore_db(firestore_db: Any) -> None:
+    global _firestore_db
+    _firestore_db = firestore_db
+
+
+class ConsentRepository(Protocol):
+    def get_state(self, uid: str) -> Optional[dict[str, Any]]: ...
+
+    def get_receipt(self, uid: str, receipt_id: str) -> Optional[dict[str, Any]]: ...
+
+    def get_current(
+        self,
+        uid: str,
+    ) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]: ...
+
+    def record(
+        self,
+        uid: str,
+        receipt_id: str,
+        receipt: dict[str, Any],
+        request_fingerprint: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], bool]: ...
+
+    def record_policy_upgrade_decline(
+        self,
+        uid: str,
+        receipt_id: str,
+        receipt: dict[str, Any],
+        request_fingerprint: str,
+        expected_current_receipt_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], bool]: ...
+
+    def complete_account_deletion(
+        self,
+        uid: str,
+        receipt_id: str,
+        request_id: str,
+        completed_at: str,
+        account_epoch_token: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], bool]: ...
+
+
+def _receipt_fingerprint(receipt: dict[str, Any]) -> str:
+    material = {
+        key: receipt.get(key)
+        for key in (
+            "decision",
+            "policy_version",
+            "processor_set_hash",
+            "scope_version",
+            "scope_hash",
+            "request_id",
+            "app_version",
+            "build_number",
+            "locale",
+            "account_epoch_hash",
+            "account_epoch_auth_time",
+        )
+    }
+    encoded = json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _retained_v10_receipt_for_upgrade_decline(
+    current_receipt: dict[str, Any],
+    decline_receipt: dict[str, Any],
+) -> dict[str, Any]:
+    contract = SUPPORTED_CONSENT_POLICY_CONTRACTS[LEGACY_POLICY_VERSION_V10]
+    subject_uid = str(current_receipt.get("subject_uid") or "")
+    decline_request_id = str(decline_receipt.get("request_id") or "")
+    retained_receipt_id = (
+        "aicr_" + hashlib.sha256(f"{subject_uid}:{decline_request_id}:retained-v10".encode()).hexdigest()[:32]
+    )
+    retained_request_id = "aicretain_" + hashlib.sha256(f"{subject_uid}:{decline_request_id}".encode()).hexdigest()[:32]
+    return {
+        **{key: value for key, value in current_receipt.items() if key not in {"request_fingerprint", "receipt_kind"}},
+        "receipt_id": retained_receipt_id,
+        "decision": "granted",
+        "policy_version": contract.version,
+        "processor_set_hash": contract.processor_set_hash,
+        "processor_ids": list(contract.processor_ids),
+        "scope_version": contract.scope_version,
+        "scope_hash": contract.scope_hash,
+        "request_id": retained_request_id,
+        "server_decided_at": decline_receipt.get("server_decided_at"),
+        "app_version": decline_receipt.get("app_version"),
+        "build_number": decline_receipt.get("build_number"),
+        "locale": decline_receipt.get("locale"),
+        "receipt_kind": "policy_upgrade_retained_v10",
+        "source_consent_receipt_id": current_receipt.get("receipt_id"),
+        "source_decline_receipt_id": decline_receipt.get("receipt_id"),
+    }
+
+
+def _consent_state_from_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: receipt.get(key)
+        for key in (
+            "receipt_id",
+            "decision",
+            "policy_version",
+            "processor_set_hash",
+            "processor_ids",
+            "profile_binding_id",
+            "scope_version",
+            "scope_hash",
+            "server_decided_at",
+            "app_version",
+            "build_number",
+            "locale",
+            "receipt_kind",
+            "deletion_phase",
+            "deletion_completed_at",
+            "account_epoch_hash",
+            "account_epoch_auth_time",
+        )
+    }
+
+
+def _is_exact_policy_grant(
+    uid: str,
+    state: Optional[dict[str, Any]],
+    receipt: Optional[dict[str, Any]],
+    policy_version: str,
+) -> bool:
+    contract = SUPPORTED_CONSENT_POLICY_CONTRACTS.get(policy_version)
+    processor_ids = (state or {}).get("processor_ids")
+    return bool(
+        contract is not None
+        and _authority_state(uid, state, receipt) == "authorized"
+        and (state or {}).get("decision") == "granted"
+        and consent_policy_contract(
+            (state or {}).get("policy_version"),
+            (state or {}).get("processor_set_hash"),
+            (state or {}).get("scope_version"),
+            (state or {}).get("scope_hash"),
+        )
+        == contract
+        and isinstance(processor_ids, list)
+        and tuple(processor_ids) == contract.processor_ids
+    )
+
+
+def _account_epoch_hash(token: Any) -> str:
+    normalized = str(token or "")
+    if not normalized:
+        return ""
+    material = f"ella-ai-consent-account-epoch-v1\x1f{normalized}".encode("utf-8")
+    return "sha256:" + hashlib.sha256(material).hexdigest()
+
+
+def _auth_time_is_after_deletion(auth_time: Any, completed_at: Any) -> bool:
+    if not isinstance(auth_time, int) or auth_time <= 0 or not _valid_server_timestamp(completed_at):
+        return False
+    deletion_time = datetime.fromisoformat(str(completed_at).replace("Z", "+00:00"))
+    return auth_time > int(deletion_time.timestamp())
+
+
+def _deletion_epoch_is_completed(
+    state: dict[str, Any],
+    receipt: Optional[dict[str, Any]],
+) -> bool:
+    completed_at = state.get("deletion_completed_at")
+    return bool(
+        receipt
+        and state.get("decision") == "deleted"
+        and receipt.get("decision") == "deleted"
+        and state.get("receipt_id") == receipt.get("receipt_id")
+        and state.get("deletion_phase") == "completed"
+        and receipt.get("deletion_phase") == "completed"
+        and completed_at
+        and completed_at == receipt.get("deletion_completed_at")
+        and _valid_server_timestamp(completed_at)
+        and receipt.get("account_epoch_token")
+        and state.get("account_epoch_hash")
+        and hmac.compare_digest(
+            str(state.get("account_epoch_hash") or ""),
+            str(receipt.get("account_epoch_hash") or ""),
+        )
+        and hmac.compare_digest(
+            str(state.get("account_epoch_hash") or ""),
+            _account_epoch_hash(receipt.get("account_epoch_token")),
+        )
+    )
+
+
+@transactional
+def _record_firestore_receipt(
+    transaction,
+    user_ref,
+    receipt_ref,
+    receipt: dict[str, Any],
+    request_fingerprint: str,
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    existing_snapshot = receipt_ref.get(transaction=transaction)
+    user_snapshot = user_ref.get(transaction=transaction)
+    user_data = user_snapshot.to_dict() if user_snapshot.exists else {}
+    current_state = dict(user_data.get("ai_consent") or {})
+
+    if current_state.get("decision") == "deleted" and receipt.get("decision") != "deleted":
+        if existing_snapshot.exists:
+            existing = existing_snapshot.to_dict()
+            if existing.get("request_fingerprint") != request_fingerprint:
+                raise ConsentIdempotencyConflict("request_id was already used with different consent metadata")
+            raise ConsentAccountDeleted("account consent authority was deleted")
+        current_receipt_id = str(current_state.get("receipt_id") or "")
+        current_receipt_snapshot = (
+            user_ref.collection("ai_consent_receipts").document(current_receipt_id).get(transaction=transaction)
+            if current_receipt_id
+            else None
+        )
+        current_receipt = (
+            current_receipt_snapshot.to_dict()
+            if current_receipt_snapshot is not None and current_receipt_snapshot.exists
+            else None
+        )
+        if receipt.get("decision") != "granted" or not _deletion_epoch_is_completed(
+            current_state,
+            current_receipt,
+        ):
+            raise ConsentAccountDeleted("account consent authority was deleted")
+        if not hmac.compare_digest(
+            str(receipt.get("account_epoch_hash") or ""),
+            str(current_state.get("account_epoch_hash") or ""),
+        ):
+            raise ConsentAccountDeleted("account consent authority was deleted")
+        if not _auth_time_is_after_deletion(
+            receipt.get("account_epoch_auth_time"),
+            current_state.get("deletion_completed_at"),
+        ):
+            raise ConsentAccountDeleted("fresh authentication is required after account deletion")
+
+    if existing_snapshot.exists:
+        existing = existing_snapshot.to_dict()
+        if existing.get("request_fingerprint") != request_fingerprint:
+            raise ConsentIdempotencyConflict("request_id was already used with different consent metadata")
+        return existing, dict(user_data.get("ai_consent") or {}), False
+    if receipt.get("account_epoch_hash") and current_state.get("decision") != "deleted":
+        raise ConsentAccountDeleted("account consent epoch was already consumed")
+
+    state = {
+        key: receipt.get(key)
+        for key in (
+            "receipt_id",
+            "decision",
+            "policy_version",
+            "processor_set_hash",
+            "processor_ids",
+            "profile_binding_id",
+            "scope_version",
+            "scope_hash",
+            "server_decided_at",
+            "app_version",
+            "build_number",
+            "locale",
+            "deletion_phase",
+            "deletion_completed_at",
+            "account_epoch_hash",
+            "account_epoch_auth_time",
+        )
+    }
+    stored_receipt = {**receipt, "request_fingerprint": request_fingerprint}
+    transaction.set(receipt_ref, stored_receipt)
+    transaction.set(
+        user_ref,
+        {
+            "ai_consent": state,
+            # Compatibility only. The versioned receipt is the authority.
+            "private_cloud_sync_enabled": receipt["decision"] == "granted",
+        },
+        merge=True,
+    )
+    return stored_receipt, state, True
+
+
+@transactional
+def _record_firestore_policy_upgrade_decline(
+    transaction,
+    user_ref,
+    receipt_ref,
+    receipt: dict[str, Any],
+    request_fingerprint: str,
+    expected_current_receipt_id: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], bool]:
+    existing_snapshot = receipt_ref.get(transaction=transaction)
+    user_snapshot = user_ref.get(transaction=transaction)
+    user_data = user_snapshot.to_dict() if user_snapshot.exists else {}
+    current_state = dict(user_data.get("ai_consent") or {})
+    current_receipt_id = str(current_state.get("receipt_id") or "")
+    current_receipt_snapshot = (
+        user_ref.collection("ai_consent_receipts").document(current_receipt_id).get(transaction=transaction)
+        if current_receipt_id
+        else None
+    )
+    current_receipt = (
+        current_receipt_snapshot.to_dict()
+        if current_receipt_snapshot is not None and current_receipt_snapshot.exists
+        else None
+    )
+
+    if existing_snapshot.exists:
+        existing = existing_snapshot.to_dict()
+        if (
+            existing.get("request_fingerprint") != request_fingerprint
+            or existing.get("receipt_kind") != "policy_upgrade_decline"
+        ):
+            raise ConsentIdempotencyConflict("request_id was already used with different consent metadata")
+        if not current_receipt:
+            raise ConsentAuthorityUnavailable("ai_consent_authority_unavailable")
+        return existing, current_state, current_receipt, False
+
+    current_expected_policy_version = next(
+        (
+            policy_version
+            for policy_version in SUPPORTED_CONSENT_POLICY_CONTRACTS
+            if current_receipt_id == expected_current_receipt_id
+            and _is_exact_policy_grant(
+                str(receipt.get("subject_uid") or ""),
+                current_state,
+                current_receipt,
+                policy_version,
+            )
+        ),
+        None,
+    )
+    current_is_expected_supported = current_expected_policy_version is not None
+    current_is_expected_v11 = current_expected_policy_version == CURRENT_POLICY_VERSION
+    current_is_supported_successor = bool(
+        expected_current_receipt_id
+        and current_receipt_id != expected_current_receipt_id
+        and any(
+            _is_exact_policy_grant(
+                str(receipt.get("subject_uid") or ""),
+                current_state,
+                current_receipt,
+                policy_version,
+            )
+            for policy_version in SUPPORTED_CONSENT_POLICY_CONTRACTS
+        )
+    )
+    if (
+        receipt.get("decision") != "declined"
+        or receipt.get("policy_version") != CURRENT_POLICY_VERSION
+        or not (current_is_expected_supported or current_is_supported_successor)
+    ):
+        raise ConsentAuthorityUnavailable("ai_consent_upgrade_authority_changed")
+
+    stored_receipt = {
+        **receipt,
+        "receipt_kind": "policy_upgrade_decline",
+        "request_fingerprint": request_fingerprint,
+    }
+    if current_is_expected_v11:
+        retained_receipt = _retained_v10_receipt_for_upgrade_decline(
+            current_receipt,
+            stored_receipt,
+        )
+        retained_receipt["request_fingerprint"] = _receipt_fingerprint(retained_receipt)
+        retained_ref = user_ref.collection("ai_consent_receipts").document(str(retained_receipt["receipt_id"]))
+        retained_snapshot = retained_ref.get(transaction=transaction)
+        if retained_snapshot.exists:
+            existing_retained = retained_snapshot.to_dict()
+            if existing_retained.get("request_fingerprint") != retained_receipt["request_fingerprint"]:
+                raise ConsentIdempotencyConflict(
+                    "retained v10 request was already used with different consent metadata"
+                )
+            retained_receipt = existing_retained
+        retained_state = _consent_state_from_receipt(retained_receipt)
+        transaction.set(receipt_ref, stored_receipt)
+        if not retained_snapshot.exists:
+            transaction.set(retained_ref, retained_receipt)
+        transaction.set(
+            user_ref,
+            {"ai_consent": retained_state},
+            merge=True,
+        )
+        return stored_receipt, retained_state, retained_receipt, True
+    transaction.set(receipt_ref, stored_receipt)
+    return stored_receipt, current_state, current_receipt, True
+
+
+@transactional
+def _complete_firestore_account_deletion(
+    transaction,
+    user_ref,
+    receipt_ref,
+    request_id: str,
+    completed_at: str,
+    account_epoch_token: str,
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    user_snapshot = user_ref.get(transaction=transaction)
+    receipt_snapshot = receipt_ref.get(transaction=transaction)
+    if not user_snapshot.exists or not receipt_snapshot.exists:
+        raise ConsentAuthorityUnavailable("account deletion consent authority is incomplete")
+
+    user_data = user_snapshot.to_dict() or {}
+    current_state = dict(user_data.get("ai_consent") or {})
+    stored_receipt = receipt_snapshot.to_dict() or {}
+    if (
+        current_state.get("decision") != "deleted"
+        or stored_receipt.get("decision") != "deleted"
+        or current_state.get("receipt_id") != stored_receipt.get("receipt_id")
+        or stored_receipt.get("request_id") != request_id
+        or current_state.get("deletion_phase") not in {"pending", "completed"}
+        or stored_receipt.get("deletion_phase") not in {"pending", "completed"}
+    ):
+        raise ConsentAuthorityUnavailable("account deletion consent authority changed")
+
+    if _deletion_epoch_is_completed(current_state, stored_receipt):
+        return stored_receipt, current_state, False
+
+    account_epoch_hash = _account_epoch_hash(account_epoch_token)
+    if not account_epoch_hash:
+        raise ConsentAuthorityUnavailable("account deletion epoch was not minted")
+
+    completed_state = {
+        **current_state,
+        "deletion_phase": "completed",
+        "deletion_completed_at": completed_at,
+        "account_epoch_hash": account_epoch_hash,
+    }
+    completed_receipt = {
+        **stored_receipt,
+        "deletion_phase": "completed",
+        "deletion_completed_at": completed_at,
+        "account_epoch_token": account_epoch_token,
+        "account_epoch_hash": account_epoch_hash,
+    }
+    transaction.set(receipt_ref, completed_receipt)
+    transaction.set(user_ref, {"ai_consent": completed_state}, merge=True)
+    return completed_receipt, completed_state, True
+
+
+@transactional
+def _read_firestore_current_receipt(
+    transaction,
+    user_ref,
+) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    user_snapshot = user_ref.get(transaction=transaction)
+    if not user_snapshot.exists:
+        return None, None
+    state = dict((user_snapshot.to_dict() or {}).get("ai_consent") or {}) or None
+    receipt_id = str((state or {}).get("receipt_id") or "")
+    if not receipt_id:
+        return state, None
+    receipt_snapshot = user_ref.collection("ai_consent_receipts").document(receipt_id).get(transaction=transaction)
+    receipt = receipt_snapshot.to_dict() if receipt_snapshot.exists else None
+    return state, receipt
+
+
+class FirestoreConsentRepository:
+    @staticmethod
+    def _configured_db():
+        if _firestore_db is None:
+            raise RuntimeError("AI consent Firestore client is not configured")
+        return _firestore_db
+
+    def get_state(self, uid: str) -> Optional[dict[str, Any]]:
+        db = self._configured_db()
+        snapshot = db.collection("users").document(uid).get()
+        if not snapshot.exists:
+            return None
+        return dict((snapshot.to_dict() or {}).get("ai_consent") or {}) or None
+
+    def get_receipt(self, uid: str, receipt_id: str) -> Optional[dict[str, Any]]:
+        db = self._configured_db()
+        snapshot = db.collection("users").document(uid).collection("ai_consent_receipts").document(receipt_id).get()
+        return snapshot.to_dict() if snapshot.exists else None
+
+    def get_current(
+        self,
+        uid: str,
+    ) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+        db = self._configured_db()
+        user_ref = db.collection("users").document(uid)
+        return _read_firestore_current_receipt(db.transaction(), user_ref)
+
+    def record(
+        self,
+        uid: str,
+        receipt_id: str,
+        receipt: dict[str, Any],
+        request_fingerprint: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], bool]:
+        db = self._configured_db()
+        user_ref = db.collection("users").document(uid)
+        receipt_ref = user_ref.collection("ai_consent_receipts").document(receipt_id)
+        return _record_firestore_receipt(
+            db.transaction(),
+            user_ref,
+            receipt_ref,
+            receipt,
+            request_fingerprint,
+        )
+
+    def record_policy_upgrade_decline(
+        self,
+        uid: str,
+        receipt_id: str,
+        receipt: dict[str, Any],
+        request_fingerprint: str,
+        expected_current_receipt_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], bool]:
+        db = self._configured_db()
+        user_ref = db.collection("users").document(uid)
+        receipt_ref = user_ref.collection("ai_consent_receipts").document(receipt_id)
+        return _record_firestore_policy_upgrade_decline(
+            db.transaction(),
+            user_ref,
+            receipt_ref,
+            receipt,
+            request_fingerprint,
+            expected_current_receipt_id,
+        )
+
+    def complete_account_deletion(
+        self,
+        uid: str,
+        receipt_id: str,
+        request_id: str,
+        completed_at: str,
+        account_epoch_token: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], bool]:
+        db = self._configured_db()
+        user_ref = db.collection("users").document(uid)
+        receipt_ref = user_ref.collection("ai_consent_receipts").document(receipt_id)
+        return _complete_firestore_account_deletion(
+            db.transaction(),
+            user_ref,
+            receipt_ref,
+            request_id,
+            completed_at,
+            account_epoch_token,
+        )
+
+
+class InMemoryConsentRepository:
+    """Test repository with the same user-scoped idempotency behavior."""
+
+    def __init__(self) -> None:
+        self.states: dict[str, dict[str, Any]] = {}
+        self.receipts: dict[tuple[str, str], dict[str, Any]] = {}
+        self._lock = threading.RLock()
+
+    def get_state(self, uid: str) -> Optional[dict[str, Any]]:
+        with self._lock:
+            state = self.states.get(uid)
+            return dict(state) if state else None
+
+    def get_receipt(self, uid: str, receipt_id: str) -> Optional[dict[str, Any]]:
+        with self._lock:
+            receipt = self.receipts.get((uid, receipt_id))
+            return dict(receipt) if receipt else None
+
+    def get_current(
+        self,
+        uid: str,
+    ) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+        with self._lock:
+            state = self.states.get(uid)
+            state_copy = dict(state) if state else None
+            receipt_id = str((state_copy or {}).get("receipt_id") or "")
+            receipt = self.receipts.get((uid, receipt_id)) if receipt_id else None
+            return state_copy, dict(receipt) if receipt else None
+
+    def record(
+        self,
+        uid: str,
+        receipt_id: str,
+        receipt: dict[str, Any],
+        request_fingerprint: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], bool]:
+        with self._lock:
+            key = (uid, receipt_id)
+            current_state = self.states.get(uid) or {}
+            if current_state.get("decision") == "deleted" and receipt.get("decision") != "deleted":
+                existing = self.receipts.get(key)
+                if existing:
+                    if existing.get("request_fingerprint") != request_fingerprint:
+                        raise ConsentIdempotencyConflict("request_id was already used with different consent metadata")
+                    raise ConsentAccountDeleted("account consent authority was deleted")
+                current_receipt = self.receipts.get((uid, str(current_state.get("receipt_id") or "")))
+                if receipt.get("decision") != "granted" or not _deletion_epoch_is_completed(
+                    current_state,
+                    current_receipt,
+                ):
+                    raise ConsentAccountDeleted("account consent authority was deleted")
+                if not hmac.compare_digest(
+                    str(receipt.get("account_epoch_hash") or ""),
+                    str(current_state.get("account_epoch_hash") or ""),
+                ):
+                    raise ConsentAccountDeleted("account consent authority was deleted")
+                if not _auth_time_is_after_deletion(
+                    receipt.get("account_epoch_auth_time"),
+                    current_state.get("deletion_completed_at"),
+                ):
+                    raise ConsentAccountDeleted("fresh authentication is required after account deletion")
+            existing = self.receipts.get(key)
+            if existing:
+                if existing.get("request_fingerprint") != request_fingerprint:
+                    raise ConsentIdempotencyConflict("request_id was already used with different consent metadata")
+                return dict(existing), dict(self.states.get(uid) or {}), False
+            if receipt.get("account_epoch_hash") and current_state.get("decision") != "deleted":
+                raise ConsentAccountDeleted("account consent epoch was already consumed")
+
+            stored = {**receipt, "request_fingerprint": request_fingerprint}
+            state = {
+                key: receipt.get(key)
+                for key in (
+                    "receipt_id",
+                    "decision",
+                    "policy_version",
+                    "processor_set_hash",
+                    "processor_ids",
+                    "profile_binding_id",
+                    "scope_version",
+                    "scope_hash",
+                    "server_decided_at",
+                    "app_version",
+                    "build_number",
+                    "locale",
+                    "deletion_phase",
+                    "deletion_completed_at",
+                    "account_epoch_hash",
+                    "account_epoch_auth_time",
+                )
+            }
+            self.receipts[(uid, receipt_id)] = stored
+            self.states[uid] = state
+            return dict(stored), dict(state), True
+
+    def record_policy_upgrade_decline(
+        self,
+        uid: str,
+        receipt_id: str,
+        receipt: dict[str, Any],
+        request_fingerprint: str,
+        expected_current_receipt_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], bool]:
+        with self._lock:
+            key = (uid, receipt_id)
+            current_state = dict(self.states.get(uid) or {})
+            current_receipt_id = str(current_state.get("receipt_id") or "")
+            current_receipt = dict(self.receipts.get((uid, current_receipt_id)) or {})
+            existing = self.receipts.get(key)
+            if existing:
+                if (
+                    existing.get("request_fingerprint") != request_fingerprint
+                    or existing.get("receipt_kind") != "policy_upgrade_decline"
+                ):
+                    raise ConsentIdempotencyConflict("request_id was already used with different consent metadata")
+                if not current_receipt:
+                    raise ConsentAuthorityUnavailable("ai_consent_authority_unavailable")
+                return dict(existing), current_state, current_receipt, False
+            current_expected_policy_version = next(
+                (
+                    policy_version
+                    for policy_version in SUPPORTED_CONSENT_POLICY_CONTRACTS
+                    if current_receipt_id == expected_current_receipt_id
+                    and _is_exact_policy_grant(
+                        uid,
+                        current_state,
+                        current_receipt,
+                        policy_version,
+                    )
+                ),
+                None,
+            )
+            current_is_expected_supported = current_expected_policy_version is not None
+            current_is_expected_v11 = current_expected_policy_version == CURRENT_POLICY_VERSION
+            current_is_supported_successor = bool(
+                expected_current_receipt_id
+                and current_receipt_id != expected_current_receipt_id
+                and any(
+                    _is_exact_policy_grant(
+                        uid,
+                        current_state,
+                        current_receipt,
+                        policy_version,
+                    )
+                    for policy_version in SUPPORTED_CONSENT_POLICY_CONTRACTS
+                )
+            )
+            if (
+                receipt.get("decision") != "declined"
+                or receipt.get("policy_version") != CURRENT_POLICY_VERSION
+                or not (current_is_expected_supported or current_is_supported_successor)
+            ):
+                raise ConsentAuthorityUnavailable("ai_consent_upgrade_authority_changed")
+
+            stored = {
+                **receipt,
+                "receipt_kind": "policy_upgrade_decline",
+                "request_fingerprint": request_fingerprint,
+            }
+            self.receipts[key] = stored
+            if current_is_expected_v11:
+                retained = _retained_v10_receipt_for_upgrade_decline(
+                    current_receipt,
+                    stored,
+                )
+                retained["request_fingerprint"] = _receipt_fingerprint(retained)
+                retained_key = (uid, str(retained["receipt_id"]))
+                existing_retained = self.receipts.get(retained_key)
+                if existing_retained:
+                    if existing_retained.get("request_fingerprint") != retained["request_fingerprint"]:
+                        raise ConsentIdempotencyConflict(
+                            "retained v10 request was already used with different consent metadata"
+                        )
+                    retained = dict(existing_retained)
+                else:
+                    self.receipts[retained_key] = retained
+                retained_state = _consent_state_from_receipt(retained)
+                self.states[uid] = retained_state
+                return dict(stored), retained_state, dict(retained), True
+            return dict(stored), current_state, current_receipt, True
+
+    def complete_account_deletion(
+        self,
+        uid: str,
+        receipt_id: str,
+        request_id: str,
+        completed_at: str,
+        account_epoch_token: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], bool]:
+        with self._lock:
+            key = (uid, receipt_id)
+            current_state = dict(self.states.get(uid) or {})
+            stored_receipt = dict(self.receipts.get(key) or {})
+            if (
+                current_state.get("decision") != "deleted"
+                or stored_receipt.get("decision") != "deleted"
+                or current_state.get("receipt_id") != receipt_id
+                or stored_receipt.get("request_id") != request_id
+                or current_state.get("deletion_phase") not in {"pending", "completed"}
+                or stored_receipt.get("deletion_phase") not in {"pending", "completed"}
+            ):
+                raise ConsentAuthorityUnavailable("account deletion consent authority changed")
+            if _deletion_epoch_is_completed(current_state, stored_receipt):
+                return stored_receipt, current_state, False
+
+            account_epoch_hash = _account_epoch_hash(account_epoch_token)
+            if not account_epoch_hash:
+                raise ConsentAuthorityUnavailable("account deletion epoch was not minted")
+
+            completed_state = {
+                **current_state,
+                "deletion_phase": "completed",
+                "deletion_completed_at": completed_at,
+                "account_epoch_hash": account_epoch_hash,
+            }
+            completed_receipt = {
+                **stored_receipt,
+                "deletion_phase": "completed",
+                "deletion_completed_at": completed_at,
+                "account_epoch_token": account_epoch_token,
+                "account_epoch_hash": account_epoch_hash,
+            }
+            self.states[uid] = completed_state
+            self.receipts[key] = completed_receipt
+            return dict(completed_receipt), dict(completed_state), True
+
+
+@dataclass(frozen=True)
+class ConsentSubmission:
+    decision: ConsentDecision
+    policy_version: str
+    processor_set_hash: str
+    request_id: str
+    app_version: str
+    build_number: str
+    locale: str
+    scope_version: str = ""
+    scope_hash: str = ""
+    account_epoch_token: str = ""
+    account_epoch_auth_time: int = 0
+
+
+class AiConsentService:
+    def __init__(
+        self,
+        repository: ConsentRepository,
+        *,
+        now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    ) -> None:
+        self.repository = repository
+        self.now = now
+
+    @staticmethod
+    def policy(policy_version: str = CURRENT_POLICY_VERSION) -> dict[str, Any]:
+        contract = SUPPORTED_CONSENT_POLICY_CONTRACTS.get(policy_version)
+        if contract is None:
+            raise ConsentPolicyMismatch("unsupported consent policy version")
+        return {
+            "version": contract.version,
+            "minimum_required_version": MINIMUM_REQUIRED_POLICY_VERSION,
+            "processor_set_hash": contract.processor_set_hash,
+            "canonical_processor_set": contract.canonical_processor_set,
+            "scope_version": contract.scope_version,
+            "scope_hash": contract.scope_hash,
+            "canonical_scope": CANONICAL_SCOPE,
+            "processors": [dict(processor) for processor in PROCESSORS if processor["id"] in contract.processor_ids],
+        }
+
+    def status(
+        self,
+        uid: str,
+        *,
+        account_epoch_auth_time: int = 0,
+        requested_policy_version: str = LEGACY_POLICY_VERSION_V10,
+    ) -> dict[str, Any]:
+        try:
+            state, receipt = self.repository.get_current(uid)
+        except Exception as exc:
+            logger.warning("ai_consent_authority_unavailable error=%s", type(exc).__name__)
+            return _status_payload(
+                uid,
+                None,
+                None,
+                authority_state="unavailable",
+                requested_policy_version=requested_policy_version,
+            )
+        return _status_payload(
+            uid,
+            state,
+            receipt,
+            account_epoch_auth_time=account_epoch_auth_time,
+            requested_policy_version=requested_policy_version,
+        )
+
+    def receipt(self, uid: str, receipt_id: str) -> Optional[dict[str, Any]]:
+        try:
+            receipt = self.repository.get_receipt(uid, receipt_id)
+        except Exception as exc:
+            raise ConsentAuthorityUnavailable("ai_consent_authority_unavailable") from exc
+        if not receipt:
+            return None
+        return _public_receipt(receipt)
+
+    def _build_receipt(self, uid: str, submission: ConsentSubmission) -> dict[str, Any]:
+        grant_contract = consent_policy_contract(
+            submission.policy_version,
+            submission.processor_set_hash,
+            submission.scope_version,
+            submission.scope_hash,
+        )
+        if submission.decision == "granted" and grant_contract is None:
+            raise ConsentPolicyMismatch("grant does not match the server-required processor policy")
+
+        receipt_id = "aicr_" + hashlib.sha256(f"{uid}:{submission.request_id}".encode()).hexdigest()[:32]
+        receipt = {
+            "receipt_id": receipt_id,
+            "subject_uid": uid,
+            "decision": submission.decision,
+            "policy_version": submission.policy_version,
+            "processor_set_hash": submission.processor_set_hash,
+            "processor_ids": list(
+                (grant_contract or SUPPORTED_CONSENT_POLICY_CONTRACTS[CURRENT_POLICY_VERSION]).processor_ids
+            ),
+            "profile_binding_id": derive_profile_binding_id(account_uid=uid, profile_uid=uid),
+            "scope_version": submission.scope_version,
+            "scope_hash": submission.scope_hash,
+            "request_id": submission.request_id,
+            "server_decided_at": self.now().astimezone(timezone.utc).isoformat(),
+            "app_version": submission.app_version,
+            "build_number": submission.build_number,
+            "locale": submission.locale,
+        }
+        if submission.account_epoch_token:
+            receipt["account_epoch_hash"] = _account_epoch_hash(submission.account_epoch_token)
+            receipt["account_epoch_auth_time"] = submission.account_epoch_auth_time
+        if submission.decision == "deleted":
+            receipt["deletion_phase"] = "pending"
+        return receipt
+
+    def submit(self, uid: str, submission: ConsentSubmission) -> dict[str, Any]:
+        receipt = self._build_receipt(uid, submission)
+        receipt_id = str(receipt["receipt_id"])
+        fingerprint = _receipt_fingerprint(receipt)
+        try:
+            stored_receipt, state, created = self.repository.record(uid, receipt_id, receipt, fingerprint)
+        except ConsentAccountDeleted:
+            raise
+        except ConsentIdempotencyConflict:
+            raise
+        except Exception as exc:
+            logger.warning("ai_consent_record_failed error=%s", type(exc).__name__)
+            raise ConsentAuthorityUnavailable("ai_consent_authority_unavailable") from exc
+        payload = _status_payload(uid, state, stored_receipt)
+        payload["receipt"] = _public_receipt(stored_receipt)
+        payload["receipt_created"] = created
+        return payload
+
+    def record_policy_upgrade_decline(
+        self,
+        uid: str,
+        submission: ConsentSubmission,
+        *,
+        expected_current_receipt_id: str,
+    ) -> dict[str, Any]:
+        if not is_exact_v11_upgrade_decline(submission):
+            raise ConsentPolicyMismatch("upgrade decline does not match the current processor policy")
+        receipt = self._build_receipt(uid, submission)
+        receipt_id = str(receipt["receipt_id"])
+        fingerprint = _receipt_fingerprint(receipt)
+        try:
+            decline_receipt, state, current_receipt, created = self.repository.record_policy_upgrade_decline(
+                uid,
+                receipt_id,
+                receipt,
+                fingerprint,
+                expected_current_receipt_id,
+            )
+        except (ConsentAuthorityUnavailable, ConsentIdempotencyConflict):
+            raise
+        except Exception as exc:
+            logger.warning("ai_consent_upgrade_decline_record_failed error=%s", type(exc).__name__)
+            raise ConsentAuthorityUnavailable("ai_consent_authority_unavailable") from exc
+        payload = _status_payload(uid, state, current_receipt)
+        payload["receipt"] = _public_receipt(decline_receipt)
+        payload["receipt_created"] = created
+        payload["upgrade_declined"] = True
+        return payload
+
+    def is_policy_upgrade_decline_replay(
+        self,
+        uid: str,
+        submission: ConsentSubmission,
+    ) -> bool:
+        if not is_exact_v11_upgrade_decline(submission):
+            return False
+        receipt = self._build_receipt(uid, submission)
+        try:
+            existing = self.repository.get_receipt(uid, str(receipt["receipt_id"]))
+        except Exception as exc:
+            raise ConsentAuthorityUnavailable("ai_consent_authority_unavailable") from exc
+        return bool(
+            existing
+            and existing.get("receipt_kind") == "policy_upgrade_decline"
+            and existing.get("request_fingerprint") == _receipt_fingerprint(receipt)
+        )
+
+    def record_account_deletion(self, uid: str, *, request_id: str) -> dict[str, Any]:
+        """Persist a server-only pending tombstone before account unlink."""
+        return self.submit(
+            uid,
+            ConsentSubmission(
+                decision="deleted",
+                policy_version=CURRENT_POLICY_VERSION,
+                processor_set_hash=CURRENT_PROCESSOR_SET_HASH,
+                scope_version=CURRENT_SCOPE_VERSION,
+                scope_hash=CURRENT_SCOPE_HASH,
+                request_id=request_id,
+                app_version="server",
+                build_number="account-deletion",
+                locale="server",
+            ),
+        )
+
+    def complete_account_deletion(self, uid: str, *, request_id: str) -> dict[str, Any]:
+        """Complete the exact deletion epoch after PostgreSQL unlink succeeds."""
+        receipt_id = "aicr_" + hashlib.sha256(f"{uid}:{request_id}".encode()).hexdigest()[:32]
+        completed_at = self.now().astimezone(timezone.utc).isoformat()
+        account_epoch_token = secrets.token_urlsafe(32)
+        try:
+            receipt, state, completed = self.repository.complete_account_deletion(
+                uid,
+                receipt_id,
+                request_id,
+                completed_at,
+                account_epoch_token,
+            )
+        except ConsentAuthorityUnavailable:
+            raise
+        except Exception as exc:
+            raise ConsentAuthorityUnavailable("ai_consent_authority_unavailable") from exc
+        return {
+            "receipt": _public_receipt(receipt),
+            "consent": _public_consent_state(state),
+            "deletion_completed": completed,
+            "deletion_completed_at": str(state.get("deletion_completed_at") or completed_at),
+        }
+
+
+def _public_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: receipt.get(key)
+        for key in (
+            "receipt_id",
+            "subject_uid",
+            "decision",
+            "policy_version",
+            "processor_set_hash",
+            "processor_ids",
+            "profile_binding_id",
+            "scope_version",
+            "scope_hash",
+            "server_decided_at",
+            "app_version",
+            "build_number",
+            "locale",
+            "receipt_kind",
+        )
+    }
+
+
+def _public_consent_state(state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in state.items()
+        if key not in {"account_epoch_token", "account_epoch_hash", "account_epoch_auth_time"}
+    }
+
+
+def _is_current_grant(
+    uid: str,
+    state: Optional[dict[str, Any]],
+    receipt: Optional[dict[str, Any]],
+) -> bool:
+    return _authority_state(uid, state, receipt) == "authorized"
+
+
+def _policy_meets_minimum(policy_version: Any) -> bool:
+    prefix = "ai-data-processors-v"
+
+    def generation(value: Any) -> Optional[int]:
+        normalized = str(value or "")
+        if normalized.startswith(prefix) and normalized[len(prefix) :].isdigit():
+            return int(normalized[len(prefix) :])
+        try:
+            return CONSENT_POLICY_VERSION_ORDER.index(normalized)
+        except ValueError:
+            return None
+
+    accepted_generation = generation(policy_version)
+    minimum_generation = generation(MINIMUM_REQUIRED_POLICY_VERSION)
+    return (
+        accepted_generation is not None and minimum_generation is not None and accepted_generation >= minimum_generation
+    )
+
+
+def _authority_state(
+    uid: str,
+    state: Optional[dict[str, Any]],
+    receipt: Optional[dict[str, Any]],
+) -> ConsentAuthorityState:
+    if not state and not receipt:
+        return "not_accepted"
+    if not state or not receipt:
+        return "unavailable"
+
+    exact_fields = (
+        "receipt_id",
+        "decision",
+        "policy_version",
+        "processor_set_hash",
+        "processor_ids",
+        "profile_binding_id",
+        "scope_version",
+        "scope_hash",
+        "server_decided_at",
+        "app_version",
+        "build_number",
+        "locale",
+        "deletion_phase",
+        "deletion_completed_at",
+        "account_epoch_hash",
+        "account_epoch_auth_time",
+    )
+    if (
+        receipt.get("subject_uid") != uid
+        or not all(receipt.get(field) == state.get(field) for field in exact_fields)
+        or not state.get("profile_binding_id")
+        or not _valid_server_timestamp(state.get("server_decided_at"))
+        or not state.get("receipt_id")
+    ):
+        return "unavailable"
+
+    decision = state.get("decision")
+    if decision == "declined":
+        return "declined"
+    if decision == "revoked":
+        return "revoked"
+    if decision == "deleted":
+        return "deleted"
+    if decision != "granted":
+        return "unavailable"
+    if not _policy_meets_minimum(state.get("policy_version")):
+        return "reconsent_required"
+    return "authorized"
+
+
+def _status_payload(
+    uid: str,
+    state: Optional[dict[str, Any]],
+    receipt: Optional[dict[str, Any]],
+    *,
+    authority_state: Optional[ConsentAuthorityState] = None,
+    account_epoch_auth_time: int = 0,
+    requested_policy_version: str = LEGACY_POLICY_VERSION_V10,
+) -> dict[str, Any]:
+    resolved_authority_state = authority_state or _authority_state(uid, state, receipt)
+    stored_policy_version = str((state or {}).get("policy_version") or "")
+    response_policy_version = (
+        stored_policy_version
+        if stored_policy_version in SUPPORTED_CONSENT_POLICY_CONTRACTS
+        else requested_policy_version
+    )
+    if response_policy_version not in SUPPORTED_CONSENT_POLICY_CONTRACTS:
+        response_policy_version = LEGACY_POLICY_VERSION_V10
+    payload = {
+        "subject_uid": uid,
+        "authorized": resolved_authority_state == "authorized",
+        "authority_state": resolved_authority_state,
+        "retryable": resolved_authority_state == "unavailable",
+        "minimum_required_policy_version": MINIMUM_REQUIRED_POLICY_VERSION,
+        "enforcement_required": ai_consent_enforcement_required(uid),
+        "policy": AiConsentService.policy(response_policy_version),
+        "consent": _public_consent_state(state) if state else {"decision": "not_recorded", "receipt_id": None},
+        "account_deletion": {**ACCOUNT_DELETION_CONTRACT, "status": "not_requested"},
+    }
+    if (
+        state
+        and _deletion_epoch_is_completed(state, receipt)
+        and _auth_time_is_after_deletion(account_epoch_auth_time, state.get("deletion_completed_at"))
+    ):
+        payload["account_epoch_token"] = str(receipt["account_epoch_token"])
+    return payload
+
+
+_repository: ConsentRepository = FirestoreConsentRepository()
+
+AI_CONSENT_REQUIRED_CODE = "ai_consent_required"
+AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE = "ai_consent_authority_unavailable"
+AI_CONSENT_WEBSOCKET_CLOSE_CODE = 4403
+AI_CONSENT_WEBSOCKET_RETRY_CLOSE_CODE = 1013
+
+
+class AiConsentHTTPException(HTTPException):
+    """Consent rejection rendered without FastAPI's nested detail envelope."""
+
+
+@dataclass(frozen=True)
+class AiConsentEgressDecision:
+    subject_uid: str
+    authorized: bool
+    typesafe_egress_authorized: bool
+
+
+async def ai_consent_http_exception_handler(_request: Any, exc: AiConsentHTTPException) -> JSONResponse:
+    detail = exc.detail if isinstance(exc.detail, dict) else {"code": str(exc.detail)}
+    return JSONResponse(status_code=exc.status_code, content=detail, headers=exc.headers)
+
+
+def get_ai_consent_service() -> AiConsentService:
+    return AiConsentService(_repository)
+
+
+def ai_consent_enforcement_required(_uid: str) -> bool:
+    return True
+
+
+def ai_consent_global_enforcement_enabled() -> bool:
+    return True
+
+
+def managed_cloud_real_data_enabled(uid: str) -> bool:
+    enabled = os.getenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED", "false").strip().lower() == "true"
+    enabled_uids = {
+        value.strip()
+        for value in os.getenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", "").split(",")
+        if value.strip()
+    }
+    return enabled or uid in enabled_uids
+
+
+def assert_managed_cloud_consent(
+    account_uid: str,
+    *,
+    profile_uid: str,
+    runtime_provider: str,
+    model_route: str,
+    memory_provider: str,
+    photon_scope: str,
+) -> str:
+    """Return the immutable receipt id authorizing one exact egress contract."""
+    if not managed_cloud_real_data_enabled(account_uid):
+        raise ManagedCloudConsentError("managed_cloud_real_data_disabled")
+    if (
+        runtime_provider != MANAGED_CLOUD_RUNTIME_PROVIDER
+        or model_route != MANAGED_CLOUD_MODEL_ROUTE
+        or memory_provider != MANAGED_CLOUD_MEMORY_PROVIDER
+        or photon_scope != MANAGED_CLOUD_PHOTON_SCOPE
+    ):
+        raise ManagedCloudConsentError("managed_cloud_consent_scope_drift")
+
+    expected_profile_binding_id = derive_profile_binding_id(
+        account_uid=account_uid,
+        profile_uid=profile_uid,
+    )
+    status = get_ai_consent_service().status(account_uid)
+    state = dict(status.get("consent") or {})
+    if status.get("authority_state") == "unavailable":
+        raise ManagedCloudConsentError("managed_cloud_consent_authority_unavailable", retryable=True)
+    if status.get("authorized") is not True or state.get("decision") != "granted":
+        raise ManagedCloudConsentError("managed_cloud_consent_required")
+    if state.get("profile_binding_id") != expected_profile_binding_id or not _valid_server_timestamp(
+        state.get("server_decided_at")
+    ):
+        raise ManagedCloudConsentError("managed_cloud_consent_stale")
+    receipt_id = str(state.get("receipt_id") or "")
+    if not receipt_id:
+        raise ManagedCloudConsentError("managed_cloud_consent_stale")
+    return receipt_id
+
+
+def resolve_ai_consent_egress_decision(uid: str) -> AiConsentEgressDecision:
+    """Resolve generic and TypeSafe egress authority from one status snapshot."""
+    try:
+        status = get_ai_consent_service().status(uid)
+    except Exception as exc:
+        raise AiConsentHTTPException(
+            status_code=503,
+            detail={
+                "code": AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE,
+                "retryable": True,
+            },
+        ) from exc
+
+    authority_state = str(status.get("authority_state") or "unavailable")
+    if authority_state == "unavailable":
+        raise AiConsentHTTPException(
+            status_code=503,
+            detail={
+                "code": AI_CONSENT_AUTHORITY_UNAVAILABLE_CODE,
+                "retryable": True,
+            },
+        )
+    if status.get("authorized") is not True:
+        raise AiConsentHTTPException(
+            status_code=403,
+            detail={"code": AI_CONSENT_REQUIRED_CODE},
+        )
+
+    consent = dict(status.get("consent") or {})
+    processor_ids = consent.get("processor_ids")
+    typesafe_egress_authorized = (
+        consent.get("decision") == "granted"
+        and consent_policy_contract(
+            consent.get("policy_version"),
+            consent.get("processor_set_hash"),
+            consent.get("scope_version"),
+            consent.get("scope_hash"),
+        )
+        == SUPPORTED_CONSENT_POLICY_CONTRACTS[TYPESAFE_POLICY_VERSION]
+        and consent.get("policy_version") == TYPESAFE_POLICY_VERSION
+        and consent.get("processor_set_hash") == TYPESAFE_PROCESSOR_SET_HASH
+        and isinstance(processor_ids, list)
+        and TYPESAFE_PROCESSOR_ID in processor_ids
+    )
+    return AiConsentEgressDecision(
+        subject_uid=uid,
+        authorized=True,
+        typesafe_egress_authorized=typesafe_egress_authorized,
+    )
+
+
+def assert_current_ai_consent(uid: str) -> str:
+    return resolve_ai_consent_egress_decision(uid).subject_uid
+
+
+def assert_typesafe_egress_consent(uid: str) -> str:
+    """Authorize TypeSafe/Jev transcript egress only under the exact v11 grant."""
+    decision = resolve_ai_consent_egress_decision(uid)
+    if decision.typesafe_egress_authorized:
+        return decision.subject_uid
+    raise AiConsentHTTPException(
+        status_code=403,
+        detail={"code": AI_CONSENT_REQUIRED_CODE},
+    )
+
+
+def require_current_ai_consent(
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+) -> str:
+    return assert_current_ai_consent(authenticated_uid)
+
+
+def require_current_ai_consent_or_internal_tts(
+    authorization: Optional[str] = Header(default=None),
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Ella-Internal-Token"),
+    x_subject_uid: Optional[str] = Header(default=None, alias="X-Ella-Subject-Uid"),
+    x_app_version: Optional[str] = Header(default=None, alias="X-App-Version"),
+    x_ella_app_build: Optional[str] = Header(default=None, alias="X-Ella-App-Build"),
+    x_ella_client_version: Optional[str] = Header(default=None, alias="X-Ella-Client-Version"),
+) -> str:
+    configured_internal_token = os.getenv("ELLA_INTERNAL_VOICE_TTS_TOKEN", "")
+    if (
+        configured_internal_token
+        and x_internal_token
+        and hmac.compare_digest(configured_internal_token, x_internal_token)
+    ):
+        subject_uid = (x_subject_uid or "").strip()
+        if not subject_uid:
+            raise HTTPException(status_code=400, detail={"code": "ai_consent_subject_required"})
+        return assert_current_ai_consent(subject_uid)
+    if authorization:
+        return assert_current_ai_consent(
+            get_exact_firebase_uid(
+                authorization,
+                x_app_version,
+                x_ella_app_build,
+                x_ella_client_version,
+            )
+        )
+    raise HTTPException(status_code=401, detail={"code": "authorization_required"})
+
+
+def resolve_processor(provider_alias: str) -> Optional[dict[str, Any]]:
+    normalized = provider_alias.strip().lower()
+    for processor in PROCESSORS:
+        if normalized in processor["provider_aliases"]:
+            return dict(processor)
+    return None

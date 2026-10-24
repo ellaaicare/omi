@@ -1,0 +1,1777 @@
+# Ella Scanner Integration
+#
+# Sends real-time transcript segments to n8n scanner for urgency detection.
+# Fire-and-forget with short timeout - doesn't block transcription flow.
+
+import asyncio
+import hashlib
+import json
+import os
+import re
+import threading
+import time
+import uuid
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from typing import Callable, Iterator, List, Optional
+
+import requests
+
+from database.ella_postgres import create_dedicated_ella_postgres_pool
+from database.honcho_attestation import authority_credential
+from ella.services import guardian_echo_classifier, guardian_playback_ledger
+from utils.conversations import spoken_diagnostic
+
+from .config import ELLA_CONFIG
+
+GUARDIAN_TRACE_LOG_URL = os.getenv(
+    "ELLA_GUARDIAN_TRACE_LOG_URL",
+    "http://127.0.0.1:8000/v1/ella/guardian/trace/log",
+)
+ELLA_POSTGRES_HOST = os.getenv("ELLA_POSTGRES_HOST", "127.0.0.1")
+ELLA_POSTGRES_PORT = int(os.getenv("ELLA_POSTGRES_PORT", "5433"))
+ELLA_POSTGRES_USER = os.getenv("ELLA_POSTGRES_USER", "postgres")
+ELLA_POSTGRES_PASSWORD = authority_credential("ELLA_POSTGRES_PASSWORD", default="postgres", strip=False)
+ELLA_POSTGRES_DATABASE = os.getenv("ELLA_POSTGRES_DATABASE", "ella_ai")
+GUARDIAN_ENQUEUE_URL = os.getenv("ELLA_GUARDIAN_ENQUEUE_URL", "http://127.0.0.1:8000/v1/ella/guardian/enqueue")
+GUARDIAN_WEBHOOK_KEY = authority_credential("GUARDIAN_WEBHOOK_KEY", strip=False)
+SCANNER_WEBHOOK_KEY = authority_credential("ELLA_SCANNER_WEBHOOK_KEY", strip=False)
+SCANNER_WEBHOOK_KEY_HEADER = "X-Ella-Scanner-Webhook-Key"
+GUARDIAN_WAKE_ACK_AUDIO_URL = os.getenv(
+    "ELLA_GUARDIAN_WAKE_ACK_AUDIO_URL",
+    "https://ella-ai-care.com/audio/system/wake_ack_pulse.mp3",
+)
+GUARDIAN_WAKE_ACK_TIMEOUT_S = float(os.getenv("ELLA_GUARDIAN_WAKE_ACK_TIMEOUT_S", "2.0"))
+GUARDIAN_WAKE_ACK_DIRECT_DB = os.getenv("ELLA_GUARDIAN_WAKE_ACK_DIRECT_DB", "true").lower() == "true"
+GUARDIAN_TRACE_LOG_TIMEOUT_S = min(
+    5.0,
+    max(0.25, float(os.getenv("ELLA_GUARDIAN_TRACE_LOG_TIMEOUT_S", "2.0"))),
+)
+WAKE_WORD_PREFIX_MAX_WORDS = 4
+WAKE_WORD_PENDING_WINDOW_S = float(os.getenv("ELLA_WAKE_WORD_PENDING_WINDOW_S", "12.0"))
+SCANNER_CONTEXT_WINDOW_S = float(os.getenv("ELLA_SCANNER_CONTEXT_WINDOW_S", "12.0"))
+# Lookback window for selecting the owner's own recently-PLAYED ledger
+# candidates to attach to the scanner context. This is a time/route
+# proximity SELECTION only — it never suppresses anything itself. Whether
+# any selected candidate is actually being re-heard is a semantic judgment
+# made downstream (the typed echo classifier / n8n Echo Guard node).
+GUARDIAN_PLAYBACK_CANDIDATE_WINDOW_SECONDS = int(os.getenv("ELLA_GUARDIAN_ECHO_SUPPRESSION_SECONDS", "45"))
+GUARDIAN_PLAYBACK_CANDIDATE_LIMIT = int(os.getenv("ELLA_GUARDIAN_PLAYBACK_CANDIDATE_LIMIT", "5"))
+GUARDIAN_PLAYBACK_CANDIDATE_LOOKUP_TIMEOUT_SECONDS = float(
+    os.getenv("ELLA_GUARDIAN_PLAYBACK_CANDIDATE_LOOKUP_TIMEOUT_SECONDS", "2.0")
+)
+# Overall wall-clock budget for the backend's own echo-source judgment call,
+# bounding the classifier's internal per-provider timeout/fallback chain so a
+# slow or hung provider can never hold up scanner dispatch — a timeout here
+# fails open exactly like every other classifier failure mode.
+GUARDIAN_ECHO_CLASSIFICATION_TIMEOUT_SECONDS = float(
+    os.getenv("ELLA_GUARDIAN_ECHO_CLASSIFICATION_TIMEOUT_SECONDS", "4.5")
+)
+SCANNER_AMBIENT_BATCHING_ENABLED = os.getenv("ELLA_SCANNER_AMBIENT_BATCHING_ENABLED", "true").lower() == "true"
+SCANNER_AMBIENT_BATCH_SECONDS = float(os.getenv("ELLA_SCANNER_AMBIENT_BATCH_SECONDS", "10.0"))
+SCANNER_AMBIENT_BATCH_WORDS = int(os.getenv("ELLA_SCANNER_AMBIENT_BATCH_WORDS", "70"))
+SCANNER_AMBIENT_BATCH_MAX_WORDS = int(os.getenv("ELLA_SCANNER_AMBIENT_BATCH_MAX_WORDS", "180"))
+SCANNER_RATE_LIMIT_DEFAULT_BACKOFF_S = float(os.getenv("ELLA_SCANNER_RATE_LIMIT_DEFAULT_BACKOFF_S", "15.0"))
+
+
+def _post_scanner_webhook(url: str, *, json: dict, headers: dict, timeout: float):
+    """Send scanner data without ambient proxy or redirect authority."""
+    with requests.Session() as session:
+        session.trust_env = False
+        response = session.post(
+            url,
+            json=json,
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=False,
+        )
+    if 300 <= response.status_code < 400:
+        raise requests.RequestException(
+            f"scanner webhook redirect rejected: status={response.status_code}",
+            response=response,
+        )
+    return response
+
+
+WAKE_WORD_ALIASES = (
+    "hey ella",
+    "ella",
+    "ela",
+    "ellah",
+    "ellaa",
+    "hey ela",
+    "hey el",
+    "hey ell",
+    "hey elle",
+    "hey eleve",
+    "hey eleven",
+    "ask ella",
+    "ask ela",
+    "tell ella",
+    "tell ela",
+)
+
+WAKE_WORD_QUESTION_STARTERS = (
+    "what",
+    "can",
+    "could",
+    "would",
+    "do",
+    "did",
+    "does",
+    "tell",
+    "check",
+    "find",
+    "search",
+    "remind",
+    "help",
+    "how",
+    "why",
+    "when",
+    "where",
+    "who",
+    "is",
+    "are",
+    "was",
+    "were",
+)
+
+_EMERGENCY_PATTERN = re.compile(
+    r"\b("
+    r"911|emergency|urgent|ambulance|paramedic|"
+    r"help me|need help|call for help|"
+    r"can(?:not|['’]t|t) breathe|chest pain|heart attack|stroke|seizure|"
+    r"fell|fallen|falling|bleeding|choking|overdose|"
+    r"suicidal|kill myself|hurt myself|fire|break in|burglar"
+    r")\b",
+    re.IGNORECASE,
+)
+_CANNOT_PHRASE = r"(?:can\s*not|cannot|can['’]t)"
+_CURRENT_PERSON_SUBJECT = (
+    r"(?:i|we|you|he|she|they|someone|somebody|"
+    r"my\s+(?:husband|wife|partner|mother|mom|father|dad|parent|son|daughter|child|"
+    r"brother|sister|friend|roommate|caregiver)|"
+    r"(?:mom|mother|dad|father|husband|wife|partner|son|daughter|child|brother|sister))"
+)
+_CURRENT_PERSON_COPULA = r"(?:\s+(?:am|is|are)|\s*['’](?:m|s|re))"
+_CREDIBLE_EMERGENCY_PATTERNS = (
+    (
+        "emergency_services",
+        re.compile(
+            r"^\s*(?:(?:please\s+)?(?:someone\s+)?|someone\s+please\s+)" r"call\s+(?:911|an?\s+ambulance)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "breathing",
+        re.compile(
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT})\s+{_CANNOT_PHRASE}\s+breathe\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "fall",
+        re.compile(
+            r"^\s*(?:i\s+fell\s+down|(?:i\s+fell|i\s+have\s+fallen|i['’]ve\s+fallen)\s+and\s+"
+            r"(?:(?:i(?:\s+am|['’]m)?|am)\s+)?(?:hurt|injured|bleeding|unable\s+to\s+move|need\s+help|"
+            rf"{_CANNOT_PHRASE}\s+get\s+up))\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("immobile", re.compile(rf"^\s*i\s+{_CANNOT_PHRASE}\s+get\s+up\b", re.IGNORECASE)),
+    (
+        "chest_pain",
+        re.compile(
+            rf"^\s*(?:i\s+have\s+chest\s+pain|"
+            rf"(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+having\s+chest\s+pain|"
+            r"my\s+chest\s+hurts)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "heart_attack",
+        re.compile(
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+having\s+(?:a\s+)?heart\s+attack\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "stroke",
+        re.compile(
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+having\s+(?:a\s+)?stroke\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "choking",
+        re.compile(
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+choking\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "overdose",
+        re.compile(
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+overdosing\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "self_harm",
+        re.compile(
+            r"^\s*(?:i(?:\s+am|\s*['’]m)\s+(?:suicidal|going\s+to\s+(?:kill|hurt)\s+myself)|"
+            r"i\s+(?:want|plan|intend)\s+to\s+(?:kill|hurt)\s+myself)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "fire",
+        re.compile(
+            r"^\s*(?:there\s+is\s+(?:a\s+)?fire|(?:my|the)\s+(?:house|home)\s+is\s+on\s+fire|"
+            r"(?:a\s+)?fire\s+(?:in|inside)\s+(?:my|the)\s+(?:house|home)|"
+            r"smoke\s+(?:in|inside)\s+(?:my|the)\s+(?:house|home))\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "seizure",
+        re.compile(
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+having\s+(?:a\s+)?seizure\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "severe_bleeding",
+        re.compile(
+            rf"^\s*(?:{_CURRENT_PERSON_SUBJECT}){_CURRENT_PERSON_COPULA}\s+bleeding\s+out\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "intruder",
+        re.compile(
+            r"^\s*(?:there\s+is\s+(?:an?\s+)?intruder(?:\s+(?:in|inside)\s+(?:my|the)\s+(?:house|home))?|"
+            r"(?:an?\s+)?intruder\s+is\s+(?:in|inside)\s+"
+            r"(?:my|the)\s+(?:house|home))\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
+_CREDIBLE_HELP_PATTERN = re.compile(
+    r"^\s*(?:please\s+)?(?:help\s+me|i\s+need\s+help)(?:\s+(?:now|please|right\s+now))?[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_NEGATED_CURRENT_SUBJECT_PATTERN = re.compile(
+    r"^\s*(?:no\s+(?:one|body|person)|nobody|none(?:\s+of\s+(?:them|us|you))?|"
+    r"not\s+(?:anyone|anybody)|neither(?:\s+of\s+(?:them|us|you))?)\b",
+    re.IGNORECASE,
+)
+_CONTEXTUAL_REPORTED_SPEECH_SUFFIX = re.compile(
+    (
+        r"\b(?:said|says|quote(?:s|d)?|reported|reports|"
+        r"told\s+(?:me|us|you|him|her|them)|heard|read)(?:\s+that)?\s*[.!?,;:]*\s*$"
+    ),
+    re.IGNORECASE,
+)
+_CREDIBLE_WAKE_PREFIX = re.compile(
+    r"^\s*(?:hey\s+(?:ella|ela|ellah|ellaa|el|ell|elle|eleve|eleven)\b[\s,;:!?-]*|"
+    r"(?:ella|ela|ellah|ellaa)\b\s*[,;:!?-]+\s*)",
+    re.IGNORECASE,
+)
+_CREDIBLE_EMERGENCY_TAIL = re.compile(
+    r"^\s*[,;:!?-]*\s*(?:(?:right\s+)?now|today|tonight|(?:please\s+)?help(?:\s+me)?|"
+    r"(?:and\s+)?(?:please\s+)?call\s+(?:911|an?\s+ambulance)(?:\s+(?:right\s+)?now)?|"
+    r"and\s+(?:i\s+)?need\s+(?:help|an?\s+ambulance)|"
+    rf"and\s+(?:i\s+)?{_CANNOT_PHRASE}\s+breathe|please)?\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_DURATION_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)(?P<unit>ms|s|m|h)")
+_SCANNER_BATCHES: dict[tuple[str, str, str, str, str], dict] = {}
+_SCANNER_RATE_LIMIT_UNTIL = {
+    "global": 0.0,
+    "users": {},
+}
+_SCANNER_STATE_LOCK = threading.Lock()
+_GUARDIAN_OFF_MODES = {"", "off", "none", "disabled", "null", "guardian_off"}
+_GUARDIAN_ACTIVE_MODES = {
+    "active_support",
+    "emergency_only",
+    "memory_support",
+    "maximum_awareness",
+    "cyborg",
+    "chatbot",
+    "demo",
+}
+_GUARDIAN_MODE_UNSET = object()
+
+
+def _trace_id_for(conversation_id: str) -> str:
+    """Use the conversation id as the cross-service guardian trace id."""
+    trace_id = str(conversation_id or "").strip()
+    if trace_id and trace_id.lower() != "unknown":
+        return trace_id
+    return f"scanner-{int(time.time() * 1000)}"
+
+
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())).strip()
+
+
+def _normalize_guardian_mode(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in _GUARDIAN_OFF_MODES:
+        return "off"
+    if normalized in {"active", "support"}:
+        return "active_support"
+    if normalized in {"emergency", "alert", "alerts_only"}:
+        return "emergency_only"
+    if normalized in {"memory"}:
+        return "memory_support"
+    if normalized in {"maximum", "max_awareness", "max"}:
+        return "maximum_awareness"
+    if normalized in {"chat"}:
+        return "chatbot"
+    return normalized
+
+
+def _word_count(text: str) -> int:
+    return len(_normalize_text(text).split())
+
+
+async def _fetch_playback_ledger_candidates(uid: str, *, window_seconds: int, limit: int) -> list[dict]:
+    pool = await _get_candidate_lookup_pool()
+    candidates = await guardian_playback_ledger.get_played_candidates(
+        pool,
+        uid,
+        window_seconds=window_seconds,
+        limit=limit,
+    )
+    return [candidate.to_classifier_candidate() for candidate in candidates]
+
+
+# `select_playback_ledger_candidates` is called synchronously from the sync
+# scanner send path, which itself runs inside a FastAPI worker thread
+# (`run_in_threadpool`) — never the app's own main event loop. An
+# `asyncio.run(...)` per call would spin up (and tear down) a brand-new
+# event loop every time, but asyncpg pools are bound to the loop that
+# created them: the second call would either reuse a pool whose connections
+# belong to an already-closed loop ("Event loop is closed" /
+# "another operation is in progress"), raise immediately if called from a
+# thread that already has a running loop, or race other callers doing the
+# same thing concurrently. Route every lookup through one dedicated,
+# long-lived background loop/thread instead, with its own pool independent
+# of the shared `database.ella_postgres` singleton (which stays reserved
+# for the app's main event loop) — that pool is then only ever touched from
+# the one loop that owns it, however many threads or loops call in.
+_candidate_loop: Optional[asyncio.AbstractEventLoop] = None
+_candidate_loop_lock = threading.Lock()
+_candidate_pool: Optional["asyncpg.Pool"] = None
+_candidate_pool_lock: Optional[asyncio.Lock] = None
+
+
+def _ensure_candidate_loop() -> asyncio.AbstractEventLoop:
+    global _candidate_loop
+    with _candidate_loop_lock:
+        if _candidate_loop is None or _candidate_loop.is_closed():
+            loop = asyncio.new_event_loop()
+            threading.Thread(
+                target=loop.run_forever,
+                name="guardian-playback-candidate-loop",
+                daemon=True,
+            ).start()
+            _candidate_loop = loop
+        return _candidate_loop
+
+
+async def _get_candidate_lookup_pool():
+    # Only ever awaited on `_candidate_loop`, so this lock and the pool it
+    # guards are both local to that single loop/thread.
+    global _candidate_pool, _candidate_pool_lock
+    if _candidate_pool_lock is None:
+        _candidate_pool_lock = asyncio.Lock()
+    async with _candidate_pool_lock:
+        if _candidate_pool is None:
+            _candidate_pool = await create_dedicated_ella_postgres_pool(min_size=1, max_size=5)
+        return _candidate_pool
+
+
+def select_playback_ledger_candidates(
+    uid: str,
+    *,
+    window_seconds: int = GUARDIAN_PLAYBACK_CANDIDATE_WINDOW_SECONDS,
+    limit: int = GUARDIAN_PLAYBACK_CANDIDATE_LIMIT,
+) -> list[dict]:
+    """Owner-scoped SELECTION of recently-PLAYED ledger candidates.
+
+    Time/route proximity only decides which of the owner's own played
+    Whispers are worth attaching to the scanner context — it never decides
+    whether the current transcript IS one of them. That is a semantic
+    judgment made downstream by the typed echo classifier (or the n8n Echo
+    Guard node), never here and never by text/regex matching.
+
+    Best-effort: any lookup failure (ledger unavailable, DB error, timeout)
+    returns an empty candidate list rather than raising, so a ledger outage
+    can never block scanner dispatch. Safe to call repeatedly from the sync
+    scanner path, from any worker thread, and from inside a caller's own
+    running event loop.
+    """
+    try:
+        loop = _ensure_candidate_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            _fetch_playback_ledger_candidates(uid, window_seconds=window_seconds, limit=limit),
+            loop,
+        )
+        return future.result(timeout=GUARDIAN_PLAYBACK_CANDIDATE_LOOKUP_TIMEOUT_SECONDS)
+    except Exception as exc:
+        # Content-free: never log the exception's own text, which for a
+        # query/driver error can echo back parameters or connection details.
+        print(
+            f"📡 Scanner playback ledger candidate lookup failed uid={uid} reason={type(exc).__name__}",
+            flush=True,
+        )
+        return []
+
+
+def _combined_segment_text(segments: List[dict]) -> str:
+    return " ".join((segment.get("text") or "").strip() for segment in segments if segment.get("text")).strip()
+
+
+async def _classify_playback_source_with_timeout(
+    transcript: str, candidates: list[dict], *, uid: str
+) -> Optional[guardian_echo_classifier.EchoClassification]:
+    try:
+        return await asyncio.wait_for(
+            guardian_echo_classifier.classify_playback_source(transcript, candidates, uid=uid),
+            timeout=GUARDIAN_ECHO_CLASSIFICATION_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return None
+
+
+def _classify_playback_source_for_dispatch(
+    transcript: str, candidates: list[dict], *, uid: str
+) -> Optional[guardian_echo_classifier.EchoClassification]:
+    """Backend-executable echo-source judgment, run before scanner dispatch.
+
+    Shares the same dedicated background loop/thread as
+    `select_playback_ledger_candidates` rather than a fresh `asyncio.run()`
+    per call, so this is safe to call from the sync scanner path, a worker
+    thread, or a caller whose own thread already has a running event loop.
+
+    Returns None on any failure (timeout, unexpected error) — callers must
+    treat None exactly like a fail-open classification and dispatch the
+    original transcript window unchanged.
+    """
+    try:
+        loop = _ensure_candidate_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            _classify_playback_source_with_timeout(transcript, candidates, uid=uid),
+            loop,
+        )
+        return future.result(timeout=GUARDIAN_ECHO_CLASSIFICATION_TIMEOUT_SECONDS + 1.0)
+    except Exception:
+        return None
+
+
+_SAFE_PARTIAL_SEGMENT_KEYS = ("speaker", "start", "end")
+
+
+def _extract_live_span_text(text: str, live_spans: list[str]) -> str:
+    """Return only the substrings of `text` that fall inside a validated
+    live span, in transcript order, with everything else (the playback
+    portion) dropped."""
+    matches = []
+    for span in live_spans:
+        start = text.find(span)
+        if start != -1:
+            matches.append((start, start + len(span)))
+    if not matches:
+        return ""
+    matches.sort()
+    merged = [matches[0]]
+    for start, end in matches[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return " ".join(text[start:end].strip() for start, end in merged).strip()
+
+
+def _segments_matching_live_spans(segments: List[dict], live_spans: list[str]) -> List[dict]:
+    """Restrict segments to only the text overlapping a validated live span.
+
+    `live_spans` are exact extractive substrings of the combined transcript
+    (`_combined_segment_text`, which joins segment texts with a single
+    space). A segment whose entire text is itself part of a validated span
+    is kept unchanged. A segment that mixes playback and live speech in the
+    same ASR chunk is rewritten to carry only the validated live
+    substring(s) — the playback portion is dropped from the outgoing text,
+    and only safe metadata (speaker, timing bounds where available)
+    carries over, never the untouched original text.
+    """
+    non_blank_spans = [span for span in live_spans if span.strip()]
+    if not non_blank_spans:
+        return []
+    kept = []
+    for segment in segments:
+        text = (segment.get("text") or "").strip()
+        if not text:
+            continue
+        if any(text in span for span in non_blank_spans):
+            kept.append(segment)
+            continue
+        live_text = _extract_live_span_text(text, non_blank_spans)
+        if not live_text:
+            continue
+        partial_segment = {"text": live_text}
+        for key in _SAFE_PARTIAL_SEGMENT_KEYS:
+            if key in segment:
+                partial_segment[key] = segment[key]
+        kept.append(partial_segment)
+    return kept
+
+
+def contains_wake_phrase(text: str) -> bool:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return False
+    if any(alias in normalized for alias in WAKE_WORD_ALIASES):
+        return True
+
+    # Deepgram/Soniox sometimes renders "Hey Ella" as "A l" or "AL" at
+    # utterance start. Keep this narrow so ambient speech is not promoted into
+    # wake traffic: it must be followed by a question/command starter.
+    tokens = normalized.split()
+    if len(tokens) >= 3 and tokens[0] == "a" and tokens[1] == "l":
+        return tokens[2] in WAKE_WORD_QUESTION_STARTERS
+    if len(tokens) >= 2 and tokens[0] == "al":
+        return tokens[1] in WAKE_WORD_QUESTION_STARTERS
+    return False
+
+
+def contains_emergency_phrase(text: str) -> bool:
+    return bool(_EMERGENCY_PATTERN.search(text or ""))
+
+
+def credible_emergency_reason(text: str) -> Optional[str]:
+    """Return a conservative reason suitable for dispatch while Guardian is off."""
+    candidate = _CREDIBLE_WAKE_PREFIX.sub("", text or "", count=1)
+    if _NEGATED_CURRENT_SUBJECT_PATTERN.search(candidate):
+        return None
+    for reason, pattern in _CREDIBLE_EMERGENCY_PATTERNS:
+        match = pattern.search(candidate)
+        if match and _CREDIBLE_EMERGENCY_TAIL.fullmatch(candidate[match.end() :]):
+            return reason
+    if _CREDIBLE_HELP_PATTERN.search(candidate):
+        return "explicit_help"
+    return None
+
+
+def _iter_credible_emergency_matches_for_segments(segments: List[dict]) -> Iterator[tuple[str, int, int]]:
+    """Yield every credible reason and its contiguous speaker-group bounds, in order."""
+    active_speaker: Optional[str] = None
+    active_text: list[str] = []
+    active_start = 0
+
+    def match_active_text() -> Optional[str]:
+        if not active_text:
+            return None
+        return credible_emergency_reason(" ".join(active_text))
+
+    for index, segment in enumerate(segments):
+        text = str(segment.get("text") or "").strip()
+        if not text:
+            continue
+        raw_speaker = segment.get("speaker") or segment.get("speaker_id") or segment.get("person_id")
+        speaker = str(raw_speaker).strip() if raw_speaker else f"unknown:{index}"
+        if active_speaker is not None and speaker != active_speaker:
+            reason = match_active_text()
+            if reason:
+                yield reason, active_start, index
+            active_text = []
+            active_start = index
+        elif active_speaker is None:
+            active_start = index
+        active_speaker = speaker
+        active_text.append(text)
+
+    reason = match_active_text()
+    if reason:
+        yield reason, active_start, len(segments)
+
+
+def _credible_emergency_match_for_segments(segments: List[dict]) -> tuple[Optional[str], int, int]:
+    """Return the first credible reason and its contiguous speaker-group bounds."""
+    for reason, start, end in _iter_credible_emergency_matches_for_segments(segments):
+        return reason, start, end
+    return None, -1, -1
+
+
+def credible_emergency_reason_for_segments(segments: List[dict]) -> Optional[str]:
+    """Match contiguous speech from one speaker without crossing speaker boundaries."""
+    reason, _, _ = _credible_emergency_match_for_segments(segments)
+    return reason
+
+
+def _single_explicit_speaker(segments: List[dict]) -> Optional[str]:
+    speaker: Optional[str] = None
+    for segment in segments:
+        if not str(segment.get("text") or "").strip():
+            continue
+        raw_speaker = segment.get("speaker") or segment.get("speaker_id") or segment.get("person_id")
+        current = str(raw_speaker).strip() if raw_speaker is not None else ""
+        if not current or (speaker is not None and current != speaker):
+            return None
+        speaker = current
+    return speaker
+
+
+def _credible_emergency_match_with_context(
+    context_segments: List[dict], current_segments: List[dict]
+) -> tuple[Optional[str], List[dict], List[dict]]:
+    """Return a reason and only the retained/current segments that authorized it."""
+    current_matches = list(_iter_credible_emergency_matches_for_segments(current_segments))
+    if current_matches:
+        context_speaker = _single_explicit_speaker(context_segments)
+        context_text = " ".join(str(segment.get("text") or "") for segment in context_segments)
+        for current_reason, current_start, current_end in current_matches:
+            matched_current_segments = current_segments[current_start:current_end]
+            current_speaker = _single_explicit_speaker(matched_current_segments)
+            if (
+                context_speaker is not None
+                and context_speaker == current_speaker
+                and _CONTEXTUAL_REPORTED_SPEECH_SUFFIX.search(context_text)
+            ):
+                continue
+            return current_reason, [], matched_current_segments
+        return None, [], []
+    if not context_segments or credible_emergency_reason_for_segments(context_segments):
+        return None, [], []
+
+    for start in range(len(context_segments) - 1, -1, -1):
+        candidate_segments = context_segments[start:] + current_segments
+        combined_reason, match_start, match_end = _credible_emergency_match_for_segments(candidate_segments)
+        if not combined_reason:
+            continue
+        context_count = len(context_segments) - start
+        matched_context_segments = candidate_segments[match_start : min(match_end, context_count)]
+        matched_current_segments = candidate_segments[max(match_start, context_count) : match_end]
+        candidate_speaker = _single_explicit_speaker(matched_context_segments + matched_current_segments)
+        if candidate_speaker is None:
+            continue
+
+        preceding_segments = context_segments[:start]
+        preceding_speaker = _single_explicit_speaker(preceding_segments)
+        preceding_text = " ".join(str(segment.get("text") or "") for segment in preceding_segments)
+        if (
+            preceding_speaker is not None
+            and preceding_speaker == candidate_speaker
+            and _CONTEXTUAL_REPORTED_SPEECH_SUFFIX.search(preceding_text)
+        ):
+            return None, [], []
+        return combined_reason, matched_context_segments, matched_current_segments
+    return None, [], []
+
+
+def credible_emergency_reason_with_context(
+    context_segments: List[dict], current_segments: List[dict]
+) -> tuple[Optional[str], bool]:
+    """Return a newly completed reason and whether prior context was required."""
+    reason, matched_context, _ = _credible_emergency_match_with_context(context_segments, current_segments)
+    return reason, bool(matched_context)
+
+
+def scanner_immediate_reason(text: str, *, wake_prefix_recent: Optional[bool] = None) -> Optional[str]:
+    if contains_wake_phrase(text) or wake_prefix_recent:
+        return "wake"
+    if contains_emergency_phrase(text):
+        return "emergency"
+    return None
+
+
+def canonicalize_wake_phrase(text: str) -> str:
+    """Canonicalize likely wake-word STT variants for scanner dispatch only."""
+    if not text:
+        return text
+
+    original = text
+    text = re.sub(
+        r"\bhey[\s,.-]*(?:ella|ela|ellah|ellaa|el|ell|elle|eleve|eleven)\b",
+        "Hey Ella",
+        text,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"^\s*a[\s,.-]*l\b(?=\s+(?:" + "|".join(re.escape(word) for word in WAKE_WORD_QUESTION_STARTERS) + r")\b)",
+        "Hey Ella",
+        text,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"^\s*al\b(?=\s+(?:" + "|".join(re.escape(word) for word in WAKE_WORD_QUESTION_STARTERS) + r")\b)",
+        "Hey Ella",
+        text,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    if text != original:
+        print(
+            f"[SCANNER-WAKE] canonicalized wake phrase for scanner dispatch: {original[:80]!r} -> {text[:80]!r}",
+            flush=True,
+        )
+    return text
+
+
+def is_short_wake_prefix_only(segments: List[dict]) -> bool:
+    combined = _combined_segment_text(segments)
+    if not combined:
+        return False
+    candidate = combined.strip()
+    if re.fullmatch(r".*[.?!]+", candidate):
+        candidate = re.sub(r"[.?!]+\s*$", "", candidate).strip()
+    normalized = _normalize_text(candidate)
+    if not contains_wake_phrase(normalized):
+        return False
+    # Only hold very short prefix-like utterances such as "Hey Ella".
+    return len(normalized.split()) <= WAKE_WORD_PREFIX_MAX_WORDS
+
+
+def prepare_scanner_segments_for_dispatch(
+    current_segments: List[dict],
+    pending_wake_prefix_segments: Optional[List[dict]] = None,
+    pending_wake_prefix_since: Optional[float] = None,
+    *,
+    now: Optional[float] = None,
+    max_pending_window_s: float = WAKE_WORD_PENDING_WINDOW_S,
+):
+    """
+    Prepare transcript batches for scanner dispatch.
+
+    Short wake-word-only batches are dispatched immediately so a reconnect between
+    "Hey Ella" and the follow-up question cannot lose the wake event. Older
+    pending-prefix state is still honored for workers that already carry one.
+    """
+    now = now if now is not None else time.time()
+    pending_wake_prefix_segments = list(pending_wake_prefix_segments or [])
+
+    if pending_wake_prefix_segments and pending_wake_prefix_since is not None:
+        if now - pending_wake_prefix_since > max_pending_window_s:
+            pending_wake_prefix_segments = []
+            pending_wake_prefix_since = None
+
+    if not current_segments:
+        return (
+            [],
+            pending_wake_prefix_segments,
+            pending_wake_prefix_since,
+            {
+                "action": "empty",
+                "prepended_count": 0,
+            },
+        )
+
+    if is_short_wake_prefix_only(current_segments):
+        return (
+            list(current_segments),
+            [],
+            None,
+            {
+                "action": "direct_wake_prefix_dispatch",
+                "prepended_count": 0,
+            },
+        )
+
+    dispatch_segments = list(current_segments)
+    prepended_count = 0
+    if pending_wake_prefix_segments and not contains_wake_phrase(_combined_segment_text(current_segments)):
+        dispatch_segments = pending_wake_prefix_segments + dispatch_segments
+        prepended_count = len(pending_wake_prefix_segments)
+        pending_wake_prefix_segments = []
+        pending_wake_prefix_since = None
+
+    return (
+        dispatch_segments,
+        pending_wake_prefix_segments,
+        pending_wake_prefix_since,
+        {
+            "action": "prepend_pending_wake_prefix" if prepended_count else "direct_dispatch",
+            "prepended_count": prepended_count,
+        },
+    )
+
+
+def scanner_payload_metadata_summary(segments: List[dict], *, limit: int = 4) -> dict:
+    """Content-free summary of a segment list for trace metadata and logs.
+
+    Never includes transcript text or any derived quote from it — only
+    ids/counts/statuses (speaker labels and per-segment character counts),
+    so this is safe to persist (e.g. into `guardian_queue.metadata`) or
+    print without ever leaking what anyone said.
+    """
+    limited = segments[:limit]
+    return {
+        "segment_count": len(segments),
+        "speakers": [segment.get("speaker") or f"SPEAKER_{segment.get('speaker_id', 0)}" for segment in limited],
+        "text_lengths": [len(segment.get("text") or "") for segment in limited],
+    }
+
+
+def scanner_model_name() -> str:
+    return (
+        os.getenv("ELLA_SCANNER_GROQ_MODEL")
+        or os.getenv("GROQ_MODEL")
+        or os.getenv("OMI_GROQ_MODEL")
+        or os.getenv("SCANNER_MODEL")
+        or "unknown"
+    )
+
+
+def _scanner_batch_key(uid, conversation_id, device_type, generation=None, owner_token=None) -> tuple:
+    return (str(uid), str(conversation_id), str(device_type or "omi"), str(generation or ""), str(owner_token or ""))
+
+
+def discard_ambient_batch(item: dict, batch_id: str) -> None:
+    """Discard only the matching capture's pending batch, never a replacement."""
+    key = _scanner_batch_key(
+        item['uid'],
+        item['conversation_id'],
+        item.get('device_type', 'omi'),
+        item.get('origin_generation'),
+        item.get('origin_owner_token'),
+    )
+    with _SCANNER_STATE_LOCK:
+        batch = _SCANNER_BATCHES.get(key)
+        if batch and batch['id'] == batch_id:
+            _SCANNER_BATCHES.pop(key)
+            batch['segments'].clear()
+
+
+def ambient_batch_is_current(item: dict, batch_id: str) -> bool:
+    key = _scanner_batch_key(
+        item['uid'],
+        item['conversation_id'],
+        item.get('device_type', 'omi'),
+        item.get('origin_generation'),
+        item.get('origin_owner_token'),
+    )
+    with _SCANNER_STATE_LOCK:
+        batch = _SCANNER_BATCHES.get(key)
+        return bool(batch and batch['id'] == batch_id)
+
+
+def _pending_ambient_segments(uid, conversation_id, device_type, generation, owner_token, batch_id) -> List[dict]:
+    key = _scanner_batch_key(uid, conversation_id, device_type, generation, owner_token)
+    with _SCANNER_STATE_LOCK:
+        batch = _SCANNER_BATCHES.get(key)
+        return list(batch['segments']) if batch and batch['id'] == batch_id else []
+
+
+def _new_ambient_batch(now: float) -> dict:
+    return {
+        "id": uuid.uuid4().hex,
+        "segments": [],
+        "started_at": now,
+        "last_at": now,
+        "word_count": 0,
+    }
+
+
+def _append_to_ambient_batch(batch: dict, segments: List[dict], now: float) -> None:
+    batch["segments"].extend(segments)
+    batch["last_at"] = now
+    batch["word_count"] += _word_count(_combined_segment_text(segments))
+
+
+def _ambient_flush_reason(batch: dict, now: float) -> Optional[str]:
+    elapsed_s = max(0.0, now - float(batch.get("started_at") or now))
+    if int(batch.get("word_count") or 0) >= SCANNER_AMBIENT_BATCH_WORDS:
+        return "word_threshold"
+    if elapsed_s >= SCANNER_AMBIENT_BATCH_SECONDS:
+        return "time_threshold"
+    return None
+
+
+def _duration_to_seconds(value: str) -> Optional[float]:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+
+    # Groq reset headers are commonly duration strings such as "1m2.5s".
+    total = 0.0
+    matched = False
+    for match in _DURATION_RE.finditer(raw):
+        matched = True
+        amount = float(match.group("value"))
+        unit = match.group("unit")
+        if unit == "ms":
+            total += amount / 1000.0
+        elif unit == "s":
+            total += amount
+        elif unit == "m":
+            total += amount * 60.0
+        elif unit == "h":
+            total += amount * 3600.0
+    if matched:
+        return max(0.0, total)
+
+    try:
+        parsed = parsedate_to_datetime(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0.0, (parsed - datetime.now(timezone.utc)).total_seconds())
+    except Exception:
+        return None
+
+
+def rate_limit_status_from_response(resp) -> dict:
+    headers = {str(k).lower(): str(v) for k, v in getattr(resp, "headers", {}).items()}
+    retry_after_s = _duration_to_seconds(headers.get("retry-after", ""))
+    reset_requests_s = _duration_to_seconds(headers.get("x-ratelimit-reset-requests", ""))
+    reset_tokens_s = _duration_to_seconds(headers.get("x-ratelimit-reset-tokens", ""))
+    status_code = int(getattr(resp, "status_code", 0) or 0)
+    remaining_requests = headers.get("x-ratelimit-remaining-requests")
+    limited = status_code == 429 or headers.get("retry-after") is not None or remaining_requests == "0"
+    return {
+        "limited": limited,
+        "retry_after_s": retry_after_s,
+        "reset_requests_s": reset_requests_s,
+        "reset_tokens_s": reset_tokens_s,
+        "remaining_requests": remaining_requests,
+        "limit_requests": headers.get("x-ratelimit-limit-requests"),
+        "remaining_tokens": headers.get("x-ratelimit-remaining-tokens"),
+        "limit_tokens": headers.get("x-ratelimit-limit-tokens"),
+    }
+
+
+def _record_scanner_backpressure(uid: str, status: dict, now: float) -> None:
+    if not status.get("limited"):
+        return
+    retry_after_s = (
+        status.get("retry_after_s")
+        or status.get("reset_requests_s")
+        or status.get("reset_tokens_s")
+        or SCANNER_RATE_LIMIT_DEFAULT_BACKOFF_S
+    )
+    until = now + max(0.0, float(retry_after_s))
+    with _SCANNER_STATE_LOCK:
+        _SCANNER_RATE_LIMIT_UNTIL["global"] = max(float(_SCANNER_RATE_LIMIT_UNTIL.get("global") or 0.0), until)
+        users = _SCANNER_RATE_LIMIT_UNTIL.setdefault("users", {})
+        users[str(uid)] = max(float(users.get(str(uid)) or 0.0), until)
+
+
+def _scanner_backpressure_remaining_s(uid: str, now: float) -> float:
+    with _SCANNER_STATE_LOCK:
+        global_until = float(_SCANNER_RATE_LIMIT_UNTIL.get("global") or 0.0)
+        user_until = float(_SCANNER_RATE_LIMIT_UNTIL.get("users", {}).get(str(uid)) or 0.0)
+    return max(0.0, max(global_until, user_until) - now)
+
+
+def reset_scanner_batch_state() -> None:
+    """Test helper for clearing in-memory ambient batching and backpressure state."""
+    with _SCANNER_STATE_LOCK:
+        _SCANNER_BATCHES.clear()
+        _SCANNER_RATE_LIMIT_UNTIL["global"] = 0.0
+        _SCANNER_RATE_LIMIT_UNTIL["users"] = {}
+
+
+def _apply_ambient_batching(
+    uid: str,
+    conversation_id: str,
+    scanner_segments: List[dict],
+    device_type: str,
+    trace_id: str,
+    *,
+    wake_prefix_recent: Optional[bool] = None,
+    credible_emergency: Optional[str] = None,
+    diagnostic_candidate: bool = False,
+    origin_generation: Optional[str] = None,
+    origin_owner_token: Optional[str] = None,
+    ambient_batch_id: Optional[str] = None,
+    now: Optional[float] = None,
+) -> tuple[Optional[List[dict]], dict]:
+    now = now if now is not None else time.time()
+    combined_text = _combined_segment_text(scanner_segments)
+    immediate_reason = scanner_immediate_reason(combined_text, wake_prefix_recent=wake_prefix_recent)
+    if immediate_reason is None and credible_emergency:
+        immediate_reason = "credible_emergency"
+    base_metadata = {
+        "batching_enabled": SCANNER_AMBIENT_BATCHING_ENABLED,
+        "model": scanner_model_name(),
+        "batch_target_seconds": SCANNER_AMBIENT_BATCH_SECONDS,
+        "batch_target_words": SCANNER_AMBIENT_BATCH_WORDS,
+        "immediate_reason": immediate_reason,
+    }
+
+    if diagnostic_candidate and not ambient_batch_id:
+        return scanner_segments, {
+            **base_metadata,
+            "batch_size": len(scanner_segments),
+            "batch_word_count": _word_count(combined_text),
+            "flush_reason": "diagnostic_candidate",
+            "rate_limit_status": "bypassed_for_diagnostic",
+        }
+
+    if not SCANNER_AMBIENT_BATCHING_ENABLED and not ambient_batch_id:
+        return scanner_segments, {
+            **base_metadata,
+            "batch_size": len(scanner_segments),
+            "batch_word_count": _word_count(combined_text),
+            "flush_reason": "disabled",
+            "rate_limit_status": "not_checked",
+        }
+
+    if immediate_reason and not ambient_batch_id:
+        return scanner_segments, {
+            **base_metadata,
+            "batch_size": len(scanner_segments),
+            "batch_word_count": _word_count(combined_text),
+            "flush_reason": f"immediate_{immediate_reason}",
+            "rate_limit_status": "bypassed_for_immediate",
+        }
+
+    key = _scanner_batch_key(uid, conversation_id, device_type, origin_generation, origin_owner_token)
+    with _SCANNER_STATE_LOCK:
+        batch = _SCANNER_BATCHES.get(key)
+        if ambient_batch_id and (not batch or batch['id'] != ambient_batch_id):
+            return None, {**base_metadata, 'flush_reason': 'stale_batch'}
+        if not batch:
+            batch = _new_ambient_batch(now)
+            _SCANNER_BATCHES[key] = batch
+        if not ambient_batch_id:
+            _append_to_ambient_batch(batch, scanner_segments, now)
+        flush_reason = _ambient_flush_reason(batch, now)
+        batch_word_count = int(batch.get("word_count") or 0)
+        batch_size = len(batch.get("segments") or [])
+        batch_started_at = float(batch.get("started_at") or now)
+
+        global_until = float(_SCANNER_RATE_LIMIT_UNTIL.get("global") or 0.0)
+        user_until = float(_SCANNER_RATE_LIMIT_UNTIL.get("users", {}).get(str(uid)) or 0.0)
+        backpressure_remaining_s = max(0.0, max(global_until, user_until) - now)
+        delay_seconds = max(
+            0.01,
+            backpressure_remaining_s,
+            0 if flush_reason else SCANNER_AMBIENT_BATCH_SECONDS - (now - batch_started_at),
+        )
+        deferred_receipt = {
+            'batch_id': batch['id'],
+            'delay_seconds': delay_seconds,
+            'deadline_monotonic': time.monotonic() + delay_seconds,
+        }
+        if backpressure_remaining_s > 0:
+            if batch_word_count >= SCANNER_AMBIENT_BATCH_MAX_WORDS:
+                _SCANNER_BATCHES.pop(key, None)
+                return None, {
+                    **base_metadata,
+                    "batch_size": batch_size,
+                    "batch_word_count": batch_word_count,
+                    "flush_reason": "rate_limited_drop",
+                    "rate_limit_status": "active",
+                    "backpressure_remaining_s": round(backpressure_remaining_s, 3),
+                    "batch_age_s": round(now - batch_started_at, 3),
+                }
+            return None, {
+                **base_metadata,
+                "batch_size": batch_size,
+                "batch_word_count": batch_word_count,
+                "flush_reason": "rate_limited_defer",
+                "rate_limit_status": "active",
+                "backpressure_remaining_s": round(backpressure_remaining_s, 3),
+                "batch_age_s": round(now - batch_started_at, 3),
+                "_deferred": deferred_receipt,
+            }
+
+        if not flush_reason:
+            return None, {
+                **base_metadata,
+                "batch_size": batch_size,
+                "batch_word_count": batch_word_count,
+                "flush_reason": "pending",
+                "rate_limit_status": "not_limited",
+                "batch_age_s": round(now - batch_started_at, 3),
+                "_deferred": deferred_receipt,
+            }
+
+        dispatch_segments = list(batch.get("segments") or [])
+        _SCANNER_BATCHES.pop(key, None)
+
+    return dispatch_segments, {
+        **base_metadata,
+        "batch_size": len(dispatch_segments),
+        "batch_word_count": _word_count(_combined_segment_text(dispatch_segments)),
+        "flush_reason": flush_reason,
+        "rate_limit_status": "not_limited",
+        "batch_age_s": round(now - batch_started_at, 3),
+    }
+
+
+def build_scanner_context_window(
+    current_segments: List[dict],
+    recent_segments: Optional[List[dict]] = None,
+    *,
+    now: Optional[float] = None,
+    window_s: float = SCANNER_CONTEXT_WINDOW_S,
+):
+    """
+    Build a short recent context window for the scanner payload.
+
+    recent_segments items are expected to be dicts like:
+      {"observed_at": <float>, "segment": <segment-dict>}
+    """
+    now = now if now is not None else time.time()
+    cleaned_recent = []
+    recent_context_segments: List[dict] = []
+    for item in recent_segments or []:
+        observed_at = item.get("observed_at")
+        segment = item.get("segment")
+        if observed_at is None or not segment:
+            continue
+        if now - float(observed_at) <= window_s:
+            cleaned_recent.append({"observed_at": float(observed_at), "segment": segment})
+            recent_context_segments.append(segment)
+
+    scanner_window_segments = recent_context_segments + list(current_segments or [])
+    scanner_window_text = _combined_segment_text(scanner_window_segments)
+    wake_prefix_recent = contains_wake_phrase(_combined_segment_text(recent_context_segments))
+    updated_recent_cache = cleaned_recent + [
+        {"observed_at": now, "segment": segment} for segment in current_segments or [] if segment.get("text")
+    ]
+
+    return {
+        "recent_segments": recent_context_segments,
+        "scanner_window_segments": scanner_window_segments,
+        "scanner_window_text": scanner_window_text,
+        "wake_prefix_recent": wake_prefix_recent,
+        "updated_recent_cache": updated_recent_cache,
+    }
+
+
+def _log_trace_event(
+    trace_id: str,
+    uid: str,
+    stage: str,
+    status: str,
+    metadata: Optional[dict] = None,
+    latency_ms: Optional[int] = None,
+) -> None:
+    """Best-effort trace write; scanner must never block transcription."""
+    if not GUARDIAN_WEBHOOK_KEY:
+        return
+    try:
+        requests.post(
+            GUARDIAN_TRACE_LOG_URL,
+            json={
+                "trace_id": trace_id,
+                "uid": uid,
+                "stage": stage,
+                "status": status,
+                "latency_ms": latency_ms,
+                "metadata": metadata or {},
+            },
+            headers={"X-Guardian-Key": GUARDIAN_WEBHOOK_KEY, "X-Ella-Subject-Uid": uid},
+            timeout=GUARDIAN_TRACE_LOG_TIMEOUT_S,
+        )
+    except Exception:
+        pass
+
+
+def _wake_turn_id(trace_id: str, text: str) -> str:
+    digest = hashlib.sha1(f"{trace_id}:{_normalize_text(text)}".encode("utf-8")).hexdigest()[:12]
+    return f"wake_{digest}"
+
+
+def _build_wake_ack_payload(uid: str, conversation_id: str, trace_id: str, scanner_segments: List[dict]) -> dict | None:
+    text = _combined_segment_text(scanner_segments)
+    if not contains_wake_phrase(text):
+        return None
+
+    wake_turn_id = _wake_turn_id(trace_id, text)
+    return {
+        "uid": uid,
+        "userID": uid,
+        "id": f"wake_ack_{trace_id}_{wake_turn_id}",
+        "url": GUARDIAN_WAKE_ACK_AUDIO_URL,
+        "priority": "normal",
+        "message": "wake_ack",
+        "trigger": "wake_word_ack",
+        "metadata": {
+            "trace_id": trace_id,
+            "parent_conversation_id": str(conversation_id),
+            "wake_turn_id": wake_turn_id,
+            "matched_pattern": "wake_phrase",
+            "ack_only": True,
+            "source": "omi_backend_fast_wake_ack",
+            "detected_at": time.time(),
+            "segments_summary": scanner_payload_metadata_summary(scanner_segments, limit=2),
+        },
+    }
+
+
+def _enqueue_wake_ack(uid: str, conversation_id: str, trace_id: str, scanner_segments: List[dict], delivery_origin: Optional[dict] = None) -> None:
+    """Fire-and-forget audible wake acknowledgement before slower scanner work."""
+    payload = _build_wake_ack_payload(uid, conversation_id, trace_id, scanner_segments)
+    if payload is None:
+        return
+
+    if delivery_origin is not None:
+        from ella.services.whisper_capture_bridge import enqueue_scope
+        if delivery_origin['presentation']=='text_only':
+            return # An audible-only wake acknowledgement has no text-only delivery.
+        payload['delivery_scope']=enqueue_scope(delivery_origin)
+    wake_turn_id = str(payload["metadata"]["wake_turn_id"])
+
+    _log_trace_event(
+        trace_id=trace_id,
+        uid=uid,
+        stage="wake_detected",
+        status="success",
+        metadata={
+            "conversation_id": str(conversation_id),
+            "wake_turn_id": wake_turn_id,
+            "segments_summary": scanner_payload_metadata_summary(scanner_segments, limit=2),
+        },
+    )
+
+    def _post() -> None:
+        start = time.time()
+        try:
+            if not GUARDIAN_WEBHOOK_KEY:
+                return
+            if GUARDIAN_WAKE_ACK_DIRECT_DB and delivery_origin is None:
+                result = _insert_wake_ack_direct(uid, trace_id, payload)
+                _log_trace_event(
+                    trace_id=trace_id,
+                    uid=uid,
+                    stage="ack_enqueued",
+                    status=result.get("status", "success"),
+                    latency_ms=int((time.time() - start) * 1000),
+                    metadata={
+                        "wake_turn_id": wake_turn_id,
+                        "queue_item_id": payload["id"],
+                        **result,
+                    },
+                )
+            else:
+                response = requests.post(
+                    GUARDIAN_ENQUEUE_URL,
+                    json=payload,
+                    headers={"X-Guardian-Key": GUARDIAN_WEBHOOK_KEY, "X-Ella-Subject-Uid": uid},
+                    timeout=GUARDIAN_WAKE_ACK_TIMEOUT_S,
+                )
+                _log_trace_event(
+                    trace_id=trace_id,
+                    uid=uid,
+                    stage="ack_enqueued",
+                    status="success" if 200 <= response.status_code < 300 else "error",
+                    latency_ms=int((time.time() - start) * 1000),
+                    metadata={
+                        "wake_turn_id": wake_turn_id,
+                        "queue_item_id": payload["id"],
+                        "method": "loopback_http",
+                        "status_code": response.status_code,
+                        "response": response.text[:200],
+                    },
+                )
+        except Exception as e:
+            _log_trace_event(
+                trace_id=trace_id,
+                uid=uid,
+                stage="ack_enqueued",
+                status="error",
+                latency_ms=int((time.time() - start) * 1000),
+                metadata={
+                    "wake_turn_id": wake_turn_id,
+                    "queue_item_id": payload["id"],
+                    "error": str(e)[:200],
+                },
+            )
+
+    threading.Thread(target=_post, name="guardian-wake-ack", daemon=True).start()
+
+
+def _insert_wake_ack_direct(uid: str, trace_id: str, payload: dict) -> dict:
+    """Insert wake ack without loopback HTTP so scanner timeouts cannot block the ring."""
+    try:
+        import psycopg2
+    except Exception as exc:
+        response = requests.post(
+            GUARDIAN_ENQUEUE_URL,
+            json=payload,
+            headers={"X-Guardian-Key": GUARDIAN_WEBHOOK_KEY, "X-Ella-Subject-Uid": uid},
+            timeout=max(GUARDIAN_WAKE_ACK_TIMEOUT_S, 12.0),
+        )
+        return {
+            "method": "loopback_http_fallback",
+            "status_code": response.status_code,
+            "fallback_reason": f"psycopg2_unavailable:{exc}",
+            "status": "success" if 200 <= response.status_code < 300 else "error",
+        }
+
+    metadata = dict(payload.get("metadata") or {})
+    metadata.setdefault("trace_id", trace_id)
+    metadata.setdefault("queue_item_id", payload["id"])
+
+    conn = psycopg2.connect(
+        host=ELLA_POSTGRES_HOST,
+        port=ELLA_POSTGRES_PORT,
+        user=ELLA_POSTGRES_USER,
+        password=ELLA_POSTGRES_PASSWORD,
+        dbname=ELLA_POSTGRES_DATABASE,
+    )
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT guardian_mode FROM users WHERE omi_uid = %s",
+                    (uid,),
+                )
+                row = cur.fetchone()
+                mode = _normalize_guardian_mode(row[0] if row else None)
+                if mode not in _GUARDIAN_ACTIVE_MODES:
+                    return {"method": "direct_db", "status": "skipped", "reason": "guardian_mode_off"}
+
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM guardian_queue
+                    WHERE uid = %s
+                      AND trigger_type = 'wake_word_ack'
+                      AND metadata->>'trace_id' = %s
+                      AND created_at > NOW() - INTERVAL '15 seconds'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (uid, trace_id),
+                )
+                duplicate = cur.fetchone()
+                if duplicate:
+                    return {
+                        "method": "direct_db",
+                        "status": "skipped",
+                        "deduped": True,
+                        "duplicate_queue_item_id": duplicate[0],
+                    }
+
+                cur.execute(
+                    """
+                    INSERT INTO guardian_queue (id, uid, url, priority, message, trigger_type, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    (
+                        payload["id"],
+                        uid,
+                        payload["url"],
+                        payload.get("priority", "normal"),
+                        payload.get("message"),
+                        payload.get("trigger"),
+                        json.dumps(metadata),
+                    ),
+                )
+                return {"method": "direct_db", "status": "success", "inserted": cur.rowcount}
+    finally:
+        conn.close()
+
+
+def send_to_scanner(
+    uid: str,
+    conversation_id: str,
+    segments: List[dict],
+    device_type: str = "omi",
+    timeout: Optional[float] = None,
+    recent_segments: Optional[List[dict]] = None,
+    scanner_window_text: Optional[str] = None,
+    wake_prefix_recent: Optional[bool] = None,
+    latency_metadata: Optional[dict] = None,
+    guardian_mode: object = _GUARDIAN_MODE_UNSET,
+    typesafe_egress_authorized: bool = False,
+    origin_generation: Optional[str] = None,
+    origin_owner_token: Optional[str] = None,
+    ambient_batch_id: Optional[str] = None,
+    on_ambient_deferred: Optional[Callable[[dict], None]] = None,
+    delivery_origin: Optional[dict] = None,
+    delivery_work_request_id: Optional[str] = None,
+    delivery_tool_work_id: Optional[str] = None,
+) -> Optional[int]:
+    """
+    Send transcript segments to Ella scanner agent.
+
+    Args:
+        uid: User ID
+        conversation_id: Current conversation ID for tracking
+        segments: List of transcript segment dicts with text, speaker, stt_source
+        device_type: Source device type (omi, ios, android)
+        timeout: Request timeout in seconds (default from config)
+
+    Returns:
+        HTTP status code if successful, None if failed
+
+    Note:
+        This is fire-and-forget. Failures are logged but don't affect
+        the main transcription flow.
+    """
+    if not ELLA_CONFIG.scanner_enabled:
+        return None
+
+    if ambient_batch_id:
+        segments = _pending_ambient_segments(
+            uid, conversation_id, device_type, origin_generation, origin_owner_token, ambient_batch_id
+        )
+    if not segments:
+        return None
+
+    if not SCANNER_WEBHOOK_KEY:
+        print("Scanner authority unavailable", flush=True)
+        return None
+
+    timeout = timeout or ELLA_CONFIG.scanner_timeout
+    trace_id = _trace_id_for(str(conversation_id))
+
+    # Format segments for scanner
+    scanner_segments = [
+        {
+            "speaker": s.get("speaker") or f"SPEAKER_{s.get('speaker_id', 0)}",
+            "text": canonicalize_wake_phrase(s.get("text", "")),
+            "stt_source": s.get("stt_provider") or s.get("stt_source") or s.get("source"),  # edge_asr, deepgram, soniox
+            "is_user": s.get("is_user"),
+            "person_id": s.get("person_id"),
+            "speaker_id": s.get("speaker_id"),
+            "speech_profile_processed": s.get("speech_profile_processed"),
+        }
+        for s in segments
+        if s.get("text")
+    ]
+
+    if not scanner_segments:
+        return None
+
+    if guardian_mode is _GUARDIAN_MODE_UNSET:
+        _log_trace_event(
+            trace_id=trace_id,
+            uid=uid,
+            stage="scanner_mode_authority",
+            status="error",
+            metadata={"reason": "guardian_mode_required"},
+        )
+        print("Scanner dispatch skipped: Guardian mode authority was not resolved", flush=True)
+        return None
+    formatted_recent_segments = [
+        {
+            "speaker": s.get("speaker") or f"SPEAKER_{s.get('speaker_id', 0)}",
+            "text": canonicalize_wake_phrase(s.get("text", "")),
+            "stt_source": s.get("stt_provider") or s.get("stt_source") or s.get("source"),
+            "is_user": s.get("is_user"),
+            "person_id": s.get("person_id"),
+            "speaker_id": s.get("speaker_id"),
+            "speech_profile_processed": s.get("speech_profile_processed"),
+        }
+        for s in (recent_segments or [])
+        if s.get("text")
+    ]
+    emergency_reason, emergency_context_segments, emergency_current_segments = _credible_emergency_match_with_context(
+        formatted_recent_segments,
+        scanner_segments,
+    )
+
+    authoritative_mode = _normalize_guardian_mode(guardian_mode)
+    guardian_mode_enabled = authoritative_mode in _GUARDIAN_ACTIVE_MODES
+    emergency_only_dispatch = not guardian_mode_enabled and emergency_reason is not None
+    if emergency_only_dispatch:
+        formatted_recent_segments = emergency_context_segments
+        scanner_segments = emergency_context_segments + emergency_current_segments
+    if not guardian_mode_enabled and not emergency_only_dispatch:
+        if ambient_batch_id:
+            discard_ambient_batch(
+                {
+                    'uid': uid,
+                    'conversation_id': conversation_id,
+                    'device_type': device_type,
+                    'origin_generation': origin_generation,
+                    'origin_owner_token': origin_owner_token,
+                },
+                ambient_batch_id,
+            )
+        _log_trace_event(
+            trace_id=trace_id,
+            uid=uid,
+            stage="scanner_mode_authority",
+            status="skipped",
+            metadata={"reason": "guardian_mode_off"},
+        )
+        return None
+
+    diagnostic_candidate = bool(
+        emergency_reason is None
+        and not formatted_recent_segments
+        and not wake_prefix_recent
+        and origin_generation
+        and origin_owner_token
+        and (
+            scanner_window_text is None
+            or spoken_diagnostic._normalized(scanner_window_text) == spoken_diagnostic.PHRASE
+        )
+        and os.getenv("ELLA_SPOKEN_DIAGNOSTIC_ENABLED", "").strip().lower() == "true"
+        and spoken_diagnostic.is_diagnostic_window(uid, scanner_segments)
+    )
+
+    scanner_segments, batch_metadata = _apply_ambient_batching(
+        uid,
+        str(conversation_id),
+        scanner_segments,
+        device_type,
+        trace_id,
+        wake_prefix_recent=wake_prefix_recent,
+        credible_emergency=emergency_reason,
+        diagnostic_candidate=diagnostic_candidate,
+        origin_generation=origin_generation,
+        origin_owner_token=origin_owner_token,
+        ambient_batch_id=ambient_batch_id,
+    )
+    deferred_receipt = batch_metadata.pop('_deferred', None)
+    if deferred_receipt and on_ambient_deferred:
+        on_ambient_deferred(deferred_receipt)
+    if not scanner_segments:
+        _log_trace_event(
+            trace_id=trace_id,
+            uid=uid,
+            stage="scanner_ambient_batch",
+            status="deferred" if batch_metadata.get("flush_reason") != "rate_limited_drop" else "dropped",
+            metadata={
+                "conversation_id": str(conversation_id),
+                "device_type": device_type,
+                **batch_metadata,
+            },
+        )
+        print(
+            f"📡 Scanner ambient batch trace={trace_id} "
+            f"status={batch_metadata.get('flush_reason')} "
+            f"size={batch_metadata.get('batch_size')} words={batch_metadata.get('batch_word_count')} "
+            f"rate_limit={batch_metadata.get('rate_limit_status')}",
+            flush=True,
+        )
+        return None
+
+    # Owner-scoped SELECTION only (time/route proximity) of this owner's own
+    # recently-PLAYED ledger entries. Time/route proximity never decides
+    # whether the current transcript IS one of them — that regex/window
+    # selection has hint authority only. The actual semantic echo-source
+    # judgment is made right below, executed here in the backend (never by
+    # text/regex matching), before ANY queue-producing action for this
+    # window — including the wake acknowledgement below — is ever taken. A
+    # re-heard "Hey Ella" that is a confirmed echo of Ella's own playback
+    # must never create a `wake_word_ack` queue row, so that ack cannot be
+    # enqueued until this judgment (and any live-span filtering it implies)
+    # is settled.
+    playback_candidates = select_playback_ledger_candidates(uid)
+
+    echo_classification = None
+    if playback_candidates:
+        combined_transcript = _combined_segment_text(scanner_segments)
+        if combined_transcript:
+            echo_classification = _classify_playback_source_for_dispatch(
+                combined_transcript, playback_candidates, uid=uid
+            )
+
+    if echo_classification is not None and not echo_classification.fail_open and echo_classification.is_confirmed_echo:
+        if echo_classification.source == "mixed":
+            live_only_segments = _segments_matching_live_spans(
+                scanner_segments, echo_classification.validated_live_spans
+            )
+            if live_only_segments:
+                # Mixed: only the classifier-validated live speech continues
+                # downstream (and can trigger the wake ack below) — the
+                # echoed portion is dropped, never dispatched and never
+                # acked on its own.
+                scanner_segments = live_only_segments
+            # else: the invariant in `_validate_payload` guarantees a
+            # confirmed "mixed" result always carries a non-blank span, so
+            # this should be unreachable; fail open on the untouched window
+            # rather than silently drop it if it is ever hit.
+        else:
+            # Confirmed Ella playback (no live component): tag this window
+            # as Ella's own output in the pipeline context. It must not be
+            # dispatched as user speech, and it must not be wake-acked
+            # either — neither can create a Whisper/queue row for a
+            # re-heard echo of Ella's own voice.
+            _log_trace_event(
+                trace_id=trace_id,
+                uid=uid,
+                stage="scanner_echo_classification",
+                status="suppressed_ella_output",
+                metadata={
+                    "conversation_id": str(conversation_id),
+                    "device_type": device_type,
+                    "candidate_count": len(playback_candidates),
+                    "matched_candidate_count": len(echo_classification.matched_playback_ids),
+                    "reason_code": echo_classification.reason_code,
+                    "confidence": echo_classification.confidence,
+                },
+            )
+            print(
+                f"📡 Scanner: trace={trace_id} confirmed Ella playback echo "
+                f"(matched={len(echo_classification.matched_playback_ids)}) — not dispatched",
+                flush=True,
+            )
+            return None
+
+    diagnostic_claim = None
+    if (
+        emergency_reason is None
+        and not formatted_recent_segments
+        and not wake_prefix_recent
+        and (
+            scanner_window_text is None
+            or spoken_diagnostic._normalized(scanner_window_text) == spoken_diagnostic.PHRASE
+        )
+        and os.getenv("ELLA_SPOKEN_DIAGNOSTIC_ENABLED", "").strip().lower() == "true"
+    ):
+        diagnostic_window = spoken_diagnostic.is_diagnostic_window(uid, scanner_segments)
+    else:
+        diagnostic_window = False
+    if diagnostic_candidate and not diagnostic_window:
+        return None
+    if diagnostic_window:
+        try:
+            diagnostic_claim = spoken_diagnostic.reserve_for_segments(
+                uid,
+                str(conversation_id),
+                scanner_segments,
+                origin_generation=origin_generation,
+                origin_owner_token=origin_owner_token,
+            )
+        except Exception:
+            diagnostic_claim = None
+        if diagnostic_claim is None:
+            return None
+
+    _enqueue_wake_ack(uid, str(conversation_id), trace_id, scanner_segments, delivery_origin)
+
+    payload = {
+        "uid": uid,
+        "conversation_id": str(conversation_id),
+        "trace_id": trace_id,
+        "device_type": device_type,
+        "segments": scanner_segments,
+        "trace": {
+            "id": trace_id,
+            "schema_version": "guardian-pipeline-v1",
+            "source": "omi-backend",
+            "contract": "ella-ai#600",
+        },
+        "scanner_batch": batch_metadata,
+        "guardian_mode": authoritative_mode,
+        "guardian_mode_source": "users.guardian_mode",
+        "guardian_mode_enabled": guardian_mode_enabled,
+        "emergency_only_dispatch": emergency_only_dispatch,
+        "typesafe_egress_authorized": typesafe_egress_authorized is True,
+        "playback_candidates": playback_candidates,
+    }
+    if delivery_origin is not None:
+        from ella.services.whisper_capture_bridge import enqueue_scope
+        payload['delivery_contract']=1
+        payload['delivery_scope']=enqueue_scope(delivery_origin)
+        payload['delivery_presentation']=delivery_origin['presentation']
+        # This locator is issued before async work; it conveys no caller authority.
+        if delivery_tool_work_id is not None:
+            from ella.services.whisper_delivery import identifier
+            payload['ella_delivery_tool_work_id']=identifier(delivery_tool_work_id)
+            payload['delivery_tool_contract']=1
+    if diagnostic_claim is not None:
+        payload["spoken_diagnostic"] = diagnostic_claim
+    if latency_metadata:
+        payload["latency"] = latency_metadata
+    if recent_segments is not None:
+        payload["recent_segments"] = formatted_recent_segments
+    if scanner_window_text is not None:
+        payload["scanner_window_text"] = canonicalize_wake_phrase(scanner_window_text)
+    if wake_prefix_recent is not None:
+        payload["wake_prefix_recent"] = wake_prefix_recent
+
+    try:
+        start = time.time()
+        resp = _post_scanner_webhook(
+            ELLA_CONFIG.scanner_url,
+            json=payload,
+            headers={SCANNER_WEBHOOK_KEY_HEADER: SCANNER_WEBHOOK_KEY},
+            timeout=timeout,
+        )
+        latency_ms = int((time.time() - start) * 1000)
+        rate_limit_status = rate_limit_status_from_response(resp)
+        _record_scanner_backpressure(uid, rate_limit_status, time.time())
+        _log_trace_event(
+            trace_id=trace_id,
+            uid=uid,
+            stage="scanner_dispatched",
+            status="success" if 200 <= resp.status_code < 300 else "error",
+            latency_ms=latency_ms,
+            metadata={
+                "conversation_id": str(conversation_id),
+                "device_type": device_type,
+                "segment_count": len(scanner_segments),
+                "scanner_status_code": resp.status_code,
+                "scanner_batch": batch_metadata,
+                "latency": latency_metadata or {},
+                "rate_limit": rate_limit_status,
+                "segments_summary": scanner_payload_metadata_summary(scanner_segments),
+                "recent_segments_summary": scanner_payload_metadata_summary(payload.get("recent_segments", [])),
+                "wake_prefix_recent": payload.get("wake_prefix_recent"),
+            },
+        )
+        print(
+            f"📡 Scanner: trace={trace_id} {len(scanner_segments)} segments → {resp.status_code} "
+            f"batch={batch_metadata.get('flush_reason')} words={batch_metadata.get('batch_word_count')} "
+            f"rate_limited={rate_limit_status.get('limited')} "
+            f"payload={scanner_payload_metadata_summary(scanner_segments)} "
+            f"recent={scanner_payload_metadata_summary(payload.get('recent_segments', []))} "
+            f"wake_prefix_recent={payload.get('wake_prefix_recent')}",
+            flush=True,
+        )
+        return resp.status_code
+
+    except requests.Timeout:
+        _log_trace_event(
+            trace_id=trace_id,
+            uid=uid,
+            stage="scanner_dispatched",
+            status="timeout",
+            metadata={
+                "conversation_id": str(conversation_id),
+                "device_type": device_type,
+                "segment_count": len(scanner_segments),
+                "timeout_s": timeout,
+                "scanner_batch": batch_metadata,
+                "latency": latency_metadata or {},
+                "segments_summary": scanner_payload_metadata_summary(scanner_segments),
+                "recent_segments_summary": scanner_payload_metadata_summary(payload.get("recent_segments", [])),
+                "wake_prefix_recent": payload.get("wake_prefix_recent"),
+            },
+        )
+        print(f"📡 Scanner timeout trace={trace_id} ({timeout}s)", flush=True)
+        return None
+
+    except Exception as e:
+        _log_trace_event(
+            trace_id=trace_id,
+            uid=uid,
+            stage="scanner_dispatched",
+            status="error",
+            metadata={
+                "conversation_id": str(conversation_id),
+                "device_type": device_type,
+                "segment_count": len(scanner_segments),
+                "error": str(e)[:200],
+                "scanner_batch": batch_metadata,
+                "latency": latency_metadata or {},
+                "segments_summary": scanner_payload_metadata_summary(scanner_segments),
+                "recent_segments_summary": scanner_payload_metadata_summary(payload.get("recent_segments", [])),
+                "wake_prefix_recent": payload.get("wake_prefix_recent"),
+            },
+        )
+        print(f"📡 Scanner error trace={trace_id}: {e}", flush=True)
+        return None

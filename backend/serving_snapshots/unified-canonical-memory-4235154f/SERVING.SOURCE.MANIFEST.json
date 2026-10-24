@@ -1,0 +1,4847 @@
+{
+  "captured_at": "2026-10-24T08:19:18.825066+00:00",
+  "closure_limit": "Static Python import inventory; dynamic runtime dependencies and protected configuration require separate verification. Not an in-memory bytecode dump.",
+  "contract": "ella-serving-python-snapshot-v1",
+  "dynamic_import_sites": [],
+  "excluded_sensitive_source": [],
+  "external_import_roots": [
+    "PIL",
+    "__future__",
+    "agents",
+    "argparse",
+    "ast",
+    "asyncio",
+    "asyncpg",
+    "atexit",
+    "audiomentations",
+    "av",
+    "base64",
+    "binascii",
+    "builtins",
+    "collections",
+    "concurrent",
+    "contextlib",
+    "contextvars",
+    "copy",
+    "cryptography",
+    "csv",
+    "dataclasses",
+    "datetime",
+    "decimal",
+    "deepgram",
+    "diarization",
+    "email",
+    "embedding",
+    "enum",
+    "fal_client",
+    "fastapi",
+    "firebase_admin",
+    "functools",
+    "gc",
+    "google",
+    "halo",
+    "hashlib",
+    "hmac",
+    "html",
+    "httpx",
+    "importlib",
+    "importlib_resources",
+    "inspect",
+    "integrations",
+    "io",
+    "ipaddress",
+    "json",
+    "jwt",
+    "langchain",
+    "langchain_core",
+    "langchain_openai",
+    "langdetect",
+    "langgraph",
+    "langsmith",
+    "lc3",
+    "locust",
+    "logging",
+    "math",
+    "memories",
+    "mimetypes",
+    "multipart",
+    "numpy",
+    "omegaconf",
+    "onnx",
+    "onnxruntime",
+    "openai",
+    "openvino",
+    "opuslib",
+    "os",
+    "packaging",
+    "pandas",
+    "pathlib",
+    "pg8000",
+    "pinecone",
+    "posixpath",
+    "psycopg2",
+    "pyannote",
+    "pyaudio",
+    "pycountry",
+    "pydantic",
+    "pydub",
+    "pyogg",
+    "pytz",
+    "queue",
+    "random",
+    "re",
+    "redis",
+    "requests",
+    "resource",
+    "scipy",
+    "secrets",
+    "shutil",
+    "signal",
+    "silero_vad",
+    "sklearn",
+    "smtplib",
+    "speech_profile_modal",
+    "speechbrain",
+    "starlette",
+    "stat",
+    "statistics",
+    "string",
+    "stripe",
+    "struct",
+    "subprocess",
+    "sys",
+    "threading",
+    "tiktoken",
+    "time",
+    "tinygrad",
+    "torch",
+    "torchaudio",
+    "torchcodec",
+    "tqdm",
+    "traceback",
+    "types",
+    "typesense",
+    "typing",
+    "typing_extensions",
+    "ulid",
+    "unicodedata",
+    "urllib",
+    "uuid",
+    "vad_modal",
+    "warnings",
+    "wave",
+    "weakref",
+    "webrtcvad",
+    "websockets",
+    "xml",
+    "zipfile",
+    "zlib",
+    "zoneinfo"
+  ],
+  "files": [
+    {
+      "bytes": 0,
+      "path": "database/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 727,
+      "path": "database/_client.py",
+      "sha256": "0112669c0da344898fee82486b6732b40c0a73868166bf0d3d2865ee3d8ab526"
+    },
+    {
+      "bytes": 14324,
+      "path": "database/action_items.py",
+      "sha256": "bd00bbe808c2622caeb5baa64fd6d7b3d05c675e113152c958f8899764ad2a0f"
+    },
+    {
+      "bytes": 15754,
+      "path": "database/announcements.py",
+      "sha256": "dbe1f69aa67a438b45208c656e645695a2256a4de4b75991dca5632c132f379c"
+    },
+    {
+      "bytes": 1647,
+      "path": "database/app_settings.py",
+      "sha256": "bd420c85a19524444df7bb324ff86d8cf7a1a8d7513997c71b8481bacdfc16ac"
+    },
+    {
+      "bytes": 19448,
+      "path": "database/apps.py",
+      "sha256": "3519c3b6eeb7ef129db3dfd90d4556cd7495a7b0f064592020d0797a409f5077"
+    },
+    {
+      "bytes": 1145,
+      "path": "database/auth.py",
+      "sha256": "0c0a46692339fd6a5d3528e06bd51e23bab832b3ce13c3f13ecd4194d744d2d9"
+    },
+    {
+      "bytes": 18029,
+      "path": "database/authority_advisory_lock.py",
+      "sha256": "346f9a365107dd44b3644ba675c3e6175a379b6b3683b63260f104ce1b47cf70"
+    },
+    {
+      "bytes": 5406,
+      "path": "database/bounded_hermes_enrichment_outbox.py",
+      "sha256": "690d0c8131ecd16e3a526f99032e48675806cd35974f486e8cffa0fc47f0e68d"
+    },
+    {
+      "bytes": 1773,
+      "path": "database/cache.py",
+      "sha256": "bbdaf85bdf320480a37045cf240b567c7b9390ad699aab36484c2648b84f9930"
+    },
+    {
+      "bytes": 6939,
+      "path": "database/cache_manager.py",
+      "sha256": "d3a9020b9c4ed2c69894a7b09e07f3cb5d66532fdeea342e348ba01e4b98ddde"
+    },
+    {
+      "bytes": 4796,
+      "path": "database/calendar_meetings.py",
+      "sha256": "0b7da7ad44084d005e5d28ec6e21e7a75ba4d3854e715f3a792dd2fbef17cd04"
+    },
+    {
+      "bytes": 18217,
+      "path": "database/chat.py",
+      "sha256": "94cace7f6733523c2b19e2329956aac7441d81cc264b0947959716c66d6db16d"
+    },
+    {
+      "bytes": 163323,
+      "path": "database/conversations.py",
+      "sha256": "2d821eae8ad46b9b9d626b2cc916e150b63bbae7f6b2b0ddc1211f3a3c84aeb8"
+    },
+    {
+      "bytes": 4154,
+      "path": "database/daily_summaries.py",
+      "sha256": "eb481db4ecd3eeaf5b1abc6f732e8ed88e4545ac7e0bdaf46beae2139a10e041"
+    },
+    {
+      "bytes": 4252,
+      "path": "database/dev_api_key.py",
+      "sha256": "2dcf08e630a98fc7b51af14b5fed5516bbb225d3ab25c74db56b0b408468058e"
+    },
+    {
+      "bytes": 3173,
+      "path": "database/ella_caregivers.py",
+      "sha256": "e1e2bca8d5b9e066faa77dd25428e235b8957e1892e67819dab9540ed2de8734"
+    },
+    {
+      "bytes": 1574,
+      "path": "database/ella_contacts.py",
+      "sha256": "d60774a93516493b6ddf7772d8ed1d0085505078c2c2e190a2273e94f35d18f9"
+    },
+    {
+      "bytes": 2315,
+      "path": "database/ella_postgres.py",
+      "sha256": "520013dddf012d7be4ad6021ee980245cd85365c9f8599b5ec3d97e902c6de14"
+    },
+    {
+      "bytes": 213483,
+      "path": "database/ella_provisioning.py",
+      "sha256": "c253af8942fbca83d49b5c9884bd2c15813e73f367423c85747d56ace75369b9"
+    },
+    {
+      "bytes": 13752,
+      "path": "database/explicit_saved_backlog_repair.py",
+      "sha256": "be052c56650b172dae9021b77614bc71e2e01fd92574ed43afa25b3832895632"
+    },
+    {
+      "bytes": 5585,
+      "path": "database/fixture_anchored_match.py",
+      "sha256": "8db4e7c44053768ac97fb2b3af5ee4c41942592b0049c793e2286ed752b859a2"
+    },
+    {
+      "bytes": 8283,
+      "path": "database/fixture_capture_lineage.py",
+      "sha256": "d64da69a9d2db35321dcc3a810f7e85e4a0dba4f284aadf774118b89bf50216f"
+    },
+    {
+      "bytes": 11441,
+      "path": "database/folders.py",
+      "sha256": "9d3d9af9a59ff47af1c77a3ef8e9c2ae610cbbbdf4e7c262c8865882f01f026a"
+    },
+    {
+      "bytes": 5828,
+      "path": "database/goals.py",
+      "sha256": "b060c33610fe7da0ed6bfa68455a3a7ec62d411f9d3a6d882dad2b4b167ad243"
+    },
+    {
+      "bytes": 10372,
+      "path": "database/helpers.py",
+      "sha256": "adc0a43fc54b13b1fb23e8f6baad54693bfacdd2d160c65f05832b2ff7461864"
+    },
+    {
+      "bytes": 14343,
+      "path": "database/hermes_cloud_enrichment_outbox.py",
+      "sha256": "86bc5ab4096eb1db56d9ab42938b54a8c2ec7b400948c8702e567db935965382"
+    },
+    {
+      "bytes": 11348,
+      "path": "database/honcho_attestation.py",
+      "sha256": "86577cb798724e2e307ea13f1b7922d877744124e6e411bafc40abdb64c7a15e"
+    },
+    {
+      "bytes": 1352,
+      "path": "database/import_jobs.py",
+      "sha256": "a0c5810cce602b8c4718a391b9ff4cf1782f3500f7529a4d3295e74727892484"
+    },
+    {
+      "bytes": 36786,
+      "path": "database/invitation_operator.py",
+      "sha256": "5e8313daa6af453c5017d762a7ac54fc10ad09845dc284c5ef42718c55a605ae"
+    },
+    {
+      "bytes": 53392,
+      "path": "database/invitations.py",
+      "sha256": "e275e7dc8205daef97f5b323a8d09a9659833acaf398afa8a209cc73a8d31d3f"
+    },
+    {
+      "bytes": 8329,
+      "path": "database/knowledge_graph.py",
+      "sha256": "774bfcbdf1d6f9168f6df4ee7cee9f6938d200641821a713bd737c09a96821ad"
+    },
+    {
+      "bytes": 46547,
+      "path": "database/managed_cloud_consent.py",
+      "sha256": "5cfca84ea75127e4482f783dc4f53e6de9331c511cec050467cdef90f119ffa0"
+    },
+    {
+      "bytes": 2968,
+      "path": "database/mcp_api_key.py",
+      "sha256": "79b63f40b14b5fd04a286ca4773d9c764b0e167f4d03516c7971b5c2b2ade188"
+    },
+    {
+      "bytes": 512,
+      "path": "database/mem_db.py",
+      "sha256": "0aa88b5bac668517707244e5d6a350bdea5903d6fbe86cdb529555adedb7c55a"
+    },
+    {
+      "bytes": 14303,
+      "path": "database/memories.py",
+      "sha256": "49d7b561cbe73f29d2ad85bbb8c059999e722a2b1f85109b086f66a645328a90"
+    },
+    {
+      "bytes": 65930,
+      "path": "database/memory_artwork.py",
+      "sha256": "0e5eb3156615ecddd1329d5ff9087add54970e40a9d1dab44564aa8fa40035c8"
+    },
+    {
+      "bytes": 43451,
+      "path": "database/memory_reinterpretations.py",
+      "sha256": "331da56743711227c09331f5613c039794fc048fb7eb7ab7e70e61c0e40f736b"
+    },
+    {
+      "bytes": 5047,
+      "path": "database/muse_private_reader.py",
+      "sha256": "26119125c591448f8cfdc975a92ccd6654078426b6db241c76496660341bd81f"
+    },
+    {
+      "bytes": 2288,
+      "path": "database/muse_source_retirement.py",
+      "sha256": "e46ca58b0d357a96581cf71de98abd9da3389e54d1bab8a0fed707198eeda750"
+    },
+    {
+      "bytes": 15787,
+      "path": "database/native_fixture_evidence.py",
+      "sha256": "a2d08ac35d375d0a52a60de7657d67979f3f1ad93598f1f8fe01723b4130ebf4"
+    },
+    {
+      "bytes": 27533,
+      "path": "database/normal_account_lifecycle.py",
+      "sha256": "a9ddc5772772e8a914471de3ceaab0dc2e416ffeb3ff7b2aeeea429357f4f70d"
+    },
+    {
+      "bytes": 9191,
+      "path": "database/normal_completed_source_recovery.py",
+      "sha256": "f755b9ffab3fa18351f164d2882a063e107f3f73a70427504434a54c07604a12"
+    },
+    {
+      "bytes": 22681,
+      "path": "database/normal_enrichment_activation.py",
+      "sha256": "2e107eeee018de8e12c49dff5ffb3bbaf584cce4ffad3808179699892c268d63"
+    },
+    {
+      "bytes": 42052,
+      "path": "database/normal_future_source_disposition.py",
+      "sha256": "190d479c2c34d201fb418a50ef121d3eb1dd77e7c3917571a7f0eff771e0f0c8"
+    },
+    {
+      "bytes": 4674,
+      "path": "database/normal_future_source_operator.py",
+      "sha256": "a85754a167ca26a214a46cd32e17d0d1657e2c97c80401229f4ac42aae60d0c2"
+    },
+    {
+      "bytes": 19295,
+      "path": "database/normal_native_source_once.py",
+      "sha256": "0c9f410ded9c25b1ade969897caf82b1fcb357fa789068fb457de7a61d2f3434"
+    },
+    {
+      "bytes": 16097,
+      "path": "database/normal_ordinary_source_disposition.py",
+      "sha256": "a176b4262b432b30b931976f20fd474f400252fc817d2ffdafde67760968041a"
+    },
+    {
+      "bytes": 5053,
+      "path": "database/normal_product_capture_provenance.py",
+      "sha256": "e437de6b90b841187e732f21ad30f525e1d060bc4c0dd7291b966e7b1feb3bfa"
+    },
+    {
+      "bytes": 8854,
+      "path": "database/normal_source_disposition.py",
+      "sha256": "021e3feee9eaa34d19d335be64d7bbc27af5642b8d9b86d4a69b3ed6b38dd6d5"
+    },
+    {
+      "bytes": 13831,
+      "path": "database/notifications.py",
+      "sha256": "7931c6461579c672d7cb1f4333fbf68989b850f519547d80a02e3a6346434115"
+    },
+    {
+      "bytes": 3045,
+      "path": "database/proposals.py",
+      "sha256": "cbfcd4c3ae0148ebc3d11843b2e959878ab43e74fe8fab8fdc01a70778fe4b8c"
+    },
+    {
+      "bytes": 6079,
+      "path": "database/qualification_stock_supervisor.py",
+      "sha256": "f687e77bdedaafe4d4dfd9e5c035f6ac3175aea6c33334c29543329abcb2a9cd"
+    },
+    {
+      "bytes": 3173,
+      "path": "database/qualification_stock_worker.py",
+      "sha256": "369c07cb497491c528f1667383a1451cc2cf4229599f7ae64c298fc0ce0aa61c"
+    },
+    {
+      "bytes": 14948,
+      "path": "database/qualification_transcript_producer.py",
+      "sha256": "fd87b8d1770fcc64fc4756a4893b4f2361dba4fd3ff81f51f7cff1345b70c5c5"
+    },
+    {
+      "bytes": 35972,
+      "path": "database/redis_db.py",
+      "sha256": "a55a130ded7282cb156c7b33adafb4cd2d20b1fda1f7f28fe49f2ca7da41398d"
+    },
+    {
+      "bytes": 6539,
+      "path": "database/redis_pubsub.py",
+      "sha256": "0820b66f6b4ae4455ef2e6c81f5808b2d7e74842ad4a9069986f288078d59b58"
+    },
+    {
+      "bytes": 1903,
+      "path": "database/runtime_targets.py",
+      "sha256": "31146d906934e707b76133b661106432e19b87f235f778d3d0c3af2cc2c28dec"
+    },
+    {
+      "bytes": 16321,
+      "path": "database/sync_segments.py",
+      "sha256": "c5d82c7615111eada07dc861e7a254cccdca002611c58d8bda3a4c00ed69b5bc"
+    },
+    {
+      "bytes": 8584,
+      "path": "database/task_sync.py",
+      "sha256": "44f3883536b9ccf0b86e076bcb400515e261ded3a3a951d4177efef23eb6d1aa"
+    },
+    {
+      "bytes": 731,
+      "path": "database/tasks.py",
+      "sha256": "e4f18a4179686ac896e8072e058730fc699828182684cbca281446ab538ded23"
+    },
+    {
+      "bytes": 2478,
+      "path": "database/trends.py",
+      "sha256": "f8221ca30b222961bf7cb76a8935000d04c71d57317e47e47c1aadc27be30e64"
+    },
+    {
+      "bytes": 12780,
+      "path": "database/user_recording_keep.py",
+      "sha256": "478eb80888cdeb7a5779ba54902ad97babe9cee3c5941e896bf2ad17d7b81fc3"
+    },
+    {
+      "bytes": 12600,
+      "path": "database/user_usage.py",
+      "sha256": "ea64f5caeb1fda9e96715753b4dfab54f32fea62814f408c06135bfa00c0fd3d"
+    },
+    {
+      "bytes": 34306,
+      "path": "database/users.py",
+      "sha256": "00bf3b22e75b8eb19ba2905c1a4da2fa260d2139ebd5b35fd822c4d1dfa593e4"
+    },
+    {
+      "bytes": 14290,
+      "path": "database/vector_db.py",
+      "sha256": "3b77a5e94d17ada6e7ec2bcec6176e7b7fe21e89d01c6d6de20611c4b7672475"
+    },
+    {
+      "bytes": 57906,
+      "path": "database/voice_canary.py",
+      "sha256": "7fd44ec177d9acd510fca8bbcc7143cf522a8dfce22c8240147b5260a21a4a6b"
+    },
+    {
+      "bytes": 5426,
+      "path": "database/wrapped.py",
+      "sha256": "3bf06fb69c3ecb5d1c75dd3b82082943bcdbcac8f16dc565c9a6c97fdfc943dc"
+    },
+    {
+      "bytes": 4495,
+      "path": "dependencies.py",
+      "sha256": "060982ac96f19137348685fea3f0a75dfbd6119767a76168ea1add1dbcc5aa3b"
+    },
+    {
+      "bytes": 1437,
+      "path": "diarizer/diarization.py",
+      "sha256": "d4f241e02726ed970d09b9a61df5c14b39d90f130e69768d12a75b90e3f74611"
+    },
+    {
+      "bytes": 2668,
+      "path": "diarizer/embedding.py",
+      "sha256": "ed1584497509a8f21b3a5c57d9079b21aba823a74a55323904831d702ede1d52"
+    },
+    {
+      "bytes": 695,
+      "path": "diarizer/main.py",
+      "sha256": "a08a8949e3e662ac8fb6b5a921d17585ca27e89daf383d9c20b272bdbe180130"
+    },
+    {
+      "bytes": 24271,
+      "path": "ella/__init__.py",
+      "sha256": "2408f7839957deba478188434979d51dc47f03ed72297100df22128504b27a94"
+    },
+    {
+      "bytes": 972,
+      "path": "ella/adapters/__init__.py",
+      "sha256": "87137c918a14dcbff9bb4687292b621a1c38604a0de0a18380fe90ccea3e68b6"
+    },
+    {
+      "bytes": 6772,
+      "path": "ella/compat/__init__.py",
+      "sha256": "1a942119500c7d84c57eed8cffa057a9e360ead08abb44ca7649d7a4c02683ec"
+    },
+    {
+      "bytes": 5872,
+      "path": "ella/config.py",
+      "sha256": "f5dd2b844339f1e102babdc8fcf82b6542d7d39607a3e1c6e9d7e61b10b1679c"
+    },
+    {
+      "bytes": 0,
+      "path": "ella/prompts/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 2561,
+      "path": "ella/prompts/loader.py",
+      "sha256": "f6d36c14cc9a351214a025de8613a4c9c7dbf541ac6aecccaadd81def229f52c"
+    },
+    {
+      "bytes": 287,
+      "path": "ella/routers/__init__.py",
+      "sha256": "c0dd603f0d0870d09de9d6a30bb4895027b31bf2203da5e02904e1f95c0a9069"
+    },
+    {
+      "bytes": 8850,
+      "path": "ella/routers/ai_consent.py",
+      "sha256": "7360eb8b56804cc98f25755699f3f4ecbcac77b4523bd6c28aa0766b10acbeb3"
+    },
+    {
+      "bytes": 14556,
+      "path": "ella/routers/auto_provision.py",
+      "sha256": "4c085e841994b8a5a19d38f58ce23089b44512537aa6ed7b35dceb3bc498de94"
+    },
+    {
+      "bytes": 67681,
+      "path": "ella/routers/callbacks.py",
+      "sha256": "394da8a0d527a541de4cafbb1d7048547e257f9a9fd5b08a87a6bbf884977614"
+    },
+    {
+      "bytes": 53281,
+      "path": "ella/routers/canonical_events.py",
+      "sha256": "e5f4e2e90373d7bd7500a2fa888b30a14f19d198f77e04ae750d1db8a4425ce2"
+    },
+    {
+      "bytes": 77859,
+      "path": "ella/routers/chat.py",
+      "sha256": "5a80afc8ad466f00331279b584a440147e918c3b124eba431ec8999206744760"
+    },
+    {
+      "bytes": 93262,
+      "path": "ella/routers/corrections.py",
+      "sha256": "688bc6bc506ae9eb229968b8f7c57cc6864c842f2028a0b5c55b6a92d42c1ace"
+    },
+    {
+      "bytes": 3850,
+      "path": "ella/routers/debug_metadata.py",
+      "sha256": "2c905556b4f2a74e142bc8e25a4db60f641ed01cca8d80da180e670aef6be7e1"
+    },
+    {
+      "bytes": 11632,
+      "path": "ella/routers/escalations.py",
+      "sha256": "cd7fb5edcce8c3c6bc69e85e5fe7063db6e19b108b7cd4b347f315a5212e4bdd"
+    },
+    {
+      "bytes": 121425,
+      "path": "ella/routers/guardian.py",
+      "sha256": "20286ca5fc139e72745e1cb46405fa9dfee18992d110381e918bdeeee72877a4"
+    },
+    {
+      "bytes": 2523,
+      "path": "ella/routers/guardian_tool_delivery.py",
+      "sha256": "0100550d76aec50526f73ee2b283f2c08563b2c99f775b1a7c5590e3db79fa45"
+    },
+    {
+      "bytes": 5012,
+      "path": "ella/routers/hermes_cloud_enrichment.py",
+      "sha256": "b396275e90e34320268342c8678b3fc5198610404d94329260c9f15fd210a093"
+    },
+    {
+      "bytes": 5449,
+      "path": "ella/routers/invites.py",
+      "sha256": "9b608b6167d7c5c9b48376d6a7f820def4f11a5960f98ff16e909c02b60dc321"
+    },
+    {
+      "bytes": 1270,
+      "path": "ella/routers/legacy_onboarding.py",
+      "sha256": "bc7141d48bd8f0eb95c8fbd160d23628b28e4b8407156804fd3fcaad9cf1e631"
+    },
+    {
+      "bytes": 30440,
+      "path": "ella/routers/mcp_onboarding.py",
+      "sha256": "fc4b43f8d5af848c26ca5fa9dbebc40d15ae762fa1ac5bb0066edee05115d362"
+    },
+    {
+      "bytes": 2464,
+      "path": "ella/routers/mcp_public_setup.py",
+      "sha256": "ef8d6f31f76983f5411b74213bd976757262b5d65a830cbbba8ec16d19775d48"
+    },
+    {
+      "bytes": 3604,
+      "path": "ella/routers/mcp_well_known.py",
+      "sha256": "552af9b331fe60745ce0094d6518416efcf0e05a8b3604943ab17461b5cf8ffd"
+    },
+    {
+      "bytes": 13929,
+      "path": "ella/routers/memory_artwork.py",
+      "sha256": "bf537a1a36cb551d0079b71b0bed0fda7bb1cb0e8de8bd2eebeef5126131db91"
+    },
+    {
+      "bytes": 3948,
+      "path": "ella/routers/memory_reinterpretation.py",
+      "sha256": "38ff3a55d50df727f81f2b85445dc9adaa01079ea8e8be9fa8e2fe28a2d59c7f"
+    },
+    {
+      "bytes": 3438,
+      "path": "ella/routers/muse_private_mcp.py",
+      "sha256": "c5fb709f3922855c80f2287cc858295d32541706e88a107fac0dd103f5eca843"
+    },
+    {
+      "bytes": 5211,
+      "path": "ella/routers/muse_private_oauth.py",
+      "sha256": "ac0d4dbe62167e328d5bad7333ba6db9d0798e6b845de04be12daa23c9d7d4bf"
+    },
+    {
+      "bytes": 4655,
+      "path": "ella/routers/muse_private_reader.py",
+      "sha256": "c99af28b207ec1ff682800bc724ef53f5caf918267e1763521ba1f732d3ee0e5"
+    },
+    {
+      "bytes": 7854,
+      "path": "ella/routers/observer.py",
+      "sha256": "5b711b5f3042e8f47c9c541ff63f13b68ff8bca3b6a88dd09e184f54db2944d9"
+    },
+    {
+      "bytes": 24961,
+      "path": "ella/routers/onboarding.py",
+      "sha256": "148779e86d4db9eccaa5f5ed564be50ff1623808480a4cdb2e244e94f73facf5"
+    },
+    {
+      "bytes": 8244,
+      "path": "ella/routers/photon.py",
+      "sha256": "ff5739f81433b8072615c4c6f4b4ed39827153c9c26cc7fa5ad3508872af47ed"
+    },
+    {
+      "bytes": 82015,
+      "path": "ella/routers/plato_mcp.py",
+      "sha256": "d5028c53c686854e1c244c4702fec08182326d5d920d2f4341b21b86afd6e408"
+    },
+    {
+      "bytes": 2740,
+      "path": "ella/routers/qualification_transcript_producer.py",
+      "sha256": "5e3e579e8f7b3e23715625bc501177a3626a034cb1e76d5885e00c08bf16ab7e"
+    },
+    {
+      "bytes": 10889,
+      "path": "ella/routers/resolve.py",
+      "sha256": "5ecdbc374d19c1ded9a3a3b4dc8815eade91cfd8e2f57fd28fcf2425ca50cded"
+    },
+    {
+      "bytes": 1712,
+      "path": "ella/routers/settings.py",
+      "sha256": "3b379c78093ad564f4162b1c1eb7419ad6fea20241588283e5ccd0e582d461f2"
+    },
+    {
+      "bytes": 2763,
+      "path": "ella/routers/thin_cloudbot_consent.py",
+      "sha256": "078985e5b6703b6a800537cd7f69bf7ea19136c8152a509e09a20d86a85d50c3"
+    },
+    {
+      "bytes": 13008,
+      "path": "ella/routers/today_cards.py",
+      "sha256": "85e5877ad48e508f7d411579adb9dbb7df566743077f8bf61e4291885a70f84f"
+    },
+    {
+      "bytes": 6153,
+      "path": "ella/routers/trace.py",
+      "sha256": "1b4b973b169977991e5f20774c020ad00e13a479baa06bd38604bf87bb5abb70"
+    },
+    {
+      "bytes": 171672,
+      "path": "ella/routers/voice.py",
+      "sha256": "fcdf12e308f0107f8ca266ff3f698a9720266d159817775cd0bd83d4821b8568"
+    },
+    {
+      "bytes": 690,
+      "path": "ella/services/__init__.py",
+      "sha256": "96f139d177a1495809f0b9956751949d22c4af79235529df38e0479cec93174d"
+    },
+    {
+      "bytes": 69055,
+      "path": "ella/services/ai_consent.py",
+      "sha256": "5f945292c67e4bb7ecc4e203449c87cdb6b28e1422ecf50ae316962dba60faf7"
+    },
+    {
+      "bytes": 8006,
+      "path": "ella/services/app_settings.py",
+      "sha256": "325b38247bc7f31f2216aaae7fbdc2c3b877f852b12b2c095ca3c71e659de41c"
+    },
+    {
+      "bytes": 10284,
+      "path": "ella/services/canonical_auth_readiness.py",
+      "sha256": "e8a9a9f9ff20593c20a2835947ccac3509fbe4f7f4f85b9ddecc6be27cfa4f32"
+    },
+    {
+      "bytes": 10778,
+      "path": "ella/services/canonical_memory.py",
+      "sha256": "b94579cdb1888386710277bfb048bb59dddb83aa560c3762c368b89e5223d03b"
+    },
+    {
+      "bytes": 3761,
+      "path": "ella/services/canonical_summary_source.py",
+      "sha256": "a5c77405907cadfbe6df5a89325b26f2071aa64b6fad0d1bb487e0b83cf0b83d"
+    },
+    {
+      "bytes": 3181,
+      "path": "ella/services/canonical_voice_search.py",
+      "sha256": "8f7ba083274fcab72dbcf3faaac1d312ba8151be8deb9b265e46a6b041ae01ae"
+    },
+    {
+      "bytes": 4005,
+      "path": "ella/services/causal_diagnostics.py",
+      "sha256": "db84355b11a3e4d463c86349ada4ea10263a90e07bfc6d1548b820bb3feeac26"
+    },
+    {
+      "bytes": 9589,
+      "path": "ella/services/consent_authority.py",
+      "sha256": "34718d3d0233620edcc15696fc4eb7478a56e4deb146f8c02dfc52a2783b95c4"
+    },
+    {
+      "bytes": 3795,
+      "path": "ella/services/conversation_lifecycle.py",
+      "sha256": "542625684c9bd6705fa03ee90228199591b1cb599c7eda896b72025e866d4dd3"
+    },
+    {
+      "bytes": 46509,
+      "path": "ella/services/correction_honcho_contract.py",
+      "sha256": "18f6536fd3b4cad45bf41c213de02af64b15bb40961453edd05d0a85b195aead"
+    },
+    {
+      "bytes": 21721,
+      "path": "ella/services/correction_propagation.py",
+      "sha256": "4001c23d3be8380fe3ebd9d101f38b22003d266e1bcc70c0ab3bd11da59cec28"
+    },
+    {
+      "bytes": 6890,
+      "path": "ella/services/enrichment_stage_timing.py",
+      "sha256": "cff3cfc47681ebcf2b2dda104d1a3de1839fee0862e61601af8860c7436e41c6"
+    },
+    {
+      "bytes": 51886,
+      "path": "ella/services/escalation_policy.py",
+      "sha256": "391f70df3b06d09b9837d44731470ba4ec63a9efd2794573c886191a9732dcc0"
+    },
+    {
+      "bytes": 14215,
+      "path": "ella/services/guardian_echo_classifier.py",
+      "sha256": "fa418e6241d074e4aff2b8d071be466d8acaa03d5ea30af69af411e9027a0abe"
+    },
+    {
+      "bytes": 18459,
+      "path": "ella/services/guardian_playback_ledger.py",
+      "sha256": "e952088e7b8c32d16f3c355d648570192b46f247f6705e5e521031a4c8a326b2"
+    },
+    {
+      "bytes": 27036,
+      "path": "ella/services/hermes_broker_client.py",
+      "sha256": "80c29fc8d421c7e8036aa779131aaefe379d57c2d9156a06aa610338062973e5"
+    },
+    {
+      "bytes": 6641,
+      "path": "ella/services/hermes_broker_prototype.py",
+      "sha256": "7afb35da3c5aacc8dfc4c58e021595771cabd3c8ca0f43c1bf0456b160064b8e"
+    },
+    {
+      "bytes": 38539,
+      "path": "ella/services/hermes_cloud.py",
+      "sha256": "8ce84edcd22ea95029c0046c29f089b68ac1c3bdc070997e665d424eb305737e"
+    },
+    {
+      "bytes": 21815,
+      "path": "ella/services/hermes_cloud_enrichment.py",
+      "sha256": "89923c3b903fa58fc8cee756c40f52e76178e986bf59cf6e0e7a0b1b6c3e30af"
+    },
+    {
+      "bytes": 1557,
+      "path": "ella/services/hermes_cloud_enrichment_dependencies.py",
+      "sha256": "d82c324cf8cf24cd7c7b9c2b8cc46b8b55094387f4efb9ba70960f4c90b85663"
+    },
+    {
+      "bytes": 21864,
+      "path": "ella/services/hermes_cloud_enrichment_outbox.py",
+      "sha256": "571d3cf6099c0d857cf02287dc147cd29211800b59f86bcd0751399327507314"
+    },
+    {
+      "bytes": 33529,
+      "path": "ella/services/hermes_cloud_photon.py",
+      "sha256": "46d3d0fa7f261b412f697c9d12b6564fc49b98408e92d134fc6c512e16f1555e"
+    },
+    {
+      "bytes": 15425,
+      "path": "ella/services/hermes_cloud_policy.py",
+      "sha256": "a190a5fd4bcf7d8ef6c9f233a28b2b89960c2b1bb93e0593e843ccab67a39f36"
+    },
+    {
+      "bytes": 38627,
+      "path": "ella/services/hermes_cloud_runtime.py",
+      "sha256": "7db06105662b5fea5a0fd3d1de2addf8310838c136b64a782c14481b0642a67f"
+    },
+    {
+      "bytes": 12755,
+      "path": "ella/services/hermes_cloud_staged_attestation.py",
+      "sha256": "e41c14b2cd7ea48a13be24d78f24abb55048a2e5e30e5516a0b4c20206d12618"
+    },
+    {
+      "bytes": 435,
+      "path": "ella/services/hermes_session.py",
+      "sha256": "342d89ebedeab9b8264993567d15923de30bfe70c962b16267c9d64cbb9e4145"
+    },
+    {
+      "bytes": 5981,
+      "path": "ella/services/invitation_authority.py",
+      "sha256": "2cb5d36f6cae71b87d80af35d45c61ba041cab87efc49a0776d54e4dafa42983"
+    },
+    {
+      "bytes": 10945,
+      "path": "ella/services/mcp_current_conversation.py",
+      "sha256": "675f9b8aeaada527d1951941eb2952a97e77e15ae0fabf906b2a4dc243c5140b"
+    },
+    {
+      "bytes": 19842,
+      "path": "ella/services/mcp_identity.py",
+      "sha256": "aabdc7ede2e5c8b0e55a7f2553a8e5480c1970bf592447675d60a9e3a19fcd32"
+    },
+    {
+      "bytes": 8787,
+      "path": "ella/services/mcp_public_setup.py",
+      "sha256": "f0255a9cb84d9ea7e9daa7ca64f2bfd777279aa0c5aa198a7a576bbbbc58e5a3"
+    },
+    {
+      "bytes": 4424,
+      "path": "ella/services/mcp_redacted_observation.py",
+      "sha256": "b276e7565e6919a8a69db9aa0005d2dea3cf2b2013bf3aec7f1a9cc46c78d76a"
+    },
+    {
+      "bytes": 7556,
+      "path": "ella/services/mcp_source_report.py",
+      "sha256": "a041420f92b92a9fb8786835688de2c86deeb7d8e8d6cb80c4d566e6b725f023"
+    },
+    {
+      "bytes": 8453,
+      "path": "ella/services/mcp_startup.py",
+      "sha256": "81eff41f703a205ea142bee335d7bca687bfcd4028b4f3cefd8bcf2fd5fce1bb"
+    },
+    {
+      "bytes": 15481,
+      "path": "ella/services/mcp_summary_enrichment.py",
+      "sha256": "1093ed466bb9978f36c115b7a48d1d2ee8c6d88d8885c25560397064b6087a97"
+    },
+    {
+      "bytes": 7634,
+      "path": "ella/services/mcp_surface_prompt.py",
+      "sha256": "578b6f2e4d3fab8fe44e9e0f48b823a6a6061bed7c6f4bd6ab2b445983ade5d6"
+    },
+    {
+      "bytes": 3644,
+      "path": "ella/services/mcp_synthetic_pending.py",
+      "sha256": "fd86c46eeb20a24a39c1d0cc5655e8c8ddbe3334c21e544bb0206f5e34ccba5a"
+    },
+    {
+      "bytes": 19710,
+      "path": "ella/services/mcp_work_queue.py",
+      "sha256": "c669f1fa00fc3c30f5080b94afd5a9f1bf73192c54933f8fbd884ec25eea30ef"
+    },
+    {
+      "bytes": 147179,
+      "path": "ella/services/memory_artwork.py",
+      "sha256": "b0ff94d4bec4424493bff21ca3f73ff3c378e36b8a0763a0176104f180a70014"
+    },
+    {
+      "bytes": 1589,
+      "path": "ella/services/memory_artwork_recovery.py",
+      "sha256": "258217695d0a42700460fd9adb1fce7fb7aaa568147de13df79da46c03167251"
+    },
+    {
+      "bytes": 29927,
+      "path": "ella/services/memory_reinterpretation.py",
+      "sha256": "fa73d821ed3191651cedaac72cd67f7dd34464ece07523491814bd6a532e84c8"
+    },
+    {
+      "bytes": 15625,
+      "path": "ella/services/muse_private_oauth.py",
+      "sha256": "a3c4302e9c6401c4c9f569048ce684ff4339443c79f4dbd8e692569c2dac191f"
+    },
+    {
+      "bytes": 12491,
+      "path": "ella/services/muse_private_reader.py",
+      "sha256": "303a2b003474b1df4ba2bc66e20054d2b52778fdd26e91a6f734fc6e8b09fa84"
+    },
+    {
+      "bytes": 14217,
+      "path": "ella/services/muse_rejected_dcr_diagnostic.py",
+      "sha256": "f74141f87ea6dd028ffa8d5bc54de72b257e7c882440702039c42ea3e8edd45b"
+    },
+    {
+      "bytes": 6197,
+      "path": "ella/services/muse_session_owner.py",
+      "sha256": "3c11e1c446d90b9a434704898c1542dfa73e901ca029df767ed115b23c6a7790"
+    },
+    {
+      "bytes": 17658,
+      "path": "ella/services/normal_account_routing.py",
+      "sha256": "fd9a4cbdcf66c54ff2ad072d12175eb5dd8ca6672c7dec9f0fb5c13e3c522be5"
+    },
+    {
+      "bytes": 12748,
+      "path": "ella/services/observer.py",
+      "sha256": "e19003eff4a13a51c3ac9ed89cd1d57effd16f2a06971fb17a84176a3c42128c"
+    },
+    {
+      "bytes": 7659,
+      "path": "ella/services/observer_apply.py",
+      "sha256": "641e3abd881e152f10852f34a959526617a1039ef110e6701d8cf13afc367d37"
+    },
+    {
+      "bytes": 20282,
+      "path": "ella/services/observer_extractor.py",
+      "sha256": "1ac9fa35bfb09f80001520b1d74fe099d5589a1eddfd2e1be3204b415eb4eaa7"
+    },
+    {
+      "bytes": 6965,
+      "path": "ella/services/observer_logs.py",
+      "sha256": "9b9f439db34028008b2c1d773fb3b1b4826a627d9301c1b5997a33a41d4c7a96"
+    },
+    {
+      "bytes": 4631,
+      "path": "ella/services/proposal_ingest.py",
+      "sha256": "a8b18d6dbf74f8ff10bb8d2d18e17b8a9a359a677db336574fa23b4322f6453a"
+    },
+    {
+      "bytes": 85361,
+      "path": "ella/services/provisioning.py",
+      "sha256": "7005a14d7965b4a211ccbc5f42f436ce286ea05eb1206da2fefaaf7786356068"
+    },
+    {
+      "bytes": 5159,
+      "path": "ella/services/retained_canonical_user.py",
+      "sha256": "23ff6514f67ce4520d5401d230a5d4517744989109757cb020c4c38c5859bc14"
+    },
+    {
+      "bytes": 28184,
+      "path": "ella/services/retained_completion_enrichment.py",
+      "sha256": "5add890b6794a299434d1ace24a78e936377b760277233f22af33c0328152630"
+    },
+    {
+      "bytes": 405,
+      "path": "ella/services/runtime_errors.py",
+      "sha256": "f7fe154741dd434fdd407456a19afb645ba2616160f193ebe872774ed1c3ee24"
+    },
+    {
+      "bytes": 32848,
+      "path": "ella/services/runtime_resolver.py",
+      "sha256": "93e9d6591b3ceed50591f7cbaa4ab9f31118972f12d50212f0dd97564afc3b88"
+    },
+    {
+      "bytes": 6512,
+      "path": "ella/services/semantic_companion_context.py",
+      "sha256": "8fedeb9c857924a362976efdb6fe72ef412011d6a91a6cd04fe18ca68b251fbb"
+    },
+    {
+      "bytes": 4709,
+      "path": "ella/services/semantic_context_authority.py",
+      "sha256": "b876a94e1eb71e04e5887774c2db54b998ca19272f07232f8a0b8e52a05fede9"
+    },
+    {
+      "bytes": 11490,
+      "path": "ella/services/semantic_contextual_producer_v2.py",
+      "sha256": "e7acbc84614c3ddf1026ebb92defc7abb8598f1e075091469918ad823e4a8994"
+    },
+    {
+      "bytes": 11596,
+      "path": "ella/services/semantic_contextual_producer_v3.py",
+      "sha256": "7af91845d207580a459b73a728c845ca8302aa187280adcf415ffea418459f03"
+    },
+    {
+      "bytes": 11255,
+      "path": "ella/services/semantic_contract_v1.py",
+      "sha256": "9a06dbfa5aa149d9e094315559ef0b784b26e4d88cb064d42132a2b645fe9384"
+    },
+    {
+      "bytes": 17372,
+      "path": "ella/services/semantic_contract_v2.py",
+      "sha256": "0599d368723d8dd5db44e7f8d472359f6ba7e5458f6fc860f126fd37a8095302"
+    },
+    {
+      "bytes": 12592,
+      "path": "ella/services/semantic_host_context.py",
+      "sha256": "798c64b522bfa1c4421b82d9f292f73f9406c3187116ca46d6479bd98de9c8e9"
+    },
+    {
+      "bytes": 11045,
+      "path": "ella/services/semantic_learning_authority.py",
+      "sha256": "226bc2147eb2630f3639af1dbc3e3e356b234915bececfed70c1fe2864e3d68e"
+    },
+    {
+      "bytes": 2967,
+      "path": "ella/services/semantic_learning_host_client.py",
+      "sha256": "c446c608c7bd061fc14578436ae3e2e80f57940103da75c53673a8599a77e4e4"
+    },
+    {
+      "bytes": 8565,
+      "path": "ella/services/semantic_learning_ledger.py",
+      "sha256": "0c79d9e6cc9b347cd3900fa3a7f5e582ad6613010f6e5677cdbe809490e2781b"
+    },
+    {
+      "bytes": 13862,
+      "path": "ella/services/semantic_learning_v3.py",
+      "sha256": "18aa01c60c34073bffe855ec696bf438a9641d635f5437478c5b07f1602dc460"
+    },
+    {
+      "bytes": 18307,
+      "path": "ella/services/semantic_learning_workflow.py",
+      "sha256": "cd3c58f656f082177cfae5825d38a629d60cb20ac976a8397c76208028c0abc9"
+    },
+    {
+      "bytes": 8639,
+      "path": "ella/services/semantic_owned_runtime.py",
+      "sha256": "328d227b4c0be603d605a1b8e8e3afcab0233663bd9478711ead270ed3056fee"
+    },
+    {
+      "bytes": 21563,
+      "path": "ella/services/semantic_producer_ledger.py",
+      "sha256": "df1cf705d4d43f15b2d61165b9b10d592f2d7baaa838fa248a29ead625ba6180"
+    },
+    {
+      "bytes": 11987,
+      "path": "ella/services/semantic_producer_v1.py",
+      "sha256": "3083bc1a50d342394eb7f970d8b0f1d371dc48ecce9a0cc8e7243cf75c4efa1d"
+    },
+    {
+      "bytes": 12067,
+      "path": "ella/services/semantic_publication.py",
+      "sha256": "a8804c77c1f559ea4104513d56d4d8b744d07febcd31eb176cfa2095cb235bf5"
+    },
+    {
+      "bytes": 13851,
+      "path": "ella/services/semantic_retained_apply.py",
+      "sha256": "32e171209ef758105cb8eb78014a14088df71d7626707082b7b29f15fef22f14"
+    },
+    {
+      "bytes": 5727,
+      "path": "ella/services/semantic_retained_integration.py",
+      "sha256": "2820092aab81e06b32d53bac13da75307cce41d48943b478699245335d00ef94"
+    },
+    {
+      "bytes": 7524,
+      "path": "ella/services/semantic_runtime_authority.py",
+      "sha256": "6b32949cecefcb359308f3db6e19dc6eeb67bc303333a513c4879d83c66e2c5c"
+    },
+    {
+      "bytes": 15240,
+      "path": "ella/services/semantic_self_hosted_runtime.py",
+      "sha256": "af6e743984f443c5f3d20e1bb55854b5a83172646f4d46408f839750a42ab9ab"
+    },
+    {
+      "bytes": 47703,
+      "path": "ella/services/summary_recovery.py",
+      "sha256": "9ebe757804a03fb7e63b7a7736fa41d3cb151a61d34b6e2646973c519ede046c"
+    },
+    {
+      "bytes": 4148,
+      "path": "ella/services/summary_sanitizer.py",
+      "sha256": "6a2e49d058afb7367fff64605004c082fac0dbaf0236689a70aea652bc199c91"
+    },
+    {
+      "bytes": 2177,
+      "path": "ella/services/summary_title_quality.py",
+      "sha256": "e9aca8fa77d8d75b5c3c62f98b151ec2dc246fd999e7c7af80af27f9013c7917"
+    },
+    {
+      "bytes": 101621,
+      "path": "ella/services/summary_writeback.py",
+      "sha256": "a3f09400b2a52fcc44cd735c121aa1b9fc8f668f46702ef6acf2cf9e7b4eb4dd"
+    },
+    {
+      "bytes": 24098,
+      "path": "ella/services/thin_cloudbot_capture.py",
+      "sha256": "84e53a193d7d8bc3688175d25239edab4ea2ca2c32f9f3a2ea7144a78f626c99"
+    },
+    {
+      "bytes": 3046,
+      "path": "ella/services/thin_cloudbot_capture_supervisor.py",
+      "sha256": "e2afd0123577072d118c634bd8d402c2d2234c027c37428ed27ae696f70f7c7a"
+    },
+    {
+      "bytes": 18187,
+      "path": "ella/services/thin_cloudbot_consent.py",
+      "sha256": "b41a54566cbb6193269cb15a3c6c1e3eb6343603341555f721e173869d1bee80"
+    },
+    {
+      "bytes": 8024,
+      "path": "ella/services/thin_cloudbot_consent_contract.py",
+      "sha256": "be241f5385b1ee1f1a49ea01da33bb4eac1cdec49888e9f9fc7489c8dff01648"
+    },
+    {
+      "bytes": 4281,
+      "path": "ella/services/thin_cloudbot_deletion.py",
+      "sha256": "2aeb500a3e96e42b269f855516ae564de3322c9ca9d0dab1d9afa6963e1bdde2"
+    },
+    {
+      "bytes": 6904,
+      "path": "ella/services/thin_cloudbot_mcp.py",
+      "sha256": "aeb8409139fd7ef6dbdcb8c938befef4b06a3e5a0f3d3fef9e83ab11af7bec68"
+    },
+    {
+      "bytes": 1579,
+      "path": "ella/services/thin_cloudbot_output.py",
+      "sha256": "4fb1d966433cb08c2307d1b5623443dad5cc22684b0e0e3dabaa0232daceebe6"
+    },
+    {
+      "bytes": 6168,
+      "path": "ella/services/thin_cloudbot_request_authority.py",
+      "sha256": "d17a55e1f082000cc83b314059743c5b6c26949bf4cde9af9ad3c5a6201ea5ff"
+    },
+    {
+      "bytes": 1412,
+      "path": "ella/services/thin_cloudbot_runtime_authority.py",
+      "sha256": "a39a5bd81fbfa14a2c34ee432ad503882898b1ea4fdc708d55f42feb153a242f"
+    },
+    {
+      "bytes": 1554,
+      "path": "ella/services/thin_delivery_binding.py",
+      "sha256": "cdae870c657641fa7affbd71614041384bc841d9f636d0f1f11f969ffbfbb017"
+    },
+    {
+      "bytes": 1749,
+      "path": "ella/services/thin_delivery_mode.py",
+      "sha256": "b351a3d2d2c2784b2dad7d0dc7047bfecc5ea69fe5742aea283b65641096fdf0"
+    },
+    {
+      "bytes": 1156,
+      "path": "ella/services/thin_muse_admission.py",
+      "sha256": "c5d1464e5127795a13f4b7af7d14932d20c1db13c0e56f4c73402bd7284b4049"
+    },
+    {
+      "bytes": 12296,
+      "path": "ella/services/thin_pending_discovery.py",
+      "sha256": "4ab516215dfc3304c2a5f16550642391c9b89cfdefa756c36cf4432b7c84f8b5"
+    },
+    {
+      "bytes": 23049,
+      "path": "ella/services/today_card.py",
+      "sha256": "cc50926e8cee3ff5fbc6c646e3252878b7ce5eb25bc42cf072fac78c6c3f9715"
+    },
+    {
+      "bytes": 39787,
+      "path": "ella/services/today_card_postgres.py",
+      "sha256": "84dec65ff1892e0b891b4812f2305e239d78cc5e16e31bfd534f3600efb4b031"
+    },
+    {
+      "bytes": 2806,
+      "path": "ella/services/transcript_processing_hold.py",
+      "sha256": "712541c7bae61f1502a8664b5198f33a7fa2732a5246e04752fa6b1a2bef62e2"
+    },
+    {
+      "bytes": 2150,
+      "path": "ella/services/voice_canary_alerts.py",
+      "sha256": "0bcb04c26cd3b218f7e1e4c00a35dd0250695ac2586f33fa37e0ae63509c1256"
+    },
+    {
+      "bytes": 9713,
+      "path": "ella/services/voice_honcho.py",
+      "sha256": "c542b6f7f351ad0d906612725a1f128dfd7ddb402643fb1c603df66d6f12aa59"
+    },
+    {
+      "bytes": 1786,
+      "path": "ella/services/wellness_parser.py",
+      "sha256": "51c21e9854e44f677043cef6e8b6f72d96407776d18efeedb7d0a01648652b8b"
+    },
+    {
+      "bytes": 2303,
+      "path": "ella/services/whisper_capture_bridge.py",
+      "sha256": "0b95be33ed265130c4d5913830001cbc99cd2df3aca7620ec71ef7181b86c695"
+    },
+    {
+      "bytes": 24554,
+      "path": "ella/services/whisper_delivery.py",
+      "sha256": "d379ac50246a9a10f8bed906676a7541e46da939517ce65c081f1013c70445e6"
+    },
+    {
+      "bytes": 6473,
+      "path": "ella/services/whisper_owned_lifecycle.py",
+      "sha256": "0d67c75720bf7c8ae897daf63fb57e61195c0c7b63160461abbdd1df81c3637c"
+    },
+    {
+      "bytes": 1694,
+      "path": "ella/services/whisper_tool_capture.py",
+      "sha256": "b47c6194fe5a5ba47651c5b0d85a4cfbc6dd16d1d1084e44f784b1b0b247e94c"
+    },
+    {
+      "bytes": 28151,
+      "path": "ella/services/whisper_tool_delivery.py",
+      "sha256": "e2b01926182f4f5ac76d67498b87ada37c36c37f064dee92b50931860759237d"
+    },
+    {
+      "bytes": 15891,
+      "path": "ella/services/whisper_tool_delivery_legacy.py",
+      "sha256": "7515978add4c8ee0b06ccf6ac8d9ee1c7e5e0f7eb81959f1ac070484b02bdbdf"
+    },
+    {
+      "bytes": 7869,
+      "path": "ella/services/whisper_tool_factory.py",
+      "sha256": "45eb3ad770b2b6b1b505e46be5c9a42a20c784dbc5ed3accfcea56250eb82826"
+    },
+    {
+      "bytes": 6934,
+      "path": "ella/services/whisper_tool_factory_legacy.py",
+      "sha256": "770c12e547de938fef8b286825b4e3e57775a84a741c70817a7aa7020bce70dd"
+    },
+    {
+      "bytes": 9239,
+      "path": "ella/utils/auto_provision.py",
+      "sha256": "c0c53fbb888c174a58f96b0e93c36be155859dc30595eb40e6e52d9e734c11f9"
+    },
+    {
+      "bytes": 17177,
+      "path": "ella/utils/identity_sync.py",
+      "sha256": "145a54b75b0285964ec4fb505cc0308d8a8b989ff0c4eaaac05ffc1c00b1e71a"
+    },
+    {
+      "bytes": 11030,
+      "path": "ella/utils/provision_authority.py",
+      "sha256": "af1ebc96db6c804aafd069d1c552386c9f3c6ffcb5d239de02f8c9200a146f10"
+    },
+    {
+      "bytes": 5296,
+      "path": "main.py",
+      "sha256": "ee8eedb6fbce6c626e844f3e09817cbcf3cf980a1d15f755415cdbc35682b59e"
+    },
+    {
+      "bytes": 100,
+      "path": "migration/main.py",
+      "sha256": "0c08fa899128bb4631c1db21431074dc65f1632b9b50004798bc8adf6c2b736f"
+    },
+    {
+      "bytes": 2747,
+      "path": "migration/memories.py",
+      "sha256": "c4f41f68df7e7719bde0f8133597107cefdfd5d844197685f608fa09f91c8144"
+    },
+    {
+      "bytes": 6845,
+      "path": "migration/remove_soft_deleted_documents.py",
+      "sha256": "6f428658f4fa005f2f6a0e2cd17e80c70135b736cca301ae0b7b47fb1e9134f9"
+    },
+    {
+      "bytes": 6785,
+      "path": "migrations/001_enhanced_protection_default.py",
+      "sha256": "1b379f9c0be5fb0d5601ac34a3061ab432586acbdd4efcc3bb6ae847783d8c65"
+    },
+    {
+      "bytes": 11497,
+      "path": "migrations/002_populate_historical_usage.py",
+      "sha256": "b7151a10171d187eaabee4e8d115293acbebda82463bb0b207db1030db6a551a"
+    },
+    {
+      "bytes": 8291,
+      "path": "migrations/003_report_top_transcription_users.py",
+      "sha256": "22131ae37cc5a78ff1ce6dbb6c46d42e0153381962dd365b83c210752889b1b1"
+    },
+    {
+      "bytes": 17305,
+      "path": "migrations/004_migrate_action_items_to_collection.py",
+      "sha256": "328815a66ca337cb2326eef1daa20aab1181fdd468c9898f4b154714cf7cdd1f"
+    },
+    {
+      "bytes": 7905,
+      "path": "migrations/005_backfill_memory_vectors.py",
+      "sha256": "714e99a432b09019c064cafaeb769d3635f7500d898e2ecd7c3e3392b886a4cc"
+    },
+    {
+      "bytes": 437,
+      "path": "modal/job.py",
+      "sha256": "ae1fd63ac39b94c9dae2797ba8bd3b730b1f5ab8eda6076aff68a7e1921befe4"
+    },
+    {
+      "bytes": 803,
+      "path": "modal/job_modal.py",
+      "sha256": "5c516529f613f745b38bdebc8c1ee58067f0555d48ba42e2599f01125a311a9a"
+    },
+    {
+      "bytes": 690,
+      "path": "modal/main.py",
+      "sha256": "9b1598ba2974e4489f98936d8c8d272da00f4862f9c36722f9055709a3313c86"
+    },
+    {
+      "bytes": 4548,
+      "path": "modal/speech_profile_modal.py",
+      "sha256": "4c42018503812d3aab812144a7251f7596dbc20610027979361f129e9b4e6166"
+    },
+    {
+      "bytes": 1103,
+      "path": "modal/vad_modal.py",
+      "sha256": "ee55b671f552795a336f9db4463e6f5879eb4a34c59e5bf62c93be9f7c17eb9e"
+    },
+    {
+      "bytes": 0,
+      "path": "models/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 6570,
+      "path": "models/announcement.py",
+      "sha256": "d763f4c0e26aa1060d99f9e891e7c51168be7128a927beb7ece05948556b4908"
+    },
+    {
+      "bytes": 9994,
+      "path": "models/app.py",
+      "sha256": "8340d23e346dce4440798929e1969c6955de14fd29d0a2ef8e08840c0b60bad1"
+    },
+    {
+      "bytes": 8007,
+      "path": "models/chat.py",
+      "sha256": "161a4ec29b56eef05375aede97a699a0f2e8a36ba0a74d47067a6873c0e8004d"
+    },
+    {
+      "bytes": 29999,
+      "path": "models/conversation.py",
+      "sha256": "f61a146a51e5d63d6a79fc7f795f78a76fab09362705f5ac341c93af0033c979"
+    },
+    {
+      "bytes": 3096,
+      "path": "models/conversation_integrity.py",
+      "sha256": "ee8b42be44e76a2f727e1c37d3b5068ea9610bd9a5e5f0606816ec8a540884ca"
+    },
+    {
+      "bytes": 2386,
+      "path": "models/daily_summary.py",
+      "sha256": "aa8fd31e8e90d1dbddccbd5e716ee817a6d53e24836854af502452ccf299c6fd"
+    },
+    {
+      "bytes": 495,
+      "path": "models/dev_api_key.py",
+      "sha256": "ff2c76ce3bbedaeb7195795637efa5ca9adb302b22346ce296cf54b7aac71a74"
+    },
+    {
+      "bytes": 2183,
+      "path": "models/folder.py",
+      "sha256": "cfe8c06b4580f744de6aed75b15c8e504f98ac4bab23e006876d11c51056222e"
+    },
+    {
+      "bytes": 5354,
+      "path": "models/hermes_cloud_enrichment_contract.py",
+      "sha256": "d79105e48521cc1dc2c2fcaec4f718e8b87986f9427eb04f6b96db74a08afd39"
+    },
+    {
+      "bytes": 2006,
+      "path": "models/import_job.py",
+      "sha256": "b8d6600d615d47a5547a92adf045cb45308d74f31768824fa1e1546f7af5b2ea"
+    },
+    {
+      "bytes": 5490,
+      "path": "models/integrations.py",
+      "sha256": "90f23ec7a1d9a3ac7c1c5a4cd7adafb2a32965ec780e6a7bc0517908edfb62d3"
+    },
+    {
+      "bytes": 411,
+      "path": "models/mcp_api_key.py",
+      "sha256": "e5851d1181a5f03b0cdaa9dd7f3fe0b7dfeb5d9095d25bedc4205b3e1be75bf4"
+    },
+    {
+      "bytes": 5143,
+      "path": "models/memories.py",
+      "sha256": "03f854fcb546dd98279cce0952efed23e47474628cb857b797f7cfe143706a2c"
+    },
+    {
+      "bytes": 4532,
+      "path": "models/message_event.py",
+      "sha256": "be9922e15949bca214b443681580c6b91d8481a606368b1a27b8db87622eff16"
+    },
+    {
+      "bytes": 904,
+      "path": "models/notification_message.py",
+      "sha256": "c02844b8e163819a782bfbf17933137ddfcabdb48adcbb67fc64a182c5e9367a"
+    },
+    {
+      "bytes": 576,
+      "path": "models/other.py",
+      "sha256": "8938b23be3369ea1626c473b00b635ac615bee2eb5eca03db27af04991f80a12"
+    },
+    {
+      "bytes": 3922,
+      "path": "models/proposals.py",
+      "sha256": "d2fff698f0e9a724501e0bc7a00cde0246c7bb495ac63d59e0026b115308b608"
+    },
+    {
+      "bytes": 74,
+      "path": "models/shared.py",
+      "sha256": "f89159f581a916d264932e620b6733eb952692a5267f020958717194dc88fdf7"
+    },
+    {
+      "bytes": 676,
+      "path": "models/task.py",
+      "sha256": "5e80420d40fb9c2c02b9d23aa932a62147e24e06d403ecca3beb3ecd55b31f7d"
+    },
+    {
+      "bytes": 8646,
+      "path": "models/transcript_segment.py",
+      "sha256": "9dd167a483dde21947f48226a4d78390d85b346e4ce2944747ad4ab14a673293"
+    },
+    {
+      "bytes": 4302,
+      "path": "models/trend.py",
+      "sha256": "9924c5168a2592940fa9bd922f37b541bc681dbc1c7ce56554bb8e85e8f8f072"
+    },
+    {
+      "bytes": 1072,
+      "path": "models/user_usage.py",
+      "sha256": "541fb3300f233b3e554a9be15dc1e801785cf7576dae22608134ff46660dc4ec"
+    },
+    {
+      "bytes": 1777,
+      "path": "models/users.py",
+      "sha256": "fa5c862904f762e06136f6a934c5a26e31d58ec9eb6ed27795f80a086482d4d9"
+    },
+    {
+      "bytes": 8535,
+      "path": "pretrained_models/snakers4_silero-vad_master/examples/microphone_and_webRTC_integration/microphone_and_webRTC_integration.py",
+      "sha256": "d1628b83eb8a1f84d038499a9c7eda962d6f2684b722bd2167a081fa3666d373"
+    },
+    {
+      "bytes": 6679,
+      "path": "pretrained_models/snakers4_silero-vad_master/examples/onnx_sequence/export.py",
+      "sha256": "5e0889ac5a84d8b0bb0bee178e1febde50397484dc96bf2d93a66eb8eae973c3"
+    },
+    {
+      "bytes": 8174,
+      "path": "pretrained_models/snakers4_silero-vad_master/examples/onnx_sequence/run.py",
+      "sha256": "b45355bec6451b07043bc352b6f890fab72c203b3708318502f833dec4e80045"
+    },
+    {
+      "bytes": 10293,
+      "path": "pretrained_models/snakers4_silero-vad_master/examples/openvino/convert.py",
+      "sha256": "4ed304326aebcffacfbbf9a342a0812953e89acfc76335299af39e5275c8cc6b"
+    },
+    {
+      "bytes": 7094,
+      "path": "pretrained_models/snakers4_silero-vad_master/examples/openvino/verify.py",
+      "sha256": "f211740338aa558220d194d8cb9dd1ed6c6be502657af5ae201f168647e5d29c"
+    },
+    {
+      "bytes": 1978,
+      "path": "pretrained_models/snakers4_silero-vad_master/hubconf.py",
+      "sha256": "2637a3a91d061a6e921853f5de5430f873c292662b46e5fd61edaf648b4ae5bd"
+    },
+    {
+      "bytes": 1288,
+      "path": "pretrained_models/snakers4_silero-vad_master/src/silero_vad/__init__.py",
+      "sha256": "45fcf7e268eb0ba83ccee737b1a86cc94d7cf7487e2a1c0a31b9b72b899201f1"
+    },
+    {
+      "bytes": 0,
+      "path": "pretrained_models/snakers4_silero-vad_master/src/silero_vad/data/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1504,
+      "path": "pretrained_models/snakers4_silero-vad_master/src/silero_vad/model.py",
+      "sha256": "40762a80d1278605480f75f90c6510c1a4ab71bd230f45c334e4f9c5e402181d"
+    },
+    {
+      "bytes": 8655,
+      "path": "pretrained_models/snakers4_silero-vad_master/src/silero_vad/sequence_vad.py",
+      "sha256": "c8b6e1194e36a5721a8f1ac6674e07f78c8a892c7585c51c9f9b40068cf34fbd"
+    },
+    {
+      "bytes": 2563,
+      "path": "pretrained_models/snakers4_silero-vad_master/src/silero_vad/tinygrad_model.py",
+      "sha256": "79afb8aae28bb9d20735df4053bef1191a85b74a0db335a5fc16c302ddda7e86"
+    },
+    {
+      "bytes": 31474,
+      "path": "pretrained_models/snakers4_silero-vad_master/src/silero_vad/utils_vad.py",
+      "sha256": "7e0f9b3334ee4feb79abcf2251be12458329077bce28c8540878ed9d35e5aa6b"
+    },
+    {
+      "bytes": 0,
+      "path": "pretrained_models/snakers4_silero-vad_master/tuning/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1665,
+      "path": "pretrained_models/snakers4_silero-vad_master/tuning/search_thresholds.py",
+      "sha256": "4b2670739897fc9ed577f52d594b2761a3e96e241ed3fa32841a951efdf908c0"
+    },
+    {
+      "bytes": 3013,
+      "path": "pretrained_models/snakers4_silero-vad_master/tuning/tune.py",
+      "sha256": "b4c2bb3724fa3fc1ae3818c3e0938e24707aa4f9104058546a989faf3fd87aef"
+    },
+    {
+      "bytes": 11805,
+      "path": "pretrained_models/snakers4_silero-vad_master/tuning/utils.py",
+      "sha256": "e1da62037c2171b424e705291fe6eadc3218a3c0514e5773b6ba6d707432f1a6"
+    },
+    {
+      "bytes": 655,
+      "path": "pusher/main.py",
+      "sha256": "417e6692d43314e70a4a0a6341b764eeb49f1ea8390f0f8dbe36e5b5fbd744c9"
+    },
+    {
+      "bytes": 0,
+      "path": "routers/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 12930,
+      "path": "routers/action_items.py",
+      "sha256": "a50d2658eb618f35d00bbd863998097112eae6e2dc28525dc7ae564c83fceaae"
+    },
+    {
+      "bytes": 798,
+      "path": "routers/agents.py",
+      "sha256": "d64f0437652393f54c4d949b359cb814ba51b829f422076d0f3b4fff351a3c84"
+    },
+    {
+      "bytes": 13354,
+      "path": "routers/announcements.py",
+      "sha256": "1ab80a9878d8f07043e76639d281e99f69e17e67cc07021c7ae9e496b202e225"
+    },
+    {
+      "bytes": 74369,
+      "path": "routers/apps.py",
+      "sha256": "fa9f7e7167e3b9a9b63657ac5daf6e3e4aaa33c28b6fa18015a076468a1e44b4"
+    },
+    {
+      "bytes": 17280,
+      "path": "routers/auth.py",
+      "sha256": "9345b24aee7375015e73d07306eab574ab6730a007267d41d68bd44728c9ab45"
+    },
+    {
+      "bytes": 4115,
+      "path": "routers/calendar_meetings.py",
+      "sha256": "433c7ae24b2dc3faa91093a59b326d830e4cfdf16b6a84d1255fc3fd2399836f"
+    },
+    {
+      "bytes": 22259,
+      "path": "routers/chat.py",
+      "sha256": "e455b630bea80220466d60bf9fc90884496f88cc1f3289ed120e354363e971cd"
+    },
+    {
+      "bytes": 49018,
+      "path": "routers/conversations.py",
+      "sha256": "9f15108cbd7be93fbbdb7f5ce26b2b7326a010e3eb67547a2d1d49419020ad6b"
+    },
+    {
+      "bytes": 1828,
+      "path": "routers/custom_auth.py",
+      "sha256": "e3764c22bacfad3953c7049477055f19a65cf92b2e2b849bcb24230f26516f44"
+    },
+    {
+      "bytes": 40527,
+      "path": "routers/developer.py",
+      "sha256": "ee1f91f3ced7ecc4af5ed4f70bbce69eeb3c200c4ca428b33da8f9b43690f5ce"
+    },
+    {
+      "bytes": 10135,
+      "path": "routers/firmware.py",
+      "sha256": "6b0991f01f8416d6279af045b32a3faecef105150c9d2e5900898ff3940424d6"
+    },
+    {
+      "bytes": 5567,
+      "path": "routers/folders.py",
+      "sha256": "50b8f69aa1eb90e17a12b3dfd55d18fecb184dc8739cb1bb7d5cd0e6c5826e20"
+    },
+    {
+      "bytes": 9252,
+      "path": "routers/goals.py",
+      "sha256": "37b939ff0c849e61741fae54c648b3c5f88ca3a9dd3ae49a22f1f4283239044e"
+    },
+    {
+      "bytes": 5107,
+      "path": "routers/imports.py",
+      "sha256": "bdaa314137b90a3c008527c1990c9a99351155fce52c94cc73079e0e31e39c36"
+    },
+    {
+      "bytes": 27673,
+      "path": "routers/integration.py",
+      "sha256": "5196f4351c56bef180c87c1f3f41ac7dd4226fca3cb607e2cde8570387566e71"
+    },
+    {
+      "bytes": 20605,
+      "path": "routers/integrations.py",
+      "sha256": "fb0b1ed991af48b764f911c72998c69cab5d5d11b810f14610c687e2681b600f"
+    },
+    {
+      "bytes": 2181,
+      "path": "routers/knowledge_graph.py",
+      "sha256": "6d9457a44a0cff9b00fdb5bb3322fb890b276dea48a14b39330cefa102c9eb70"
+    },
+    {
+      "bytes": 7277,
+      "path": "routers/mcp.py",
+      "sha256": "9c646720d91aa9075eb0d05d24290f1ca78b38c8b02d4baf4cc6972e8deeea10"
+    },
+    {
+      "bytes": 37203,
+      "path": "routers/mcp_sse.py",
+      "sha256": "a8e8304c2cc9106f4c39c1643136979c84af9f00ad3bbfc0e714b2f98b69bc43"
+    },
+    {
+      "bytes": 4109,
+      "path": "routers/memories.py",
+      "sha256": "602d9fd26990a7e753ddab2c7bb6a60fdb99d2c42ec4c6ae6cacd76f0cdf0105"
+    },
+    {
+      "bytes": 5326,
+      "path": "routers/notifications.py",
+      "sha256": "a25ddadeeee588a2f5f9fc1dd6f58be6f41da12b37376862f3985bb55a74227b"
+    },
+    {
+      "bytes": 8418,
+      "path": "routers/oauth.py",
+      "sha256": "529d9366989452a2f69543209d9e60779f2bf81596f1ea003e4683f0fc8ede03"
+    },
+    {
+      "bytes": 0,
+      "path": "routers/onboarding.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 208,
+      "path": "routers/other.py",
+      "sha256": "8464c14dd6570cf30102f48c30d2d01325948871655e81dba03f945425912454"
+    },
+    {
+      "bytes": 40245,
+      "path": "routers/payment.py",
+      "sha256": "5c394c04bbb689ea29795a3efa0505e6a7ab7c8bcf47749668b8a09365b1c640"
+    },
+    {
+      "bytes": 1418,
+      "path": "routers/plugins.py",
+      "sha256": "cf28f22ea5e052f43686641d0225c63caabcedd3a302d0b36412eaa527be609a"
+    },
+    {
+      "bytes": 22056,
+      "path": "routers/pusher.py",
+      "sha256": "c541874f6d9994bafc957d9a1e921bac161bece6bc25209f10cb1c6a9ec602e6"
+    },
+    {
+      "bytes": 3767,
+      "path": "routers/speech_profile.py",
+      "sha256": "49a6ec5751472d39e4a37eca7aa19570f8395047b05b276fc750cb739c57f570"
+    },
+    {
+      "bytes": 48839,
+      "path": "routers/sync.py",
+      "sha256": "ca13399da90bbaeaf6af08dcb4570f302a8327f9cc80b2988fb2be1960fc21a9"
+    },
+    {
+      "bytes": 48604,
+      "path": "routers/task_integrations.py",
+      "sha256": "61406045f0ccc2fec5ff3efa1d48c6568917efcb5e55d38e6803334b9879b4a1"
+    },
+    {
+      "bytes": 197362,
+      "path": "routers/transcribe.py",
+      "sha256": "7432e499917774bb4f08b5f73972788f26fab6259982f8ba5561d4e0b0efe32f"
+    },
+    {
+      "bytes": 237,
+      "path": "routers/trends.py",
+      "sha256": "5e207bd10de4fabc6adcbf3ec2e47ef20134da112300aa59e8b2d885f578b27f"
+    },
+    {
+      "bytes": 14566,
+      "path": "routers/updates.py",
+      "sha256": "260bd60385757b3f58c316915d5e62bd827e6427fd514c2f44791587c3aea66a"
+    },
+    {
+      "bytes": 48973,
+      "path": "routers/users.py",
+      "sha256": "171694f263266d03233a0e52483bc769ab772fd5e773cfa1c01ad2e1ef929918"
+    },
+    {
+      "bytes": 2684,
+      "path": "routers/workflow.py",
+      "sha256": "7668b7277ce386e42d4ffa0b75bcb4d10997b98497fd40fde348e6738845d00a"
+    },
+    {
+      "bytes": 4468,
+      "path": "routers/wrapped.py",
+      "sha256": "8c1477eeadcb6e032a1bf68adf05e42e33570a785aad3f7c1fc47867888615c8"
+    },
+    {
+      "bytes": 0,
+      "path": "templates/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 2996,
+      "path": "testing/load_test.py",
+      "sha256": "5d969fa97403a3cc9023c734e8fc46c14eeeb2995733183d040eea714a8f7249"
+    },
+    {
+      "bytes": 634,
+      "path": "testing/locustfile.py",
+      "sha256": "12fcfac5b37fe7e9eee7a683d597fc7510ae6e0cc34e69b83223ddde29fb4b20"
+    },
+    {
+      "bytes": 0,
+      "path": "utils/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1895,
+      "path": "utils/aac.py",
+      "sha256": "b3e6793052b0c83254ac0b8058aa471ad744241e1d6660d6186a75534257cbda"
+    },
+    {
+      "bytes": 7007,
+      "path": "utils/agent.py",
+      "sha256": "c9b628055f3693efa1691537ebc20086893f18813a289121951bb6569f9a1163"
+    },
+    {
+      "bytes": 668,
+      "path": "utils/analytics.py",
+      "sha256": "69ed7f1ac3569eeb42fb423ddf1eeae2782db97bf7e85f59b774d7850971dc73"
+    },
+    {
+      "bytes": 15646,
+      "path": "utils/app_integrations.py",
+      "sha256": "33dd9664361f6d38b768f4b4f6aea9d654f0d59744c955f0f8d3de2106ba7bc2"
+    },
+    {
+      "bytes": 52070,
+      "path": "utils/apps.py",
+      "sha256": "4cc50c7ad0d98b9affdb63b330ea34a0bd578ee7fbe6e94c83a11b98d318cd6d"
+    },
+    {
+      "bytes": 4888,
+      "path": "utils/audio.py",
+      "sha256": "7013d65f96a64c295875091cc31cfec53a23e87e20ea0a46ed219d6845590cb8"
+    },
+    {
+      "bytes": 5145,
+      "path": "utils/capture_buffer.py",
+      "sha256": "b2d4d1dd2f1c04946e2308f75d4983559e712653268d7fcbb245fc7c619e7370"
+    },
+    {
+      "bytes": 2644,
+      "path": "utils/capture_task_diagnostics.py",
+      "sha256": "6324897a6c0fc12f206767e87e318867f519eca3821b35f02fffec7692e108f5"
+    },
+    {
+      "bytes": 10951,
+      "path": "utils/chat.py",
+      "sha256": "c5fde134d001ad6eb2b93072c0ef499dc68dbe5403bf2ea5120d115a16981f2e"
+    },
+    {
+      "bytes": 55820,
+      "path": "utils/conversations/capture_protocol.py",
+      "sha256": "9b72a98a09d19a7f7e5960fab92b296c873c48e4b8e566501631f59b016250a8"
+    },
+    {
+      "bytes": 3194,
+      "path": "utils/conversations/capture_target.py",
+      "sha256": "926e572f76be07613e66d849e3cfd99b685b4a3c6bd7c5aa3c53cdac9db4222a"
+    },
+    {
+      "bytes": 944,
+      "path": "utils/conversations/failure_state.py",
+      "sha256": "513d3e73ea18c9db272e456d77de0dacaaec3cb444a6f81c1c879585cc6d04fc"
+    },
+    {
+      "bytes": 1761,
+      "path": "utils/conversations/generic_summary.py",
+      "sha256": "24b0170d918af7db5d5762a4a817780b157c73c192d82bdd00cc8d4dc0464886"
+    },
+    {
+      "bytes": 936,
+      "path": "utils/conversations/location.py",
+      "sha256": "bdfbed268549e02c4d8795b043b47c6114b1a6ac15c389042dcc1579d9a4927c"
+    },
+    {
+      "bytes": 2697,
+      "path": "utils/conversations/long_discarded_inventory.py",
+      "sha256": "dfdb8ad7f0028ef4211c13c98e9b513a3d9204e994c2eaf218473b1ec527c341"
+    },
+    {
+      "bytes": 2864,
+      "path": "utils/conversations/memories.py",
+      "sha256": "b642a6aabf226b5ced2fe0981cc4e8519e39e049967d1a29d78a15a2edbd18b9"
+    },
+    {
+      "bytes": 17482,
+      "path": "utils/conversations/merge_conversations.py",
+      "sha256": "0c74d118d4f4a318b02cc5ff315ee783e60523dcee46f9a05089b94824bf6726"
+    },
+    {
+      "bytes": 7668,
+      "path": "utils/conversations/postprocess_conversation.py",
+      "sha256": "fe64b1e96db0d94bfd14fd71b8a28df47e5e7ddeddf21533428e7729683bbe07"
+    },
+    {
+      "bytes": 68838,
+      "path": "utils/conversations/process_conversation.py",
+      "sha256": "793729912e9f4f287f7d3b332c4966d82efff1e7b7dfab3e1e3ebf45931191c0"
+    },
+    {
+      "bytes": 2041,
+      "path": "utils/conversations/search.py",
+      "sha256": "34c5cd0799a040ab20dd75427aa97c9de946ebfc270b94f0c7c2ccbeb21d8d6c"
+    },
+    {
+      "bytes": 11530,
+      "path": "utils/conversations/spoken_diagnostic.py",
+      "sha256": "7d7fec2c9c09f99928a106182051d5a74e7b35d358f3da9e4da83c9a3c6a8a13"
+    },
+    {
+      "bytes": 3602,
+      "path": "utils/conversations/vector.py",
+      "sha256": "b21ad565d5d49b091d0cc95eae9dab3dbcb237280c97239ffe2d42f53c23d99c"
+    },
+    {
+      "bytes": 611,
+      "path": "utils/dev_api_keys.py",
+      "sha256": "934ec81c567ae9b5263b196ab12879eeba221ccedb2b86fc965523f0fa8be373"
+    },
+    {
+      "bytes": 1349,
+      "path": "utils/ella/__init__.py",
+      "sha256": "3e3f9463bbda006ab9b42bd5a8608184b79eabe18a356084ee9137f58e385470"
+    },
+    {
+      "bytes": 3735,
+      "path": "utils/ella/ambient_deadline.py",
+      "sha256": "8e67c652fa6f7c217a9cd72f0ad8789185edffa3a85372ff4c3a3ade9d2eda7b"
+    },
+    {
+      "bytes": 821,
+      "path": "utils/ella/canonical_auth.py",
+      "sha256": "3bc2be1ea872145712c05d32100974143ad82f2dbc3fba6f648b705708100724"
+    },
+    {
+      "bytes": 11519,
+      "path": "utils/ella/canonical_context.py",
+      "sha256": "c84883f52a7b25ad322f63e807306240cc4db5470a4ca7e7e0ece64746254b22"
+    },
+    {
+      "bytes": 15417,
+      "path": "utils/ella/canonical_omi.py",
+      "sha256": "b6e857ac17c05f088a2e22afc5fbd16908787b9e404519b5c445d497f628d2fb"
+    },
+    {
+      "bytes": 692,
+      "path": "utils/ella/chat.py",
+      "sha256": "c05ed381277f6e24e9a1d0cc4f7a219f0d2d1d0db2eb0b41ce873c25704e8fbc"
+    },
+    {
+      "bytes": 3382,
+      "path": "utils/ella/config.py",
+      "sha256": "4dd9b303c01f899a24a4383e93972b57f69f1154f571feedf9948b1fe9efbe99"
+    },
+    {
+      "bytes": 8963,
+      "path": "utils/ella/exact_firebase_auth.py",
+      "sha256": "81b8b59f6342dba469873b86e3ad6a6dd405e4c27fcecabb44668a382d589665"
+    },
+    {
+      "bytes": 7555,
+      "path": "utils/ella/history_pagination.py",
+      "sha256": "7e9516df4bce64c258567c66129274fa6268e014be2e3f8cfa06dabad0a8a111"
+    },
+    {
+      "bytes": 3319,
+      "path": "utils/ella/memory.py",
+      "sha256": "62a72189dedd1e5b891d051676b008237af53054fee415dcb228c9a8f2f1d965"
+    },
+    {
+      "bytes": 16013,
+      "path": "utils/ella/memory_artwork_storage.py",
+      "sha256": "10a62395c66acfc8064a2680d4504c9afc43eab468ce637f21a3dcf7130d3092"
+    },
+    {
+      "bytes": 12022,
+      "path": "utils/ella/postprocess.py",
+      "sha256": "5fe764ab487cd76c83e5978ad45c71240840fa0e7cea9e406519a99cbb60b68d"
+    },
+    {
+      "bytes": 69639,
+      "path": "utils/ella/scanner.py",
+      "sha256": "26f1db0e8e56178a23db343e8289804f3512d79ec6d7fbfe7b4885a7fb12774e"
+    },
+    {
+      "bytes": 4331,
+      "path": "utils/ella/scanner_debounce.py",
+      "sha256": "87006885e80366f6b78eea41c69f556542f963fddd1fa7f23035eeb0a0e30da6"
+    },
+    {
+      "bytes": 19223,
+      "path": "utils/ella/scanner_keyterms.py",
+      "sha256": "bc53653df930f2be7407e76637a4a16348692eafd5b449509df6efe019abcd70"
+    },
+    {
+      "bytes": 5252,
+      "path": "utils/ella/summary.py",
+      "sha256": "65903ae7687376cf75d393c5ee0d35ce43e7abea96521ce95af7743748441556"
+    },
+    {
+      "bytes": 4164,
+      "path": "utils/ella/time_context.py",
+      "sha256": "09d0452333accba801d006562a8f90b3d9096eb3041d965ac0b93907201e8039"
+    },
+    {
+      "bytes": 4830,
+      "path": "utils/encryption.py",
+      "sha256": "1da69af3e7689e2c6849ef2abc1b91aebc23a68f17d3b31b433bcb3df2e4a9b4"
+    },
+    {
+      "bytes": 0,
+      "path": "utils/imports/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 16492,
+      "path": "utils/imports/limitless.py",
+      "sha256": "225f9929eed6ad9731dcfe5632a985c101d6d3a85d19cdaca8d4b2e3511e37ae"
+    },
+    {
+      "bytes": 0,
+      "path": "utils/llm/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 9819,
+      "path": "utils/llm/app_generator.py",
+      "sha256": "5245e575b06001bc7918a9cfa35a466556e9439c64f8444f63d135224244e0dd"
+    },
+    {
+      "bytes": 60077,
+      "path": "utils/llm/chat.py",
+      "sha256": "ace62d386dfdc441603300eb77b8513da7f02d2b38b7616a2003188e40e07f8e"
+    },
+    {
+      "bytes": 11724,
+      "path": "utils/llm/clients.py",
+      "sha256": "d0c2e16bee5a1ad5e6a80a68745fdf1f8ef039d03ca1bf83a0eb169ede12e449"
+    },
+    {
+      "bytes": 47356,
+      "path": "utils/llm/conversation_processing.py",
+      "sha256": "f96c9f680c8e6396020b10ec8083a21b71c421f95d872716a2e0bc2c8cb46015"
+    },
+    {
+      "bytes": 14387,
+      "path": "utils/llm/external_integrations.py",
+      "sha256": "c3d81336d8f3c081b6b9a2a706526e1fd95f6013283db6b18baa8d353a54625b"
+    },
+    {
+      "bytes": 1128,
+      "path": "utils/llm/followup.py",
+      "sha256": "04e4eeb9580adf218b8f90b4de78925dd484bdbc51a8818aef65261be2d7a4b7"
+    },
+    {
+      "bytes": 11461,
+      "path": "utils/llm/goals.py",
+      "sha256": "87c9919039738b61040956c7fd606c4515898d51aa2f2f23c2039c75774a21f5"
+    },
+    {
+      "bytes": 10687,
+      "path": "utils/llm/knowledge_graph.py",
+      "sha256": "04e90d49dfac4f1208dde95ff44188483a2a94d13ff855fc6db7ae132743eefa"
+    },
+    {
+      "bytes": 12006,
+      "path": "utils/llm/memories.py",
+      "sha256": "59338944960289faab3faa3566cef1b9cb9c3760fec34afc6cfe78603b960b9e"
+    },
+    {
+      "bytes": 6435,
+      "path": "utils/llm/notifications.py",
+      "sha256": "351497b08eeee22df2a126cc45f26dfb657bf9bf802d5e4739cc4d0c3546d328"
+    },
+    {
+      "bytes": 1137,
+      "path": "utils/llm/openglass.py",
+      "sha256": "2c7144590eb3d0c20ba4f17167fb67c6222897b905175058b92bd363655b6f88"
+    },
+    {
+      "bytes": 10229,
+      "path": "utils/llm/persona.py",
+      "sha256": "fb95432eebbaf0da0adfaa59c27fae752824718c38d1d843b3ecf77ca5553cd4"
+    },
+    {
+      "bytes": 1088,
+      "path": "utils/llm/proactive_notification.py",
+      "sha256": "fa211e7f34549682279d5edb2fe72bbd9b9bae385b15acb414b07f74a0690834"
+    },
+    {
+      "bytes": 2865,
+      "path": "utils/llm/trends.py",
+      "sha256": "9dd5b83f81ab43fa087d3c35e7a9a8d4483c67881d28b577c24aa5cbd448067a"
+    },
+    {
+      "bytes": 2783,
+      "path": "utils/llms/memory.py",
+      "sha256": "a16c0904ead5a1b03501b110b932d9ba87170a7662fb9740a93f61134ff8f2ea"
+    },
+    {
+      "bytes": 593,
+      "path": "utils/mcp_api_keys.py",
+      "sha256": "67b1bd5cb089d213f491fac8a28f001fe4d2976dcd3d2af84deeb6751a4742a5"
+    },
+    {
+      "bytes": 26426,
+      "path": "utils/mcp_client.py",
+      "sha256": "8733325662d880812cb87791ba06ddc1bd8384089e802b1cd27a5b5453acda18"
+    },
+    {
+      "bytes": 12015,
+      "path": "utils/mentor_notifications.py",
+      "sha256": "deb7bf0d5c9bee078760914c828a49db26ec8eb40e89c7a81096928561446f90"
+    },
+    {
+      "bytes": 19783,
+      "path": "utils/notifications.py",
+      "sha256": "8fd920fdfff17df422b8556ca7f7dacaf993c56dd15107ab55c6ecc168a83743"
+    },
+    {
+      "bytes": 364,
+      "path": "utils/observability/__init__.py",
+      "sha256": "da15cb6b4223cb0e8ab5f2a84bd067d886c09bcfe8d31803102be509a4d26554"
+    },
+    {
+      "bytes": 5454,
+      "path": "utils/observability/langsmith.py",
+      "sha256": "8df45271f65ec2d63d6c9c4ccf18244b97b3d2bad122684cce104196af32693c"
+    },
+    {
+      "bytes": 19109,
+      "path": "utils/observability/langsmith_prompts.py",
+      "sha256": "0017d9535b29ba3c7a90dbddbcbfe6d47f2db23b6781ed5873d000120a3975db"
+    },
+    {
+      "bytes": 9804,
+      "path": "utils/onboarding.py",
+      "sha256": "abd896233287220f190eef7d817d5398ecee5809959dda481d5cada2c6080353"
+    },
+    {
+      "bytes": 10110,
+      "path": "utils/other/chat_file.py",
+      "sha256": "fb627da8fd9f771d4c0846512e1a7733296a5b90551bef4f8f82d99d4841128b"
+    },
+    {
+      "bytes": 6427,
+      "path": "utils/other/endpoints.py",
+      "sha256": "7a922683215e25a1f54f78537a2c14e63d37ada69e3110bf082ee57b4794dfbc"
+    },
+    {
+      "bytes": 5967,
+      "path": "utils/other/hume.py",
+      "sha256": "695ccca615d4a0454033db5e599c4ffcf9a2e067cd7672e2881a77b1abc155dc"
+    },
+    {
+      "bytes": 306,
+      "path": "utils/other/jobs.py",
+      "sha256": "065aa205831421a50be23ff35de72781c46d7b3e71b0ae0ffab0f02677313d0c"
+    },
+    {
+      "bytes": 7627,
+      "path": "utils/other/notifications.py",
+      "sha256": "b6e28dce084d4d798e5df2ad59365c3c556a273a07547fb0ab84826d3057d9f1"
+    },
+    {
+      "bytes": 217,
+      "path": "utils/other/pattern.py",
+      "sha256": "0b3bd98a9779774cfa6f712b7fc19967dcd190b8292b6b0d568497b2b6c6bb95"
+    },
+    {
+      "bytes": 29824,
+      "path": "utils/other/storage.py",
+      "sha256": "85f5ec55a278e00572d65b9314c3d4eb3b3e06a880d99c1145b246f8f54d20f0"
+    },
+    {
+      "bytes": 235,
+      "path": "utils/other/task.py",
+      "sha256": "279cf2306f8c6364668345254564810852675f1f36262b34366acde4b2201651"
+    },
+    {
+      "bytes": 2350,
+      "path": "utils/other/timeout.py",
+      "sha256": "f55520f40e915e1daa1d024f348ed0a6a65a2695e28098af2730b229d533226e"
+    },
+    {
+      "bytes": 30129,
+      "path": "utils/prompts.py",
+      "sha256": "2aff95a248a5a8f17bab80bfb49056fc3ab9776ce35911bb880ef52ba715b510"
+    },
+    {
+      "bytes": 1793,
+      "path": "utils/pusher.py",
+      "sha256": "6d0f949a501d7ae6ac0f056ac3101514e92785f45e6d22012742a5ad0b9cef36"
+    },
+    {
+      "bytes": 26949,
+      "path": "utils/retrieval/agentic.py",
+      "sha256": "714a3cb38119d6ff8da7250a614d0074f6057cf12ae2bfb0ed810fb92e796b98"
+    },
+    {
+      "bytes": 23727,
+      "path": "utils/retrieval/graph.py",
+      "sha256": "2ffcd6d6531413544173c24079cbe853512a6563456ba3fdcd067bf95909ced1"
+    },
+    {
+      "bytes": 4221,
+      "path": "utils/retrieval/rag.py",
+      "sha256": "5b1f920f905c1f8383762f2b5f4bb591234856fcad4a1d470b7aa5458d017205"
+    },
+    {
+      "bytes": 6992,
+      "path": "utils/retrieval/safety.py",
+      "sha256": "fb21ad9eba5271274e462ac27afbcc62b906afaa8e4da79fb8ed5e549cdd13a4"
+    },
+    {
+      "bytes": 1942,
+      "path": "utils/retrieval/tools/__init__.py",
+      "sha256": "ed2a58f1cfe1c75555b3db723294a0fc4aa235c0fb0837ccbf083e6328f00fdd"
+    },
+    {
+      "bytes": 24141,
+      "path": "utils/retrieval/tools/action_item_tools.py",
+      "sha256": "a715ec9a47f1cf18a040843b8bb03b57dc88ef37c26b4eb100c912ac33b47457"
+    },
+    {
+      "bytes": 10880,
+      "path": "utils/retrieval/tools/app_tools.py",
+      "sha256": "52c26192863e3acea628f4c5d3e185fd8570b11f4a40f40f1f19c3fed498f5ef"
+    },
+    {
+      "bytes": 17156,
+      "path": "utils/retrieval/tools/apple_health_tools.py",
+      "sha256": "45c4aa5c805ca08507042bf60f82f2b5143c8519b36e97f9d3e273cb1fb31529"
+    },
+    {
+      "bytes": 60587,
+      "path": "utils/retrieval/tools/calendar_tools.py",
+      "sha256": "acb312262147f21a1a82739637528338c517a6d7957bfe37f496afad1213bc64"
+    },
+    {
+      "bytes": 3035,
+      "path": "utils/retrieval/tools/chart_tools.py",
+      "sha256": "d8f765068d0ca53b6dabad82ed0dcb36da4e196c362c96b81866cec2fad88e52"
+    },
+    {
+      "bytes": 28227,
+      "path": "utils/retrieval/tools/conversation_tools.py",
+      "sha256": "e3730df4b2d1f4d4e19fe4a2af2e76aaae6cb6b59f19c3d577e569b65779d375"
+    },
+    {
+      "bytes": 4261,
+      "path": "utils/retrieval/tools/file_tools.py",
+      "sha256": "e0b0638fa690098e3fe72177d549310da643a04f824bc8cfeb3e232ebab41fcb"
+    },
+    {
+      "bytes": 9410,
+      "path": "utils/retrieval/tools/gmail_tools.py",
+      "sha256": "9d6a28346cc44a675f7f5a0b6f18e861cfe3ba4a3de89ab0f8dda6e61e2d3da0"
+    },
+    {
+      "bytes": 2364,
+      "path": "utils/retrieval/tools/google_utils.py",
+      "sha256": "28fe1953b0b36c2e26c383bf780c1dbfbe227b3f4cc1b86cefd653fb7f070d61"
+    },
+    {
+      "bytes": 4055,
+      "path": "utils/retrieval/tools/integration_base.py",
+      "sha256": "9274595ba6f2522f664b687e9563437a20d4664136d3bf81aefab0a253deb2da"
+    },
+    {
+      "bytes": 13518,
+      "path": "utils/retrieval/tools/memory_tools.py",
+      "sha256": "e96fb0f5daf1ddf0074ceba2d52b2ddbd15080e1110ab5e287d19da11bc4dd3c"
+    },
+    {
+      "bytes": 4513,
+      "path": "utils/retrieval/tools/notification_settings_tools.py",
+      "sha256": "67e094c1488f471f591e1f78ef22c6ac6443dda86d04f9938b8d8f65c3bf75f6"
+    },
+    {
+      "bytes": 1817,
+      "path": "utils/retrieval/tools/omi_tools.py",
+      "sha256": "9dfa8c9fc323873aa1d4a3a9ef6ac2c86cbbf07d7d484568e7be7370ee3df698"
+    },
+    {
+      "bytes": 4412,
+      "path": "utils/retrieval/tools/perplexity_tools.py",
+      "sha256": "f959b0bbd0e61c7920c66348d5b4adc02c8763d07dcbd4767598cf68d85dbda2"
+    },
+    {
+      "bytes": 1165,
+      "path": "utils/scopes.py",
+      "sha256": "532cf03ca963a1b07b5e02e10af11d6119c32d50825084379326f21badad588f"
+    },
+    {
+      "bytes": 8859,
+      "path": "utils/social.py",
+      "sha256": "ec40e4b4993b2cbb5b4c74afbee61e9192787675d0aee8f6b642b54de5b64e1c"
+    },
+    {
+      "bytes": 3196,
+      "path": "utils/speaker_assignment.py",
+      "sha256": "108a344c6eee2cfd8e49d4972f119da9e842e40d7ca78b02ee28eaca00f87db6"
+    },
+    {
+      "bytes": 18079,
+      "path": "utils/speaker_identification.py",
+      "sha256": "e4ffdf845817215e083066d0e0c435771865aab855dc0f1845abe570d9c3762e"
+    },
+    {
+      "bytes": 3292,
+      "path": "utils/speaker_sample.py",
+      "sha256": "f83a17aa110c0e6a2c29f39a883b48a2b2a3582fdbee19dc780cc244387a24b6"
+    },
+    {
+      "bytes": 9973,
+      "path": "utils/speaker_sample_migration.py",
+      "sha256": "7da9b9be5c939c9543aec29c15e5a49f846cc4ac3fa59699316c89a5e2b5b79d"
+    },
+    {
+      "bytes": 8248,
+      "path": "utils/stripe.py",
+      "sha256": "3bae940de205a91033b400144384ff100e524f11819e4e4d258e342c32e60b22"
+    },
+    {
+      "bytes": 4711,
+      "path": "utils/stt/local_silero_vad.py",
+      "sha256": "0b3740441ebf3caabb6b164a1503277e57c049c78c24513861ce4492e9fd49f3"
+    },
+    {
+      "bytes": 3636,
+      "path": "utils/stt/local_silero_worker.py",
+      "sha256": "f6f4f8a549232abc4f9341c23515db57d349e62eee900c57d4521ee0582f223d"
+    },
+    {
+      "bytes": 14350,
+      "path": "utils/stt/pre_recorded.py",
+      "sha256": "7721f72d161fb7d91ebbeaa6f733b76332d70f41e4d8e9c877d4934c12b1dc03"
+    },
+    {
+      "bytes": 2843,
+      "path": "utils/stt/provider_selection.py",
+      "sha256": "7f5aa43339c09fbab54f308c20d930dc5135fc06fc0ff44dce720cc88ac005fa"
+    },
+    {
+      "bytes": 4215,
+      "path": "utils/stt/session_delivery.py",
+      "sha256": "f6bcbffa5b2b8d55b75b7617561fbe683bb0b721f5e60c40a9994cd5fcba78c3"
+    },
+    {
+      "bytes": 9566,
+      "path": "utils/stt/soniox_util.py",
+      "sha256": "a273cb012beb46b4f6d8457bc12376df7102dd33d279cc7955f19c03ffdbfcd6"
+    },
+    {
+      "bytes": 5022,
+      "path": "utils/stt/speaker_embedding.py",
+      "sha256": "023eeff3a1bc3a3cb1f3be6ddb9627ff0d472e3b7bcbb31c29f5cf3533962062"
+    },
+    {
+      "bytes": 2180,
+      "path": "utils/stt/speech_profile.py",
+      "sha256": "02fb2b0ef14a01650cb005f7da9c3968b16b5184f0913911de92569e99a99112"
+    },
+    {
+      "bytes": 40017,
+      "path": "utils/stt/streaming.py",
+      "sha256": "0f91d55506d7c3ba10105e83c733ac541518771d60dc3117d140ae93cbf40840"
+    },
+    {
+      "bytes": 4718,
+      "path": "utils/stt/vad.py",
+      "sha256": "85f57b6cce4a83cf2252c9ee356f1dc8f7c28dfd4b08d0e93352859bc56df0e3"
+    },
+    {
+      "bytes": 1289,
+      "path": "utils/stt/vad_configuration.py",
+      "sha256": "f41e1d5764f1c2b1b7bf4bdc8bd01a9b22411316db30a6153933bb0c9b0189be"
+    },
+    {
+      "bytes": 11351,
+      "path": "utils/subscription.py",
+      "sha256": "d5ab49fb7f9417e5015d3338e19539411feff0eb51fb9f903de32055765ca68e"
+    },
+    {
+      "bytes": 7304,
+      "path": "utils/sync_capture_manifest.py",
+      "sha256": "97033d328d9c640acccc934695e2ef3342e72b7015c9c79deacb8ce2b98242ab"
+    },
+    {
+      "bytes": 7490,
+      "path": "utils/task_sync.py",
+      "sha256": "0e31637d5a73d5aa6914c20014e9263f2ce490e80e5055f40b41e9072d52628a"
+    },
+    {
+      "bytes": 1775,
+      "path": "utils/text_utils.py",
+      "sha256": "a6fdc2e625a793315605d5f8429e4e542fd6411a1557a6649461ff211f59b57f"
+    },
+    {
+      "bytes": 8037,
+      "path": "utils/translation.py",
+      "sha256": "ac8498232cee061aed4aea5f8ab251066d556ea56ae228a0e95e6edd3cea6d8c"
+    },
+    {
+      "bytes": 1363,
+      "path": "utils/translation_cache.py",
+      "sha256": "d7d29a3c7e9dfb487f639cc6eef24a69cdcb10281d28b9cb3d9680d869c183d0"
+    },
+    {
+      "bytes": 7747,
+      "path": "utils/webhooks.py",
+      "sha256": "563023f8a2042f6a6fbe79d8ed7f9cdbb46f57e6d460a1c47042e81161257ec2"
+    },
+    {
+      "bytes": 25,
+      "path": "utils/wrapped/__init__.py",
+      "sha256": "b4cced093d9c8ec43182af10ba30eec76833e1fe93c6f978f39616f45e935d98"
+    },
+    {
+      "bytes": 39952,
+      "path": "utils/wrapped/generate_2025.py",
+      "sha256": "4f1f9e511836b293a6b82e4566e53496301b877d25888834b857d28bb800a26e"
+    }
+  ],
+  "known_pid_3709250_present": true,
+  "python_bytes": 6414728,
+  "release": "unified-canonical-memory-4235154f",
+  "scope": "runtime Python only; tests/scripts/config/credentials/data excluded; no modules imported",
+  "static_import_edges": {
+    "database/__init__.py": [],
+    "database/_client.py": [],
+    "database/action_items.py": [
+      "database/_client.py"
+    ],
+    "database/announcements.py": [
+      "database/_client.py",
+      "models/announcement.py"
+    ],
+    "database/app_settings.py": [
+      "database/_client.py"
+    ],
+    "database/apps.py": [
+      "database/_client.py",
+      "database/redis_db.py",
+      "models/app.py"
+    ],
+    "database/auth.py": [
+      "database/redis_db.py"
+    ],
+    "database/authority_advisory_lock.py": [],
+    "database/bounded_hermes_enrichment_outbox.py": [
+      "database/hermes_cloud_enrichment_outbox.py"
+    ],
+    "database/cache.py": [
+      "database/cache_manager.py",
+      "database/redis_db.py",
+      "database/redis_pubsub.py"
+    ],
+    "database/cache_manager.py": [],
+    "database/calendar_meetings.py": [
+      "database/_client.py"
+    ],
+    "database/chat.py": [
+      "database/__init__.py",
+      "database/_client.py",
+      "database/helpers.py",
+      "database/users.py",
+      "models/chat.py",
+      "utils/__init__.py",
+      "utils/encryption.py",
+      "utils/other/endpoints.py"
+    ],
+    "database/conversations.py": [
+      "database/__init__.py",
+      "database/_client.py",
+      "database/helpers.py",
+      "database/hermes_cloud_enrichment_outbox.py",
+      "database/memory_artwork.py",
+      "database/muse_source_retirement.py",
+      "database/normal_enrichment_activation.py",
+      "database/normal_future_source_disposition.py",
+      "database/normal_product_capture_provenance.py",
+      "database/redis_db.py",
+      "database/users.py",
+      "ella/services/mcp_source_report.py",
+      "ella/services/mcp_work_queue.py",
+      "ella/services/normal_account_routing.py",
+      "ella/services/thin_cloudbot_capture.py",
+      "models/conversation.py",
+      "models/conversation_integrity.py",
+      "models/hermes_cloud_enrichment_contract.py",
+      "models/transcript_segment.py",
+      "utils/__init__.py",
+      "utils/conversations/capture_target.py",
+      "utils/ella/memory_artwork_storage.py",
+      "utils/encryption.py",
+      "utils/other/hume.py",
+      "utils/other/storage.py"
+    ],
+    "database/daily_summaries.py": [
+      "database/_client.py"
+    ],
+    "database/dev_api_key.py": [
+      "database/_client.py",
+      "database/redis_db.py",
+      "models/dev_api_key.py",
+      "utils/dev_api_keys.py",
+      "utils/scopes.py"
+    ],
+    "database/ella_caregivers.py": [
+      "database/_client.py"
+    ],
+    "database/ella_contacts.py": [
+      "database/_client.py"
+    ],
+    "database/ella_postgres.py": [
+      "database/honcho_attestation.py"
+    ],
+    "database/ella_provisioning.py": [
+      "database/__init__.py",
+      "database/authority_advisory_lock.py",
+      "database/ella_postgres.py",
+      "database/honcho_attestation.py",
+      "database/runtime_targets.py",
+      "database/voice_canary.py",
+      "ella/services/whisper_delivery.py"
+    ],
+    "database/explicit_saved_backlog_repair.py": [
+      "database/__init__.py",
+      "database/conversations.py",
+      "database/normal_account_lifecycle.py",
+      "database/normal_enrichment_activation.py",
+      "database/normal_product_capture_provenance.py",
+      "ella/services/ai_consent.py",
+      "models/hermes_cloud_enrichment_contract.py"
+    ],
+    "database/fixture_anchored_match.py": [],
+    "database/fixture_capture_lineage.py": [
+      "database/__init__.py",
+      "database/conversations.py",
+      "database/native_fixture_evidence.py",
+      "database/normal_enrichment_activation.py",
+      "database/normal_native_source_once.py"
+    ],
+    "database/folders.py": [
+      "database/_client.py",
+      "models/folder.py"
+    ],
+    "database/goals.py": [
+      "database/_client.py"
+    ],
+    "database/helpers.py": [
+      "database/__init__.py",
+      "database/_client.py",
+      "database/redis_db.py",
+      "database/users.py"
+    ],
+    "database/hermes_cloud_enrichment_outbox.py": [
+      "database/__init__.py",
+      "database/_client.py",
+      "database/normal_enrichment_activation.py",
+      "ella/services/normal_account_routing.py"
+    ],
+    "database/honcho_attestation.py": [],
+    "database/import_jobs.py": [
+      "database/_client.py"
+    ],
+    "database/invitation_operator.py": [
+      "database/__init__.py",
+      "database/authority_advisory_lock.py",
+      "database/invitations.py",
+      "database/voice_canary.py"
+    ],
+    "database/invitations.py": [
+      "database/__init__.py",
+      "database/authority_advisory_lock.py",
+      "database/managed_cloud_consent.py",
+      "database/runtime_targets.py",
+      "database/voice_canary.py"
+    ],
+    "database/knowledge_graph.py": [
+      "database/_client.py"
+    ],
+    "database/managed_cloud_consent.py": [
+      "database/__init__.py",
+      "database/authority_advisory_lock.py",
+      "database/ella_provisioning.py",
+      "database/runtime_targets.py",
+      "database/voice_canary.py"
+    ],
+    "database/mcp_api_key.py": [
+      "database/_client.py",
+      "database/redis_db.py",
+      "models/mcp_api_key.py",
+      "utils/mcp_api_keys.py"
+    ],
+    "database/mem_db.py": [],
+    "database/memories.py": [
+      "database/__init__.py",
+      "database/_client.py",
+      "database/helpers.py",
+      "database/users.py",
+      "utils/__init__.py",
+      "utils/encryption.py"
+    ],
+    "database/memory_artwork.py": [
+      "database/_client.py"
+    ],
+    "database/memory_reinterpretations.py": [],
+    "database/muse_private_reader.py": [
+      "database/__init__.py",
+      "database/redis_db.py",
+      "ella/services/muse_private_reader.py",
+      "utils/conversations/capture_protocol.py"
+    ],
+    "database/muse_source_retirement.py": [
+      "database/ella_postgres.py",
+      "utils/ella/memory_artwork_storage.py"
+    ],
+    "database/native_fixture_evidence.py": [
+      "database/__init__.py",
+      "database/fixture_anchored_match.py",
+      "database/fixture_capture_lineage.py",
+      "database/normal_enrichment_activation.py",
+      "database/normal_native_source_once.py"
+    ],
+    "database/normal_account_lifecycle.py": [
+      "database/__init__.py",
+      "database/_client.py",
+      "database/conversations.py",
+      "database/normal_enrichment_activation.py",
+      "database/normal_future_source_disposition.py",
+      "database/normal_native_source_once.py",
+      "database/normal_product_capture_provenance.py",
+      "ella/services/normal_account_routing.py",
+      "ella/services/retained_completion_enrichment.py",
+      "ella/services/runtime_errors.py",
+      "models/hermes_cloud_enrichment_contract.py"
+    ],
+    "database/normal_completed_source_recovery.py": [
+      "database/__init__.py",
+      "database/conversations.py",
+      "database/normal_enrichment_activation.py",
+      "database/normal_source_disposition.py",
+      "models/hermes_cloud_enrichment_contract.py"
+    ],
+    "database/normal_enrichment_activation.py": [
+      "database/__init__.py",
+      "database/normal_account_lifecycle.py",
+      "database/normal_completed_source_recovery.py",
+      "database/normal_future_source_disposition.py",
+      "database/normal_native_source_once.py",
+      "database/normal_ordinary_source_disposition.py",
+      "database/normal_source_disposition.py"
+    ],
+    "database/normal_future_source_disposition.py": [
+      "database/__init__.py",
+      "database/conversations.py",
+      "database/normal_account_lifecycle.py",
+      "database/normal_enrichment_activation.py",
+      "ella/services/__init__.py",
+      "ella/services/mcp_source_report.py",
+      "ella/services/mcp_summary_enrichment.py",
+      "ella/services/mcp_synthetic_pending.py",
+      "ella/services/normal_account_routing.py",
+      "ella/services/retained_completion_enrichment.py",
+      "ella/services/runtime_errors.py",
+      "models/hermes_cloud_enrichment_contract.py"
+    ],
+    "database/normal_future_source_operator.py": [
+      "database/__init__.py",
+      "database/normal_enrichment_activation.py",
+      "database/normal_future_source_disposition.py",
+      "ella/services/normal_account_routing.py",
+      "ella/services/thin_cloudbot_mcp.py"
+    ],
+    "database/normal_native_source_once.py": [
+      "database/__init__.py",
+      "database/conversations.py",
+      "database/fixture_anchored_match.py",
+      "database/fixture_capture_lineage.py",
+      "database/native_fixture_evidence.py",
+      "database/normal_enrichment_activation.py",
+      "database/normal_future_source_disposition.py",
+      "models/hermes_cloud_enrichment_contract.py"
+    ],
+    "database/normal_ordinary_source_disposition.py": [
+      "database/__init__.py",
+      "database/conversations.py",
+      "database/normal_enrichment_activation.py",
+      "database/normal_future_source_disposition.py",
+      "database/normal_native_source_once.py"
+    ],
+    "database/normal_product_capture_provenance.py": [
+      "database/__init__.py",
+      "database/normal_future_source_disposition.py",
+      "database/normal_native_source_once.py",
+      "ella/services/normal_account_routing.py",
+      "ella/services/retained_completion_enrichment.py",
+      "ella/services/runtime_errors.py",
+      "models/hermes_cloud_enrichment_contract.py"
+    ],
+    "database/normal_source_disposition.py": [
+      "database/__init__.py",
+      "database/conversations.py",
+      "database/normal_enrichment_activation.py",
+      "models/hermes_cloud_enrichment_contract.py"
+    ],
+    "database/notifications.py": [
+      "database/_client.py"
+    ],
+    "database/proposals.py": [
+      "database/_client.py",
+      "models/proposals.py"
+    ],
+    "database/qualification_stock_supervisor.py": [
+      "ella/services/causal_diagnostics.py"
+    ],
+    "database/qualification_stock_worker.py": [
+      "database/_client.py",
+      "database/conversations.py",
+      "database/qualification_transcript_producer.py",
+      "ella/services/ai_consent.py",
+      "ella/services/causal_diagnostics.py",
+      "models/conversation.py",
+      "utils/conversations/process_conversation.py"
+    ],
+    "database/qualification_transcript_producer.py": [
+      "database/__init__.py",
+      "database/conversations.py",
+      "database/normal_enrichment_activation.py",
+      "database/normal_future_source_disposition.py",
+      "database/qualification_stock_supervisor.py",
+      "ella/services/ai_consent.py",
+      "models/conversation.py",
+      "models/transcript_segment.py"
+    ],
+    "database/redis_db.py": [
+      "database/honcho_attestation.py"
+    ],
+    "database/redis_pubsub.py": [],
+    "database/runtime_targets.py": [],
+    "database/sync_segments.py": [
+      "database/_client.py",
+      "database/conversations.py"
+    ],
+    "database/task_sync.py": [
+      "database/_client.py"
+    ],
+    "database/tasks.py": [
+      "database/_client.py"
+    ],
+    "database/trends.py": [
+      "database/_client.py",
+      "models/conversation.py",
+      "models/trend.py"
+    ],
+    "database/user_recording_keep.py": [],
+    "database/user_usage.py": [
+      "database/_client.py",
+      "models/user_usage.py"
+    ],
+    "database/users.py": [
+      "database/_client.py",
+      "ella/services/thin_cloudbot_deletion.py",
+      "models/users.py",
+      "utils/ella/memory_artwork_storage.py",
+      "utils/subscription.py"
+    ],
+    "database/vector_db.py": [
+      "database/honcho_attestation.py",
+      "models/conversation.py",
+      "utils/llm/clients.py"
+    ],
+    "database/voice_canary.py": [
+      "database/__init__.py",
+      "database/authority_advisory_lock.py",
+      "database/honcho_attestation.py"
+    ],
+    "database/wrapped.py": [
+      "database/_client.py"
+    ],
+    "dependencies.py": [
+      "database/dev_api_key.py",
+      "database/mcp_api_key.py",
+      "utils/scopes.py"
+    ],
+    "diarizer/diarization.py": [],
+    "diarizer/embedding.py": [],
+    "diarizer/main.py": [],
+    "ella/__init__.py": [
+      "database/conversations.py",
+      "database/memory_reinterpretations.py",
+      "ella/compat/__init__.py",
+      "ella/config.py",
+      "ella/routers/callbacks.py",
+      "ella/routers/canonical_events.py",
+      "ella/routers/chat.py",
+      "ella/routers/corrections.py",
+      "ella/routers/debug_metadata.py",
+      "ella/routers/escalations.py",
+      "ella/routers/guardian.py",
+      "ella/routers/hermes_cloud_enrichment.py",
+      "ella/routers/invites.py",
+      "ella/routers/legacy_onboarding.py",
+      "ella/routers/mcp_onboarding.py",
+      "ella/routers/mcp_well_known.py",
+      "ella/routers/memory_artwork.py",
+      "ella/routers/memory_reinterpretation.py",
+      "ella/routers/muse_private_mcp.py",
+      "ella/routers/muse_private_oauth.py",
+      "ella/routers/muse_private_reader.py",
+      "ella/routers/observer.py",
+      "ella/routers/onboarding.py",
+      "ella/routers/photon.py",
+      "ella/routers/plato_mcp.py",
+      "ella/routers/resolve.py",
+      "ella/routers/settings.py",
+      "ella/routers/today_cards.py",
+      "ella/routers/trace.py",
+      "ella/routers/voice.py",
+      "ella/services/canonical_auth_readiness.py",
+      "ella/services/hermes_cloud_enrichment_dependencies.py",
+      "ella/services/hermes_cloud_enrichment_outbox.py",
+      "ella/services/memory_artwork.py",
+      "ella/services/memory_reinterpretation.py",
+      "ella/services/today_card.py",
+      "ella/services/today_card_postgres.py",
+      "routers/__init__.py",
+      "utils/ella/memory.py",
+      "utils/ella/scanner.py",
+      "utils/ella/summary.py"
+    ],
+    "ella/adapters/__init__.py": [
+      "utils/ella/memory.py",
+      "utils/ella/scanner.py",
+      "utils/ella/summary.py"
+    ],
+    "ella/compat/__init__.py": [],
+    "ella/config.py": [],
+    "ella/prompts/__init__.py": [],
+    "ella/prompts/loader.py": [],
+    "ella/routers/__init__.py": [],
+    "ella/routers/ai_consent.py": [
+      "database/managed_cloud_consent.py",
+      "ella/services/ai_consent.py",
+      "ella/services/consent_authority.py",
+      "utils/ella/exact_firebase_auth.py"
+    ],
+    "ella/routers/auto_provision.py": [
+      "database/ella_provisioning.py",
+      "database/honcho_attestation.py",
+      "ella/services/__init__.py",
+      "ella/services/provisioning.py",
+      "ella/services/runtime_resolver.py"
+    ],
+    "ella/routers/callbacks.py": [
+      "database/_client.py",
+      "database/conversations.py",
+      "database/ella_caregivers.py",
+      "database/ella_contacts.py",
+      "database/ella_postgres.py",
+      "database/honcho_attestation.py",
+      "database/memories.py",
+      "database/users.py",
+      "ella/config.py",
+      "ella/services/ai_consent.py",
+      "ella/services/canonical_summary_source.py",
+      "ella/services/escalation_policy.py",
+      "ella/services/memory_artwork.py",
+      "ella/services/runtime_resolver.py",
+      "ella/services/semantic_context_authority.py",
+      "ella/services/semantic_learning_authority.py",
+      "ella/services/semantic_learning_v3.py",
+      "ella/services/semantic_publication.py",
+      "ella/services/semantic_runtime_authority.py",
+      "ella/services/summary_sanitizer.py",
+      "ella/services/summary_writeback.py",
+      "models/conversation.py",
+      "utils/ella/canonical_omi.py",
+      "utils/ella/exact_firebase_auth.py",
+      "utils/notifications.py",
+      "utils/other/storage.py"
+    ],
+    "ella/routers/canonical_events.py": [
+      "database/ella_postgres.py",
+      "database/memory_reinterpretations.py",
+      "ella/services/today_card_postgres.py",
+      "utils/ella/canonical_auth.py",
+      "utils/ella/canonical_context.py",
+      "utils/ella/exact_firebase_auth.py",
+      "utils/ella/history_pagination.py",
+      "utils/ella/time_context.py"
+    ],
+    "ella/routers/chat.py": [
+      "database/ella_provisioning.py",
+      "database/honcho_attestation.py",
+      "ella/config.py",
+      "ella/routers/canonical_events.py",
+      "ella/routers/resolve.py",
+      "ella/routers/trace.py",
+      "ella/services/ai_consent.py",
+      "ella/services/canonical_memory.py",
+      "ella/services/hermes_cloud_runtime.py",
+      "ella/services/hermes_session.py",
+      "ella/services/provisioning.py",
+      "ella/services/runtime_resolver.py",
+      "utils/ella/canonical_context.py",
+      "utils/ella/exact_firebase_auth.py",
+      "utils/ella/history_pagination.py",
+      "utils/ella/time_context.py"
+    ],
+    "ella/routers/corrections.py": [
+      "database/_client.py",
+      "database/auth.py",
+      "database/conversations.py",
+      "ella/config.py",
+      "ella/routers/canonical_events.py",
+      "ella/services/__init__.py",
+      "ella/services/ai_consent.py",
+      "ella/services/correction_propagation.py",
+      "ella/services/hermes_session.py",
+      "ella/services/proposal_ingest.py",
+      "ella/services/summary_recovery.py",
+      "ella/services/summary_writeback.py",
+      "models/conversation.py",
+      "utils/ella/exact_firebase_auth.py"
+    ],
+    "ella/routers/debug_metadata.py": [
+      "ella/routers/resolve.py",
+      "utils/ella/exact_firebase_auth.py"
+    ],
+    "ella/routers/escalations.py": [
+      "database/honcho_attestation.py",
+      "ella/services/escalation_policy.py",
+      "utils/ella/exact_firebase_auth.py"
+    ],
+    "ella/routers/guardian.py": [
+      "database/__init__.py",
+      "database/app_settings.py",
+      "database/ella_provisioning.py",
+      "database/honcho_attestation.py",
+      "ella/routers/guardian_tool_delivery.py",
+      "ella/routers/resolve.py",
+      "ella/services/__init__.py",
+      "ella/services/ai_consent.py",
+      "ella/services/app_settings.py",
+      "ella/services/escalation_policy.py",
+      "ella/services/guardian_playback_ledger.py",
+      "ella/services/hermes_cloud.py",
+      "ella/services/runtime_errors.py",
+      "ella/services/runtime_resolver.py",
+      "ella/services/thin_cloudbot_consent.py",
+      "ella/services/thin_cloudbot_request_authority.py",
+      "ella/services/thin_delivery_mode.py",
+      "ella/services/whisper_delivery.py",
+      "utils/__init__.py",
+      "utils/conversations/capture_protocol.py",
+      "utils/conversations/spoken_diagnostic.py",
+      "utils/ella/canonical_context.py",
+      "utils/ella/exact_firebase_auth.py",
+      "utils/ella/time_context.py"
+    ],
+    "ella/routers/guardian_tool_delivery.py": [
+      "ella/services/whisper_delivery.py",
+      "ella/services/whisper_tool_factory.py",
+      "utils/ella/exact_firebase_auth.py"
+    ],
+    "ella/routers/hermes_cloud_enrichment.py": [
+      "ella/services/hermes_cloud_enrichment.py",
+      "ella/services/runtime_errors.py",
+      "ella/services/transcript_processing_hold.py",
+      "utils/ella/exact_firebase_auth.py"
+    ],
+    "ella/routers/invites.py": [
+      "database/__init__.py",
+      "database/invitations.py",
+      "ella/services/invitation_authority.py",
+      "utils/__init__.py",
+      "utils/ella/exact_firebase_auth.py",
+      "utils/other/endpoints.py"
+    ],
+    "ella/routers/legacy_onboarding.py": [
+      "database/ella_provisioning.py"
+    ],
+    "ella/routers/mcp_onboarding.py": [
+      "ella/services/mcp_identity.py",
+      "ella/services/mcp_startup.py",
+      "ella/services/mcp_surface_prompt.py"
+    ],
+    "ella/routers/mcp_public_setup.py": [
+      "database/_client.py",
+      "dependencies.py",
+      "ella/services/mcp_public_setup.py"
+    ],
+    "ella/routers/mcp_well_known.py": [],
+    "ella/routers/memory_artwork.py": [
+      "ella/services/ai_consent.py",
+      "ella/services/memory_artwork.py",
+      "ella/services/memory_artwork_recovery.py",
+      "ella/services/summary_recovery.py",
+      "utils/ella/exact_firebase_auth.py"
+    ],
+    "ella/routers/memory_reinterpretation.py": [
+      "database/conversations.py",
+      "database/memory_reinterpretations.py",
+      "ella/routers/canonical_events.py",
+      "ella/services/memory_reinterpretation.py",
+      "utils/ella/exact_firebase_auth.py"
+    ],
+    "ella/routers/muse_private_mcp.py": [
+      "ella/routers/muse_private_reader.py",
+      "ella/services/muse_private_reader.py",
+      "ella/services/muse_session_owner.py"
+    ],
+    "ella/routers/muse_private_oauth.py": [
+      "ella/routers/mcp_onboarding.py",
+      "ella/routers/muse_private_reader.py",
+      "ella/services/muse_private_oauth.py",
+      "ella/services/muse_private_reader.py",
+      "ella/services/muse_rejected_dcr_diagnostic.py"
+    ],
+    "ella/routers/muse_private_reader.py": [
+      "database/ella_postgres.py",
+      "database/muse_private_reader.py",
+      "ella/services/ai_consent.py",
+      "ella/services/canonical_memory.py",
+      "ella/services/muse_private_reader.py",
+      "ella/services/runtime_resolver.py"
+    ],
+    "ella/routers/observer.py": [
+      "ella/routers/canonical_events.py",
+      "ella/services/observer.py",
+      "ella/services/observer_apply.py",
+      "ella/services/observer_extractor.py",
+      "ella/services/observer_logs.py",
+      "utils/ella/exact_firebase_auth.py"
+    ],
+    "ella/routers/onboarding.py": [
+      "database/__init__.py",
+      "database/_client.py",
+      "database/app_settings.py",
+      "database/ella_provisioning.py",
+      "database/normal_enrichment_activation.py",
+      "database/runtime_targets.py",
+      "ella/services/ai_consent.py",
+      "ella/services/app_settings.py",
+      "ella/services/hermes_cloud_policy.py",
+      "ella/services/normal_account_routing.py",
+      "ella/services/provisioning.py",
+      "ella/services/runtime_resolver.py",
+      "utils/__init__.py",
+      "utils/ella/exact_firebase_auth.py",
+      "utils/other/endpoints.py"
+    ],
+    "ella/routers/photon.py": [
+      "database/ella_provisioning.py",
+      "ella/routers/canonical_events.py",
+      "ella/services/hermes_cloud_photon.py",
+      "ella/services/runtime_errors.py",
+      "utils/ella/exact_firebase_auth.py"
+    ],
+    "ella/routers/plato_mcp.py": [
+      "database/conversations.py",
+      "database/memories.py",
+      "ella/routers/canonical_events.py",
+      "ella/services/__init__.py",
+      "ella/services/mcp_identity.py",
+      "ella/services/mcp_startup.py",
+      "ella/services/mcp_surface_prompt.py",
+      "ella/services/proposal_ingest.py",
+      "ella/services/runtime_errors.py",
+      "ella/services/runtime_resolver.py",
+      "ella/utils/provision_authority.py",
+      "utils/ella/canonical_auth.py",
+      "utils/ella/time_context.py"
+    ],
+    "ella/routers/qualification_transcript_producer.py": [
+      "database/_client.py",
+      "database/qualification_transcript_producer.py",
+      "ella/services/ai_consent.py",
+      "ella/services/thin_cloudbot_consent.py",
+      "ella/services/thin_cloudbot_request_authority.py",
+      "utils/ella/exact_firebase_auth.py"
+    ],
+    "ella/routers/resolve.py": [
+      "database/ella_provisioning.py",
+      "database/honcho_attestation.py",
+      "ella/services/runtime_errors.py",
+      "ella/services/runtime_resolver.py",
+      "utils/ella/exact_firebase_auth.py"
+    ],
+    "ella/routers/settings.py": [
+      "database/__init__.py",
+      "database/app_settings.py",
+      "ella/services/app_settings.py",
+      "utils/ella/exact_firebase_auth.py"
+    ],
+    "ella/routers/thin_cloudbot_consent.py": [
+      "database/_client.py",
+      "ella/services/thin_cloudbot_consent.py",
+      "ella/services/thin_cloudbot_consent_contract.py",
+      "utils/ella/exact_firebase_auth.py"
+    ],
+    "ella/routers/today_cards.py": [
+      "database/honcho_attestation.py",
+      "ella/services/ai_consent.py",
+      "ella/services/today_card.py",
+      "ella/services/today_card_postgres.py",
+      "utils/ella/exact_firebase_auth.py"
+    ],
+    "ella/routers/trace.py": [
+      "utils/ella/exact_firebase_auth.py"
+    ],
+    "ella/routers/voice.py": [
+      "database/__init__.py",
+      "database/conversations.py",
+      "database/honcho_attestation.py",
+      "database/runtime_targets.py",
+      "database/users.py",
+      "database/voice_canary.py",
+      "ella/services/ai_consent.py",
+      "ella/services/canonical_memory.py",
+      "ella/services/canonical_voice_search.py",
+      "ella/services/provisioning.py",
+      "ella/services/runtime_resolver.py",
+      "ella/services/today_card.py",
+      "ella/services/today_card_postgres.py",
+      "ella/services/voice_canary_alerts.py",
+      "ella/services/voice_honcho.py",
+      "ella/services/whisper_delivery.py",
+      "ella/services/whisper_owned_lifecycle.py",
+      "utils/ella/canonical_context.py",
+      "utils/ella/exact_firebase_auth.py"
+    ],
+    "ella/services/__init__.py": [],
+    "ella/services/ai_consent.py": [
+      "utils/ella/exact_firebase_auth.py"
+    ],
+    "ella/services/app_settings.py": [],
+    "ella/services/canonical_auth_readiness.py": [
+      "utils/ella/canonical_auth.py"
+    ],
+    "ella/services/canonical_memory.py": [
+      "ella/routers/canonical_events.py",
+      "ella/services/ai_consent.py",
+      "ella/services/runtime_resolver.py",
+      "utils/ella/history_pagination.py"
+    ],
+    "ella/services/canonical_summary_source.py": [],
+    "ella/services/canonical_voice_search.py": [
+      "ella/services/canonical_memory.py"
+    ],
+    "ella/services/causal_diagnostics.py": [],
+    "ella/services/consent_authority.py": [
+      "database/__init__.py",
+      "database/managed_cloud_consent.py",
+      "ella/services/ai_consent.py",
+      "ella/services/provisioning.py",
+      "utils/ella/memory_artwork_storage.py"
+    ],
+    "ella/services/conversation_lifecycle.py": [
+      "ella/config.py"
+    ],
+    "ella/services/correction_honcho_contract.py": [
+      "database/honcho_attestation.py",
+      "ella/services/__init__.py",
+      "ella/services/ai_consent.py",
+      "ella/services/hermes_session.py",
+      "ella/services/proposal_ingest.py",
+      "ella/services/runtime_errors.py",
+      "ella/services/runtime_resolver.py"
+    ],
+    "ella/services/correction_propagation.py": [
+      "database/_client.py",
+      "ella/services/__init__.py",
+      "ella/services/correction_honcho_contract.py",
+      "ella/services/proposal_ingest.py"
+    ],
+    "ella/services/enrichment_stage_timing.py": [],
+    "ella/services/escalation_policy.py": [],
+    "ella/services/guardian_echo_classifier.py": [
+      "database/honcho_attestation.py"
+    ],
+    "ella/services/guardian_playback_ledger.py": [
+      "database/ella_postgres.py"
+    ],
+    "ella/services/hermes_broker_client.py": [
+      "ella/services/hermes_broker_prototype.py",
+      "ella/services/runtime_errors.py"
+    ],
+    "ella/services/hermes_broker_prototype.py": [
+      "ella/services/runtime_errors.py",
+      "ella/services/runtime_resolver.py"
+    ],
+    "ella/services/hermes_cloud.py": [
+      "ella/services/hermes_cloud_policy.py",
+      "ella/services/hermes_cloud_staged_attestation.py",
+      "ella/services/runtime_errors.py"
+    ],
+    "ella/services/hermes_cloud_enrichment.py": [
+      "database/ella_provisioning.py",
+      "ella/routers/canonical_events.py",
+      "ella/services/hermes_cloud_runtime.py",
+      "ella/services/runtime_errors.py",
+      "ella/services/runtime_resolver.py",
+      "models/conversation.py",
+      "models/hermes_cloud_enrichment_contract.py",
+      "utils/ella/canonical_omi.py"
+    ],
+    "ella/services/hermes_cloud_enrichment_dependencies.py": [
+      "database/conversations.py",
+      "database/ella_provisioning.py",
+      "ella/routers/canonical_events.py",
+      "ella/services/hermes_cloud_enrichment.py",
+      "ella/services/memory_artwork.py",
+      "ella/services/normal_account_routing.py",
+      "ella/services/retained_completion_enrichment.py",
+      "ella/services/summary_recovery.py"
+    ],
+    "ella/services/hermes_cloud_enrichment_outbox.py": [
+      "database/bounded_hermes_enrichment_outbox.py",
+      "database/hermes_cloud_enrichment_outbox.py",
+      "database/normal_future_source_disposition.py",
+      "ella/services/__init__.py",
+      "ella/services/causal_diagnostics.py",
+      "ella/services/hermes_cloud_enrichment_dependencies.py",
+      "ella/services/normal_account_routing.py",
+      "ella/services/runtime_errors.py",
+      "ella/services/runtime_resolver.py"
+    ],
+    "ella/services/hermes_cloud_photon.py": [
+      "database/ella_provisioning.py",
+      "database/honcho_attestation.py",
+      "database/runtime_targets.py",
+      "ella/routers/canonical_events.py",
+      "ella/services/ai_consent.py",
+      "ella/services/hermes_cloud.py",
+      "ella/services/hermes_cloud_policy.py",
+      "ella/services/hermes_cloud_runtime.py",
+      "ella/services/runtime_errors.py",
+      "ella/services/runtime_resolver.py"
+    ],
+    "ella/services/hermes_cloud_policy.py": [
+      "database/honcho_attestation.py",
+      "database/runtime_targets.py",
+      "ella/services/__init__.py",
+      "ella/services/ai_consent.py",
+      "ella/services/runtime_errors.py"
+    ],
+    "ella/services/hermes_cloud_runtime.py": [
+      "database/__init__.py",
+      "database/ella_provisioning.py",
+      "database/voice_canary.py",
+      "ella/routers/canonical_events.py",
+      "ella/services/ai_consent.py",
+      "ella/services/hermes_broker_client.py",
+      "ella/services/hermes_broker_prototype.py",
+      "ella/services/hermes_cloud.py",
+      "ella/services/hermes_cloud_policy.py",
+      "ella/services/runtime_errors.py",
+      "ella/services/runtime_resolver.py"
+    ],
+    "ella/services/hermes_cloud_staged_attestation.py": [
+      "ella/services/hermes_cloud_policy.py",
+      "ella/services/runtime_errors.py"
+    ],
+    "ella/services/hermes_session.py": [],
+    "ella/services/invitation_authority.py": [
+      "database/invitations.py",
+      "database/runtime_targets.py",
+      "ella/services/ai_consent.py",
+      "ella/services/hermes_cloud_policy.py"
+    ],
+    "ella/services/mcp_current_conversation.py": [
+      "ella/services/__init__.py",
+      "ella/services/mcp_source_report.py",
+      "ella/services/mcp_synthetic_pending.py"
+    ],
+    "ella/services/mcp_identity.py": [
+      "database/_client.py"
+    ],
+    "ella/services/mcp_public_setup.py": [],
+    "ella/services/mcp_redacted_observation.py": [],
+    "ella/services/mcp_source_report.py": [],
+    "ella/services/mcp_startup.py": [
+      "utils/ella/canonical_context.py",
+      "utils/ella/time_context.py"
+    ],
+    "ella/services/mcp_summary_enrichment.py": [
+      "ella/services/__init__.py",
+      "ella/services/mcp_source_report.py",
+      "ella/services/mcp_synthetic_pending.py",
+      "ella/services/summary_sanitizer.py"
+    ],
+    "ella/services/mcp_surface_prompt.py": [],
+    "ella/services/mcp_synthetic_pending.py": [],
+    "ella/services/mcp_work_queue.py": [
+      "database/_client.py",
+      "database/conversations.py",
+      "ella/services/__init__.py",
+      "ella/services/mcp_summary_enrichment.py"
+    ],
+    "ella/services/memory_artwork.py": [
+      "database/memory_artwork.py",
+      "ella/services/ai_consent.py",
+      "ella/services/runtime_resolver.py",
+      "utils/ella/memory_artwork_storage.py"
+    ],
+    "ella/services/memory_artwork_recovery.py": [
+      "database/conversations.py"
+    ],
+    "ella/services/memory_reinterpretation.py": [
+      "database/conversations.py",
+      "database/memory_reinterpretations.py",
+      "ella/routers/corrections.py",
+      "ella/services/__init__.py",
+      "ella/services/ai_consent.py",
+      "ella/services/hermes_session.py",
+      "ella/services/proposal_ingest.py",
+      "ella/services/summary_recovery.py",
+      "ella/services/summary_writeback.py"
+    ],
+    "ella/services/muse_private_oauth.py": [
+      "database/_client.py",
+      "ella/routers/mcp_onboarding.py",
+      "ella/services/ai_consent.py",
+      "ella/services/mcp_identity.py",
+      "ella/services/muse_private_reader.py"
+    ],
+    "ella/services/muse_private_reader.py": [],
+    "ella/services/muse_rejected_dcr_diagnostic.py": [],
+    "ella/services/muse_session_owner.py": [
+      "database/_client.py",
+      "ella/services/ai_consent.py",
+      "ella/services/mcp_identity.py",
+      "ella/services/muse_private_reader.py"
+    ],
+    "ella/services/normal_account_routing.py": [
+      "database/_client.py",
+      "database/normal_account_lifecycle.py",
+      "database/normal_enrichment_activation.py",
+      "ella/services/ai_consent.py",
+      "ella/services/hermes_cloud_enrichment_outbox.py",
+      "ella/services/runtime_errors.py",
+      "ella/services/runtime_resolver.py",
+      "ella/services/semantic_runtime_authority.py"
+    ],
+    "ella/services/observer.py": [
+      "ella/services/__init__.py",
+      "ella/services/proposal_ingest.py"
+    ],
+    "ella/services/observer_apply.py": [
+      "database/__init__.py",
+      "database/proposals.py",
+      "ella/routers/canonical_events.py",
+      "models/proposals.py"
+    ],
+    "ella/services/observer_extractor.py": [
+      "ella/services/__init__.py",
+      "ella/services/ai_consent.py",
+      "ella/services/observer.py",
+      "ella/services/runtime_resolver.py"
+    ],
+    "ella/services/observer_logs.py": [
+      "database/honcho_attestation.py",
+      "ella/services/observer.py"
+    ],
+    "ella/services/proposal_ingest.py": [
+      "database/__init__.py",
+      "database/proposals.py",
+      "models/proposals.py"
+    ],
+    "ella/services/provisioning.py": [
+      "database/__init__.py",
+      "database/app_settings.py",
+      "database/ella_provisioning.py",
+      "database/honcho_attestation.py",
+      "database/runtime_targets.py",
+      "database/voice_canary.py",
+      "ella/services/ai_consent.py",
+      "ella/services/hermes_cloud.py",
+      "ella/services/hermes_cloud_policy.py",
+      "ella/services/hermes_cloud_staged_attestation.py",
+      "ella/services/normal_account_routing.py",
+      "ella/services/runtime_errors.py",
+      "ella/utils/provision_authority.py"
+    ],
+    "ella/services/retained_canonical_user.py": [
+      "ella/services/canonical_summary_source.py",
+      "models/hermes_cloud_enrichment_contract.py"
+    ],
+    "ella/services/retained_completion_enrichment.py": [
+      "database/_client.py",
+      "database/normal_account_lifecycle.py",
+      "database/normal_future_source_disposition.py",
+      "database/normal_product_capture_provenance.py",
+      "ella/routers/canonical_events.py",
+      "ella/services/__init__.py",
+      "ella/services/ai_consent.py",
+      "ella/services/canonical_summary_source.py",
+      "ella/services/enrichment_stage_timing.py",
+      "ella/services/normal_account_routing.py",
+      "ella/services/retained_canonical_user.py",
+      "ella/services/runtime_errors.py",
+      "ella/services/semantic_companion_context.py",
+      "ella/services/semantic_contract_v1.py",
+      "ella/services/semantic_host_context.py",
+      "ella/services/semantic_learning_v3.py",
+      "ella/services/semantic_learning_workflow.py",
+      "ella/services/semantic_publication.py",
+      "ella/services/semantic_retained_apply.py",
+      "ella/services/semantic_retained_integration.py",
+      "ella/services/semantic_runtime_authority.py",
+      "ella/services/summary_sanitizer.py",
+      "ella/services/summary_title_quality.py",
+      "ella/services/transcript_processing_hold.py",
+      "models/hermes_cloud_enrichment_contract.py"
+    ],
+    "ella/services/runtime_errors.py": [],
+    "ella/services/runtime_resolver.py": [
+      "database/ella_provisioning.py",
+      "database/honcho_attestation.py",
+      "database/runtime_targets.py",
+      "ella/services/ai_consent.py",
+      "ella/services/hermes_cloud.py",
+      "ella/services/hermes_cloud_policy.py",
+      "ella/services/provisioning.py"
+    ],
+    "ella/services/semantic_companion_context.py": [],
+    "ella/services/semantic_context_authority.py": [
+      "database/_client.py",
+      "database/normal_account_lifecycle.py",
+      "ella/services/canonical_summary_source.py",
+      "ella/services/semantic_host_context.py",
+      "ella/services/transcript_processing_hold.py",
+      "models/hermes_cloud_enrichment_contract.py"
+    ],
+    "ella/services/semantic_contextual_producer_v2.py": [
+      "ella/services/semantic_contract_v1.py",
+      "ella/services/semantic_producer_v1.py",
+      "ella/services/summary_title_quality.py"
+    ],
+    "ella/services/semantic_contextual_producer_v3.py": [
+      "ella/services/semantic_contract_v2.py",
+      "ella/services/semantic_producer_v1.py",
+      "ella/services/summary_title_quality.py"
+    ],
+    "ella/services/semantic_contract_v1.py": [],
+    "ella/services/semantic_contract_v2.py": [
+      "ella/services/semantic_contract_v1.py"
+    ],
+    "ella/services/semantic_host_context.py": [
+      "ella/services/__init__.py",
+      "ella/services/canonical_summary_source.py",
+      "ella/services/enrichment_stage_timing.py",
+      "ella/services/semantic_companion_context.py",
+      "ella/services/transcript_processing_hold.py",
+      "ella/utils/provision_authority.py"
+    ],
+    "ella/services/semantic_learning_authority.py": [
+      "database/conversations.py",
+      "ella/routers/canonical_events.py",
+      "ella/services/ai_consent.py",
+      "ella/services/canonical_summary_source.py",
+      "ella/services/retained_canonical_user.py",
+      "ella/services/semantic_host_context.py",
+      "ella/services/semantic_learning_ledger.py",
+      "ella/services/semantic_learning_v3.py",
+      "ella/services/semantic_runtime_authority.py",
+      "models/hermes_cloud_enrichment_contract.py"
+    ],
+    "ella/services/semantic_learning_host_client.py": [
+      "ella/services/semantic_host_context.py",
+      "ella/services/semantic_learning_v3.py",
+      "ella/utils/provision_authority.py"
+    ],
+    "ella/services/semantic_learning_ledger.py": [
+      "ella/services/semantic_learning_v3.py"
+    ],
+    "ella/services/semantic_learning_v3.py": [],
+    "ella/services/semantic_learning_workflow.py": [
+      "ella/routers/canonical_events.py",
+      "ella/services/__init__.py",
+      "ella/services/ai_consent.py",
+      "ella/services/canonical_summary_source.py",
+      "ella/services/retained_canonical_user.py",
+      "ella/services/semantic_host_context.py",
+      "ella/services/semantic_learning_host_client.py",
+      "ella/services/semantic_learning_ledger.py",
+      "ella/services/semantic_learning_v3.py",
+      "ella/services/semantic_publication.py",
+      "ella/services/semantic_runtime_authority.py",
+      "ella/services/semantic_self_hosted_runtime.py",
+      "models/hermes_cloud_enrichment_contract.py"
+    ],
+    "ella/services/semantic_owned_runtime.py": [
+      "ella/services/hermes_cloud_runtime.py",
+      "ella/services/runtime_resolver.py",
+      "ella/services/semantic_producer_ledger.py",
+      "ella/services/semantic_publication.py"
+    ],
+    "ella/services/semantic_producer_ledger.py": [
+      "ella/services/__init__.py",
+      "ella/services/canonical_summary_source.py",
+      "ella/services/enrichment_stage_timing.py",
+      "ella/services/semantic_contextual_producer_v2.py",
+      "ella/services/semantic_contextual_producer_v3.py",
+      "ella/services/semantic_producer_v1.py",
+      "ella/services/semantic_publication.py"
+    ],
+    "ella/services/semantic_producer_v1.py": [
+      "ella/services/semantic_contract_v1.py"
+    ],
+    "ella/services/semantic_publication.py": [
+      "ella/services/canonical_summary_source.py",
+      "ella/services/summary_title_quality.py"
+    ],
+    "ella/services/semantic_retained_apply.py": [
+      "ella/services/__init__.py",
+      "ella/services/ai_consent.py",
+      "ella/services/semantic_host_context.py",
+      "ella/services/semantic_publication.py",
+      "ella/services/semantic_runtime_authority.py",
+      "ella/services/summary_writeback.py"
+    ],
+    "ella/services/semantic_retained_integration.py": [
+      "ella/services/__init__.py",
+      "ella/services/ai_consent.py",
+      "ella/services/enrichment_stage_timing.py",
+      "ella/services/semantic_host_context.py",
+      "ella/services/semantic_producer_ledger.py",
+      "ella/services/semantic_publication.py",
+      "ella/services/semantic_runtime_authority.py",
+      "ella/services/semantic_self_hosted_runtime.py"
+    ],
+    "ella/services/semantic_runtime_authority.py": [
+      "ella/services/runtime_resolver.py",
+      "ella/services/semantic_host_context.py",
+      "ella/services/semantic_publication.py",
+      "ella/utils/provision_authority.py"
+    ],
+    "ella/services/semantic_self_hosted_runtime.py": [
+      "ella/routers/canonical_events.py",
+      "ella/services/__init__.py",
+      "ella/services/ai_consent.py",
+      "ella/services/enrichment_stage_timing.py",
+      "ella/services/semantic_host_context.py",
+      "ella/services/semantic_owned_runtime.py",
+      "ella/services/semantic_producer_ledger.py",
+      "ella/services/semantic_publication.py",
+      "ella/services/semantic_runtime_authority.py",
+      "ella/services/transcript_processing_hold.py"
+    ],
+    "ella/services/summary_recovery.py": [
+      "database/__init__.py",
+      "database/conversations.py",
+      "database/vector_db.py",
+      "ella/services/ai_consent.py",
+      "ella/services/hermes_session.py",
+      "ella/services/memory_artwork.py",
+      "ella/services/memory_artwork_recovery.py",
+      "ella/services/runtime_resolver.py",
+      "ella/services/summary_writeback.py",
+      "models/conversation.py",
+      "models/conversation_integrity.py",
+      "utils/conversations/generic_summary.py",
+      "utils/conversations/vector.py"
+    ],
+    "ella/services/summary_sanitizer.py": [],
+    "ella/services/summary_title_quality.py": [],
+    "ella/services/summary_writeback.py": [
+      "database/conversations.py",
+      "ella/services/canonical_summary_source.py",
+      "ella/services/semantic_publication.py",
+      "ella/services/summary_sanitizer.py",
+      "models/conversation.py",
+      "utils/ella/canonical_omi.py"
+    ],
+    "ella/services/thin_cloudbot_capture.py": [
+      "database/_client.py",
+      "database/conversations.py",
+      "ella/services/__init__.py",
+      "ella/services/mcp_source_report.py",
+      "ella/services/mcp_summary_enrichment.py",
+      "ella/services/mcp_synthetic_pending.py",
+      "ella/services/thin_cloudbot_capture_supervisor.py",
+      "ella/services/thin_cloudbot_consent.py",
+      "ella/services/thin_cloudbot_request_authority.py",
+      "models/conversation.py",
+      "utils/conversations/capture_protocol.py",
+      "utils/conversations/capture_target.py",
+      "utils/llm/conversation_processing.py",
+      "utils/stt/pre_recorded.py"
+    ],
+    "ella/services/thin_cloudbot_capture_supervisor.py": [
+      "ella/services/thin_cloudbot_consent.py"
+    ],
+    "ella/services/thin_cloudbot_consent.py": [
+      "ella/services/thin_cloudbot_consent_contract.py"
+    ],
+    "ella/services/thin_cloudbot_consent_contract.py": [],
+    "ella/services/thin_cloudbot_deletion.py": [
+      "ella/services/thin_cloudbot_consent.py"
+    ],
+    "ella/services/thin_cloudbot_mcp.py": [
+      "database/conversations.py",
+      "ella/services/__init__.py",
+      "ella/services/mcp_current_conversation.py",
+      "ella/services/mcp_source_report.py",
+      "ella/services/mcp_summary_enrichment.py",
+      "ella/services/mcp_synthetic_pending.py",
+      "ella/services/thin_cloudbot_capture.py",
+      "ella/services/thin_cloudbot_consent.py"
+    ],
+    "ella/services/thin_cloudbot_output.py": [
+      "ella/services/thin_cloudbot_consent.py",
+      "ella/services/thin_delivery_mode.py",
+      "ella/services/whisper_delivery.py"
+    ],
+    "ella/services/thin_cloudbot_request_authority.py": [
+      "database/_client.py",
+      "ella/services/thin_cloudbot_consent.py",
+      "utils/ella/exact_firebase_auth.py"
+    ],
+    "ella/services/thin_cloudbot_runtime_authority.py": [
+      "ella/services/thin_cloudbot_consent.py"
+    ],
+    "ella/services/thin_delivery_binding.py": [],
+    "ella/services/thin_delivery_mode.py": [
+      "ella/services/thin_cloudbot_consent.py",
+      "ella/services/thin_cloudbot_request_authority.py"
+    ],
+    "ella/services/thin_muse_admission.py": [
+      "ella/services/thin_cloudbot_consent.py"
+    ],
+    "ella/services/thin_pending_discovery.py": [
+      "database/conversations.py",
+      "ella/services/__init__.py",
+      "ella/services/mcp_source_report.py",
+      "ella/services/mcp_summary_enrichment.py",
+      "ella/services/mcp_synthetic_pending.py",
+      "ella/services/thin_cloudbot_request_authority.py"
+    ],
+    "ella/services/today_card.py": [],
+    "ella/services/today_card_postgres.py": [
+      "database/ella_postgres.py",
+      "ella/services/today_card.py",
+      "utils/ella/canonical_omi.py"
+    ],
+    "ella/services/transcript_processing_hold.py": [
+      "database/_client.py",
+      "database/normal_account_lifecycle.py",
+      "database/normal_enrichment_activation.py",
+      "ella/services/normal_account_routing.py",
+      "ella/services/runtime_errors.py"
+    ],
+    "ella/services/voice_canary_alerts.py": [],
+    "ella/services/voice_honcho.py": [
+      "database/honcho_attestation.py",
+      "ella/services/ai_consent.py",
+      "ella/services/correction_honcho_contract.py"
+    ],
+    "ella/services/wellness_parser.py": [],
+    "ella/services/whisper_capture_bridge.py": [
+      "ella/services/whisper_delivery.py"
+    ],
+    "ella/services/whisper_delivery.py": [
+      "ella/services/thin_delivery_binding.py"
+    ],
+    "ella/services/whisper_owned_lifecycle.py": [
+      "ella/services/whisper_delivery.py"
+    ],
+    "ella/services/whisper_tool_capture.py": [
+      "utils/__init__.py",
+      "utils/conversations/capture_protocol.py"
+    ],
+    "ella/services/whisper_tool_delivery.py": [
+      "ella/services/__init__.py",
+      "ella/services/whisper_delivery.py",
+      "ella/services/whisper_owned_lifecycle.py",
+      "ella/services/whisper_tool_delivery_legacy.py"
+    ],
+    "ella/services/whisper_tool_delivery_legacy.py": [
+      "ella/services/whisper_delivery.py"
+    ],
+    "ella/services/whisper_tool_factory.py": [
+      "ella/routers/__init__.py",
+      "ella/routers/guardian.py",
+      "ella/services/ai_consent.py",
+      "ella/services/semantic_host_context.py",
+      "ella/services/semantic_runtime_authority.py",
+      "ella/services/whisper_delivery.py",
+      "ella/services/whisper_owned_lifecycle.py",
+      "ella/services/whisper_tool_capture.py",
+      "ella/services/whisper_tool_delivery.py",
+      "ella/services/whisper_tool_factory_legacy.py"
+    ],
+    "ella/services/whisper_tool_factory_legacy.py": [
+      "ella/routers/__init__.py",
+      "ella/routers/guardian.py",
+      "ella/services/ai_consent.py",
+      "ella/services/semantic_host_context.py",
+      "ella/services/semantic_runtime_authority.py",
+      "ella/services/whisper_delivery.py",
+      "ella/services/whisper_tool_capture.py",
+      "ella/services/whisper_tool_delivery_legacy.py"
+    ],
+    "ella/utils/auto_provision.py": [
+      "database/honcho_attestation.py",
+      "ella/utils/provision_authority.py"
+    ],
+    "ella/utils/identity_sync.py": [
+      "database/honcho_attestation.py",
+      "ella/utils/provision_authority.py"
+    ],
+    "ella/utils/provision_authority.py": [
+      "database/honcho_attestation.py"
+    ],
+    "main.py": [
+      "database/_client.py",
+      "ella/__init__.py",
+      "ella/routers/__init__.py",
+      "ella/routers/ai_consent.py",
+      "ella/routers/mcp_public_setup.py",
+      "ella/routers/qualification_transcript_producer.py",
+      "ella/routers/thin_cloudbot_consent.py",
+      "ella/services/ai_consent.py",
+      "routers/__init__.py",
+      "routers/action_items.py",
+      "routers/agents.py",
+      "routers/announcements.py",
+      "routers/apps.py",
+      "routers/auth.py",
+      "routers/calendar_meetings.py",
+      "routers/chat.py",
+      "routers/conversations.py",
+      "routers/custom_auth.py",
+      "routers/developer.py",
+      "routers/firmware.py",
+      "routers/folders.py",
+      "routers/goals.py",
+      "routers/imports.py",
+      "routers/integration.py",
+      "routers/integrations.py",
+      "routers/knowledge_graph.py",
+      "routers/mcp.py",
+      "routers/mcp_sse.py",
+      "routers/memories.py",
+      "routers/notifications.py",
+      "routers/oauth.py",
+      "routers/other.py",
+      "routers/payment.py",
+      "routers/plugins.py",
+      "routers/speech_profile.py",
+      "routers/sync.py",
+      "routers/task_integrations.py",
+      "routers/transcribe.py",
+      "routers/trends.py",
+      "routers/updates.py",
+      "routers/users.py",
+      "routers/workflow.py",
+      "routers/wrapped.py",
+      "utils/observability/__init__.py",
+      "utils/other/timeout.py"
+    ],
+    "migration/main.py": [],
+    "migration/memories.py": [
+      "database/_client.py"
+    ],
+    "migration/remove_soft_deleted_documents.py": [],
+    "migrations/001_enhanced_protection_default.py": [
+      "database/__init__.py",
+      "database/chat.py",
+      "database/conversations.py",
+      "database/memories.py",
+      "database/users.py"
+    ],
+    "migrations/002_populate_historical_usage.py": [
+      "database/__init__.py",
+      "database/user_usage.py",
+      "models/conversation.py",
+      "models/memories.py",
+      "utils/__init__.py",
+      "utils/encryption.py"
+    ],
+    "migrations/003_report_top_transcription_users.py": [],
+    "migrations/004_migrate_action_items_to_collection.py": [],
+    "migrations/005_backfill_memory_vectors.py": [
+      "database/vector_db.py",
+      "models/memories.py"
+    ],
+    "modal/job.py": [
+      "utils/other/jobs.py"
+    ],
+    "modal/job_modal.py": [
+      "utils/other/notifications.py"
+    ],
+    "modal/main.py": [],
+    "modal/speech_profile_modal.py": [
+      "utils/stt/speech_profile.py"
+    ],
+    "modal/vad_modal.py": [],
+    "models/__init__.py": [],
+    "models/announcement.py": [],
+    "models/app.py": [],
+    "models/chat.py": [],
+    "models/conversation.py": [
+      "models/chat.py",
+      "models/other.py",
+      "models/transcript_segment.py"
+    ],
+    "models/conversation_integrity.py": [],
+    "models/daily_summary.py": [],
+    "models/dev_api_key.py": [],
+    "models/folder.py": [],
+    "models/hermes_cloud_enrichment_contract.py": [],
+    "models/import_job.py": [],
+    "models/integrations.py": [
+      "models/memories.py",
+      "models/transcript_segment.py"
+    ],
+    "models/mcp_api_key.py": [],
+    "models/memories.py": [
+      "database/_client.py"
+    ],
+    "models/message_event.py": [
+      "models/conversation.py"
+    ],
+    "models/notification_message.py": [],
+    "models/other.py": [],
+    "models/proposals.py": [],
+    "models/shared.py": [],
+    "models/task.py": [],
+    "models/transcript_segment.py": [
+      "models/other.py"
+    ],
+    "models/trend.py": [],
+    "models/user_usage.py": [],
+    "models/users.py": [],
+    "pretrained_models/snakers4_silero-vad_master/examples/microphone_and_webRTC_integration/microphone_and_webRTC_integration.py": [],
+    "pretrained_models/snakers4_silero-vad_master/examples/onnx_sequence/export.py": [],
+    "pretrained_models/snakers4_silero-vad_master/examples/onnx_sequence/run.py": [],
+    "pretrained_models/snakers4_silero-vad_master/examples/openvino/convert.py": [],
+    "pretrained_models/snakers4_silero-vad_master/examples/openvino/verify.py": [],
+    "pretrained_models/snakers4_silero-vad_master/hubconf.py": [],
+    "pretrained_models/snakers4_silero-vad_master/src/silero_vad/__init__.py": [],
+    "pretrained_models/snakers4_silero-vad_master/src/silero_vad/data/__init__.py": [],
+    "pretrained_models/snakers4_silero-vad_master/src/silero_vad/model.py": [
+      "pretrained_models/snakers4_silero-vad_master/src/silero_vad/sequence_vad.py",
+      "pretrained_models/snakers4_silero-vad_master/src/silero_vad/utils_vad.py"
+    ],
+    "pretrained_models/snakers4_silero-vad_master/src/silero_vad/sequence_vad.py": [
+      "pretrained_models/snakers4_silero-vad_master/src/silero_vad/utils_vad.py"
+    ],
+    "pretrained_models/snakers4_silero-vad_master/src/silero_vad/tinygrad_model.py": [],
+    "pretrained_models/snakers4_silero-vad_master/src/silero_vad/utils_vad.py": [],
+    "pretrained_models/snakers4_silero-vad_master/tuning/__init__.py": [],
+    "pretrained_models/snakers4_silero-vad_master/tuning/search_thresholds.py": [
+      "utils/__init__.py"
+    ],
+    "pretrained_models/snakers4_silero-vad_master/tuning/tune.py": [
+      "utils/__init__.py"
+    ],
+    "pretrained_models/snakers4_silero-vad_master/tuning/utils.py": [],
+    "pusher/main.py": [
+      "routers/__init__.py",
+      "routers/pusher.py"
+    ],
+    "routers/__init__.py": [],
+    "routers/action_items.py": [
+      "database/action_items.py",
+      "utils/__init__.py",
+      "utils/notifications.py",
+      "utils/other/endpoints.py",
+      "utils/task_sync.py"
+    ],
+    "routers/agents.py": [
+      "models/__init__.py",
+      "models/shared.py",
+      "models/task.py",
+      "utils/__init__.py",
+      "utils/conversations/process_conversation.py",
+      "utils/other/hume.py"
+    ],
+    "routers/announcements.py": [
+      "database/announcements.py",
+      "models/announcement.py",
+      "utils/__init__.py",
+      "utils/other/endpoints.py"
+    ],
+    "routers/apps.py": [
+      "database/apps.py",
+      "database/auth.py",
+      "database/memories.py",
+      "database/redis_db.py",
+      "models/app.py",
+      "utils/__init__.py",
+      "utils/apps.py",
+      "utils/llm/app_generator.py",
+      "utils/llm/clients.py",
+      "utils/llm/persona.py",
+      "utils/mcp_client.py",
+      "utils/notifications.py",
+      "utils/other/endpoints.py",
+      "utils/other/storage.py",
+      "utils/social.py"
+    ],
+    "routers/auth.py": [
+      "database/redis_db.py"
+    ],
+    "routers/calendar_meetings.py": [
+      "database/calendar_meetings.py",
+      "models/conversation.py",
+      "utils/__init__.py",
+      "utils/other/endpoints.py"
+    ],
+    "routers/chat.py": [
+      "database/apps.py",
+      "database/chat.py",
+      "database/conversations.py",
+      "ella/services/ai_consent.py",
+      "models/app.py",
+      "models/chat.py",
+      "models/conversation.py",
+      "routers/sync.py",
+      "utils/__init__.py",
+      "utils/apps.py",
+      "utils/chat.py",
+      "utils/llm/chat.py",
+      "utils/llm/clients.py",
+      "utils/llm/goals.py",
+      "utils/llm/persona.py",
+      "utils/other/chat_file.py",
+      "utils/other/endpoints.py",
+      "utils/other/storage.py",
+      "utils/retrieval/agentic.py",
+      "utils/retrieval/graph.py"
+    ],
+    "routers/conversations.py": [
+      "database/action_items.py",
+      "database/conversations.py",
+      "database/redis_db.py",
+      "database/user_recording_keep.py",
+      "database/users.py",
+      "database/vector_db.py",
+      "ella/services/ai_consent.py",
+      "ella/services/thin_cloudbot_capture.py",
+      "ella/services/thin_cloudbot_request_authority.py",
+      "ella/services/today_card_postgres.py",
+      "models/app.py",
+      "models/chat.py",
+      "models/conversation.py",
+      "models/other.py",
+      "models/transcript_segment.py",
+      "utils/__init__.py",
+      "utils/app_integrations.py",
+      "utils/apps.py",
+      "utils/conversations/capture_protocol.py",
+      "utils/conversations/capture_target.py",
+      "utils/conversations/location.py",
+      "utils/conversations/merge_conversations.py",
+      "utils/conversations/process_conversation.py",
+      "utils/conversations/search.py",
+      "utils/ella/memory_artwork_storage.py",
+      "utils/llm/conversation_processing.py",
+      "utils/other/endpoints.py",
+      "utils/other/storage.py",
+      "utils/speaker_identification.py"
+    ],
+    "routers/custom_auth.py": [],
+    "routers/developer.py": [
+      "database/action_items.py",
+      "database/conversations.py",
+      "database/dev_api_key.py",
+      "database/memories.py",
+      "database/users.py",
+      "dependencies.py",
+      "ella/services/today_card_postgres.py",
+      "models/conversation.py",
+      "models/dev_api_key.py",
+      "models/memories.py",
+      "models/transcript_segment.py",
+      "utils/apps.py",
+      "utils/conversations/location.py",
+      "utils/conversations/process_conversation.py",
+      "utils/ella/memory_artwork_storage.py",
+      "utils/llm/memories.py",
+      "utils/notifications.py",
+      "utils/scopes.py"
+    ],
+    "routers/firmware.py": [
+      "database/redis_db.py"
+    ],
+    "routers/folders.py": [
+      "database/conversations.py",
+      "database/folders.py",
+      "models/conversation.py",
+      "models/folder.py",
+      "utils/__init__.py",
+      "utils/other/endpoints.py"
+    ],
+    "routers/goals.py": [
+      "database/__init__.py",
+      "database/goals.py",
+      "utils/__init__.py",
+      "utils/llm/goals.py",
+      "utils/other/endpoints.py"
+    ],
+    "routers/imports.py": [
+      "database/conversations.py",
+      "database/import_jobs.py",
+      "models/import_job.py",
+      "utils/__init__.py",
+      "utils/imports/limitless.py",
+      "utils/other/endpoints.py"
+    ],
+    "routers/integration.py": [
+      "database/action_items.py",
+      "database/apps.py",
+      "database/conversations.py",
+      "database/memories.py",
+      "database/notifications.py",
+      "database/redis_db.py",
+      "models/app.py",
+      "models/conversation.py",
+      "models/integrations.py",
+      "routers/conversations.py",
+      "utils/app_integrations.py",
+      "utils/apps.py",
+      "utils/conversations/location.py",
+      "utils/conversations/memories.py",
+      "utils/conversations/process_conversation.py",
+      "utils/conversations/search.py"
+    ],
+    "routers/integrations.py": [
+      "database/redis_db.py",
+      "database/users.py",
+      "utils/__init__.py",
+      "utils/other/endpoints.py"
+    ],
+    "routers/knowledge_graph.py": [
+      "database/__init__.py",
+      "database/knowledge_graph.py",
+      "database/memories.py",
+      "database/users.py",
+      "utils/__init__.py",
+      "utils/llm/knowledge_graph.py",
+      "utils/other/endpoints.py"
+    ],
+    "routers/mcp.py": [
+      "database/conversations.py",
+      "database/mcp_api_key.py",
+      "database/memories.py",
+      "database/users.py",
+      "dependencies.py",
+      "models/conversation.py",
+      "models/mcp_api_key.py",
+      "models/memories.py",
+      "utils/apps.py",
+      "utils/llm/memories.py"
+    ],
+    "routers/mcp_sse.py": [
+      "database/_client.py",
+      "database/conversations.py",
+      "database/mcp_api_key.py",
+      "database/memories.py",
+      "ella/services/__init__.py",
+      "ella/services/mcp_current_conversation.py",
+      "ella/services/mcp_redacted_observation.py",
+      "ella/services/mcp_source_report.py",
+      "ella/services/mcp_summary_enrichment.py",
+      "ella/services/mcp_synthetic_pending.py",
+      "ella/services/mcp_work_queue.py",
+      "ella/services/summary_sanitizer.py",
+      "ella/services/thin_cloudbot_capture.py",
+      "ella/services/thin_cloudbot_mcp.py",
+      "ella/services/thin_cloudbot_request_authority.py",
+      "ella/services/thin_pending_discovery.py",
+      "models/conversation.py",
+      "models/memories.py",
+      "utils/llm/memories.py"
+    ],
+    "routers/memories.py": [
+      "database/memories.py",
+      "database/vector_db.py",
+      "models/memories.py",
+      "utils/__init__.py",
+      "utils/apps.py",
+      "utils/other/endpoints.py"
+    ],
+    "routers/notifications.py": [
+      "database/notifications.py",
+      "database/redis_db.py",
+      "models/app.py",
+      "models/other.py",
+      "utils/__init__.py",
+      "utils/app_integrations.py",
+      "utils/apps.py",
+      "utils/notifications.py",
+      "utils/other/endpoints.py"
+    ],
+    "routers/oauth.py": [
+      "database/apps.py",
+      "database/redis_db.py",
+      "models/app.py",
+      "utils/apps.py"
+    ],
+    "routers/onboarding.py": [],
+    "routers/other.py": [],
+    "routers/payment.py": [
+      "database/__init__.py",
+      "database/action_items.py",
+      "database/conversations.py",
+      "database/memories.py",
+      "database/notifications.py",
+      "database/users.py",
+      "models/users.py",
+      "utils/__init__.py",
+      "utils/apps.py",
+      "utils/notifications.py",
+      "utils/other/endpoints.py",
+      "utils/stripe.py",
+      "utils/subscription.py"
+    ],
+    "routers/plugins.py": [],
+    "routers/pusher.py": [
+      "database/__init__.py",
+      "database/conversations.py",
+      "database/redis_db.py",
+      "database/users.py",
+      "models/conversation.py",
+      "utils/app_integrations.py",
+      "utils/apps.py",
+      "utils/conversations/location.py",
+      "utils/conversations/process_conversation.py",
+      "utils/other/storage.py",
+      "utils/other/task.py",
+      "utils/speaker_identification.py",
+      "utils/webhooks.py"
+    ],
+    "routers/speech_profile.py": [
+      "database/conversations.py",
+      "database/redis_db.py",
+      "database/users.py",
+      "models/conversation.py",
+      "models/other.py",
+      "utils/__init__.py",
+      "utils/other/endpoints.py",
+      "utils/other/storage.py",
+      "utils/stt/vad.py"
+    ],
+    "routers/sync.py": [
+      "database/__init__.py",
+      "database/_client.py",
+      "database/conversations.py",
+      "database/sync_segments.py",
+      "database/users.py",
+      "ella/services/ai_consent.py",
+      "ella/services/thin_cloudbot_capture.py",
+      "ella/services/thin_cloudbot_consent.py",
+      "ella/services/thin_cloudbot_request_authority.py",
+      "models/conversation.py",
+      "models/transcript_segment.py",
+      "utils/__init__.py",
+      "utils/conversations/process_conversation.py",
+      "utils/encryption.py",
+      "utils/other/endpoints.py",
+      "utils/other/storage.py",
+      "utils/stt/pre_recorded.py",
+      "utils/stt/vad.py",
+      "utils/stt/vad_configuration.py",
+      "utils/sync_capture_manifest.py"
+    ],
+    "routers/task_integrations.py": [
+      "database/redis_db.py",
+      "database/task_sync.py",
+      "database/users.py",
+      "utils/__init__.py",
+      "utils/other/endpoints.py"
+    ],
+    "routers/transcribe.py": [
+      "database/__init__.py",
+      "database/calendar_meetings.py",
+      "database/conversations.py",
+      "database/ella_postgres.py",
+      "database/redis_db.py",
+      "database/users.py",
+      "ella/routers/auto_provision.py",
+      "ella/routers/guardian.py",
+      "ella/services/ai_consent.py",
+      "ella/services/conversation_lifecycle.py",
+      "ella/services/thin_cloudbot_capture.py",
+      "ella/services/thin_cloudbot_consent.py",
+      "ella/services/thin_cloudbot_request_authority.py",
+      "ella/services/whisper_capture_bridge.py",
+      "ella/services/whisper_delivery.py",
+      "ella/services/whisper_tool_factory.py",
+      "models/conversation.py",
+      "models/message_event.py",
+      "models/transcript_segment.py",
+      "models/users.py",
+      "utils/__init__.py",
+      "utils/aac.py",
+      "utils/analytics.py",
+      "utils/app_integrations.py",
+      "utils/apps.py",
+      "utils/audio.py",
+      "utils/capture_buffer.py",
+      "utils/capture_task_diagnostics.py",
+      "utils/conversations/capture_protocol.py",
+      "utils/conversations/capture_target.py",
+      "utils/conversations/location.py",
+      "utils/conversations/process_conversation.py",
+      "utils/ella/ambient_deadline.py",
+      "utils/ella/exact_firebase_auth.py",
+      "utils/ella/memory_artwork_storage.py",
+      "utils/ella/scanner.py",
+      "utils/ella/scanner_keyterms.py",
+      "utils/llm/clients.py",
+      "utils/llm/openglass.py",
+      "utils/notifications.py",
+      "utils/onboarding.py",
+      "utils/other/endpoints.py",
+      "utils/other/storage.py",
+      "utils/other/task.py",
+      "utils/pusher.py",
+      "utils/speaker_assignment.py",
+      "utils/speaker_identification.py",
+      "utils/speaker_sample_migration.py",
+      "utils/stt/session_delivery.py",
+      "utils/stt/speaker_embedding.py",
+      "utils/stt/streaming.py",
+      "utils/subscription.py",
+      "utils/translation.py",
+      "utils/translation_cache.py",
+      "utils/webhooks.py"
+    ],
+    "routers/trends.py": [
+      "database/trends.py"
+    ],
+    "routers/updates.py": [
+      "database/redis_db.py",
+      "routers/firmware.py"
+    ],
+    "routers/users.py": [
+      "database/__init__.py",
+      "database/_client.py",
+      "database/chat.py",
+      "database/conversations.py",
+      "database/daily_summaries.py",
+      "database/managed_cloud_consent.py",
+      "database/memories.py",
+      "database/notifications.py",
+      "database/redis_db.py",
+      "database/user_usage.py",
+      "database/users.py",
+      "ella/services/ai_consent.py",
+      "ella/services/thin_cloudbot_deletion.py",
+      "models/conversation.py",
+      "models/notification_message.py",
+      "models/other.py",
+      "models/user_usage.py",
+      "models/users.py",
+      "utils/__init__.py",
+      "utils/apps.py",
+      "utils/ella/memory_artwork_storage.py",
+      "utils/llm/external_integrations.py",
+      "utils/llm/followup.py",
+      "utils/notifications.py",
+      "utils/observability/__init__.py",
+      "utils/other/endpoints.py",
+      "utils/other/storage.py",
+      "utils/stripe.py",
+      "utils/subscription.py",
+      "utils/webhooks.py"
+    ],
+    "routers/workflow.py": [
+      "database/conversations.py",
+      "models/conversation.py",
+      "models/integrations.py",
+      "routers/conversations.py",
+      "utils/conversations/location.py",
+      "utils/conversations/process_conversation.py"
+    ],
+    "routers/wrapped.py": [
+      "database/wrapped.py",
+      "utils/__init__.py",
+      "utils/other/endpoints.py",
+      "utils/wrapped/generate_2025.py"
+    ],
+    "templates/__init__.py": [],
+    "testing/load_test.py": [],
+    "testing/locustfile.py": [],
+    "utils/__init__.py": [],
+    "utils/aac.py": [],
+    "utils/agent.py": [
+      "models/app.py",
+      "models/chat.py",
+      "utils/retrieval/graph.py"
+    ],
+    "utils/analytics.py": [
+      "database/__init__.py",
+      "database/user_usage.py"
+    ],
+    "utils/app_integrations.py": [
+      "database/__init__.py",
+      "database/apps.py",
+      "database/chat.py",
+      "database/conversations.py",
+      "database/mem_db.py",
+      "database/notifications.py",
+      "database/redis_db.py",
+      "database/vector_db.py",
+      "models/app.py",
+      "models/chat.py",
+      "models/conversation.py",
+      "models/notification_message.py",
+      "utils/apps.py",
+      "utils/llm/clients.py",
+      "utils/llm/proactive_notification.py",
+      "utils/mentor_notifications.py",
+      "utils/notifications.py"
+    ],
+    "utils/apps.py": [
+      "database/apps.py",
+      "database/auth.py",
+      "database/cache.py",
+      "database/conversations.py",
+      "database/memories.py",
+      "database/redis_db.py",
+      "database/users.py",
+      "models/app.py",
+      "models/conversation.py",
+      "models/other.py",
+      "utils/__init__.py",
+      "utils/llm/persona.py",
+      "utils/social.py",
+      "utils/stripe.py"
+    ],
+    "utils/audio.py": [],
+    "utils/capture_buffer.py": [],
+    "utils/capture_task_diagnostics.py": [],
+    "utils/chat.py": [
+      "database/apps.py",
+      "database/chat.py",
+      "database/notifications.py",
+      "database/users.py",
+      "models/app.py",
+      "models/chat.py",
+      "models/conversation.py",
+      "models/notification_message.py",
+      "models/transcript_segment.py",
+      "utils/notifications.py",
+      "utils/other/storage.py",
+      "utils/retrieval/graph.py",
+      "utils/stt/pre_recorded.py"
+    ],
+    "utils/conversations/capture_protocol.py": [
+      "database/_client.py",
+      "database/conversations.py",
+      "database/fixture_capture_lineage.py",
+      "models/conversation.py",
+      "utils/conversations/capture_target.py"
+    ],
+    "utils/conversations/capture_target.py": [
+      "database/_client.py",
+      "ella/services/thin_cloudbot_consent.py",
+      "ella/services/thin_cloudbot_request_authority.py"
+    ],
+    "utils/conversations/failure_state.py": [
+      "models/conversation.py"
+    ],
+    "utils/conversations/generic_summary.py": [
+      "database/action_items.py",
+      "database/notifications.py",
+      "database/users.py",
+      "models/conversation.py",
+      "models/other.py",
+      "utils/llm/conversation_processing.py"
+    ],
+    "utils/conversations/location.py": [
+      "models/conversation.py"
+    ],
+    "utils/conversations/long_discarded_inventory.py": [],
+    "utils/conversations/memories.py": [
+      "database/memories.py",
+      "models/integrations.py",
+      "models/memories.py",
+      "utils/llm/memories.py"
+    ],
+    "utils/conversations/merge_conversations.py": [
+      "database/action_items.py",
+      "database/conversations.py",
+      "database/memories.py",
+      "database/vector_db.py",
+      "models/conversation.py",
+      "utils/conversations/process_conversation.py",
+      "utils/ella/memory_artwork_storage.py",
+      "utils/notifications.py",
+      "utils/other/storage.py"
+    ],
+    "utils/conversations/postprocess_conversation.py": [
+      "database/conversations.py",
+      "database/users.py",
+      "models/conversation.py",
+      "utils/conversations/process_conversation.py",
+      "utils/other/storage.py",
+      "utils/stt/pre_recorded.py",
+      "utils/stt/speech_profile.py",
+      "utils/stt/vad.py"
+    ],
+    "utils/conversations/process_conversation.py": [
+      "database/__init__.py",
+      "database/action_items.py",
+      "database/apps.py",
+      "database/calendar_meetings.py",
+      "database/conversations.py",
+      "database/folders.py",
+      "database/memories.py",
+      "database/notifications.py",
+      "database/redis_db.py",
+      "database/tasks.py",
+      "database/trends.py",
+      "database/users.py",
+      "database/vector_db.py",
+      "ella/services/ai_consent.py",
+      "ella/services/normal_account_routing.py",
+      "models/app.py",
+      "models/conversation.py",
+      "models/conversation_integrity.py",
+      "models/memories.py",
+      "models/notification_message.py",
+      "models/other.py",
+      "models/task.py",
+      "models/trend.py",
+      "utils/analytics.py",
+      "utils/apps.py",
+      "utils/conversations/capture_protocol.py",
+      "utils/conversations/failure_state.py",
+      "utils/conversations/vector.py",
+      "utils/ella/postprocess.py",
+      "utils/llm/chat.py",
+      "utils/llm/conversation_processing.py",
+      "utils/llm/external_integrations.py",
+      "utils/llm/goals.py",
+      "utils/llm/knowledge_graph.py",
+      "utils/llm/memories.py",
+      "utils/llm/trends.py",
+      "utils/notifications.py",
+      "utils/other/hume.py",
+      "utils/other/storage.py",
+      "utils/retrieval/rag.py",
+      "utils/task_sync.py",
+      "utils/webhooks.py"
+    ],
+    "utils/conversations/search.py": [],
+    "utils/conversations/spoken_diagnostic.py": [
+      "database/_client.py",
+      "utils/__init__.py",
+      "utils/conversations/capture_protocol.py"
+    ],
+    "utils/conversations/vector.py": [
+      "database/notifications.py",
+      "database/vector_db.py",
+      "models/conversation.py",
+      "utils/llm/chat.py",
+      "utils/llm/clients.py"
+    ],
+    "utils/dev_api_keys.py": [],
+    "utils/ella/__init__.py": [],
+    "utils/ella/ambient_deadline.py": [],
+    "utils/ella/canonical_auth.py": [],
+    "utils/ella/canonical_context.py": [
+      "utils/ella/canonical_auth.py",
+      "utils/ella/time_context.py"
+    ],
+    "utils/ella/canonical_omi.py": [
+      "models/conversation_integrity.py",
+      "utils/ella/canonical_auth.py"
+    ],
+    "utils/ella/chat.py": [],
+    "utils/ella/config.py": [],
+    "utils/ella/exact_firebase_auth.py": [],
+    "utils/ella/history_pagination.py": [],
+    "utils/ella/memory.py": [
+      "utils/ella/config.py"
+    ],
+    "utils/ella/memory_artwork_storage.py": [
+      "database/__init__.py",
+      "database/ella_postgres.py",
+      "database/memory_artwork.py"
+    ],
+    "utils/ella/postprocess.py": [
+      "database/hermes_cloud_enrichment_outbox.py",
+      "ella/services/ai_consent.py",
+      "ella/services/normal_account_routing.py",
+      "ella/services/runtime_errors.py",
+      "ella/services/transcript_processing_hold.py",
+      "models/hermes_cloud_enrichment_contract.py",
+      "utils/ella/config.py"
+    ],
+    "utils/ella/scanner.py": [
+      "database/ella_postgres.py",
+      "database/honcho_attestation.py",
+      "ella/services/__init__.py",
+      "ella/services/guardian_echo_classifier.py",
+      "ella/services/guardian_playback_ledger.py",
+      "ella/services/whisper_capture_bridge.py",
+      "ella/services/whisper_delivery.py",
+      "utils/__init__.py",
+      "utils/conversations/spoken_diagnostic.py",
+      "utils/ella/config.py"
+    ],
+    "utils/ella/scanner_debounce.py": [],
+    "utils/ella/scanner_keyterms.py": [
+      "database/honcho_attestation.py",
+      "ella/services/runtime_errors.py",
+      "ella/services/runtime_resolver.py",
+      "ella/utils/provision_authority.py"
+    ],
+    "utils/ella/summary.py": [
+      "utils/ella/config.py"
+    ],
+    "utils/ella/time_context.py": [],
+    "utils/encryption.py": [],
+    "utils/imports/__init__.py": [],
+    "utils/imports/limitless.py": [
+      "database/conversations.py",
+      "database/import_jobs.py",
+      "models/conversation.py",
+      "models/import_job.py",
+      "models/transcript_segment.py",
+      "utils/notifications.py"
+    ],
+    "utils/llm/__init__.py": [],
+    "utils/llm/app_generator.py": [
+      "utils/llm/clients.py"
+    ],
+    "utils/llm/chat.py": [
+      "database/auth.py",
+      "database/goals.py",
+      "database/notifications.py",
+      "database/redis_db.py",
+      "database/users.py",
+      "models/app.py",
+      "models/chat.py",
+      "models/conversation.py",
+      "models/other.py",
+      "models/transcript_segment.py",
+      "utils/llm/clients.py",
+      "utils/llms/memory.py",
+      "utils/observability/langsmith_prompts.py"
+    ],
+    "utils/llm/clients.py": [
+      "models/conversation.py"
+    ],
+    "utils/llm/conversation_processing.py": [
+      "ella/prompts/loader.py",
+      "models/app.py",
+      "models/conversation.py",
+      "utils/llm/clients.py"
+    ],
+    "utils/llm/external_integrations.py": [
+      "database/action_items.py",
+      "database/users.py",
+      "models/conversation.py",
+      "models/other.py",
+      "utils/llm/clients.py",
+      "utils/llms/memory.py"
+    ],
+    "utils/llm/followup.py": [
+      "models/other.py",
+      "models/transcript_segment.py",
+      "utils/llm/clients.py"
+    ],
+    "utils/llm/goals.py": [
+      "database/chat.py",
+      "database/conversations.py",
+      "database/goals.py",
+      "database/memories.py",
+      "database/vector_db.py",
+      "utils/llm/clients.py"
+    ],
+    "utils/llm/knowledge_graph.py": [
+      "database/__init__.py",
+      "database/_client.py",
+      "database/knowledge_graph.py",
+      "utils/llm/clients.py"
+    ],
+    "utils/llm/memories.py": [
+      "database/__init__.py",
+      "database/users.py",
+      "ella/prompts/loader.py",
+      "models/memories.py",
+      "models/other.py",
+      "models/transcript_segment.py",
+      "utils/llm/clients.py",
+      "utils/llms/memory.py",
+      "utils/prompts.py"
+    ],
+    "utils/llm/notifications.py": [
+      "database/memories.py",
+      "utils/llm/clients.py"
+    ],
+    "utils/llm/openglass.py": [
+      "models/conversation.py",
+      "utils/llm/clients.py"
+    ],
+    "utils/llm/persona.py": [
+      "models/app.py",
+      "models/chat.py",
+      "utils/llm/clients.py"
+    ],
+    "utils/llm/proactive_notification.py": [
+      "models/chat.py",
+      "utils/llm/clients.py",
+      "utils/llms/memory.py"
+    ],
+    "utils/llm/trends.py": [
+      "database/users.py",
+      "models/conversation.py",
+      "models/other.py",
+      "models/trend.py",
+      "utils/llm/clients.py"
+    ],
+    "utils/llms/memory.py": [
+      "database/auth.py",
+      "database/memories.py",
+      "models/memories.py"
+    ],
+    "utils/mcp_api_keys.py": [],
+    "utils/mcp_client.py": [
+      "models/app.py"
+    ],
+    "utils/mentor_notifications.py": [
+      "database/notifications.py"
+    ],
+    "utils/notifications.py": [
+      "database/auth.py",
+      "database/notifications.py",
+      "database/redis_db.py",
+      "utils/llm/notifications.py"
+    ],
+    "utils/observability/__init__.py": [
+      "utils/observability/langsmith.py",
+      "utils/observability/langsmith_prompts.py"
+    ],
+    "utils/observability/langsmith.py": [],
+    "utils/observability/langsmith_prompts.py": [
+      "utils/observability/langsmith.py"
+    ],
+    "utils/onboarding.py": [
+      "utils/llm/clients.py"
+    ],
+    "utils/other/chat_file.py": [
+      "database/chat.py",
+      "models/chat.py"
+    ],
+    "utils/other/endpoints.py": [],
+    "utils/other/hume.py": [],
+    "utils/other/jobs.py": [
+      "utils/other/notifications.py"
+    ],
+    "utils/other/notifications.py": [
+      "database/chat.py",
+      "database/conversations.py",
+      "database/daily_summaries.py",
+      "database/notifications.py",
+      "database/redis_db.py",
+      "models/conversation.py",
+      "models/notification_message.py",
+      "utils/llm/external_integrations.py",
+      "utils/notifications.py",
+      "utils/webhooks.py"
+    ],
+    "utils/other/pattern.py": [],
+    "utils/other/storage.py": [
+      "database/__init__.py",
+      "database/redis_db.py",
+      "database/users.py",
+      "utils/__init__.py",
+      "utils/encryption.py"
+    ],
+    "utils/other/task.py": [],
+    "utils/other/timeout.py": [],
+    "utils/prompts.py": [],
+    "utils/pusher.py": [],
+    "utils/retrieval/agentic.py": [
+      "database/notifications.py",
+      "models/app.py",
+      "models/chat.py",
+      "models/conversation.py",
+      "utils/llm/chat.py",
+      "utils/llm/clients.py",
+      "utils/observability/langsmith.py",
+      "utils/observability/langsmith_prompts.py",
+      "utils/other/endpoints.py",
+      "utils/retrieval/safety.py",
+      "utils/retrieval/tools/__init__.py",
+      "utils/retrieval/tools/app_tools.py"
+    ],
+    "utils/retrieval/graph.py": [
+      "database/conversations.py",
+      "database/notifications.py",
+      "database/redis_db.py",
+      "database/users.py",
+      "database/vector_db.py",
+      "models/app.py",
+      "models/chat.py",
+      "models/conversation.py",
+      "models/other.py",
+      "utils/app_integrations.py",
+      "utils/llm/chat.py",
+      "utils/llm/persona.py",
+      "utils/observability/langsmith.py",
+      "utils/other/chat_file.py",
+      "utils/other/endpoints.py",
+      "utils/retrieval/agentic.py"
+    ],
+    "utils/retrieval/rag.py": [
+      "database/conversations.py",
+      "database/users.py",
+      "database/vector_db.py",
+      "models/conversation.py",
+      "models/other.py",
+      "models/transcript_segment.py",
+      "utils/llm/chat.py",
+      "utils/llm/clients.py"
+    ],
+    "utils/retrieval/safety.py": [],
+    "utils/retrieval/tools/__init__.py": [
+      "utils/retrieval/tools/action_item_tools.py",
+      "utils/retrieval/tools/apple_health_tools.py",
+      "utils/retrieval/tools/calendar_tools.py",
+      "utils/retrieval/tools/chart_tools.py",
+      "utils/retrieval/tools/conversation_tools.py",
+      "utils/retrieval/tools/file_tools.py",
+      "utils/retrieval/tools/gmail_tools.py",
+      "utils/retrieval/tools/memory_tools.py",
+      "utils/retrieval/tools/notification_settings_tools.py",
+      "utils/retrieval/tools/omi_tools.py",
+      "utils/retrieval/tools/perplexity_tools.py"
+    ],
+    "utils/retrieval/tools/action_item_tools.py": [
+      "database/action_items.py",
+      "utils/notifications.py",
+      "utils/retrieval/agentic.py"
+    ],
+    "utils/retrieval/tools/app_tools.py": [
+      "database/apps.py",
+      "database/redis_db.py",
+      "models/app.py",
+      "utils/mcp_client.py",
+      "utils/retrieval/agentic.py"
+    ],
+    "utils/retrieval/tools/apple_health_tools.py": [
+      "database/notifications.py",
+      "database/users.py",
+      "utils/retrieval/agentic.py",
+      "utils/retrieval/tools/integration_base.py"
+    ],
+    "utils/retrieval/tools/calendar_tools.py": [
+      "database/users.py",
+      "utils/retrieval/agentic.py",
+      "utils/retrieval/tools/google_utils.py",
+      "utils/retrieval/tools/integration_base.py"
+    ],
+    "utils/retrieval/tools/chart_tools.py": [
+      "utils/retrieval/agentic.py"
+    ],
+    "utils/retrieval/tools/conversation_tools.py": [
+      "database/conversations.py",
+      "database/users.py",
+      "database/vector_db.py",
+      "models/conversation.py",
+      "models/other.py",
+      "utils/llm/clients.py",
+      "utils/retrieval/agentic.py"
+    ],
+    "utils/retrieval/tools/file_tools.py": [
+      "database/chat.py",
+      "models/chat.py",
+      "utils/other/chat_file.py",
+      "utils/retrieval/agentic.py"
+    ],
+    "utils/retrieval/tools/gmail_tools.py": [
+      "database/users.py",
+      "utils/retrieval/agentic.py",
+      "utils/retrieval/tools/google_utils.py",
+      "utils/retrieval/tools/integration_base.py"
+    ],
+    "utils/retrieval/tools/google_utils.py": [
+      "database/users.py"
+    ],
+    "utils/retrieval/tools/integration_base.py": [
+      "database/users.py",
+      "utils/retrieval/agentic.py"
+    ],
+    "utils/retrieval/tools/memory_tools.py": [
+      "database/memories.py",
+      "database/vector_db.py",
+      "models/memories.py",
+      "utils/retrieval/agentic.py"
+    ],
+    "utils/retrieval/tools/notification_settings_tools.py": [
+      "database/notifications.py",
+      "utils/retrieval/agentic.py"
+    ],
+    "utils/retrieval/tools/omi_tools.py": [
+      "utils/app_integrations.py"
+    ],
+    "utils/retrieval/tools/perplexity_tools.py": [],
+    "utils/scopes.py": [],
+    "utils/social.py": [
+      "database/apps.py",
+      "database/redis_db.py",
+      "utils/conversations/memories.py",
+      "utils/llm/persona.py"
+    ],
+    "utils/speaker_assignment.py": [
+      "models/transcript_segment.py"
+    ],
+    "utils/speaker_identification.py": [
+      "database/__init__.py",
+      "database/conversations.py",
+      "database/users.py",
+      "utils/other/storage.py",
+      "utils/speaker_sample.py",
+      "utils/speaker_sample_migration.py",
+      "utils/stt/speaker_embedding.py"
+    ],
+    "utils/speaker_sample.py": [
+      "utils/other/storage.py",
+      "utils/stt/pre_recorded.py",
+      "utils/text_utils.py"
+    ],
+    "utils/speaker_sample_migration.py": [
+      "database/__init__.py",
+      "database/users.py",
+      "utils/speaker_sample.py",
+      "utils/stt/speaker_embedding.py"
+    ],
+    "utils/stripe.py": [
+      "database/__init__.py",
+      "database/redis_db.py"
+    ],
+    "utils/stt/local_silero_vad.py": [],
+    "utils/stt/local_silero_worker.py": [],
+    "utils/stt/pre_recorded.py": [
+      "models/transcript_segment.py",
+      "utils/other/endpoints.py"
+    ],
+    "utils/stt/provider_selection.py": [],
+    "utils/stt/session_delivery.py": [],
+    "utils/stt/soniox_util.py": [
+      "database/redis_db.py",
+      "utils/other/endpoints.py",
+      "utils/other/storage.py"
+    ],
+    "utils/stt/speaker_embedding.py": [],
+    "utils/stt/speech_profile.py": [
+      "utils/other/storage.py"
+    ],
+    "utils/stt/streaming.py": [
+      "utils/stt/provider_selection.py",
+      "utils/stt/soniox_util.py"
+    ],
+    "utils/stt/vad.py": [
+      "database/__init__.py",
+      "database/redis_db.py",
+      "utils/stt/local_silero_vad.py",
+      "utils/stt/vad_configuration.py"
+    ],
+    "utils/stt/vad_configuration.py": [],
+    "utils/subscription.py": [
+      "database/user_usage.py",
+      "database/users.py",
+      "models/users.py"
+    ],
+    "utils/sync_capture_manifest.py": [
+      "database/redis_db.py"
+    ],
+    "utils/task_sync.py": [
+      "database/action_items.py",
+      "database/task_sync.py",
+      "database/users.py",
+      "routers/task_integrations.py",
+      "utils/notifications.py"
+    ],
+    "utils/text_utils.py": [],
+    "utils/translation.py": [],
+    "utils/translation_cache.py": [
+      "utils/translation.py"
+    ],
+    "utils/webhooks.py": [
+      "database/notifications.py",
+      "database/redis_db.py",
+      "database/users.py",
+      "models/conversation.py",
+      "models/users.py",
+      "utils/notifications.py"
+    ],
+    "utils/wrapped/__init__.py": [],
+    "utils/wrapped/generate_2025.py": [
+      "database/action_items.py",
+      "database/conversations.py",
+      "database/wrapped.py",
+      "models/conversation.py",
+      "utils/llm/clients.py",
+      "utils/notifications.py"
+    ]
+  },
+  "unresolved_local_references": [
+    "modal",
+    "modal.App",
+    "modal.Cron",
+    "modal.Image",
+    "modal.Secret",
+    "modal.asgi_app",
+    "modal.gpu",
+    "modal.web_endpoint"
+  ]
+}

@@ -1,0 +1,276 @@
+"""Opt-in direct semantic-role gateway bridge, separate from normal chat.
+
+An owned agent alias selects the gateway route. Its upstream model/profile are
+independently bound by a fresh protected host configuration snapshot. The direct
+role gateway executes no AIAgent, memory tools or fallback. Exact terminal ACK,
+actual provider ID and owned canonical readback are required before success.
+"""
+
+from __future__ import annotations
+
+from ella.services import enrichment_stage_timing as _timing
+
+import asyncio
+import copy
+import json
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from typing import Any
+
+from ella.services.semantic_owned_runtime import _parse_result, _reject, _valid_response_id, CHANNELS, MAX_REQUEST_BYTES
+from ella.services.semantic_producer_ledger import BackendTurn
+from ella.services.semantic_publication import PublicationBinding, digest
+
+SELF_HOSTED_CHANNELS = {**CHANNELS, "learning_generator": "semantic_learning_generator", "learning_verifier": "semantic_learning_verifier"}
+ROLE_POLICIES = {"generator": "ella-semantic-summary-v1", "verifier": "ella-semantic-summary-v1", "learning_generator": "ella-semantic-learning-v3", "learning_verifier": "ella-semantic-learning-v3"}
+
+
+def _require_semantic_protocol_ack(body, headers, *, runtime, session, role, nonce, request_sha256):
+    """Authenticate gateway wire then bind its server-derived direct-role ACK.
+
+    The body model echo and gateway UUID alone are not model execution proof.
+    expected_model/profile come from the already pinned owned runtime, never
+    a fallback selection or a caller-created body identity assertion.
+    """
+    ack = body.get("semantic_protocol")
+    hermes = body.get("hermes")
+    if not isinstance(ack, dict) or not isinstance(hermes, dict):
+        _reject("semantic_runtime_gateway_completion_ack_missing")
+    if (type(ack.get("version")) is not int or ack["version"] != 1
+        or ack.get("completed") is not True or ack.get("partial") is not False
+        or ack.get("failed") is not False or ack.get("fallback_used") is not False
+        or type(ack.get("tools_executed")) is not int or ack["tools_executed"] != 0
+        or hermes.get("completed") is not True or hermes.get("partial") is not False
+        or hermes.get("failed") is not False
+        or any(obj.get(k) not in (None, "") for obj in (ack, hermes) for k in ("error", "error_code"))):
+        _reject("semantic_runtime_gateway_incomplete")
+    if (headers.get("X-Hermes-Completed") != "true"
+        or headers.get("X-Hermes-Partial") != "false" or headers.get("X-Hermes-Error")):
+        _reject("semantic_runtime_gateway_incomplete")
+    if (ack.get("session_id") != session or ack.get("role") != role
+        or ack.get("nonce") != nonce or ack.get("request_sha256") != request_sha256
+        or headers.get("X-Hermes-Session-Id") != session
+        or headers.get("X-Hermes-Session-Key") != session):
+        _reject("semantic_runtime_gateway_session_binding_changed")
+    profile = getattr(runtime, "profile_name", None)
+    model = getattr(runtime, "expected_model", None)
+    policy_version = getattr(runtime, "model_policy_version", None)
+    policy_digest = ack.get("runtime_policy_digest")
+    from collections.abc import Mapping
+    authority = getattr(runtime, "authority", None)
+    model_provider = authority.get("provider") if isinstance(authority, Mapping) else "openai-codex"
+    credential_source = {"openai-codex":"configured_shared_root_oauth", "openrouter":"configured_shared_root_api_key"}.get(model_provider)
+    if credential_source is None or (model_provider=="openrouter" and model!="deepseek/deepseek-v4-flash"):
+        _reject("semantic_runtime_gateway_actual_identity_changed")
+    if (not isinstance(policy_version, str) or not policy_version
+        or ack.get("runtime_policy_version") != policy_version
+        or ack.get("credential_source") != credential_source
+        or not isinstance(policy_digest, str) or len(policy_digest) != 64
+        or any(c not in "0123456789abcdef" for c in policy_digest)
+        or policy_digest != getattr(runtime, "semantic_policy_sha256", None)):
+        _reject("semantic_runtime_gateway_actual_policy_changed")
+    if (not isinstance(profile, str) or not profile or not isinstance(model, str) or not model
+        or ack.get("profile") != profile or ack.get("model") != model
+        or ack.get("initial_model") != model
+        or ack.get("provider") != model_provider or ack.get("initial_provider") != model_provider):
+        _reject("semantic_runtime_gateway_actual_identity_changed")
+    if (ack.get("gateway_response_id") != body.get("id")
+        or not _valid_response_id(ack.get("provider_response_id"))):
+        _reject("semantic_runtime_gateway_provenance_missing")
+    return ack
+
+
+@dataclass(frozen=True)
+class _SelfHostedDependencies:
+    resolver: Any
+    identity: Any
+    revalidator: Any
+    consent: Any
+    client_factory: Any
+    event_type: Any
+
+
+class SelfHostedSemanticRuntimeBridge:
+    def __init__(
+        self,
+        *,
+        binding,
+        current_binding,
+        repository,
+        event_store,
+        dependencies,
+        expected_runtime_identity,
+        timeout_seconds=45,
+    ):
+        if (
+            not isinstance(binding, PublicationBinding)
+            or expected_runtime_identity is None
+            or not 0 < timeout_seconds <= 120
+        ):
+            _reject("semantic_runtime_binding_invalid")
+        self.binding, self.current_binding = binding, current_binding
+        self.expected_runtime_identity = expected_runtime_identity
+        self.repository, self.event_store, self._deps = repository, event_store, dependencies
+        self.timeout_seconds = timeout_seconds
+
+    async def _authority(self, identity=None):
+        with _timing.stage('semantic_self_hosted_runtime._authority'):
+            from ella.services.transcript_processing_hold import require_transcript_processing_active
+            await require_transcript_processing_active(self.binding.uid)
+            if await _timing.await_stage('semantic_self_hosted_runtime.await.109', asyncio.to_thread(self.current_binding)) != self.binding:
+                _reject("semantic_runtime_publication_authority_changed")
+            subject = await _timing.await_stage('semantic_self_hosted_runtime.await.111', asyncio.to_thread(self._deps.consent, self.binding.uid))
+            if subject != self.binding.uid:
+                _reject("semantic_runtime_consent_owner_changed")
+            if identity is None:
+                runtime = await _timing.await_stage('semantic_self_hosted_runtime.await.115', self._deps.resolver(self.binding.uid, repository=self.repository, target_mode='hermes-cloud-transcript'))
+            else:
+                runtime = await _timing.await_stage('semantic_self_hosted_runtime.await.119', self._deps.revalidator(identity, repository=self.repository))
+            if (
+                runtime is None
+                or runtime.uid != self.binding.uid
+                or runtime.provider != "hermes"
+                or runtime.status != "active"
+                or not runtime.gateway_url
+                or not runtime.gateway_token
+                or not runtime.agent_id
+            ):
+                _reject("semantic_existing_self_hosted_target_required")
+            actual_identity = self._deps.identity(runtime)
+            if actual_identity != self.expected_runtime_identity:
+                _reject("semantic_runtime_hydration_target_changed")
+            if identity is not None and actual_identity != identity:
+                _reject("semantic_runtime_target_changed")
+            await require_transcript_processing_active(self.binding.uid)
+            return runtime, actual_identity
+
+    async def __call__(self, *, role, request):
+        with _timing.stage('semantic_self_hosted_runtime.__call__'):
+            if role not in SELF_HOSTED_CHANNELS or not isinstance(request, dict):
+                _reject("semantic_runtime_request_invalid")
+            request = copy.deepcopy(request)
+            if request.get("policy") != ROLE_POLICIES[role] or not isinstance(request.get("instructions"), str):
+                _reject("semantic_runtime_policy_invalid")
+            wire = json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            if len(wire.encode()) > MAX_REQUEST_BYTES:
+                _reject("semantic_runtime_request_capacity")
+            key = digest(
+                {
+                    "domain": "ella-self-hosted-semantic-turn-v1",
+                    "binding": asdict(self.binding),
+                    "role": role,
+                    "request_sha256": digest(request),
+                }
+            )
+            session = "ella-semantic-" + role + "-" + key
+            runtime, identity = await _timing.await_stage('semantic_self_hosted_runtime.await.155', self._authority())
+            started = datetime.now(timezone.utc)
+            async with self._deps.client_factory(timeout=self.timeout_seconds) as client:
+                runtime, _ = await _timing.await_stage('semantic_self_hosted_runtime.await.158', self._authority(identity))
+                response = await _timing.await_stage('semantic_self_hosted_runtime.await.159', client.post(runtime.gateway_url.rstrip('/') + '/v1/chat/completions', headers={'Authorization': 'Bearer ' + runtime.gateway_token, 'Content-Type': 'application/json', 'X-Hermes-Session-Id': session, 'X-Hermes-Session-Key': session, 'X-Trace-Id': session, 'X-Ella-Semantic-Protocol': '1', 'X-Ella-Semantic-Role': role, 'X-Ella-Semantic-Nonce': key, 'Idempotency-Key': key}, json={'model': runtime.agent_id, 'messages': [{'role': 'user', 'content': wire}], 'temperature': 0.1, 'max_tokens': 1600, 'stream': False}))
+            response.raise_for_status()
+            await _timing.await_stage('semantic_self_hosted_runtime.await.181', self._authority(identity))
+            body = response.json()
+            if not isinstance(body, dict) or not _valid_response_id(body.get("id")):
+                _reject("semantic_runtime_gateway_provenance_missing")
+            choices = body.get("choices")
+            if (
+                not isinstance(choices, list)
+                or len(choices) != 1
+                or not isinstance(choices[0], dict)
+                or choices[0].get("finish_reason") != "stop"
+            ):
+                _reject("semantic_runtime_output_shape")
+            message = choices[0].get("message")
+            if not isinstance(message, dict) or message.get("role") != "assistant" or message.get("tool_calls"):
+                _reject("semantic_runtime_output_shape")
+            text = message.get("content")
+            result = _parse_result(text)
+            ack = _require_semantic_protocol_ack(
+                body, response.headers, runtime=runtime, session=session, role=role,
+                nonce=key, request_sha256=digest(request)
+            )
+            event_id = "semantic-hermes:" + key + ":assistant"
+            source_identity = "semantic-hermes:" + key
+            event = self._deps.event_type(
+                uid=self.binding.uid,
+                canonical_identity=self.binding.uid,
+                event_id=event_id,
+                session_id=session,
+                channel=SELF_HOSTED_CHANNELS[role],
+                provider="hermes",
+                role="assistant",
+                text=text,
+                started_at=started,
+                ended_at=datetime.now(timezone.utc),
+                privacy_scope="user_private",
+                scan_policy="none",
+                source_ref={
+                    "source_identity": source_identity,
+                    "provider_response_id": ack["provider_response_id"],
+                    "gateway_response_id": body["id"],
+                    "scope_kind": "semantic_operation",
+                    "operation_id": key,
+                },
+                metadata={"role": role, "binding_sha256": digest(asdict(self.binding)), "request_sha256": digest(request)},
+            )
+            await _timing.await_stage('semantic_self_hosted_runtime.await.226', self._authority(identity))
+            receipt = await _timing.await_stage('semantic_self_hosted_runtime.await.227', self.event_store.write_batch([event]))
+            if (
+                not isinstance(receipt, dict)
+                or receipt.get("ok") is not True
+                or not any(
+                    item.get("event_id") == event_id and item.get("source_identity") == source_identity
+                    for item in receipt.get("events", [])
+                    if isinstance(item, dict)
+                )
+            ):
+                _reject("semantic_runtime_canonical_unconfirmed")
+            stored = await _timing.await_stage('semantic_self_hosted_runtime.await.238', self.event_store.get_event(uid=self.binding.uid, event_id=event_id, source_identity=source_identity))
+            if (
+                not isinstance(stored, dict)
+                or stored.get("uid") != self.binding.uid
+                or stored.get("canonical_identity") != self.binding.uid
+                or stored.get("text") != text
+                or (stored.get("source_ref") or {}).get("provider_response_id") != ack["provider_response_id"]
+                or (stored.get("source_ref") or {}).get("gateway_response_id") != body["id"]
+            ):
+                _reject("semantic_runtime_canonical_unconfirmed")
+            await _timing.await_stage('semantic_self_hosted_runtime.await.250', self._authority(identity))
+            # Self-hosted gateway has no Hermes Cloud SQL interaction row. Return
+            # its actual completion ID and the confirmed durable canonical event ID.
+            return BackendTurn(result, body["id"], event_id)
+
+
+def create_self_hosted_runtime_bridge(
+    *, binding, current_binding, repository, expected_runtime_identity, timeout_seconds=45, host_read_budget=None
+):
+    import httpx
+    from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
+    from ella.services.ai_consent import assert_current_ai_consent
+    from ella.services.semantic_runtime_authority import (
+        resolve_semantic_runtime as resolve_isolated_runtime,
+        semantic_runtime_authority_identity as runtime_authority_identity,
+        revalidate_semantic_runtime as revalidate_runtime_authority,
+    )
+
+    from functools import partial
+    from ella.services.semantic_host_context import HostReadBudget
+    host_read_budget=host_read_budget or HostReadBudget()
+    dependencies = _SelfHostedDependencies(
+        partial(resolve_isolated_runtime,host_read_budget=host_read_budget),
+        runtime_authority_identity,
+        partial(revalidate_runtime_authority,host_read_budget=host_read_budget),
+        assert_current_ai_consent,
+        httpx.AsyncClient,
+        CanonicalEventIn,
+    )
+    return SelfHostedSemanticRuntimeBridge(
+        binding=binding,
+        current_binding=current_binding,
+        repository=repository,
+        event_store=PostgresCanonicalEventStore(),
+        dependencies=dependencies,
+        expected_runtime_identity=expected_runtime_identity,
+        timeout_seconds=timeout_seconds,
+    )

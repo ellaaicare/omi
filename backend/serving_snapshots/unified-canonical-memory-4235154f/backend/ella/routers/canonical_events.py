@@ -1,0 +1,1271 @@
+"""
+Canonical event ledger for unified Ella memory.
+
+Source adapters write lossless turn-level events here first, then downstream
+processors can fan out to OMI conversation objects, OpenClaw workspace files,
+scanner/guardian routes, or future agent runtimes. This module intentionally
+does not require OpenClaw runtime access.
+"""
+
+from __future__ import annotations
+
+import json
+import hmac
+import logging
+import os
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+import asyncpg
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from pydantic import BaseModel, Field
+
+from database.ella_postgres import get_ella_postgres_pool
+from ella.services.today_card_postgres import PostgresTodayCardRepository, lock_today_card_source_validity
+from utils.ella.canonical_auth import CANONICAL_EVENT_SERVICE_HEADER
+from utils.ella.exact_firebase_auth import (
+    ELLA_SUBJECT_UID_HEADER,
+    EllaRequestAuthority,
+    get_exact_firebase_uid,
+    get_firebase_or_service_authority,
+)
+from utils.ella.canonical_context import (
+    MAX_CANONICAL_EVENT_SEQUENCE,
+    MAX_CANONICAL_TURN_ORDINAL,
+    parse_canonical_ordering_integer,
+)
+from utils.ella.time_context import annotate_event_time, build_time_context
+
+logger = logging.getLogger("ella.canonical_events")
+
+DEFAULT_TIMELINE_LIMIT = 100
+MAX_TIMELINE_LIMIT = 500
+_TURN_ORDINAL_SQL_IS_VALID = """(
+    metadata->>'turn_ordinal' ~ '^(0|[1-9][0-9]{0,18})$'
+    AND (
+        length(metadata->>'turn_ordinal') < 19
+        OR metadata->>'turn_ordinal' <= '9223372036854775807'
+    )
+)"""
+_EVENT_SEQUENCE_SQL_IS_VALID = """(
+    metadata->>'event_sequence' ~ '^(0|[1-9][0-9]{0,9})$'
+    AND (
+        length(metadata->>'event_sequence') < 10
+        OR metadata->>'event_sequence' <= '2147483647'
+    )
+)"""
+_TURN_IDENTITY_SQL = """COALESCE(
+    NULLIF(metadata->>'turn_id', ''),
+    NULLIF(source_ref->>'client_message_id', ''),
+    NULLIF(source_ref->>'turn_id', ''),
+    regexp_replace(event_id, ':(user|assistant)$', '')
+)"""
+
+
+CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD = "canonical_summary_publication_sequence"
+CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD = "canonical_summary_publication_sha256"
+MAX_CANONICAL_SUMMARY_PUBLICATION_SEQUENCE = (1 << 63) - 1
+
+
+def _turn_identity(item: dict[str, Any]) -> str:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    source_ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+    explicit = metadata.get("turn_id") or source_ref.get("client_message_id") or source_ref.get("turn_id")
+    if explicit:
+        return str(explicit)
+    event_id = str(item.get("event_id") or "")
+    for suffix in (":user", ":assistant"):
+        if event_id.endswith(suffix):
+            return event_id[: -len(suffix)]
+    return event_id
+
+
+def _event_sequence(item: dict[str, Any]) -> int:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    sequence = metadata.get("event_sequence")
+    parsed = parse_canonical_ordering_integer(sequence, maximum=MAX_CANONICAL_EVENT_SEQUENCE)
+    if parsed is not None:
+        return parsed
+    if item.get("role") == "user":
+        return 0
+    if item.get("role") == "assistant":
+        return 1
+    return 2
+
+
+def _turn_ordinal(item: dict[str, Any]) -> Optional[int]:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    ordinal = metadata.get("turn_ordinal")
+    return parse_canonical_ordering_integer(ordinal, maximum=MAX_CANONICAL_TURN_ORDINAL)
+
+
+def _canonical_event_order(item: dict[str, Any]) -> tuple[datetime, str, int, int, str, int, str]:
+    turn_ordinal = _turn_ordinal(item)
+    return (
+        item["started_at"],
+        str(item.get("session_id") or ""),
+        0 if turn_ordinal is not None else 1,
+        turn_ordinal or 0,
+        _turn_identity(item),
+        _event_sequence(item),
+        str(item.get("event_id") or ""),
+    )
+
+
+async def _get_pool() -> asyncpg.Pool:
+    """Compatibility seam for existing repository construction and tests."""
+    return await get_ella_postgres_pool()
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_datetime(value: datetime | str | None, field_name: str) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        raw = value.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid {field_name}: {value}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _model_dump(model: BaseModel) -> dict[str, Any]:
+    if hasattr(model, "model_dump"):
+        return model.model_dump(mode="json")
+    return model.dict()
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(value or {}, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _normalize_ordering_integer(raw: Any, *, field_name: str, maximum: int) -> int:
+    value = parse_canonical_ordering_integer(raw, maximum=maximum)
+    if value is None:
+        raise HTTPException(status_code=422, detail=f"invalid_{field_name}")
+    return value
+
+
+def _normalize_ordering_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(metadata)
+    if "turn_ordinal" in normalized:
+        normalized["turn_ordinal"] = _normalize_ordering_integer(
+            normalized["turn_ordinal"], field_name="turn_ordinal", maximum=MAX_CANONICAL_TURN_ORDINAL
+        )
+    if "event_sequence" in normalized:
+        normalized["event_sequence"] = _normalize_ordering_integer(
+            normalized["event_sequence"], field_name="event_sequence", maximum=MAX_CANONICAL_EVENT_SEQUENCE
+        )
+    return normalized
+
+
+def _should_replace_existing_event(item: dict[str, Any]) -> bool:
+    """Allow derived OMI summary rows to refresh while preserving raw source data.
+
+    Normal turn events remain immutable. OMI summary events are app-facing
+    derived summaries; Observer corrections/enrichment should update the single
+    canonical summary row instead of creating duplicate timeline entries.
+    """
+    metadata = item.get("metadata") or {}
+    return item.get("channel") == "omi" and metadata.get("adapter") == "omi-enriched-conversation"
+
+
+def _canonical_summary_publication_fence(item: dict[str, Any]) -> Optional[tuple[int, str]]:
+    if not _should_replace_existing_event(item):
+        return None
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    raw_sequence = metadata.get(CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD)
+    raw_sha256 = metadata.get(CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD)
+    if raw_sequence is None and raw_sha256 is None:
+        return None
+    try:
+        sequence = int(raw_sequence)
+    except (TypeError, ValueError) as error:
+        raise ValueError("invalid canonical summary publication sequence") from error
+    sha256 = str(raw_sha256 or "")
+    if (
+        sequence < 1
+        or sequence > MAX_CANONICAL_SUMMARY_PUBLICATION_SEQUENCE
+        or len(sha256) != 64
+        or any(character not in "0123456789abcdef" for character in sha256)
+    ):
+        raise ValueError("invalid canonical summary publication fence")
+    return sequence, sha256
+
+
+def _should_accept_canonical_summary_replacement(existing: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    incoming_fence = _canonical_summary_publication_fence(incoming)
+    existing_fence = _canonical_summary_publication_fence(existing)
+    if existing_fence is None:
+        return True
+    if incoming_fence is None:
+        return False
+    existing_sequence, existing_sha256 = existing_fence
+    incoming_sequence, incoming_sha256 = incoming_fence
+    return incoming_sequence > existing_sequence or (
+        incoming_sequence == existing_sequence and incoming_sha256 == existing_sha256
+    )
+
+
+def _today_card_source_id(item: dict[str, Any]) -> str:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    source_ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+    today = metadata.get("today_card") if isinstance(metadata.get("today_card"), dict) else {}
+    if metadata.get("adapter") != "omi-enriched-conversation" and not today:
+        return ""
+    return str(source_ref.get("conversation_id") or today.get("source_id") or item.get("event_id") or "").strip()
+
+
+def _today_card_source_snapshot(value: dict[str, Any]) -> str:
+    def json_value(candidate: Any) -> Any:
+        if isinstance(candidate, str):
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                return candidate
+        return candidate
+
+    return _stable_json(
+        {
+            "text": value.get("text"),
+            "started_at": value.get("started_at"),
+            "privacy_scope": value.get("privacy_scope"),
+            "scan_policy": value.get("scan_policy"),
+            "source_ref": json_value(value.get("source_ref")),
+            "metadata": json_value(value.get("metadata")),
+        }
+    )
+
+
+def _is_private_scoped_event(item: dict[str, Any]) -> bool:
+    source_ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    return (source_ref.get("scope_kind") or metadata.get("scope_kind")) in {"memory", "daily_card"}
+
+
+def _reinterpretation_enabled() -> bool:
+    return os.getenv("ELLA_MEMORY_REINTERPRETATION_ENABLED", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _completion_can_reinterpret(completion: SessionCompleteIn) -> bool:
+    source_ref = completion.source_ref if isinstance(completion.source_ref, dict) else {}
+    metadata = completion.metadata if isinstance(completion.metadata, dict) else {}
+    can_reinterpret = source_ref.get("can_reinterpret")
+    if can_reinterpret is None:
+        can_reinterpret = metadata.get("can_reinterpret")
+    scope_kind = source_ref.get("scope_kind") or metadata.get("scope_kind")
+    if scope_kind == "memory":
+        return can_reinterpret is True
+    confirmation = source_ref.get("correction_confirmed")
+    if confirmation is None:
+        confirmation = metadata.get("correction_confirmed")
+    return scope_kind == "daily_card" and can_reinterpret is True and confirmation is True
+
+
+def _require_reinterpretation_completion_auth(
+    completion: SessionCompleteIn,
+    authority: EllaRequestAuthority,
+) -> None:
+    if not _reinterpretation_enabled() or not _completion_can_reinterpret(completion):
+        return
+    if not authority.is_service:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "invalid_reinterpretation_completion_token"},
+        )
+
+
+def _canonical_event_authority(
+    authorization: Optional[str] = Header(default=None),
+    service_key: Optional[str] = Header(default=None, alias=CANONICAL_EVENT_SERVICE_HEADER),
+    service_subject_uid: Optional[str] = Header(default=None, alias=ELLA_SUBJECT_UID_HEADER),
+    x_app_version: Optional[str] = Header(default=None, alias="X-App-Version"),
+    x_ella_app_build: Optional[str] = Header(default=None, alias="X-Ella-App-Build"),
+    x_ella_client_version: Optional[str] = Header(default=None, alias="X-Ella-Client-Version"),
+) -> EllaRequestAuthority:
+    """Authenticate an exact Firebase subject or the dedicated ledger service."""
+    configured = os.getenv("ELLA_EVENT_LEDGER_TOKEN", "").strip()
+    provided_service_key = service_key
+    if provided_service_key is None and authorization:
+        scheme, _, token = authorization.partition(" ")
+        if configured and scheme.lower() == "bearer" and token and hmac.compare_digest(token, configured):
+            provided_service_key = token
+    if provided_service_key is not None:
+        return get_firebase_or_service_authority(
+            authorization=authorization,
+            provided_service_key=provided_service_key,
+            configured_service_key=configured,
+            service="canonical-event-ledger",
+            service_subject_uid=service_subject_uid,
+            x_app_version=x_app_version,
+            x_ella_app_build=x_ella_app_build,
+            x_ella_client_version=x_ella_client_version,
+        )
+    return EllaRequestAuthority(
+        firebase_uid=get_exact_firebase_uid(
+            authorization,
+            x_app_version,
+            x_ella_app_build,
+            x_ella_client_version,
+        )
+    )
+
+
+def _authorize_canonical_owner(
+    authority: EllaRequestAuthority,
+    *,
+    uid: Optional[str],
+    canonical_identity: Optional[str],
+    feature: str,
+) -> str:
+    exact_uid = authority.require_uid(uid, feature=feature)
+    if not canonical_identity or canonical_identity != exact_uid:
+        raise HTTPException(status_code=403, detail=f"{feature} canonical identity does not match authority")
+    return exact_uid
+
+
+def _authorize_event_batch(authority: EllaRequestAuthority, events: list[CanonicalEventIn]) -> None:
+    for event in events:
+        _authorize_canonical_owner(
+            authority,
+            uid=event.uid,
+            canonical_identity=event.canonical_identity,
+            feature="Canonical event",
+        )
+
+
+def _reinterpretation_row(item: dict[str, Any]) -> dict[str, Any]:
+    source_ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    return {
+        "event_id": item.get("event_id"),
+        "source_identity": item.get("source_identity"),
+        "uid": item.get("uid"),
+        "session_id": item.get("session_id"),
+        "role": item.get("role"),
+        "text": item.get("text"),
+        "started_at": item.get("started_at"),
+        "connection_id": source_ref.get("connection_id") or metadata.get("connection_id") or "",
+        "turn_index": source_ref.get("turn_index") or metadata.get("turn_index") or 0,
+        "scope_kind": source_ref.get("scope_kind") or metadata.get("scope_kind") or "",
+        "conversation_id": source_ref.get("conversation_id") or metadata.get("conversation_id") or "",
+        "active_summary_version_id": (
+            source_ref.get("active_summary_version_id") or metadata.get("active_summary_version_id") or ""
+        ),
+    }
+
+
+def _require_existing_canonical_owner(existing: Optional[dict], incoming: dict) -> None:
+    """A caller-owned identity must never transfer a different owner's stored row."""
+    if existing is not None and (
+        existing.get("uid") != incoming.get("uid")
+        or existing.get("canonical_identity") != incoming.get("canonical_identity")
+    ):
+        raise HTTPException(status_code=409, detail="canonical_identity_owner_conflict")
+
+
+def _derive_source_identity(
+    *,
+    uid: str,
+    channel: str,
+    provider: str,
+    session_id: Optional[str],
+    source_ref: dict[str, Any],
+) -> str:
+    """Build the source side of the idempotency key.
+
+    Adapters can pass `source_ref.source_identity` when they already have a
+    durable source namespace. Otherwise we derive a stable namespace from common
+    source identifiers and finally fall back to uid/channel/provider/session.
+    """
+    explicit = source_ref.get("source_identity")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+
+    for key in (
+        "conversation_id",
+        "message_id",
+        "row_id",
+        "call_id",
+        "thread_id",
+        "source_id",
+    ):
+        value = source_ref.get(key)
+        if value is not None and value != "":
+            return f"{provider}:{channel}:{key}:{value}"
+
+    session_part = session_id or "no-session"
+    return f"{provider}:{channel}:uid:{uid}:session:{session_part}"
+
+
+class CanonicalEventIn(BaseModel):
+    uid: str
+    canonical_identity: str
+    event_id: str
+    session_id: Optional[str] = None
+    channel: str
+    provider: str
+    role: str
+    text: str = ""
+    started_at: datetime | str
+    ended_at: Optional[datetime | str] = None
+    privacy_scope: str = "user_private"
+    scan_policy: str = "none"
+    source_ref: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    def normalized(self) -> dict[str, Any]:
+        started_at = _parse_datetime(self.started_at, "started_at")
+        ended_at = _parse_datetime(self.ended_at, "ended_at")
+        assert started_at is not None
+        ordering_metadata = _normalize_ordering_metadata(self.metadata)
+        raw_event = _model_dump(self)
+        raw_event["metadata"] = ordering_metadata
+        source_identity = _derive_source_identity(
+            uid=self.uid,
+            channel=self.channel,
+            provider=self.provider,
+            session_id=self.session_id,
+            source_ref=self.source_ref,
+        )
+        normalized = {
+            **raw_event,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "source_identity": source_identity,
+            "raw_event": raw_event,
+        }
+        try:
+            _canonical_summary_publication_fence(normalized)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return normalized
+
+
+class CanonicalEventsBatch(BaseModel):
+    events: list[CanonicalEventIn] = Field(default_factory=list)
+
+
+class SessionCompleteIn(BaseModel):
+    uid: Optional[str] = None
+    canonical_identity: Optional[str] = None
+    channel: Optional[str] = None
+    provider: Optional[str] = None
+    started_at: Optional[datetime | str] = None
+    ended_at: Optional[datetime | str] = None
+    source_ref: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    def normalized(self, session_id: str) -> dict[str, Any]:
+        source_identity = _derive_source_identity(
+            uid=self.uid or "",
+            channel=self.channel or "unknown",
+            provider=self.provider or "unknown",
+            session_id=session_id,
+            source_ref=self.source_ref,
+        )
+        ordering_metadata = _normalize_ordering_metadata(self.metadata)
+        raw_completion = _model_dump(self)
+        raw_completion["metadata"] = ordering_metadata
+        return {
+            "session_id": session_id,
+            "uid": self.uid,
+            "canonical_identity": self.canonical_identity,
+            "channel": self.channel,
+            "provider": self.provider,
+            "started_at": _parse_datetime(self.started_at, "started_at"),
+            "completed_at": _parse_datetime(self.ended_at, "ended_at") or _utc_now(),
+            "source_ref": self.source_ref,
+            "metadata": ordering_metadata,
+            "source_identity": source_identity,
+            "raw_completion": raw_completion,
+        }
+
+
+class CanonicalEventStore:
+    async def write_batch(self, events: list[CanonicalEventIn]) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def any_event_exists(
+        self,
+        *,
+        uid: str,
+        identities: tuple[tuple[str, str], ...],
+    ) -> bool:
+        raise NotImplementedError
+
+    async def get_event(
+        self,
+        *,
+        uid: str,
+        event_id: str,
+        source_identity: str,
+    ) -> Optional[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def complete_session(self, session_id: str, completion: SessionCompleteIn) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def timeline(
+        self,
+        *,
+        uid: str,
+        since: Optional[datetime],
+        limit: int,
+        channels: Optional[list[str]],
+        before: Optional[datetime] = None,
+    ) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def events_by_event_ids(
+        self, *, uid: str, source_identity: str, event_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        """Read back exact owner-bound event ids after an idempotent write."""
+        raise NotImplementedError
+
+
+class PostgresCanonicalEventStore(CanonicalEventStore):
+    def __init__(self, reinterpretation_repository: Any = None, today_card_repository: Any = None):
+        if reinterpretation_repository is None and _reinterpretation_enabled():
+            from database.memory_reinterpretations import PostgresMemoryReinterpretationRepository
+
+            reinterpretation_repository = PostgresMemoryReinterpretationRepository(_get_pool)
+        self._reinterpretation_repository = reinterpretation_repository
+        self._today_card_repository = today_card_repository or PostgresTodayCardRepository(_get_pool)
+
+    async def write_batch(self, events: list[CanonicalEventIn]) -> dict[str, Any]:
+        if not events:
+            return {"ok": True, "inserted": 0, "duplicates": 0, "events": []}
+
+        pool = await _get_pool()
+        statuses: list[dict[str, Any]] = []
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                for event in events:
+                    item = event.normalized()
+                    existing_owner = await conn.fetchrow(
+                        "SELECT uid, canonical_identity FROM canonical_events WHERE event_id = $1 AND source_identity = $2",
+                        item["event_id"],
+                        item["source_identity"],
+                    )
+                    _require_existing_canonical_owner(
+                        dict(existing_owner) if existing_owner is not None else None, item
+                    )
+                    today_card_source_id = _today_card_source_id(item)
+                    previous_source_snapshot = ""
+                    if today_card_source_id:
+                        await lock_today_card_source_validity(conn, item["uid"])
+                    if _should_replace_existing_event(item) and today_card_source_id:
+                        previous = await conn.fetchrow(
+                            """
+                            SELECT text, started_at, privacy_scope, scan_policy, source_ref, metadata
+                            FROM canonical_events
+                            WHERE event_id = $1 AND source_identity = $2
+                              AND uid = $3 AND canonical_identity = $4
+                            FOR UPDATE
+                            """,
+                            item["event_id"],
+                            item["source_identity"],
+                            item["uid"],
+                            item["canonical_identity"],
+                        )
+                        if previous:
+                            previous_source_snapshot = _today_card_source_snapshot(dict(previous))
+                    conflict_clause = (
+                        f"""
+                        DO UPDATE SET
+                            uid = EXCLUDED.uid,
+                            canonical_identity = EXCLUDED.canonical_identity,
+                            session_id = EXCLUDED.session_id,
+                            channel = EXCLUDED.channel,
+                            provider = EXCLUDED.provider,
+                            role = EXCLUDED.role,
+                            text = EXCLUDED.text,
+                            started_at = EXCLUDED.started_at,
+                            ended_at = EXCLUDED.ended_at,
+                            privacy_scope = EXCLUDED.privacy_scope,
+                            scan_policy = EXCLUDED.scan_policy,
+                            source_ref = EXCLUDED.source_ref,
+                            metadata = EXCLUDED.metadata,
+                            raw_event = EXCLUDED.raw_event
+                        WHERE canonical_events.uid = EXCLUDED.uid
+                          AND canonical_events.canonical_identity = EXCLUDED.canonical_identity
+                          AND (
+                            NOT (canonical_events.metadata ? '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}')
+                            OR NOT (
+                                canonical_events.metadata ->> '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}'
+                                ~ '^[0-9]+$'
+                            )
+                            OR (
+                                EXCLUDED.metadata ->> '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}'
+                                ~ '^[0-9]+$'
+                                AND (
+                                    (
+                                        canonical_events.metadata ->> '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}'
+                                    )::bigint < (
+                                        EXCLUDED.metadata ->> '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}'
+                                    )::bigint
+                                    OR (
+                                        (
+                                            canonical_events.metadata
+                                            ->> '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}'
+                                        )::bigint = (
+                                            EXCLUDED.metadata ->> '{CANONICAL_SUMMARY_PUBLICATION_SEQUENCE_FIELD}'
+                                        )::bigint
+                                        AND canonical_events.metadata
+                                            ->> '{CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD}'
+                                            = EXCLUDED.metadata
+                                            ->> '{CANONICAL_SUMMARY_PUBLICATION_SHA256_FIELD}'
+                                    )
+                                )
+                            )
+                          )
+                        """
+                        if _should_replace_existing_event(item)
+                        else "DO NOTHING"
+                    )
+                    row = await conn.fetchrow(
+                        f"""
+                        INSERT INTO canonical_events (
+                            uid, canonical_identity, event_id, source_identity,
+                            session_id, channel, provider, role, text,
+                            started_at, ended_at, privacy_scope, scan_policy,
+                            source_ref, metadata, raw_event
+                        )
+                        VALUES (
+                            $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                            $10, $11, $12, $13, $14::jsonb, $15::jsonb, $16::jsonb
+                        )
+                        ON CONFLICT (event_id, source_identity) {conflict_clause}
+                        RETURNING id, (xmax = 0) AS inserted
+                        """,
+                        item["uid"],
+                        item["canonical_identity"],
+                        item["event_id"],
+                        item["source_identity"],
+                        item.get("session_id"),
+                        item["channel"],
+                        item["provider"],
+                        item["role"],
+                        item["text"],
+                        item["started_at"],
+                        item["ended_at"],
+                        item["privacy_scope"],
+                        item["scan_policy"],
+                        _stable_json(item["source_ref"]),
+                        _stable_json(item["metadata"]),
+                        _stable_json(item["raw_event"]),
+                    )
+                    if row is None:
+                        # A conflicting owner may have inserted after the preflight read.
+                        conflict_owner = await conn.fetchrow(
+                            "SELECT uid, canonical_identity FROM canonical_events WHERE event_id = $1 AND source_identity = $2",
+                            item["event_id"],
+                            item["source_identity"],
+                        )
+                        _require_existing_canonical_owner(
+                            dict(conflict_owner) if conflict_owner is not None else None, item
+                        )
+                    statuses.append(
+                        {
+                            "event_id": item["event_id"],
+                            "source_identity": item["source_identity"],
+                            "inserted": bool(row and row["inserted"]),
+                            "updated": bool(row and not row["inserted"]),
+                        }
+                    )
+                    if (
+                        row
+                        and not row["inserted"]
+                        and today_card_source_id
+                        and previous_source_snapshot
+                        and _today_card_source_snapshot(item) != previous_source_snapshot
+                    ):
+                        try:
+                            async with conn.transaction():
+                                await self._today_card_repository.invalidate_source_in_connection(
+                                    conn,
+                                    uid=item["uid"],
+                                    source_id=today_card_source_id,
+                                    reason="source_version_changed",
+                                )
+                        except asyncpg.UndefinedTableError:
+                            logger.warning("Today-card migration missing while processing canonical source update")
+
+        inserted_count = sum(1 for status in statuses if status["inserted"])
+        updated_count = sum(1 for status in statuses if status.get("updated"))
+        return {
+            "ok": True,
+            "inserted": inserted_count,
+            "updated": updated_count,
+            "duplicates": len(statuses) - inserted_count - updated_count,
+            "events": statuses,
+        }
+
+    async def any_event_exists(
+        self,
+        *,
+        uid: str,
+        identities: tuple[tuple[str, str], ...],
+    ) -> bool:
+        if not identities:
+            return False
+        arguments: list[str] = [uid]
+        predicates = []
+        for event_id, source_identity in identities:
+            event_parameter = len(arguments) + 1
+            source_parameter = event_parameter + 1
+            predicates.append(f"(event_id = ${event_parameter} AND source_identity = ${source_parameter})")
+            arguments.extend((event_id, source_identity))
+        pool = await _get_pool()
+        return bool(
+            await pool.fetchval(
+                f"""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM canonical_events
+                    WHERE uid = $1
+                      AND ({" OR ".join(predicates)})
+                )
+                """,
+                *arguments,
+            )
+        )
+
+    async def get_event(
+        self,
+        *,
+        uid: str,
+        event_id: str,
+        source_identity: str,
+    ) -> Optional[dict[str, Any]]:
+        pool = await _get_pool()
+        row = await pool.fetchrow(
+            """
+            SELECT uid, canonical_identity, event_id, source_identity,
+                   session_id, channel, provider, role, text,
+                   started_at, ended_at, privacy_scope, scan_policy,
+                   source_ref, metadata, raw_event, inserted_at
+            FROM canonical_events
+            WHERE uid = $1
+              AND event_id = $2
+              AND source_identity = $3
+            """,
+            uid,
+            event_id,
+            source_identity,
+        )
+        return _row_to_event(row) if row else None
+
+    async def complete_session(self, session_id: str, completion: SessionCompleteIn) -> dict[str, Any]:
+        item = completion.normalized(session_id)
+        pool = await _get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO canonical_event_sessions (
+                        session_id, source_identity, uid, canonical_identity,
+                        channel, provider, started_at, completed_at,
+                        source_ref, metadata, raw_completion
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb)
+                    ON CONFLICT (session_id, source_identity)
+                    DO UPDATE SET
+                        completed_at = GREATEST(
+                            canonical_event_sessions.completed_at,
+                            EXCLUDED.completed_at
+                        ),
+                        source_ref = EXCLUDED.source_ref,
+                        metadata = EXCLUDED.metadata,
+                        raw_completion = EXCLUDED.raw_completion
+                    WHERE canonical_event_sessions.uid = EXCLUDED.uid
+                      AND canonical_event_sessions.canonical_identity = EXCLUDED.canonical_identity
+                    RETURNING id, (xmax = 0) AS inserted
+                    """,
+                    item["session_id"],
+                    item["source_identity"],
+                    item["uid"],
+                    item["canonical_identity"],
+                    item["channel"],
+                    item["provider"],
+                    item["started_at"],
+                    item["completed_at"],
+                    _stable_json(item["source_ref"]),
+                    _stable_json(item["metadata"]),
+                    _stable_json(item["raw_completion"]),
+                )
+                if row is None:
+                    raise HTTPException(status_code=409, detail="canonical_identity_owner_conflict")
+                job = None
+                if self._reinterpretation_repository is not None:
+                    job = await self._reinterpretation_repository.enqueue_from_completion(conn, item)
+
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "source_identity": item["source_identity"],
+            "completed_at": item["completed_at"].isoformat(),
+            "inserted": bool(row and row["inserted"]),
+            "duplicate": bool(row and not row["inserted"]),
+            "reinterpretation": (
+                {
+                    "job_id": job["id"],
+                    "status": job["status"],
+                    "not_before": job["not_before"].isoformat(),
+                }
+                if job
+                else None
+            ),
+        }
+
+    async def history_page(self, *, uid: str, limit: int, channels: list[str], position=None):
+        """Opt-in keyset order; legacy timeline() remains byte-for-byte unchanged."""
+        from utils.ella.history_pagination import HistoryPageError, validate_position
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise HistoryPageError('history_page_invalid')
+        terms = [
+            'started_at',
+            "COALESCE(session_id, '') COLLATE \"C\"",
+            f'CASE WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN 0 ELSE 1 END',
+            f"CASE WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN (metadata->>'turn_ordinal')::bigint ELSE 0 END",
+            """COALESCE(
+                CASE WHEN jsonb_typeof(metadata->'turn_id')='string' THEN NULLIF(metadata->>'turn_id','') END,
+                CASE WHEN jsonb_typeof(source_ref->'client_message_id')='string' THEN NULLIF(source_ref->>'client_message_id','') END,
+                CASE WHEN jsonb_typeof(source_ref->'turn_id')='string' THEN NULLIF(source_ref->>'turn_id','') END,
+                regexp_replace(event_id, ':(user|assistant)$', '')
+            ) COLLATE "C" 
+            """,
+            f"CASE WHEN {_EVENT_SEQUENCE_SQL_IS_VALID} THEN (metadata->>'event_sequence')::integer WHEN role='user' THEN 0 WHEN role='assistant' THEN 1 ELSE 2 END",
+            'event_id COLLATE "C"',
+            'source_identity COLLATE "C"',
+        ]
+        params = [uid, channels]
+        filters = ["uid=$1", "canonical_identity=$1", "channel=ANY($2::text[])",
+            "NOT (COALESCE(source_ref->>'scope_kind','') IN ('memory','daily_card') OR COALESCE(metadata->>'scope_kind','') IN ('memory','daily_card'))"]
+        if position is not None:
+            parsed = validate_position([position[0].isoformat(timespec='microseconds'), *position[1:]])
+            params.extend(parsed)
+            casts = ['timestamptz','text','integer','bigint','text','integer','text','text']
+            right = [f'${i+3}::{cast}' + (' COLLATE "C"' if cast=='text' else '') for i,cast in enumerate(casts)]
+            filters.append('('+', '.join(terms)+') < ('+', '.join(right)+')')
+        params.append(limit + 1)
+        pool = await _get_pool()
+        rows = await pool.fetch('SELECT uid,canonical_identity,event_id,source_identity,session_id,channel,provider,role,text,started_at,ended_at,privacy_scope,scan_policy,source_ref,metadata,raw_event,inserted_at FROM canonical_events WHERE '
+            + ' AND '.join(filters) + ' ORDER BY ' + ', '.join(t+' DESC' for t in terms) + f' LIMIT ${len(params)}', *params)
+        return [_row_to_event(row) for row in rows]
+
+    async def timeline(
+        self,
+        *,
+        uid: str,
+        since: Optional[datetime],
+        limit: int,
+        channels: Optional[list[str]],
+        before: Optional[datetime] = None,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = [uid]
+        filters = [
+            "uid = $1",
+            (
+                "NOT ("
+                "COALESCE(source_ref ->> 'scope_kind', '') IN ('memory', 'daily_card') "
+                "OR COALESCE(metadata ->> 'scope_kind', '') IN ('memory', 'daily_card')"
+                ")"
+            ),
+        ]
+        if since:
+            params.append(since)
+            filters.append(f"started_at >= ${len(params)}")
+        if before:
+            params.append(before)
+            filters.append(f"started_at < ${len(params)}")
+        if channels:
+            params.append(channels)
+            filters.append(f"channel = ANY(${len(params)}::text[])")
+        params.append(limit)
+        limit_placeholder = f"${len(params)}"
+        where_clause = " AND ".join(filters)
+
+        pool = await _get_pool()
+        rows = await pool.fetch(
+            f"""
+            SELECT *
+            FROM (
+                SELECT uid, canonical_identity, event_id, source_identity,
+                       session_id, channel, provider, role, text,
+                       started_at, ended_at, privacy_scope, scan_policy,
+                       source_ref, metadata, raw_event, inserted_at
+                FROM canonical_events
+                WHERE {where_clause}
+                ORDER BY
+                    started_at DESC,
+                    COALESCE(session_id, '') DESC,
+                    CASE WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN 0 ELSE 1 END DESC,
+                    CASE WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN (metadata->>'turn_ordinal')::bigint ELSE 0 END DESC,
+                    {_TURN_IDENTITY_SQL} DESC,
+                    CASE WHEN {_EVENT_SEQUENCE_SQL_IS_VALID} THEN (metadata->>'event_sequence')::integer
+                         WHEN role = 'user' THEN 0 WHEN role = 'assistant' THEN 1 ELSE 2 END DESC,
+                    event_id DESC
+                LIMIT {limit_placeholder}
+            ) recent_events
+            ORDER BY
+                started_at ASC,
+                COALESCE(session_id, '') ASC,
+                CASE WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN 0 ELSE 1 END ASC,
+                CASE WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN (metadata->>'turn_ordinal')::bigint ELSE 0 END ASC,
+                {_TURN_IDENTITY_SQL} ASC,
+                CASE WHEN {_EVENT_SEQUENCE_SQL_IS_VALID} THEN (metadata->>'event_sequence')::integer
+                     WHEN role = 'user' THEN 0 WHEN role = 'assistant' THEN 1 ELSE 2 END ASC,
+                event_id ASC
+            """,
+            *params,
+        )
+        return [_row_to_event(row) for row in rows]
+
+    async def events_by_event_ids(
+        self, *, uid: str, source_identity: str, event_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        pool = await _get_pool()
+        rows = await pool.fetch(
+            f"""
+            SELECT uid, canonical_identity, event_id, source_identity,
+                   session_id, channel, provider, role, text,
+                   started_at, ended_at, privacy_scope, scan_policy,
+                   source_ref, metadata, raw_event, inserted_at
+            FROM canonical_events
+            WHERE event_id = ANY($1::text[])
+              AND source_identity = $2
+              AND uid = $3
+            ORDER BY
+                started_at ASC,
+                COALESCE(session_id, '') ASC,
+                CASE WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN 0 ELSE 1 END ASC,
+                CASE
+                    WHEN {_TURN_ORDINAL_SQL_IS_VALID} THEN (metadata->>'turn_ordinal')::bigint
+                    ELSE 0
+                END ASC,
+                {_TURN_IDENTITY_SQL} ASC,
+                CASE
+                    WHEN {_EVENT_SEQUENCE_SQL_IS_VALID} THEN (metadata->>'event_sequence')::integer
+                    WHEN role = 'user' THEN 0 WHEN role = 'assistant' THEN 1 ELSE 2
+                END ASC,
+                event_id ASC
+            """,
+            event_ids,
+            source_identity,
+            uid,
+        )
+        return [_row_to_event(row) for row in rows]
+
+
+class InMemoryCanonicalEventStore(CanonicalEventStore):
+    def __init__(self, reinterpretation_repository: Any = None):
+        self._events: dict[tuple[str, str], dict[str, Any]] = {}
+        self._sessions: dict[tuple[str, str], dict[str, Any]] = {}
+        self._reinterpretation_repository = reinterpretation_repository
+
+    async def write_batch(self, events: list[CanonicalEventIn]) -> dict[str, Any]:
+        normalized_events = [event.normalized() for event in events]
+        batch_owners = {}
+        for item in normalized_events:
+            key = (item["event_id"], item["source_identity"])
+            _require_existing_canonical_owner(self._events.get(key), item)
+            _require_existing_canonical_owner(batch_owners.get(key), item)
+            batch_owners[key] = item
+        statuses = []
+        for item in normalized_events:
+            item["inserted_at"] = _utc_now()
+            key = (item["event_id"], item["source_identity"])
+            existing = self._events.get(key)
+            inserted = existing is None
+            updated = False
+            if inserted:
+                self._events[key] = item
+            elif _should_replace_existing_event(item) and _should_accept_canonical_summary_replacement(existing, item):
+                item["inserted_at"] = existing["inserted_at"]
+                self._events[key] = item
+                updated = True
+            statuses.append(
+                {
+                    "event_id": item["event_id"],
+                    "source_identity": item["source_identity"],
+                    "inserted": inserted,
+                    "updated": updated,
+                }
+            )
+        inserted_count = sum(1 for status in statuses if status["inserted"])
+        updated_count = sum(1 for status in statuses if status["updated"])
+        return {
+            "ok": True,
+            "inserted": inserted_count,
+            "updated": updated_count,
+            "duplicates": len(statuses) - inserted_count - updated_count,
+            "events": statuses,
+        }
+
+    async def any_event_exists(
+        self,
+        *,
+        uid: str,
+        identities: tuple[tuple[str, str], ...],
+    ) -> bool:
+        for event_id, source_identity in identities:
+            event = self._events.get((event_id, source_identity))
+            if event and event.get("uid") == uid:
+                return True
+        return False
+
+    async def get_event(
+        self,
+        *,
+        uid: str,
+        event_id: str,
+        source_identity: str,
+    ) -> Optional[dict[str, Any]]:
+        event = self._events.get((event_id, source_identity))
+        if not event or event.get("uid") != uid:
+            return None
+        return _row_to_event(event)
+
+    async def complete_session(self, session_id: str, completion: SessionCompleteIn) -> dict[str, Any]:
+        item = completion.normalized(session_id)
+        key = (item["session_id"], item["source_identity"])
+        _require_existing_canonical_owner(self._sessions.get(key), item)
+        inserted = key not in self._sessions
+        self._sessions[key] = item
+        job = None
+        if self._reinterpretation_repository is not None:
+            rows = [
+                _reinterpretation_row(event)
+                for event in self._events.values()
+                if event.get("uid") == item.get("uid") and event.get("session_id") == session_id
+            ]
+            rows.sort(
+                key=lambda row: (
+                    row.get("started_at") or _utc_now(),
+                    row.get("connection_id") or "",
+                    int(row.get("turn_index") or 0),
+                    row.get("event_id") or "",
+                )
+            )
+            job = await self._reinterpretation_repository.enqueue(item, rows)
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "source_identity": item["source_identity"],
+            "completed_at": item["completed_at"].isoformat(),
+            "inserted": inserted,
+            "duplicate": not inserted,
+            "reinterpretation": (
+                {
+                    "job_id": job["id"],
+                    "status": job["status"],
+                    "not_before": job["not_before"].isoformat(),
+                }
+                if job
+                else None
+            ),
+        }
+
+    async def history_page(self, *, uid: str, limit: int, channels: list[str], position=None):
+        from utils.ella.history_pagination import key, HistoryPageError
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise HistoryPageError('history_page_invalid')
+        allowed=set(channels)
+        events=[event for event in self._events.values() if event['uid']==uid
+            and event.get('canonical_identity',event['uid'])==uid and event['channel'] in allowed
+            and not _is_private_scoped_event(event) and (position is None or key(event)<position)]
+        events.sort(key=key,reverse=True)
+        return [_row_to_event(event) for event in events[:limit+1]]
+
+    async def timeline(
+        self,
+        *,
+        uid: str,
+        since: Optional[datetime],
+        limit: int,
+        channels: Optional[list[str]],
+        before: Optional[datetime] = None,
+    ) -> list[dict[str, Any]]:
+        channel_set = set(channels or [])
+        events = []
+        for event in self._events.values():
+            if event["uid"] != uid:
+                continue
+            if before and event["started_at"] >= before:
+                continue
+            if since and event["started_at"] < since:
+                continue
+            if channel_set and event["channel"] not in channel_set:
+                continue
+            if _is_private_scoped_event(event):
+                continue
+            events.append(event)
+
+        events.sort(key=_canonical_event_order)
+        return [_row_to_event(event) for event in events[-limit:]]
+
+    async def events_by_event_ids(
+        self, *, uid: str, source_identity: str, event_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        expected_ids = set(event_ids)
+        events = [
+            event
+            for event in self._events.values()
+            if event["event_id"] in expected_ids and event["uid"] == uid and event["source_identity"] == source_identity
+        ]
+        events.sort(key=_canonical_event_order)
+        return [_row_to_event(event) for event in events]
+
+
+def _row_to_event(row: Any) -> dict[str, Any]:
+    def value(name: str) -> Any:
+        if isinstance(row, dict):
+            return row.get(name)
+        return row[name]
+
+    def json_value(name: str) -> dict[str, Any]:
+        raw = value(name)
+        if raw is None:
+            return {}
+        if isinstance(raw, str):
+            return json.loads(raw)
+        return dict(raw)
+
+    def iso(name: str) -> Optional[str]:
+        raw = value(name)
+        if not raw:
+            return None
+        if isinstance(raw, datetime):
+            return raw.astimezone(timezone.utc).isoformat()
+        return str(raw)
+
+    return annotate_event_time(
+        {
+            "uid": value("uid"),
+            "canonical_identity": value("canonical_identity"),
+            "event_id": value("event_id"),
+            "source_identity": value("source_identity"),
+            "session_id": value("session_id"),
+            "channel": value("channel"),
+            "provider": value("provider"),
+            "role": value("role"),
+            "text": value("text"),
+            "started_at": iso("started_at"),
+            "ended_at": iso("ended_at"),
+            "privacy_scope": value("privacy_scope"),
+            "scan_policy": value("scan_policy"),
+            "source_ref": json_value("source_ref"),
+            "metadata": json_value("metadata"),
+            "raw_event": json_value("raw_event"),
+        }
+    )
+
+
+def _parse_channels(channels: Optional[str]) -> Optional[list[str]]:
+    if not channels:
+        return None
+    parsed = [part.strip() for part in channels.split(",") if part.strip()]
+    return parsed or None
+
+
+def _sanitize_limit(limit: int) -> int:
+    if limit < 1:
+        raise HTTPException(status_code=400, detail="limit must be >= 1")
+    return min(limit, MAX_TIMELINE_LIMIT)
+
+
+def create_canonical_events_router(store: Optional[CanonicalEventStore] = None) -> APIRouter:
+    """Create the backend router for canonical event ingestion and timeline reads."""
+    router = APIRouter()
+    default_store = store or PostgresCanonicalEventStore()
+
+    @router.post("/v1/ella/events")
+    async def write_events(
+        batch: CanonicalEventsBatch,
+        authority: EllaRequestAuthority = Depends(_canonical_event_authority),
+    ):
+        """
+        Idempotently write raw canonical events.
+
+        Source adapters should submit one event per user/assistant/source turn.
+        Duplicates are detected by `(event_id, source_identity)` and ignored;
+        existing raw text/metadata is never overwritten by summaries,
+        corrections, retries, or downstream enrichment.
+        """
+        _authorize_event_batch(authority, batch.events)
+        return await default_store.write_batch(batch.events)
+
+    @router.post("/v1/ella/sessions/{session_id}/complete")
+    async def complete_session(
+        session_id: str,
+        completion: SessionCompleteIn,
+        authority: EllaRequestAuthority = Depends(_canonical_event_authority),
+    ):
+        """Record source session completion without converting sessions into OMI objects."""
+        exact_uid = _authorize_canonical_owner(
+            authority,
+            uid=completion.uid,
+            canonical_identity=completion.canonical_identity,
+            feature="Canonical session completion",
+        )
+        _require_reinterpretation_completion_auth(
+            completion,
+            authority,
+        )
+        if completion.uid != exact_uid:
+            raise HTTPException(status_code=403, detail="Canonical session completion UID does not match authority")
+        return await default_store.complete_session(session_id, completion)
+
+    @router.get("/v1/ella/timeline")
+    async def read_timeline(
+        uid: str,
+        since: Optional[str] = None,
+        before: Optional[str] = None,
+        limit: int = Query(default=DEFAULT_TIMELINE_LIMIT),
+        channels: Optional[str] = None,
+        timezone: Optional[str] = Query(default=None, alias="timezone"),
+        authority: EllaRequestAuthority = Depends(_canonical_event_authority),
+    ):
+        """
+        Read a single chronological timeline across channels for one uid.
+
+        `channels` is a comma-separated filter such as
+        `ios_chat,ios_voice,imessage,omi_transcript`. OMI conversation objects
+        remain separate durable session objects; this endpoint returns the raw
+        canonical turn ledger used for memory hydration and reconciliation.
+        """
+        uid = authority.require_uid(uid, feature="Canonical timeline")
+        parsed_since = _parse_datetime(since, "since") if since else None
+        events = await default_store.timeline(
+            uid=uid,
+            since=parsed_since,
+            before=_parse_datetime(before, "before") if before else None,
+            limit=_sanitize_limit(limit),
+            channels=_parse_channels(channels),
+        )
+        if timezone:
+            events = [annotate_event_time(event, tz_name=timezone) for event in events]
+        return {"ok": True, "uid": uid, "time_context": build_time_context(timezone), "events": events}
+
+    return router
+
+
+async def handle_events(request: Request, store: Optional[CanonicalEventStore] = None) -> dict[str, Any]:
+    """Direct import helper for backend integration tests or legacy mounting."""
+    payload = CanonicalEventsBatch(**(await request.json()))
+    return await (store or PostgresCanonicalEventStore()).write_batch(payload.events)
