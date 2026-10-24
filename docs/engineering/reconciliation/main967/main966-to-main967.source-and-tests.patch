@@ -1,0 +1,991 @@
+--- a/app/lib/ella/pages/ella_provisioning_gate_page.dart
++++ b/app/lib/ella/pages/ella_provisioning_gate_page.dart
+@@ -1,3 +1,5 @@
++import 'package:omi/ella/upstream_capture/ella_existing_capture_stop.dart';
++import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
+ import 'dart:async';
+ 
+ import 'package:flutter/material.dart';
+@@ -28,6 +30,7 @@
+     this.appVersionProvider,
+     this.consentAuthorityRefresher,
+     this.timezoneProvider,
++    this.captureRuntime,
+   });
+ 
+   final Widget readyChild;
+@@ -37,6 +40,7 @@
+   final String Function()? appVersionProvider;
+   final Future<bool> Function(String uid)? consentAuthorityRefresher;
+   final Future<String> Function()? timezoneProvider;
++  final EllaUpstreamCaptureRuntime? captureRuntime;
+ 
+   @override
+   State<EllaProvisioningGatePage> createState() => _EllaProvisioningGatePageState();
+@@ -218,6 +222,7 @@
+                           child: Text(context.l10n.aiConsentReviewAction),
+                         ),
+                       ),
++                      EllaExistingCaptureStop(runtime: widget.captureRuntime, authenticatedUid: _authenticatedUid),
+                       TextButton(onPressed: _signOut, child: Text(context.l10n.signOut)),
+                     ],
+                   ),
+@@ -394,6 +399,7 @@
+                           ),
+                         ],
+                         const SizedBox(height: 12),
++                        EllaExistingCaptureStop(runtime: widget.captureRuntime, authenticatedUid: _authenticatedUid),
+                         TextButton(
+                           onPressed: _signOut,
+                           child: Text(
+--- /dev/null
++++ b/app/lib/ella/upstream_capture/ella_existing_capture_stop.dart
+@@ -0,0 +1,58 @@
++import 'package:flutter/material.dart';
++import 'package:omi/services/wals/wal_owner_authority.dart';
++import 'package:omi/utils/l10n_extensions.dart';
++import 'ella_upstream_capture_runtime.dart';
++
++/// Deliberate Stop remains reachable while setup is unavailable. This widget
++/// never boots/binds capture, refreshes consent, starts a producer or disconnects
++/// an unknown device. Each press carries an exact existing-producer handle.
++class EllaExistingCaptureStop extends StatefulWidget {
++  const EllaExistingCaptureStop({super.key, this.runtime, this.authenticatedUid});
++  final EllaUpstreamCaptureRuntime? runtime;
++  final String Function()? authenticatedUid;
++  @override State<EllaExistingCaptureStop> createState() => _EllaExistingCaptureStopState();
++}
++class _EllaExistingCaptureStopState extends State<EllaExistingCaptureStop> {
++  bool _busy=false;
++  String? _message;
++  String? _messageOwner;
++  int? _messageEpoch;
++  EllaUpstreamCaptureRuntime get _runtime => widget.runtime ?? EllaUpstreamCaptureRuntime.instance;
++  String get _uid => widget.authenticatedUid?.call() ?? WalOwnerAuthority.authenticatedUid;
++  Future<void> _stop(EllaExistingCaptureStopTarget target) async {
++    if (_busy) return;
++    setState(() { _busy=true; _message=null; _messageOwner=target.uid; _messageEpoch=target.epoch; });
++    var stopped=false;
++    try { stopped=await _runtime.stopExistingCapture(target); } catch (_) { /* truthful unconfirmed result below */ }
++    if (!mounted) return;
++    setState(() {
++      _busy=false;
++      _message=_uid!=target.uid || _runtime.authority.boundUid!=target.uid ||
++          _runtime.authority.bindingEpoch!=target.epoch ? null :
++          stopped ? 'Recording stopped.' : 'Recording stop is not confirmed. No new recording was started.';
++    });
++  }
++  @override Widget build(BuildContext context) {
++    final runtime=_runtime;
++    return AnimatedBuilder(
++      animation:Listenable.merge([if(runtime.provider!=null) runtime.provider!,runtime.lastRevocation]),
++      builder:(context,_) {
++        final target=runtime.existingCaptureStopTarget(_uid);
++        final messageCurrent=_messageOwner==_uid && runtime.authority.boundUid==_uid &&
++            runtime.authority.bindingEpoch==_messageEpoch;
++        final message=messageCurrent ? _message : null;
++        final busy=_busy && messageCurrent;
++        if(target==null && !busy && message==null) return const SizedBox.shrink();
++        return Padding(padding:const EdgeInsets.symmetric(vertical:8),child:Column(
++          mainAxisSize:MainAxisSize.min,crossAxisAlignment:CrossAxisAlignment.stretch,children:[
++            if(target!=null || busy) OutlinedButton.icon(
++              key:const Key('existing-capture-stop'),
++              style:OutlinedButton.styleFrom(minimumSize:const Size(double.infinity,48)),
++              onPressed:_busy || target==null ? null : ()=>_stop(target),
++              icon:const Icon(Icons.stop_circle_outlined),
++              label:Text(busy ? context.l10n.upstreamCaptureStopping : context.l10n.irisCaptureStop)),
++            if(message!=null) Text(message,key:const Key('existing-capture-stop-result')),
++          ]));
++      });
++  }
++}
+--- a/app/lib/ella/upstream_capture/ella_upstream_capture_dock.dart
++++ b/app/lib/ella/upstream_capture/ella_upstream_capture_dock.dart
+@@ -1,3 +1,4 @@
++import 'package:omi/ella/upstream_capture/ella_existing_capture_stop.dart';
+ import 'package:omi/ella/widgets/ella_v7_surfaces.dart';
+ import 'package:omi/ella/widgets/quiet_memory_preview.dart';
+ import 'dart:async';
+@@ -716,7 +717,9 @@
+   }
+ 
+   Future<void> _openTranscript(CaptureProvider provider, EllaCaptureSessionView session) async {
+-    bool isCurrent() => mounted && _uid == session.uid && _runtime.isCurrentCaptureSession(session);
++    final presentation = _runtime.transcriptPresentationFor(session);
++    bool isCurrent() => mounted && _uid == session.uid && presentation != null &&
++        _runtime.isCurrentTranscriptPresentation(presentation);
+     if (!isCurrent() || _transcriptOpen) return;
+     _transcriptOpen = true;
+     final originUid = _uid;
+@@ -1051,6 +1054,7 @@
+                               ),
+                             ],
+                           ),
++                          EllaExistingCaptureStop(runtime: _runtime, authenticatedUid: () => _uid),
+                           if (isCurrent()) ...[
+                             Text(
+                               _operation == _DockOperation.pausing || _operation == _DockOperation.resuming
+--- a/app/lib/ella/upstream_capture/ella_upstream_capture_runtime.dart
++++ b/app/lib/ella/upstream_capture/ella_upstream_capture_runtime.dart
+@@ -1,3 +1,4 @@
++import 'package:omi/ella/upstream_capture/transcript_presentation_lease.dart';
+ import 'package:omi/ella/upstream_capture/ella_native_capture_authorization.dart';
+ import 'package:flutter/widgets.dart';
+ import 'package:omi/upstream_capture/services/devices/transports/native_ble_transport.dart';
+@@ -58,6 +59,21 @@
+   EllaCaptureFinishOutcome.processing => 'Memory is processing. Check Journal for the result.',
+   null => 'Memory requested. Check Journal for the result.',
+ };
++
++/// Capability for stopping one existing committed producer, never starting one.
++/// This process-local handle is not serialized or adopted after an owner change.
++class EllaExistingCaptureStopTarget {
++  const EllaExistingCaptureStopTarget._(this.uid, this.epoch, this.provider,
++      this.identity, this.source);
++  final String uid;
++  final int epoch;
++  final CaptureProvider provider;
++  final ({String sessionKey, String mode, int deviceRevision}) identity;
++  final String source;
++  bool _matches(EllaExistingCaptureStopTarget? other) => other != null &&
++      uid == other.uid && epoch == other.epoch && identical(provider, other.provider) &&
++      identity == other.identity && source == other.source;
++}
+ 
+ /// Content-free identity for a current capture's presentation and Finish action.
+ /// Socket readiness is deliberately absent: retained words survive recovery.
+@@ -830,6 +846,84 @@
+   }
+ 
+   bool isCurrentCaptureSession(EllaCaptureSessionView session) => session.matches(captureSession);
++
++  // Stop does not grant capture or require a new setup/consent decision. It must
++  // still match the authenticated owner, original binding and committed producer.
++  EllaExistingCaptureStopTarget? existingCaptureStopTarget(String uid) {
++    final capture = provider;
++    if (_disposed || uid.isEmpty || capture == null || authority.boundUid != uid ||
++        !authority.isCurrentOwner(uid)) return null;
++    final identity = capture.transcriptPresentationIdentity;
++    final source = capture.liveCaptureSource;
++    if (identity == null || source == null) return null;
++    return EllaExistingCaptureStopTarget._(uid, authority.bindingEpoch, capture, identity, source);
++  }
++
++  bool isCurrentExistingCaptureStop(EllaExistingCaptureStopTarget target) =>
++      target._matches(existingCaptureStopTarget(target.uid));
++
++  Future<bool>? _existingStopFuture;
++  EllaExistingCaptureStopTarget? _existingStopTarget;
++  Future<bool> stopExistingCapture(EllaExistingCaptureStopTarget target) {
++    final pending = _existingStopFuture;
++    if (pending != null) return target._matches(_existingStopTarget) ? pending : Future.value(false);
++    if (!isCurrentExistingCaptureStop(target)) return Future.value(false);
++    final completion = Completer<bool>();
++    _existingStopFuture = completion.future;
++    _existingStopTarget = target;
++    _retireDefaultNecklaceRecording();
++    cancelPendingCaptureChange();
++    bool current() => isCurrentExistingCaptureStop(target);
++    () async {
++      try {
++        if (!current()) { completion.complete(false); return; }
++        if (target.source == 'phone') {
++          final applied = await target.provider.stopStreamRecording(
++              resumeHandedOffPendant: false, isCurrent: current);
++          if (!applied) { completion.complete(false); return; }
++        } else {
++          await target.provider.stopStreamDeviceRecording(cleanDevice: false, isCurrent: current);
++        }
++        completion.complete(!_disposed && identical(provider, target.provider) &&
++            authority.boundUid == target.uid && authority.bindingEpoch == target.epoch &&
++            authority.isCurrentOwner(target.uid) && target.provider.liveCaptureSource == null);
++      } catch (error, stack) {
++        completion.completeError(error, stack);
++      } finally {
++        if (identical(_existingStopFuture, completion.future)) {
++          _existingStopFuture = null;
++          _existingStopTarget = null;
++        }
++      }
++    }();
++    return completion.future;
++  }
++
++
++  TranscriptPresentationScope? get _transcriptPresentationScope {
++    if (_disposed || !authority.hasCurrentAuthority) return null;
++    final uid = authority.boundUid;
++    final currentProvider = provider;
++    if (uid == null || currentProvider == null) return null;
++    final identity = currentProvider.transcriptPresentationIdentity;
++    final source = currentProvider.liveCaptureSource;
++    if (identity == null || source == null) return null;
++    return TranscriptPresentationScope(
++      uid: uid, bindingEpoch: authority.bindingEpoch, providerIdentity: currentProvider,
++      producerSessionKey: identity.sessionKey, mode: identity.mode,
++      source: source, deviceRevision: identity.deviceRevision,
++    );
++  }
++
++  TranscriptPresentationLease? transcriptPresentationFor(EllaCaptureSessionView session) {
++    if (!isCurrentCaptureSession(session)) return null;
++    final scope = _transcriptPresentationScope;
++    return scope == null ? null : TranscriptPresentationLease(scope);
++  }
++
++  bool isCurrentTranscriptPresentation(TranscriptPresentationLease lease) =>
++      lease.observe(_transcriptPresentationScope);
++
+ 
+   bool _pauseChangePending = false;
+   CaptureOperationCancellation? _resumeCancellation;
+--- /dev/null
++++ b/app/lib/ella/upstream_capture/transcript_presentation_lease.dart
+@@ -0,0 +1,32 @@
++/// Private in-memory presentation scope. Never serialized or used for Finish.
++class TranscriptPresentationScope {
++  const TranscriptPresentationScope({required this.uid, required this.bindingEpoch,
++    required this.providerIdentity, required this.producerSessionKey,
++    required this.mode, required this.source, required this.deviceRevision});
++  final String uid;
++  final int bindingEpoch;
++  final Object providerIdentity;
++  final String producerSessionKey;
++  final String mode;
++  final String source;
++  final int deviceRevision;
++
++  bool matches(TranscriptPresentationScope? current) => current != null &&
++      uid == current.uid && bindingEpoch == current.bindingEpoch &&
++      identical(providerIdentity, current.providerIdentity) &&
++      producerSessionKey == current.producerSessionKey && mode == current.mode &&
++      source == current.source && deviceRevision == current.deviceRevision;
++}
++
++/// A stopped/replaced/unauthorized viewer cannot revive on later notifications.
++class TranscriptPresentationLease {
++  TranscriptPresentationLease(this._origin);
++  final TranscriptPresentationScope _origin;
++  bool _retired = false;
++  bool get retired => _retired;
++  bool observe(TranscriptPresentationScope? current) {
++    if (_retired) return false;
++    if (!_origin.matches(current)) _retired = true;
++    return !_retired;
++  }
++}
+--- a/app/lib/upstream_capture/services/capture/capture_controller.dart
++++ b/app/lib/upstream_capture/services/capture/capture_controller.dart
+@@ -786,6 +786,16 @@
+         _ => null,
+       };
+ 
++  /// Read-only presentation identity for one committed capture producer.
++  /// Conversation/window rollover does not replace this coordinator session.
++  /// This identity cannot authorize Finish, transport writes or a new producer.
++  ({String sessionKey, String mode, int deviceRevision})? get transcriptPresentationIdentity {
++    final model = _capture.readModel;
++    final active = model.state.active;
++    if (model.liveOwnerName == null || active == null) return null;
++    return (sessionKey: active.sessionKey, mode: active.mode.name, deviceRevision: _deviceIdentityRevision);
++  }
++
+   /// When the live recording started (it keeps counting through a pause), or null.
+   DateTime? get liveCaptureStartedAt => _recordingTelemetry.startedAt;
+ 
+@@ -2581,12 +2591,13 @@
+   /// it took over from resumes (unless [resumeHandedOffPendant] is false, when the caller resumes
+   /// it after processing), and otherwise the capture policy returns to its value at start.
+   /// Returns false when a newer capture intent superseded this stop before it tore anything down.
+-  Future<bool> stopStreamRecording({String reason = 'user_stopped', bool resumeHandedOffPendant = true}) async {
++  Future<bool> stopStreamRecording({String reason = 'user_stopped', bool resumeHandedOffPendant = true, bool Function()? isCurrent}) async {
+     final outcome = await _capture.dispatch(
+       PhoneStopRequested(
+         reason: reason,
+         userStop: reason == 'user_stopped',
+         resumeSuspendedPendant: resumeHandedOffPendant,
++        isCurrent: isCurrent,
+       ),
+     );
+     outcome.throwIfFailed();
+--- a/app/lib/upstream_capture/services/capture/capture_coordinator.dart
++++ b/app/lib/upstream_capture/services/capture/capture_coordinator.dart
+@@ -595,10 +595,12 @@
+     required this.reason,
+     required this.userStop,
+     this.resumeSuspendedPendant = true,
++    this.isCurrent,
+   });
+   final String reason;
+   final bool userStop;
+   final bool resumeSuspendedPendant;
++  final bool Function()? isCurrent;
+ }
+ 
+ /// `finishCapture`: stop and process the phone conversation before a pendant
+@@ -1432,7 +1434,7 @@
+   Future<CaptureDispatchOutcome> _run(CaptureEvent event) async {
+     final quarantined = _retirementFence.pending;
+     if (quarantined && event is PhoneStopRequested) {
+-      event = PhoneStopRequested(reason: event.reason, userStop: false, resumeSuspendedPendant: false);
++      event = PhoneStopRequested(reason: event.reason, userStop: false, resumeSuspendedPendant: false, isCurrent: event.isCurrent);
+     }
+     if (quarantined &&
+         event is! PhoneStopRequested &&
+@@ -1457,6 +1459,13 @@
+             ? _state.phase == CapturePhase.phoneLive || _state.phase == CapturePhase.pendantLive
+             : _state.phase == CapturePhase.phonePaused || _state.phase == CapturePhase.pendantPaused;
+         if (!eligible) return CaptureDispatchOutcome.denied(_state);
++      } catch (_) {
++        return CaptureDispatchOutcome.denied(_state);
++      }
++    }
++    if (event is PhoneStopRequested && event.isCurrent != null) {
++      try {
++        if (!event.isCurrent!()) return CaptureDispatchOutcome.denied(_state);
+       } catch (_) {
+         return CaptureDispatchOutcome.denied(_state);
+       }
+--- a/app/test/ella/upstream_capture/ella_upstream_capture_dock_test.dart
++++ b/app/test/ella/upstream_capture/ella_upstream_capture_dock_test.dart
+@@ -105,6 +105,21 @@
+ /// directly; real sessions get these identities from the capture coordinator.
+ class _DockCaptureProvider extends CaptureProvider {
+   _DockCaptureProvider({super.connectivity, super.bleListeners, super.preferences});
++  // Explicit committed presentation seam for this widget-only fixture. Real
++  // coordinator ownership is tested by transcript_rollover_runtime_test.dart.
++  String presentationProducer = 'fixture-producer-1';
++  String presentationMode = 'live';
++  int presentationDeviceRevision = 0;
++  int presentationStarts = 1;
++  @override
++  ({String sessionKey, String mode, int deviceRevision})? get transcriptPresentationIdentity =>
++      liveCaptureSource == null ? null : (sessionKey:presentationProducer,
++        mode:presentationMode, deviceRevision:presentationDeviceRevision);
++  @override
++  void clearUserData() {
++    presentationProducer='fixture-producer-${++presentationStarts}';
++    super.clearUserData();
++  }
+   String recordingIdentity = 'recording-1';
+   String? windowIdentity = 'window-1';
+   bool captureReady = true;
+@@ -2271,7 +2286,7 @@
+     expect(find.text('Compass'), findsOneWidget);
+   });
+ 
+-  testWidgets('real conversation replacement retires sheet despite identical recording and WAL timestamp',
++  testWidgets('rollover integration: real conversation replacement updates the same open dock sheet',
+       (tester) async {
+     final fixture = await _DockFixture.create(tester);
+     await fixture.pump(tester);
+@@ -2298,8 +2313,12 @@
+     expect(fixture.provider.activeCaptureSessionId, 'window-1');
+     expect(fixture.runtime.isCurrentCaptureSession(original), isFalse);
+     expect(find.text('Synthetic same-window revision'), findsNothing);
+-    expect(find.text('Synthetic replacement words'), findsNothing);
+-    expect(find.text('Recording is unavailable right now.'), findsOneWidget);
++    expect(find.text('Synthetic replacement words'), findsOneWidget);
++    expect(find.text('Recording is unavailable right now.'), findsNothing);
++    var finishCalls=0;
++    fixture.runtime.finishOverride=() async { finishCalls++; };
++    await fixture.runtime.finishCaptureSession(original);
++    expect(finishCalls,0,reason:'read continuity cannot authorize a stale exact Finish');
+   });
+ 
+   testWidgets('real reset changes presentation generation even when timestamp and recording are reused',
+@@ -3609,4 +3628,48 @@
+       expect(fixture.provider.recordingState, RecordingState.stop);
+     });
+   }
++  for(final boundary in ['producer','epoch','device','provider']) {
++    testWidgets('rollover integration: $boundary retirement clears the open dock and cannot revive', (tester) async {
++      final fixture=await _DockFixture.create(tester);
++      await fixture.pump(tester);
++      fixture.makeNecklaceLive(segments:[_segment('old-visible','Synthetic old producer words')]);
++      await tester.pump();
++      await tester.tap(find.byKey(const Key('upstream-capture-view-transcript')));
++      await tester.pump();await tester.pump(const Duration(milliseconds:400));
++      expect(find.text('Synthetic old producer words'),findsOneWidget);
++      final authority=fixture.authority as _DockSessionAuthority;
++      _DockCaptureProvider? replacement;
++      if(boundary=='producer') fixture.provider.presentationProducer='fixture-producer-2';
++      if(boundary=='epoch') authority.epoch++;
++      if(boundary=='device') fixture.provider.presentationDeviceRevision++;
++      if(boundary=='provider') {
++        replacement=_DockCaptureProvider(preferences:upstream.SharedPreferencesUtil(),
++          bleListeners:_NoBleListeners(),connectivity:CaptureConnectivityBoundary(
++            initiallyConnected:true,changes:fixture.connectivity.stream,isConnected:()=>true));
++        replacement.updateRecordingState(RecordingState.deviceRecord);
++        replacement.segments.add(_segment('foreign','Synthetic replacement provider words'));
++        fixture.runtime.replacementCapture=replacement;
++        addTearDown(replacement.dispose);
++      }
++      fixture.provider.updateRecordingState(RecordingState.deviceRecord);
++      await tester.pump();
++      expect(find.text('Recording is unavailable right now.'),findsOneWidget);
++      expect(find.text('Synthetic old producer words'),findsNothing);
++      expect(find.text('Synthetic replacement provider words'),findsNothing);
++      fixture.provider.presentationProducer='fixture-producer-1';
++      authority.epoch=0;fixture.provider.presentationDeviceRevision=0;
++      fixture.runtime.replacementCapture=null;
++      fixture.provider.updateRecordingState(RecordingState.deviceRecord);
++      await tester.pump();
++      expect(find.text('Synthetic old producer words'),findsNothing);
++      await tester.tap(find.byKey(const Key('upstream-capture-transcript-close')));
++      await tester.pump();await tester.pump(const Duration(milliseconds:400));
++      await tester.tap(find.byKey(const Key('upstream-capture-view-transcript')));
++      await tester.pump();await tester.pump(const Duration(milliseconds:400));
++      expect(find.text('Synthetic old producer words'),findsOneWidget,
++        reason:'an explicit reopen obtains a fresh authorized read lease');
++      expect(tester.takeException(),isNull);
++    });
++  }
++
+ }
+--- /dev/null
++++ b/app/test/ella/upstream_capture/existing_capture_stop_queue_test.dart
+@@ -0,0 +1,148 @@
++import 'dart:async';
++import 'package:omi/services/capture/capture_operation_cancellation.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart';
++import 'package:omi/upstream_capture/utils/enums.dart';
++import 'package:omi/upstream_capture/services/capture/capture_coordinator.dart';
++
++CaptureCoordinator _coordinator(Future<Object?> Function(CaptureStage) runStage,
++        {Future<void> Function(String)? persist,
++        Future<void> Function()? start,
++        Future<void> Function()? stop,
++        CaptureRetirementFence? retirementFence,
++        bool Function()? callActive, bool micCapturing = false}) =>
++    CaptureCoordinator(
++      retirementFence: retirementFence,
++      readEnvironment: () => CaptureEnvironment(
++        policyMuted: false,
++        paused: false,
++        batchModeEnabled: false,
++        batchModeSuspendedForOnboarding: false,
++        deviceSupportsTranscribeLater: false,
++        networkConnected: true,
++        signedIn: () => true,
++        phoneMicSupportsBatch: false,
++        transcriptReady: false,
++        socketConnected: false,
++        deviceServiceReady: false,
++        callActive: callActive?.call() ?? false,
++        deviceRecording: false,
++        micCapturing: micCapturing,
++      ),
++      ports: CaptureEffectPorts(
++        writePolicy: (_) async => const PolicyWriteOutcome(revision: 1, superseded: false),
++        stopBleStream: ({bool disableNativeBackground = false}) async {},
++        startBleStream: () async {},
++        openSocket: (_) async {},
++        closeSocket: (_) async {},
++        startNativeMic: (_) async {
++          await start?.call();
++        },
++        stopNativeMic: () async {
++          await stop?.call();
++        },
++        setNativeWriterGate: (_, __) async {},
++        finalizeWal: () async {},
++        rollSession: (_) async {},
++        mintRecordingId: (_, __) => 'synthetic-recording',
++        checkPhonePermission: () async => true,
++        readSnapshot: () => null,
++        persistSnapshot: (encoded) async {
++          await persist?.call(encoded);
++        },
++        runStage: runStage,
++      ),
++    );
++
++void main() {
++  for (final retirement in ['owner', 'session']) {
++    test('initially valid Stop retires by $retirement while queued before dequeue', () async {
++      final blocker = Completer<Object?>();
++      final entered = Completer<void>();
++      var block = false;
++      var checks = 0;
++      var currentOwner = 'owner-a';
++      var currentSession = 'session-a';
++      var stops = 0;
++      final coordinator = _coordinator((stage) async {
++        if (stage is StopPhoneLiveStage || stage is StopPhoneBatchStage) stops++;
++        if (block && !entered.isCompleted) {
++          entered.complete();
++          return blocker.future;
++        }
++        return null;
++      }, stop: () async { stops++; }, micCapturing: true);
++      try {
++        await coordinator.dispatch(const PhoneStartRequested());
++        expect(coordinator.state.phase, CapturePhase.phoneLive);
++        bool guard() { checks++; return currentOwner == 'owner-a' && currentSession == 'session-a'; }
++        expect(guard(), isTrue);
++        checks = 0;
++        block = true;
++        final first = coordinator.dispatch(const KeepAliveTick(testingProbe: true));
++        await entered.future;
++        final pending = coordinator.dispatch(PhoneStopRequested(
++          reason: 'user_stopped', userStop: true, resumeSuspendedPendant: false, isCurrent: guard));
++        expect(checks, 0);
++        if (retirement == 'owner') currentOwner = 'owner-b';
++        if (retirement == 'session') currentSession = 'session-b';
++        blocker.complete();
++        await first;
++        expect((await pending).admitted, isFalse);
++        expect(checks, 1);
++        expect(stops, 0);
++        expect(coordinator.state.phase, CapturePhase.phoneLive);
++      } finally {
++        if (!blocker.isCompleted) blocker.complete();
++        await coordinator.pendingDrain;
++        coordinator.dispose();
++      }
++    });
++  }
++  for (final current in [true, false]) {
++    test('quarantine conversion retains ${current ? "current" : "stale"} Stop guard and never resumes a producer', () async {
++      final fence = CaptureRetirementFence();
++      var phoneStarts = 0;
++      var stops = 0;
++      var checks = 0;
++      final stages = <CaptureStage>[];
++      final coordinator = _coordinator((stage) async {
++        stages.add(stage);
++        if (stage is StartPhoneSessionStage) phoneStarts++;
++        return null;
++      }, retirementFence: fence, stop: () async { stops++; });
++      try {
++        final pendant = BtDevice(id: 'fictional-pendant', name: 'Omi', type: DeviceType.omi, rssi: -40);
++        await coordinator.dispatch(DeviceUpdated(pendant));
++        await coordinator.dispatch(DeviceStartRequested(device: pendant));
++        expect(coordinator.state.phase, CapturePhase.pendantLive);
++        await coordinator.dispatch(const PhoneStartRequested());
++        expect(coordinator.state.phase, CapturePhase.phoneLive);
++        expect(coordinator.state.pendantSuspension?.reason, SuspendReason.phone);
++        expect(coordinator.state.connectedDevice?.id, pendant.id);
++        expect(phoneStarts, 1);
++        stages.clear();
++        fence.hold();
++        final result = await coordinator.dispatch(PhoneStopRequested(
++          reason: 'user_stopped', userStop: true, resumeSuspendedPendant: true,
++          isCurrent: () { checks++; return current; }));
++        expect(checks, 1);
++        expect(result.admitted, current);
++        expect(phoneStarts, 1);
++        expect(stages.whereType<ResumeSuspendedPendantStage>(), isEmpty);
++        expect(stages.whereType<StartDeviceSessionStage>(), isEmpty);
++        if (current) {
++          expect(stops, greaterThan(0));
++          expect(coordinator.state.phase, CapturePhase.idle);
++        } else {
++          expect(stops, 0);
++          expect(coordinator.state.phase, CapturePhase.phoneLive);
++        }
++      } finally {
++        fence.release();
++        await coordinator.pendingDrain;
++        coordinator.dispose();
++      }
++    });
++  }
++}
+--- /dev/null
++++ b/app/test/ella/upstream_capture/existing_capture_stop_test.dart
+@@ -0,0 +1,179 @@
++import 'dart:async';
++import 'dart:io';
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:provider/provider.dart';
++import 'package:omi/ella/ella_theme.dart';
++import 'package:omi/ella/pages/ella_provisioning_gate_page.dart';
++import 'package:omi/ella/services/ella_provisioning_service.dart';
++import 'package:omi/l10n/app_localizations.dart';
++import 'package:omi/providers/ella_provisioning_provider.dart';
++import 'package:omi/backend/schema/bt_device/bt_device.dart' as remembered;
++import 'support/ella_upstream_capture_harness.dart';
++import 'stop_escape_fonts.dart';
++import '../../upstream_capture/support/capture/scripted_device_connection.dart';
++
++Future<EllaUpstreamCaptureHarness> boot(WidgetTester tester) async =>
++  (await tester.runAsync(() async {
++    final directory=await Directory.systemTemp.createTemp('owned_stop_widget_');
++    final h=await EllaUpstreamCaptureHarness.boot(tempDir:directory);
++    expect(await h.bind(),isTrue);
++    return h;
++  }))!;
++Future<void> cleanup(WidgetTester tester,EllaUpstreamCaptureHarness h) async {
++  await tester.pumpWidget(const SizedBox.shrink());
++  await tester.runAsync(() async {
++    await h.dispose();
++    if(h.tempDir.existsSync()) h.tempDir.deleteSync(recursive:true);
++  });
++}
++Future<void> errorGate(WidgetTester tester,EllaUpstreamCaptureHarness h,String error,
++    {double scale=1,void Function()? onSignOut}) async {
++  final setup=EllaProvisioningProvider()..state=EllaProvisioningState.blocked..errorCode=error;
++  addTearDown(setup.dispose);
++  await tester.pumpWidget(ChangeNotifierProvider.value(value:setup,child:MaterialApp(
++    theme:ellaThemeData(),localizationsDelegates:AppLocalizations.localizationsDelegates,
++    supportedLocales:AppLocalizations.supportedLocales,
++    builder:(context,child)=>MediaQuery(data:MediaQuery.of(context).copyWith(
++      textScaler:TextScaler.linear(scale)),child:child!),
++    home:EllaProvisioningGatePage(startOnMount:false,captureRuntime:h.runtime,
++      authenticatedUidProvider:()=>h.authenticatedUid,onSignOutOverride:onSignOut ?? (){},
++      readyChild:const SizedBox(key:Key('protected-home'))))));
++  await tester.pump();
++}
++
++// A real controller-owned audio subscription with a bounded held cancellation.
++// This does not replace runtime admission or Stop; it holds only the fake BLE port.
++class HeldStopConnection extends ScriptedDeviceConnection {
++  bool armed=false;
++  int heldCancels=0;
++  final entered=Completer<void>(), release=Completer<void>();
++  @override Future<StreamSubscription?> getBleAudioBytesListener({required void Function(List<int>) onAudioBytesReceived}) async {
++    final inner=await super.getBleAudioBytesListener(onAudioBytesReceived:onAudioBytesReceived);
++    return HeldStopSubscription(inner!,() async {
++      if(armed){heldCancels++;if(!entered.isCompleted)entered.complete();await release.future;}
++    });
++  }
++}
++class HeldStopSubscription implements StreamSubscription<dynamic> {
++  HeldStopSubscription(this.inner,this.beforeCancel);
++  final StreamSubscription<dynamic> inner;
++  final Future<void> Function() beforeCancel;
++  @override Future<void> cancel() async { await beforeCancel();await inner.cancel(); }
++  @override void onData(void Function(dynamic)? f)=>inner.onData(f);
++  @override void onError(Function? f)=>inner.onError(f);
++  @override void onDone(void Function()? f)=>inner.onDone(f);
++  @override void pause([Future<void>? f])=>inner.pause(f);
++  @override void resume()=>inner.resume();
++  @override bool get isPaused=>inner.isPaused;
++  @override Future<E> asFuture<E>([E? value])=>inner.asFuture<E>(value);
++}
++
++void main() {
++  setUpAll(fonts);
++  for(final error in ['provider_unavailable','request_timeout','auth_required']) {
++    testWidgets('existing Stop stays reachable in actual $error setup gate without opening Home',(tester) async {
++      final h=await boot(tester);addTearDown(()=>cleanup(tester,h));
++      await tester.runAsync(()=>h.connectPendant());
++      // A lost frame lease is not a new grant: the authenticated producer owner
++      // remains known, and Stop must work even when captureSession is null.
++      h.leases.single.stop();
++      expect(h.runtime.captureSession,isNull);
++      expect(h.runtime.existingCaptureStopTarget(h.authenticatedUid),isNotNull);
++      var signOuts=0;
++      await errorGate(tester,h,error,onSignOut:()=>signOuts++);
++      final button=find.byKey(const Key('existing-capture-stop'));
++      await tester.ensureVisible(button);
++      expect(button.hitTestable(),findsOneWidget);
++      await tester.tap(button);await tester.pump();
++      await tester.runAsync(()=>h.settle());await tester.pump();
++      expect(h.provider.liveCaptureSource,isNull);
++      expect(find.text('Recording stopped.'),findsOneWidget);
++      expect(find.byKey(const Key('protected-home')),findsNothing);
++      expect(h.processCalls,0);expect(h.disconnectedDevices,isEmpty);
++      expect(signOuts,0);expect(tester.takeException(),isNull);
++    });
++  }
++  testWidgets('held necklace Stop deduplicates taps and does not claim stopped early',(tester) async {
++    final h=await boot(tester);addTearDown(()=>cleanup(tester,h));
++    final link=HeldStopConnection();h.deviceConnection=link;
++    await tester.runAsync(() async {
++      await h.provider.streamDeviceRecording(device:EllaUpstreamCaptureHarness.pendant);
++      await h.settle();
++    });
++    link.armed=true;
++    addTearDown(() {if(!link.release.isCompleted)link.release.complete();});
++    await errorGate(tester,h,'provider_unavailable');
++    final button=find.byKey(const Key('existing-capture-stop'));
++    await tester.ensureVisible(button);await tester.tap(button);await tester.tap(button);
++    await tester.pump();await tester.runAsync(()=>link.entered.future.timeout(const Duration(seconds:3)));
++    expect(link.heldCancels,1);expect(find.text('Recording stopped.'),findsNothing);
++    link.release.complete();await tester.runAsync(()=>h.settle());await tester.pump();
++    expect(link.openAudioSubscriptions,0);expect(link.heldCancels,1);
++    expect(find.text('Recording stopped.'),findsOneWidget);
++    expect(find.byKey(const Key('protected-home')),findsNothing);
++  });
++  testWidgets('stale account press cannot stop a known producer or show old result',(tester) async {
++    final h=await boot(tester);addTearDown(()=>cleanup(tester,h));
++    await tester.runAsync(()=>h.connectPendant());
++    await errorGate(tester,h,'provider_unavailable');
++    final button=find.byKey(const Key('existing-capture-stop'));
++    await tester.ensureVisible(button);
++    h.switchAccount(accountB);
++    final before=h.hostApi.stopCalls;
++    await tester.tap(button);await tester.pump();
++    expect(h.hostApi.stopCalls,before);
++    expect(h.deviceConnection!.openAudioSubscriptions,1);
++    expect(find.text('Recording stopped.'),findsNothing);
++    expect(find.byKey(const Key('existing-capture-stop-result')),findsNothing);
++  });
++  testWidgets('large text retains an accessible deliberate Stop in setup failure',(tester) async {
++    final h=await boot(tester);addTearDown(()=>cleanup(tester,h));
++    await tester.runAsync(()=>h.connectPendant());
++    await errorGate(tester,h,'provider_unavailable',scale:3.5);
++    final button=find.byKey(const Key('existing-capture-stop'));
++    await tester.ensureVisible(button);await tester.pump();
++    expect(button.hitTestable(),findsOneWidget);
++    expect(tester.getSize(button).height,greaterThanOrEqualTo(48));
++    expect(tester.takeException(),isNull);
++  });
++  test('guarded phone stop rejects a stale queued owner predicate',() async {
++    final dir=await Directory.systemTemp.createTemp('owned_stop_runtime_');
++    final h=await EllaUpstreamCaptureHarness.boot(tempDir:dir);
++    try {
++      expect(await h.bind(),isTrue);await h.startPhone();
++      final stops=h.hostApi.stopCalls;
++      final applied=await h.provider.stopStreamRecording(isCurrent:()=>false,resumeHandedOffPendant:false);
++      expect(applied,isFalse);expect(h.hostApi.stopCalls,stops);expect(h.hostApi.nativeRecording,isTrue);
++    } finally { await h.dispose();if(dir.existsSync())dir.deleteSync(recursive:true); }
++  });
++  test('an old Stop target cannot stop a later same-owner phone producer',() async {
++    final dir=await Directory.systemTemp.createTemp('owned_stop_successor_');
++    final h=await EllaUpstreamCaptureHarness.boot(tempDir:dir);
++    try {
++      expect(await h.bind(),isTrue);await h.startPhone();
++      final target=h.runtime.existingCaptureStopTarget(accountA)!;
++      expect(await h.runtime.stopExistingCapture(target),isTrue);
++      await h.startPhone();final stops=h.hostApi.stopCalls;
++      expect(await h.runtime.stopExistingCapture(target),isFalse);
++      expect(h.hostApi.stopCalls,stops);expect(h.hostApi.nativeRecording,isTrue);
++    } finally { await h.dispose();if(dir.existsSync())dir.deleteSync(recursive:true); }
++  });
++  test('deliberate Stop does not create a persistent automatic-resume latch',() async {
++    final dir=await Directory.systemTemp.createTemp('owned_stop_reopen_');
++    final h=await EllaUpstreamCaptureHarness.boot(tempDir:dir);
++    try {
++      expect(await h.bind(),isTrue);await h.connectPendant();
++      await h.runtime.connectNecklace(accountA,EllaUpstreamCaptureHarness.pendant);
++      h.ellaPreferences.btDevice=remembered.BtDevice.fromJson(EllaUpstreamCaptureHarness.pendant.toJson());
++      await h.ellaPreferences.btDeviceOwnerBindingSet(accountA);await h.settle();
++      final target=h.runtime.existingCaptureStopTarget(accountA)!;
++      expect(await h.runtime.stopExistingCapture(target),isTrue);
++      expect(h.provider.liveCaptureSource,isNull);
++      h.runtime.didChangeAppLifecycleState(AppLifecycleState.resumed);
++      await h.settle();
++      expect(h.provider.liveCaptureSource,'omi');
++      expect(h.deviceConnection!.openAudioSubscriptions,1);
++    } finally { await h.dispose();if(dir.existsSync())dir.deleteSync(recursive:true); }
++  });
++}
+--- /dev/null
++++ b/app/test/ella/upstream_capture/stop_escape_fonts.dart
+@@ -0,0 +1,12 @@
++import 'package:flutter/services.dart';
++
++Future<void> fonts() async {
++  for (final entry in {
++    'Manrope': 'assets/fonts/Manrope-400.ttf',
++    'Fraunces': 'assets/fonts/Fraunces-Latin-Regular.ttf',
++    'MaterialIcons': 'fonts/MaterialIcons-Regular.otf',
++  }.entries) {
++    final loader = FontLoader(entry.key)..addFont(rootBundle.load(entry.value));
++    await loader.load();
++  }
++}
+--- /dev/null
++++ b/app/test/ella/upstream_capture/transcript_presentation_lease_test.dart
+@@ -0,0 +1,55 @@
++import 'package:flutter_test/flutter_test.dart';
++import 'package:omi/ella/upstream_capture/transcript_presentation_lease.dart';
++
++final _provider = Object();
++TranscriptPresentationScope scope({String uid='fixture-owner', int epoch=4,
++    Object? provider, String producer='pendant-8', String source='omi',
++    String mode='live', int device=2}) => TranscriptPresentationScope(
++  uid: uid, bindingEpoch: epoch, providerIdentity: provider ?? _provider,
++  producerSessionKey: producer, mode: mode, source: source, deviceRevision: device);
++
++void main() {
++  test('new conversation projections keep the same authorized producer viewer', () {
++    final lease=TranscriptPresentationLease(scope());
++    // Each notification reprojects a new scope object. Conversation/window IDs
++    // are intentionally outside this presentation-only scope.
++    expect(lease.observe(scope()), isTrue);
++    expect(lease.observe(scope()), isTrue);
++    expect(lease.retired, isFalse);
++  });
++  test('Stop then reopen cannot revive the old sheet', () {
++    final lease=TranscriptPresentationLease(scope());
++    expect(lease.observe(null), isFalse);
++    expect(lease.observe(scope()), isFalse);
++  });
++  test('coalesced Stop/new capture is rejected without observing idle', () {
++    final lease=TranscriptPresentationLease(scope());
++    expect(lease.observe(scope(producer:'pendant-9')), isFalse);
++    expect(lease.observe(scope()), isFalse);
++  });
++  test('switching owner retires before any future presentation', () {
++    final lease=TranscriptPresentationLease(scope());
++    expect(lease.observe(scope(uid:'different-fixture-owner')), isFalse);
++    expect(lease.observe(scope()), isFalse);
++  });
++  test('same owner authority retirement cannot revive on a new epoch', () {
++    final lease=TranscriptPresentationLease(scope());
++    expect(lease.observe(scope(epoch:5)), isFalse);
++    expect(lease.observe(scope()), isFalse);
++  });
++  test('provider replacement cannot adopt the old viewer', () {
++    final lease=TranscriptPresentationLease(scope());
++    expect(lease.observe(scope(provider:Object())), isFalse);
++  });
++  test('source and transport transitions each retire the viewer', () {
++    final sourceLease=TranscriptPresentationLease(scope());
++    expect(sourceLease.observe(scope(source:'phone')), isFalse);
++    final modeLease=TranscriptPresentationLease(scope());
++    expect(modeLease.observe(scope(mode:'batch')), isFalse);
++  });
++  test('device identity revision retires even with unchanged logical key', () {
++    final lease=TranscriptPresentationLease(scope());
++    expect(lease.observe(scope(device:3)), isFalse);
++    expect(lease.observe(scope()), isFalse);
++  });
++}
+--- /dev/null
++++ b/app/test/ella/upstream_capture/transcript_rollover_runtime_test.dart
+@@ -0,0 +1,137 @@
++import 'dart:async';
++import 'dart:io';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:omi/upstream_capture/backend/schema/conversation.dart';
++import 'package:omi/upstream_capture/backend/schema/structured.dart';
++import 'package:omi/upstream_capture/backend/schema/transcript_segment.dart';
++import 'support/ella_upstream_capture_harness.dart';
++
++ServerConversation snapshot(String id) => ServerConversation(id:id,
++  createdAt:DateTime.utc(2026,10,23), structured:Structured('Fictional title','Fictional summary'),
++  transcriptSegments:[TranscriptSegment(id:'segment-$id',text:'Synthetic $id words',
++    speaker:'SPEAKER_0',isUser:false,personId:null,start:0,end:1,translations:const [])]);
++
++void main() {
++  late Directory directory;
++  late EllaUpstreamCaptureHarness h;
++  setUp(() async {
++    directory=await Directory.systemTemp.createTemp('transcript_rollover_');
++    h=await EllaUpstreamCaptureHarness.boot(tempDir:directory);
++    expect(await h.bind(), isTrue);
++  });
++  tearDown(() async {
++    await h.dispose();
++    if(directory.existsSync()) directory.deleteSync(recursive:true);
++  });
++  test('real coordinator preserves viewer across server rollover but rejects stale Finish',() async {
++    await h.connectPendant();
++    h.provider.applyInProgressConversation(snapshot('window-a'));
++    final exact=h.runtime.captureSession!;
++    final producer=h.provider.transcriptPresentationIdentity!;
++    final lease=h.runtime.transcriptPresentationFor(exact)!;
++    h.provider.applyInProgressConversation(snapshot('window-b'));
++    expect(h.provider.transcriptPresentationIdentity,producer);
++    expect(h.runtime.isCurrentCaptureSession(exact),isFalse);
++    expect(h.runtime.isCurrentTranscriptPresentation(lease),isTrue);
++    expect(h.provider.segments.single.text,'Synthetic window-b words');
++    await h.runtime.finishCaptureSession(exact,stopDeviceIngress:false);
++    expect(h.processCalls,0);
++  });
++  test('real manual Create leaves viewer current while same necklace keeps supplying audio',() async {
++    final link=await h.connectPendant();
++    for(var i=0;i<3;i++) { link.emitAudio(); }
++    await h.settle();
++    final exact=h.runtime.captureSession!;
++    final producer=h.provider.transcriptPresentationIdentity!;
++    final lease=h.runtime.transcriptPresentationFor(exact)!;
++    final before=h.audioFramesSent;
++    await h.runtime.finishCaptureSession(exact,stopDeviceIngress:false);
++    await h.settle();
++    expect(h.processCalls,1);
++    expect(h.provider.transcriptPresentationIdentity,producer);
++    expect(h.runtime.isCurrentTranscriptPresentation(lease),isTrue);
++    h.provider.applyInProgressConversation(snapshot('after-explicit-create'));
++    expect(h.runtime.isCurrentTranscriptPresentation(lease),isTrue);
++    await h.runtime.finishCaptureSession(exact,stopDeviceIngress:false);
++    expect(h.processCalls,1);
++    for(var i=0;i<3;i++) { link.emitAudio(); }
++    await h.settle();
++    expect(h.audioFramesSent,greaterThan(before));
++    expect(h.disconnectedDevices,isEmpty);
++  });
++  test('real Stop then new phone capture retires old viewer with idle notification coalesced',() async {
++    await h.startPhone();
++    final exact=h.runtime.captureSession!;
++    final oldProducer=h.provider.transcriptPresentationIdentity!;
++    final lease=h.runtime.transcriptPresentationFor(exact)!;
++    await h.runtime.stopPhoneCapture();
++    await h.settle();
++    // Deliberately do not observe the lease while idle.
++    await h.startPhone();
++    expect(h.provider.transcriptPresentationIdentity!.sessionKey,isNot(oldProducer.sessionKey));
++    expect(h.runtime.isCurrentTranscriptPresentation(lease),isFalse);
++    expect(h.runtime.transcriptPresentationFor(h.runtime.captureSession!),isNotNull);
++    expect(h.runtime.isCurrentTranscriptPresentation(lease),isFalse);
++  });
++  test('real same-owner release and rebind cannot revive the old presentation lease',() async {
++    await h.startPhone();
++    final lease=h.runtime.transcriptPresentationFor(h.runtime.captureSession!)!;
++    final epoch=h.authority.bindingEpoch;
++    await h.runtime.releaseAccount();
++    expect(h.runtime.isCurrentTranscriptPresentation(lease),isFalse);
++    expect(await h.bind(),isTrue);
++    expect(h.authority.bindingEpoch,isNot(epoch));
++    expect(h.runtime.isCurrentTranscriptPresentation(lease),isFalse);
++  });
++  test('real authenticated-owner change retires before exposing successor segments',() async {
++    await h.connectPendant();
++    final lease=h.runtime.transcriptPresentationFor(h.runtime.captureSession!)!;
++    h.switchAccount(accountB);
++    expect(h.runtime.isCurrentTranscriptPresentation(lease),isFalse);
++    h.switchAccount(accountA);
++    expect(h.runtime.isCurrentTranscriptPresentation(lease),isFalse);
++    expect(h.processCalls,0);
++  });
++  test('real phone Pause and Resume preserve the same committed producer viewer',() async {
++    await h.startPhone();
++    final exact=h.runtime.captureSession!;
++    final lease=h.runtime.transcriptPresentationFor(exact)!;
++    await h.runtime.setCapturePaused(exact,paused:true);
++    expect(h.runtime.isCurrentTranscriptPresentation(lease),isTrue);
++    await h.runtime.setCapturePaused(exact,paused:false);
++    expect(h.runtime.isCurrentTranscriptPresentation(lease),isTrue);
++    expect(h.processCalls,0);
++  });
++  test('real phone takeover retires the pendant viewer even if pendant later resumes',() async {
++    await h.connectPendant();
++    final lease=h.runtime.transcriptPresentationFor(h.runtime.captureSession!)!;
++    await h.startPhone();
++    expect(h.runtime.captureSession!.source,'phone');
++    expect(h.runtime.isCurrentTranscriptPresentation(lease),isFalse);
++    await h.runtime.stopPhoneCapture();
++    await h.settle();
++    expect(h.runtime.isCurrentTranscriptPresentation(lease),isFalse);
++  });
++  test('real disconnect retires the viewer without creating another capture',() async {
++    await h.connectPendant();
++    final lease=h.runtime.transcriptPresentationFor(h.runtime.captureSession!)!;
++    await h.runtime.disconnectNecklace();
++    await h.settle();
++    expect(h.runtime.isCurrentTranscriptPresentation(lease),isFalse);
++    expect(h.disconnectedDevices,hasLength(1));
++  });
++  test('held real start cannot publish a staged presentation identity',() async {
++    final hold=Completer<void>(),entered=Completer<void>();
++    h.hostApi.holdNextStart=hold;h.hostApi.nextStartEntered=entered;
++    final start=h.startPhone();
++    try {
++      await entered.future.timeout(const Duration(seconds:3));
++      expect(h.provider.transcriptPresentationIdentity,isNull);
++      expect(h.runtime.captureSession,isNull);
++    } finally {
++      if(!hold.isCompleted) hold.complete();
++      await start;
++    }
++    expect(h.runtime.transcriptPresentationFor(h.runtime.captureSession!),isNotNull);
++  });
++}

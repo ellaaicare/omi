@@ -1,0 +1,37 @@
+{
+  "schema": "ella.thin30.git-provenance-gap.v1",
+  "conclusion": "Authoritative checkout/remote/commit/subtree UNKNOWN. Existing controls prove source assembly, not Git identity.",
+  "assembly": {
+    "base": "/Volumes/External T1/EllaEngineering-iOS/runs/thin29-discovery-provenance-20261023-native1/source",
+    "overlay_root": "/Users/ellaai/Documents/Codex/2026-10-10/task-6/thin29-success-picker-diagnostics-20261023/overlay",
+    "scope_sha256": "c264ac1bc088c1697af6222d2dcabd69e848ecf8553e30abd5577243b6724338",
+    "preparation_state": "SOURCE_CONFIGURATION_PREP_ONLY",
+    "transforms": "Build29-to30 plus configured source/output paths; see retained pinned controls, not executed here."
+  },
+  "control_pins": [
+    {
+      "retained_control_relative_path": "prepare_source.py",
+      "bytes": 6769,
+      "sha256": "e6860298f611a87f0280b8beb2386539888989809eca8bbbd76f46db5f23cb1a"
+    },
+    {
+      "retained_control_relative_path": "CANDIDATE.SCOPE.safe.json",
+      "bytes": 2191,
+      "sha256": "c264ac1bc088c1697af6222d2dcabd69e848ecf8553e30abd5577243b6724338"
+    },
+    {
+      "retained_control_relative_path": "native30/SOURCE.PREPARATION.safe.json",
+      "bytes": 2665,
+      "sha256": "a531d8c9b58f7cadd72737addefdd606c3c47e3b759d71a380b2a113cc59f8e8"
+    }
+  ],
+  "snapshot_has_git": false,
+  "package": {
+    "name": "ella_thin",
+    "version": "0.1.0+30",
+    "pubspec_sha256": "7057c37371c437aba4626e50f2058cfd0c39304a8bd25d6c6af749f297dfeb55"
+  },
+  "source_owner_confirmation": "Thin/Muse owner independently reports no authoritative repository metadata; OMI imports and upstream pins establish reuse only.",
+  "minimum_blocker": "Project owner must identify or select the maintained Thin repository/subtree and import strategy; do not infer it from shared Dart imports or initialize a new repo. Then commit reviewed exact source/config/dependency closure and compare against signed Thin30 artifact.",
+  "effects": "Read-only control inspection and this small evidence record. No SDK, API probe, clone, fetch, checkout, index write, move or source mutation."
+}
