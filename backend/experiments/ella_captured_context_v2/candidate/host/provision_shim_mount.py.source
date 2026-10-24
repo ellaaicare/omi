@@ -1,0 +1,11 @@
+# Versioned captured data; existing authentication and owner/workspace gates remain authoritative.
+from semantic_context_snapshot_routes_v2 import install_captured_context_routes
+install_captured_context_routes(
+    app, verify_token=verify_token, validate_agent_id=_validate_agent_id,
+    request_owner_uid=_request_owner_uid, workspace_for_agent=_workspace_for_agent,
+    load_registry=_load_registry,
+    state_root=Path(__file__).parent.parent / "state" / "semantic-context-sync",
+    backend_url=os.getenv("OMI_API_URL", "http://100.101.168.91:8000"),
+    callback_key=os.getenv("ELLA_CALLBACK_SERVICE_KEY", ""),
+)
+

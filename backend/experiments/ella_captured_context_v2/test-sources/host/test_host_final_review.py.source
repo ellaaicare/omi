@@ -1,0 +1,58 @@
+"""Independent bounded transport diagnostic tests; no live HTTP or imports of backend clients."""
+import ast
+import asyncio
+import importlib.util
+import json
+from pathlib import Path
+import sys
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+import httpx
+
+ROOT = Path(__file__).resolve().parents[2]
+CANDIDATE = ROOT / 'captured-context-v2/candidate/ella/services'
+
+class Rejected(ValueError):
+    pass
+
+def reject(code):
+    raise Rejected(code)
+
+class Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_exact_async_transport_closes_untrusted_header_values(self):
+        tree = ast.parse((CANDIDATE / 'semantic_captured_context.py').read_text())
+        node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == '_exchange_async')
+        namespace = {'asyncio': asyncio, 'json': json, 'httpx': httpx, 'reject': reject}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), '<actual-candidate-exchange>', 'exec'), namespace)
+        spec = importlib.util.spec_from_file_location('ella.services.semantic_captured_hold_codes', CANDIDATE / 'semantic_captured_hold_codes.py')
+        codes = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(codes)
+        class Response:
+            status_code = 409
+            headers = {}
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def aiter_bytes(self):
+                self.fail('non200 body must never be read')
+                yield b''
+        response = Response()
+        class Client:
+            def __init__(self, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            def stream(self, *a, **kw): return response
+        for value, expected in [
+            ('protected_file_changed', 'captured_context_host_protected_file_changed'),
+            ('context_records_timeout', 'captured_context_host_context_records_timeout'),
+            ('PRIVATE_SECRET\r\nInjected:value', 'captured_context_host_rejected'),
+            (['protected_file_changed'], 'captured_context_host_rejected'),
+            (None, 'captured_context_host_rejected'),
+        ]:
+            response.headers = {'X-Ella-Captured-Context-Hold-Code': value}
+            with patch.dict(sys.modules, {'ella.services.semantic_captured_hold_codes': codes}):
+                with self.assertRaisesRegex(Rejected, '^' + expected + '$'):
+                    await namespace['_exchange_async'](url='http://synthetic', body={'uid':'synthetic-owner'}, authority=SimpleNamespace(token='synthetic'), timeout=1, client_factory=Client)
+
+if __name__ == '__main__':
+    unittest.main()

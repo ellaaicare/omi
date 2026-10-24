@@ -1,0 +1,114 @@
+"""Bounded LOCAL existing-materialization reader; markdown supplies CID hints only.
+No UID/ownership/source authority is inferred from file names/frontmatter. The
+host manifest service requires same-owner backend metadata and exact projection
+hash for every hint, plus exact whole-index rendering. No RPC/provider/writes.
+"""
+
+import os, re, stat
+from pathlib import Path
+from semantic_context_snapshot import _open_root, _document
+from semantic_context_manifest_v2 import RecentRow, ManifestHold, MAX_ROWS
+from recent_context_projection_v2 import (
+    parse_frontmatter,
+    extract_title,
+    extract_overview,
+    event_datetime,
+    format_local_utc_stamp,
+)
+
+LINK = re.compile(r'\[details\]\(conversations/omi-([A-Za-z0-9_.:-]{1,200})\.md\)')
+PREFIX_BYTES = 16384
+
+
+def sig(s):
+    return (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns, s.st_mode, s.st_uid)
+
+
+def prefix(root, name):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
+    try:
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.geteuid()
+            or before.st_nlink != 1
+            or before.st_mode & 0o022
+        ):
+            raise ManifestHold('materialized_file_unsafe')
+
+        def read_projection():
+            data = b''
+            while len(data) < PREFIX_BYTES:
+                piece = os.read(fd, min(512, PREFIX_BYTES - len(data)))
+                if not piece:
+                    break
+                data += piece
+                marker = data.find(b'\n## Transcript')
+                if marker >= 0:
+                    return data[: marker + len(b'\n## Transcript')]
+            raise ManifestHold('materialized_prefix_incomplete')
+
+        first = read_projection()
+        os.lseek(fd, 0, os.SEEK_SET)
+        second = read_projection()
+        after = os.fstat(fd)
+        current = os.stat(name, dir_fd=root, follow_symlinks=False)
+        if first != second or sig(before) != sig(after) or sig(before) != sig(current):
+            raise ManifestHold('materialized_file_changed')
+        # Stop at transcript heading: projection needs no transcript body. Decode
+        # the complete metadata prefix strictly; no permissive byte replacement.
+        try:
+            return first.decode('utf-8')
+        except UnicodeError as error:
+            raise ManifestHold('materialized_prefix_encoding') from error
+    finally:
+        os.close(fd)
+
+
+def read_materialized_recent_rows(*, uid, runtime):
+    if runtime.uid != uid:
+        raise ManifestHold('materialized_runtime_owner')
+    root = _open_root(runtime.workspace_root)
+    try:
+        index = _document(root, 'recent-conversations.md')
+    finally:
+        os.close(root)
+    if not isinstance(index, str):
+        raise ManifestHold('materialized_index_required')
+    ids = LINK.findall(index)
+    if len(ids) > MAX_ROWS or len(set(ids)) != len(ids) or any('..' in cid for cid in ids):
+        raise ManifestHold('materialized_index_hints')
+    if not ids:
+        return []
+    path = str(Path(runtime.workspace_root) / 'conversations')
+    directory = _open_root(path)
+    try:
+        before = os.fstat(directory)
+        rows = []
+        for cid in ids:
+            text = prefix(directory, 'omi-' + cid + '.md')
+            p = Path('omi-' + cid + '.md')
+            fm = parse_frontmatter(text)
+            # Do not read fm.uid or fm.agent_id: backend must independently validate.
+            if '## Transcript' not in text:
+                raise ManifestHold('materialized_prefix_incomplete')
+            projection = {
+                'stamp': format_local_utc_stamp(event_datetime(p, text)),
+                'title': fm.get('title') or extract_title(p, text),
+                'emoji': fm.get('emoji') or '',
+                'category': fm.get('category') or 'other',
+                'segments': fm.get('segments') or '?',
+                'overview': extract_overview(text),
+            }
+            rows.append(RecentRow(cid, projection))
+        current = _open_root(path)
+        try:
+            if sig(before) != sig(os.fstat(directory)) or sig(before) != sig(os.fstat(current)):
+                raise ManifestHold('materialized_directory_changed')
+        finally:
+            os.close(current)
+        return rows
+    except OSError as error:
+        raise ManifestHold('materialized_file_unavailable') from error
+    finally:
+        os.close(directory)

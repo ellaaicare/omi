@@ -1,0 +1,779 @@
+"""Independent actual capture scope + real typed budget/fence/publication chain.
+Actual host sidecar service composed through a fake HTTP leaf; actual canonical
+source/identity, OperationBudget, Attempt/_key and PublicationBinding classes.
+No live DB/network/model/auth/config. Graph-store adapter is an explicit double
+using the actual pure fence callback predicate, not a Firestore qualification.
+"""
+
+import asyncio, ast, copy, hashlib, importlib.util, json, sys, time, types, unittest
+from contextvars import ContextVar
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+W = ROOT.parent
+BACKEND = W / 'repo/backend/serving_snapshots/unified-canonical-memory-4235154f/backend'
+
+
+def module(name, **kw):
+    m = types.ModuleType(name)
+    m.__dict__.update(kw)
+    return m
+
+
+def load(name, path):
+    s = importlib.util.spec_from_file_location(name, path)
+    m = importlib.util.module_from_spec(s)
+    sys.modules[name] = m
+    s.loader.exec_module(m)
+    return m
+
+
+BASE = {k: module(k, __path__=[]) for k in ['ella', 'ella.services', 'ella.utils', 'models', 'database']}
+with patch.dict(sys.modules, BASE):
+    CAN = load('ella.services.canonical_summary_source', BACKEND / 'ella/services/canonical_summary_source.py')
+    ID = load('models.hermes_cloud_enrichment_contract', BACKEND / 'models/hermes_cloud_enrichment_contract.py')
+    BUDGET = load(
+        'ella.services.semantic_operation_budget',
+        W / 'deadline-v1/candidate/ella/services/semantic_operation_budget.py',
+    )
+    FENCE = load('database.enrichment_attempt_fence', W / 'candidate/database/enrichment_attempt_fence.py')
+    sys.modules['database'].enrichment_attempt_fence = FENCE
+    ISOLATION = load('database.enrichment_job_isolation', W / 'candidate/database/enrichment_job_isolation.py')
+    TITLE = load('ella.services.summary_title_quality', BACKEND / 'ella/services/summary_title_quality.py')
+    # Execute the exact production ContextVar declaration and digest function.
+    p = W / 'baseline/database/normal_future_source_disposition.py'
+    tree = ast.parse(p.read_text())
+    future = module('database.normal_future_source_disposition', ContextVar=ContextVar, hashlib=hashlib, json=json)
+    nodes = [
+        n
+        for n in tree.body
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == '_worker_job' for t in n.targets)
+        or isinstance(n, ast.FunctionDef)
+        and n.name == 'digest'
+    ]
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(p), 'exec'), future.__dict__)
+    # Lifecycle TAG literal and its exact imported digest; DB methods not invoked.
+    LIFECYCLE = module(
+        'database.normal_account_lifecycle', TAG='normal_account_lifecycle_admission', digest=future.digest
+    )
+    authority = SimpleNamespace(
+        base_url='http://synthetic-host', token='synthetic-existing-ref', snapshot=lambda: 'synthetic-pin'
+    )
+    PROVISION = module('ella.utils.provision_authority', hermes_provision_authority=lambda **kw: authority)
+    sys.modules['ella.utils.provision_authority'] = PROVISION
+    SCOPE = load(
+        'ella.services.semantic_captured_context', ROOT / 'candidate/ella/services/semantic_captured_context.py'
+    )
+    PUB = load('ella.services.semantic_publication', ROOT / 'candidate/ella/services/semantic_publication.py')
+HOSTTEST = W / 'context-snapshot-v2-host/tests/test_host_manifest.py'
+HOST = load('actual_host_rig_for_backend_scope', HOSTTEST)
+MODULES = {
+    **BASE,
+    'ella.services.canonical_summary_source': CAN,
+    'models.hermes_cloud_enrichment_contract': ID,
+    'ella.services.semantic_operation_budget': BUDGET,
+    'database.enrichment_attempt_fence': FENCE,
+    'database.enrichment_job_isolation': ISOLATION,
+    'database.normal_future_source_disposition': future,
+    'database.normal_account_lifecycle': LIFECYCLE,
+    'ella.services.summary_title_quality': TITLE,
+    'ella.utils.provision_authority': PROVISION,
+    'ella.services.semantic_captured_context': SCOPE,
+    'ella.services.semantic_publication': PUB,
+    'ella.services.semantic_companion_context': module(
+        'ella.services.semantic_companion_context',
+        SOURCES=HOST.snapshot.SOURCES,
+        MAX_DOCUMENT_BYTES=65536,
+        MAX_SNAPSHOT_BYTES=131072,
+    ),
+}
+
+
+class Rig:
+    def __init__(self):
+        self.host = HOST.Rig()
+        self.uid = self.host.uid
+        self.cid = self.host.cid
+        self.runtime = self.host.runtime
+        self.identity = self.host.identity
+        self.clock = 0.0
+        self.exchanges = 0
+        self.doc = {
+            'id': self.cid,
+            'uid': self.uid,
+            'status': 'completed',
+            'active_summary_version_id': 'stock',
+            'started_at': '2026-01-01T00:00:00Z',
+            'finished_at': '2026-01-01T00:01:00Z',
+            'transcript_segments': [{'text': 'fictional exact source', 'speaker': 'Speaker0'}],
+            'structured': {'title': 'Fictional', 'overview': 'Fictional source', 'emoji': 'x', 'category': 'other'},
+        }
+        self.job = {
+            'job_id': 'synthetic-job',
+            'uid': self.uid,
+            'conversation_id': self.cid,
+            'client_interaction_id': 'synthetic-client',
+            'transcript_sha256': ID.transcript_source(self.doc)[1],
+            'attempt_count': 1,
+            'lease_token': 'synthetic-lease',
+            'admission_epoch': 'epoch',
+            'normal_account_lifecycle_admission': {'account_epoch': 'account-epoch', 'route_sha256': 'a' * 64},
+        }
+        self.fenced = FENCE.begin(
+            FENCE.reserve(ISOLATION.attempt(self.job), claims_open=True, previously_quarantined=False),
+            ISOLATION.attempt(self.job),
+            claims_open=True,
+        )
+        self.budget = BUDGET.OperationBudget(BUDGET.attempt_scope(self.job), clock=lambda: self.clock)
+        self.source = CAN.canonical_source_from_conversation(
+            uid=self.uid, conversation_id=self.cid, conversation=self.doc
+        )
+        self.source_sha = CAN.canonical_source_sha256(self.source)
+        self.host.source = self.source
+        self.host.source_sha = self.source_sha
+        self.host.authority = HOST.sync.Authority(self.runtime, self.identity, 'registry-v1', self.source_sha)
+        binding = {
+            'uid': self.uid,
+            'conversation_id': self.cid,
+            'source_sha256': self.source_sha,
+            'runtime_authority_sha256': self.identity.digest,
+            'registry_revision': 'registry-v1',
+        }
+        self.host.receipts = {
+            'start': {'status': 'started', 'binding': binding},
+            'completed': {
+                'status': 'completed',
+                'binding': binding,
+                'context_sha256': 'e' * 64,
+                'context_revision': 'fixed',
+            },
+        }
+        self.modules = {
+            **MODULES,
+            'database.enrichment_graph_guard': module('database.enrichment_graph_guard', require_current=self.graph),
+            'ella.services.transcript_processing_hold': module(
+                'ella.services.transcript_processing_hold', assert_transcript_processing_active=lambda uid: None
+            ),
+        }
+        self.patcher = patch.dict(sys.modules, self.modules)
+        self.patcher.start()
+        self.bt = BUDGET._CURRENT.set(self.budget)
+        self.jt = future._worker_job.set(self.job)
+        self.context = SCOPE.attempt_context(self.uid, self.cid)
+        self.scope = self.context.__enter__()
+        self.host.attempt = self.scope.attempt_sha256
+
+        async def exchange(**kw):
+            self.exchanges += 1
+            body = kw['body']
+            if kw['url'].endswith('/snapshot-v2'):
+                return await self.host.capture()
+            return await self.host.service.validate_sidecar(
+                uid=self.uid,
+                conversation_id=self.cid,
+                expected_source_sha256=self.source_sha,
+                sidecar=body['sidecar'],
+                sidecar_sha256=body['sidecar_sha256'],
+            )
+
+        self.exchange_patch = patch.object(SCOPE, '_exchange_async', exchange)
+        self.exchange_patch.start()
+
+    def graph(self, uid, cid):
+        if (uid, cid) != (self.uid, self.cid) or not FENCE.callback_allowed(self.fenced, ISOLATION.attempt(self.job)):
+            raise FENCE.FenceRejected('graph_attempt_not_active')
+
+    def reader(self, *a):
+        return copy.deepcopy(self.doc)
+
+    def capture(self):
+        return SCOPE.capture_context(
+            runtime=self.runtime,
+            uid=self.uid,
+            conversation_id=self.cid,
+            runtime_identity=self.identity,
+            read_conversation=self.reader,
+            read_budget=SimpleNamespace(reserve=lambda _: 60),
+        )
+
+    def read(self):
+        return SCOPE.read_captured_context(
+            runtime=self.runtime,
+            uid=self.uid,
+            conversation_id=self.cid,
+            runtime_identity=self.identity,
+            read_conversation=self.reader,
+            read_budget=SimpleNamespace(reserve=lambda _: 60),
+        )
+
+    def admit(self):
+        self.doc[PUB.POLICY_FIELD] = {
+            'enabled': True,
+            'admissions_open': True,
+            'uid': self.uid,
+            'conversation_id': self.cid,
+            'revision': 'synthetic-policy',
+            'contextual_schema_version': 2,
+            'semantic_contract_version': 2,
+            'companion_context_sha256': PUB.digest(self.capture_value),
+            'companion_context_revision': self.capture_value['revision'],
+            **self.scope.fields(),
+        }
+        self.scope.mark_admitted(self.doc)
+
+    def prepare(self):
+        self.capture_value = self.capture()
+        self.admit()
+        return self.capture_value
+
+    def receipt(self):
+        binding = PUB.current_binding(self.doc, uid=self.uid, conversation_id=self.cid)
+        assert type(binding) is PUB.PublicationBinding
+        candidate = {'title': 'Fictional', 'overview': 'Fictional', 'emoji': 'x', 'category': 'other'}
+        for role in ['generator', 'verifier']:
+            changes, _ = PUB.record_completed_operation(
+                self.doc,
+                binding=binding,
+                operation_id=role,
+                candidate=candidate,
+                role=role,
+                runtime_interaction_id='synthetic-runtime-' + role,
+                canonical_assistant_event_id='synthetic-canonical-' + role,
+                verifier_result=(
+                    {
+                        'accepted': True,
+                        'source_grounded': True,
+                        'semantic_summary': True,
+                        'context_owner_verified': True,
+                    }
+                    if role == 'verifier'
+                    else None
+                ),
+            )
+            self.doc.update(changes)
+        changes, result = PUB.issue_receipt(
+            self.doc,
+            binding=binding,
+            candidate=candidate,
+            generator_operation_id='generator',
+            verifier_operation_id='verifier',
+        )
+        self.doc.update(changes)
+        return candidate, result['receipt_id']
+
+    def close(self):
+        self.context.__exit__(None, None, None)
+        self.exchange_patch.stop()
+        future._worker_job.reset(self.jt)
+        BUDGET._CURRENT.reset(self.bt)
+        self.patcher.stop()
+        self.host.close()
+
+
+class ActualScopeTests(unittest.TestCase):
+    def setUp(self):
+        self.r = Rig()
+
+    def tearDown(self):
+        self.r.close()
+
+    def test_actual_typed_classes_not_aliases_and_attempt_digest(self):
+        r = self.r
+        r.prepare()
+        self.assertIs(type(r.budget), BUDGET.OperationBudget)
+        self.assertIs(type(ISOLATION.attempt(r.job)), FENCE.Attempt)
+        self.assertEqual(
+            FENCE._key(ISOLATION.attempt(r.job))['lease_sha256'],
+            hashlib.sha256(r.job['lease_token'].encode()).hexdigest(),
+        )
+        self.assertIs(type(PUB.current_binding(r.doc, uid=r.uid, conversation_id=r.cid)), PUB.PublicationBinding)
+
+    def test_concurrent_index_append_or_eviction_returns_sealed_original(self):
+        r = self.r
+        original = r.prepare()
+        r.host.rows = []
+        r.host.write_index()
+        returned = r.read()
+        self.assertEqual(returned, original)
+        returned['documents']['MEMORY.md'] = 'mutated returned copy'
+        self.assertEqual(r.read(), original)
+
+    def test_protected_record_change_stops_root_read_no_stamp(self):
+        r = self.r
+        r.prepare()
+        before = r.scope._validation_stamp.get()
+        r.host.metadata['context-a']['active_summary_version_id'] = 'changed'
+        with self.assertRaises(HOST.v2.ManifestHold):
+            r.read()
+        self.assertIs(r.scope._validation_stamp.get(), before)
+
+    def test_protected_file_change_stops_root_read(self):
+        r = self.r
+        r.prepare()
+        (r.host.path / 'MEMORY.md').write_text('changed')
+        with self.assertRaises(HOST.v2.ManifestHold):
+            r.read()
+
+    def test_source_stock_delete_and_transcript_changes_reject_before_host(self):
+        r = self.r
+        r.prepare()
+        before = r.exchanges
+        for key, value in [
+            ('active_summary_version_id', 'new'),
+            ('deleted', True),
+            ('status', 'discarded'),
+            ('transcript_segments', [{'text': 'changed'}]),
+        ]:
+            with self.subTest(key=key):
+                original = copy.deepcopy(r.doc)
+                r.doc[key] = value
+                with self.assertRaises(PUB.SemanticPublicationRejectedError):
+                    r.read()
+                r.doc = original
+        self.assertEqual(r.exchanges, before)
+
+    def test_foreign_owner_source_lease_attempt_and_replaced_budget_reject(self):
+        r = self.r
+        r.prepare()
+        before = r.exchanges
+        for key, value in [
+            ('uid', 'foreign'),
+            ('conversation_id', 'foreign'),
+            ('lease_token', 'foreign'),
+            ('attempt_count', 2),
+            ('normal_account_lifecycle_admission', {'account_epoch': 'foreign', 'route_sha256': 'a' * 64}),
+        ]:
+            original = r.job[key]
+            r.job[key] = value
+            with self.subTest(key=key), self.assertRaises((PUB.SemanticPublicationRejectedError, ValueError)):
+                r.read()
+            r.job[key] = original
+        other = BUDGET.OperationBudget(BUDGET.attempt_scope(r.job))
+        token = BUDGET._CURRENT.set(other)
+        try:
+            with self.assertRaises(PUB.SemanticPublicationRejectedError):
+                r.read()
+        finally:
+            BUDGET._CURRENT.reset(token)
+        self.assertEqual(r.exchanges, before)
+
+    def test_closed_graph_and_expired_budget_reject(self):
+        r = self.r
+        r.prepare()
+        r.fenced = FENCE.finish(r.fenced, ISOLATION.attempt(r.job), outcome='unknown_quarantined')
+        with self.assertRaises(FENCE.FenceRejected):
+            r.read()
+        r.clock = 601
+        with self.assertRaises(TimeoutError):
+            r.scope.envelope()
+
+    def test_sealed_manifest_snapshot_tamper_and_stale_ack_reject(self):
+        r = self.r
+        r.prepare()
+        copy_value = r.scope.envelope()
+        copy_value['snapshot']['documents']['MEMORY.md'] = 'tampered'
+        self.assertNotEqual(copy_value, r.scope.envelope())
+        ack = {
+            'contract': 'ella-captured-context-validation-v2',
+            'compatible': True,
+            'owner_sha256': SCOPE.textsha(r.uid),
+            'target_conversation_id': r.cid,
+            'target_source_sha256': r.source_sha,
+            'runtime_authority_sha256': r.identity.digest,
+            'attempt_scope_sha256': r.scope.attempt_sha256,
+            'sidecar_sha256': r.scope.fields()['captured_context_manifest_sha256'],
+            'snapshot_sha256': PUB.digest(r.capture_value),
+        }
+        for key in ['attempt_scope_sha256', 'sidecar_sha256', 'snapshot_sha256', 'target_source_sha256']:
+            bad = {**ack, key: 'f' * 64}
+            with self.subTest(key=key), self.assertRaises(PUB.SemanticPublicationRejectedError):
+                r.scope.require_ack(bad)
+
+    def test_publication_fixed_lambda_cannot_borrow_previous_validation(self):
+        r = self.r
+        r.prepare()
+        candidate, receipt = r.receipt()
+        r.read()
+        with self.assertRaisesRegex(PUB.SemanticPublicationRejectedError, 'captured_context_fresh_validation_required'):
+            PUB.require_publication(
+                r.doc,
+                uid=r.uid,
+                conversation_id=r.cid,
+                candidate=candidate,
+                receipt_id=receipt,
+                read_companion_context=lambda uid: copy.deepcopy(r.capture_value),
+            )
+
+    def test_actual_publication_receipt_chain_with_two_fresh_validations(self):
+        r = self.r
+        r.prepare()
+        candidate, receipt = r.receipt()
+        r.host.rows = []
+        r.host.write_index()
+        before = r.scope.validations
+        PUB.require_publication(
+            r.doc,
+            uid=r.uid,
+            conversation_id=r.cid,
+            candidate=candidate,
+            receipt_id=receipt,
+            read_companion_context=lambda uid: r.read(),
+        )
+        self.assertEqual(r.scope.validations, before + 2)
+
+    def test_scope_context_close_blocks_stale_context_copy(self):
+        r = self.r
+        r.prepare()
+        copied = __import__('contextvars').copy_context()
+        r.context.__exit__(None, None, None)
+        with self.assertRaises(PUB.SemanticPublicationRejectedError):
+            copied.run(r.scope.envelope)
+        with self.assertRaises(PUB.SemanticPublicationRejectedError):
+            PUB.current_binding(r.doc, uid=r.uid, conversation_id=r.cid)
+        # Prevent repeated context-manager exit in fixture teardown.
+        r.context = __import__('contextlib').nullcontext()
+
+    def test_v1_without_scope_retains_legacy_current_binding_and_no_ticket(self):
+        r = self.r
+        r.prepare()
+        r.context.__exit__(None, None, None)
+        r.context = __import__('contextlib').nullcontext()
+        p = r.doc[PUB.POLICY_FIELD]
+        for key in ['context_contract_version', 'captured_context_manifest_sha256', 'captured_context_attempt_sha256']:
+            p.pop(key)
+        binding = PUB.current_binding(r.doc, uid=r.uid, conversation_id=r.cid)
+        self.assertIs(type(binding), PUB.PublicationBinding)
+        self.assertIsNone(SCOPE.validation_ticket(r.doc, r.uid, r.cid))
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+
+class CancellationAndCoordinator(unittest.TestCase):
+    def test_cancelled_owner_scope_blocks_late_thread_capture_install(self):
+        import threading
+
+        r = Rig()
+        r.context.__exit__(None, None, None)
+        r.context = __import__('contextlib').nullcontext()
+        entered = threading.Event()
+        release = threading.Event()
+        done = threading.Event()
+        seen = {}
+        original = SCOPE._exchange_async
+
+        async def exchange(**kw):
+            entered.set()
+            await asyncio.to_thread(release.wait, 2)
+            return await original(**kw)
+
+        async def exercise():
+            async def driver():
+                with SCOPE.attempt_context(r.uid, r.cid) as value:
+                    seen['scope'] = value
+
+                    def work():
+                        try:
+                            r.capture()
+                        except BaseException as error:
+                            seen['error'] = error
+                        finally:
+                            done.set()
+
+                    await asyncio.to_thread(work)
+
+            task = asyncio.create_task(driver())
+            self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            release.set()
+            self.assertTrue(await asyncio.to_thread(done.wait, 2))
+
+        try:
+            with patch.object(SCOPE, '_exchange_async', exchange):
+                asyncio.run(exercise())
+            self.assertTrue(seen['scope'].closed)
+            self.assertIsNone(seen['scope']._sealed)
+            self.assertIsInstance(seen['error'], PUB.SemanticPublicationRejectedError)
+        finally:
+            r.close()
+
+    def test_actual_coordinator_captures_after_learning_marks_admitted_before_produce(self):
+        from dataclasses import dataclass
+        from contextlib import nullcontext
+        import threading
+
+        r = Rig()
+        r.context.__exit__(None, None, None)
+        r.context = __import__('contextlib').nullcontext()
+        queued = ID.build_enrichment_identity(uid=r.uid, conversation_id=r.cid, conversation=r.doc)
+        r.job['client_interaction_id'] = queued.client_interaction_id
+        r.fenced = FENCE.begin(
+            FENCE.reserve(ISOLATION.attempt(r.job), claims_open=True, previously_quarantined=False),
+            ISOLATION.attempt(r.job),
+            claims_open=True,
+        )
+        r.host.attempt = SCOPE.expected_attempt_digest(r.job)
+
+        async def wait(_, value):
+            return await value
+
+        async def nohold(uid):
+            pass
+
+        timing = module(
+            'ella.services.enrichment_stage_timing',
+            stage=lambda *a: nullcontext(),
+            operation=lambda *a: nullcontext(),
+            await_stage=wait,
+        )
+        companion = module(
+            'ella.services.semantic_companion_context',
+            SOURCES=HOST.snapshot.SOURCES,
+            MAX_DOCUMENT_BYTES=65536,
+            MAX_SNAPSHOT_BYTES=131072,
+            CompanionContextUnavailable=HOST.snapshot.CompanionContextUnavailable,
+        )
+        hold = module(
+            'ella.services.transcript_processing_hold',
+            assert_transcript_processing_active=lambda uid: None,
+            require_transcript_processing_active=nohold,
+        )
+        lifecycle = module(
+            'database.normal_account_lifecycle',
+            TAG=LIFECYCLE.TAG,
+            digest=LIFECYCLE.digest,
+            require_dispatch_context=lambda *a: None,
+        )
+        mods = {
+            'ella.services.enrichment_stage_timing': timing,
+            'ella.services.semantic_companion_context': companion,
+            'ella.services.transcript_processing_hold': hold,
+            'database.normal_account_lifecycle': lifecycle,
+            'database._client': module('database._client', db=object()),
+        }
+
+        class StopProduce(Exception):
+            pass
+
+        async def runtime(*a, **kw):
+            return r.runtime
+
+        async def user(**kw):
+            return {'confirmed': True, 'event_id': 'synthetic-user-event'}
+
+        async def sync_context(*a, **kw):
+            return None
+
+        async def learning(**kw):
+            return {'status': 'no_learning'}
+
+        updates = []
+        seen = {}
+
+        def update(uid, cid, builder):
+            changes, result = builder(copy.deepcopy(r.doc))
+            updates.append(copy.deepcopy(changes))
+            r.doc.update(changes)
+            return {'result': result}
+
+        async def produce(**kw):
+            seen['scope'] = SCOPE.current_scope(r.uid, r.cid)
+            self.assertTrue(seen['scope'].admitted)
+            self.assertEqual(seen['scope'].fields()['context_contract_version'], 2)
+            raise StopProduce()
+
+        original = SCOPE._exchange_async
+
+        async def exchange(**kw):
+            if kw['url'].endswith('/snapshot-v2'):
+                entries = r.doc['semantic_retained_completion_jobs_v1']
+                self.assertEqual(next(iter(entries.values()))['learning']['status'], 'no_learning')
+                seen['after_learning'] = True
+            return await original(**kw)
+
+        try:
+            with patch.dict(sys.modules, mods):
+                host_module = load(
+                    'ella.services.semantic_host_context', ROOT / 'candidate/ella/services/semantic_host_context.py'
+                )
+
+                def hydrate(runtime, **kw):
+                    scope = SCOPE.current_scope(r.uid, r.cid)
+                    if scope is not None and scope._sealed is not None:
+                        return host_module.host_context(
+                            runtime=runtime,
+                            uid=r.uid,
+                            conversation_id=r.cid,
+                            runtime_identity=r.identity,
+                            read_conversation=r.reader,
+                            read_budget=kw['host_read_budget'],
+                        )
+                    return HOST.snapshot.hydrate_owned_workspace(runtime, uid=r.uid, runtime_identity=r.identity)
+
+                scope = {
+                    '__name__': 'actual_captured_retained_coordinator',
+                    'asyncio': asyncio,
+                    'copy': copy,
+                    'threading': threading,
+                    'dataclass': dataclass,
+                    'SimpleNamespace': SimpleNamespace,
+                    'admission': PUB,
+                    '_timing': timing,
+                    'canonical_source_from_conversation': CAN.canonical_source_from_conversation,
+                    'canonical_source_sha256': CAN.canonical_source_sha256,
+                    'transcript_source': ID.transcript_source,
+                    'build_enrichment_identity': ID.build_enrichment_identity,
+                    'require_initial_source': lambda *a: None,
+                    'require_current_runtime': lambda *a: None,
+                    'require_transcript_processing_active': nohold,
+                    'JOBS_FIELD': 'semantic_retained_completion_jobs_v1',
+                    'MAX_JOBS': 8,
+                }
+                sys.modules[scope['__name__']] = module(scope['__name__'])
+                tree = ast.parse((ROOT / 'candidate/ella/services/retained_completion_enrichment.py').read_text())
+                nodes = [
+                    n
+                    for n in tree.body
+                    if isinstance(n, (ast.FunctionDef, ast.ClassDef))
+                    and n.name
+                    in {'reject', 'owned', 'source_pin', 'Dependencies', 'RetainedCompletionEnrichmentService'}
+                ]
+                exec(
+                    compile(
+                        ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])),
+                        'actual_retained_coordinator',
+                        'exec',
+                    ),
+                    scope,
+                )
+                deps = scope['Dependencies'](
+                    selected=lambda uid: True,
+                    resolve=runtime,
+                    identity=lambda x: r.identity,
+                    revalidate=runtime,
+                    consent=lambda uid: uid,
+                    hydrate=hydrate,
+                    produce=produce,
+                    apply_factory=lambda **k: None,
+                    canonical_user=user,
+                    sync_context=sync_context,
+                    learning=learning,
+                )
+                service = scope['RetainedCompletionEnrichmentService'](
+                    repository=object(), read_conversation=r.reader, update_conversation=update, dependencies=deps
+                )
+                with patch.object(SCOPE, '_exchange_async', exchange), self.assertRaises(StopProduce):
+                    asyncio.run(
+                        service._enrich(r.uid, r.cid, False, queued.client_interaction_id, queued.transcript_sha256)
+                    )
+            self.assertTrue(seen['after_learning'])
+            self.assertTrue(seen['scope'].closed)
+            self.assertEqual(len(updates), 4)
+            self.assertEqual(r.doc[PUB.POLICY_FIELD]['context_contract_version'], 2)
+        finally:
+            r.close()
+
+
+class StructuralAndLegacy(unittest.TestCase):
+    def test_malformed_host_capture_even_rehashed_cannot_install(self):
+        r = Rig()
+        try:
+            value = asyncio.run(r.host.capture())
+            mutations = [
+                lambda v: v['snapshot']['documents'].update(unknown='private'),
+                lambda v: v['sidecar']['raw_files']['MEMORY.md'].update(present=True, sha256=None),
+                lambda v: v['sidecar']['recent_index_records'][0].update(deleted=True),
+                lambda v: v['sidecar']['recent_index_records'][0].update(active_summary_version_id=True),
+                lambda v: v['sidecar'].update(registry_revision_sha256='bad'),
+            ]
+            for mutate in mutations:
+                bad = copy.deepcopy(value)
+                mutate(bad)
+                bad['sidecar']['snapshot_sha256'] = PUB.digest(bad['snapshot'])
+                bad['sidecar_sha256'] = PUB.digest(bad['sidecar'])
+                with self.subTest(mutation=mutate), self.assertRaises(PUB.SemanticPublicationRejectedError):
+                    r.scope.install(bad, runtime=r.runtime, identity=r.identity, reader=r.reader)
+                self.assertIsNone(r.scope._sealed)
+        finally:
+            r.close()
+
+    def test_unknown_context_versions_and_policy_manifest_drift_fail_closed(self):
+        r = Rig()
+        try:
+            r.prepare()
+            policy = r.doc[PUB.POLICY_FIELD]
+            for value in [0, 3, True, '2']:
+                policy['context_contract_version'] = value
+                with self.subTest(value=value), self.assertRaises(PUB.SemanticPublicationRejectedError):
+                    PUB.current_binding(r.doc, uid=r.uid, conversation_id=r.cid)
+            policy['context_contract_version'] = 2
+            policy['captured_context_manifest_sha256'] = 'f' * 64
+            with self.assertRaises(PUB.SemanticPublicationRejectedError):
+                r.read()
+        finally:
+            r.close()
+
+    def test_no_budget_default_yields_no_context_and_no_new_policy_fields(self):
+        r = Rig()
+        r.context.__exit__(None, None, None)
+        r.context = __import__('contextlib').nullcontext()
+        token = BUDGET._CURRENT.set(None)
+        try:
+            with SCOPE.attempt_context(r.uid, r.cid) as scope:
+                self.assertIsNone(scope)
+                self.assertIsNone(SCOPE.current_scope(r.uid, r.cid))
+                self.assertEqual(SCOPE.policy_fields(r.uid, r.cid), {})
+        finally:
+            BUDGET._CURRENT.reset(token)
+            r.close()
+
+    def test_validation_in_other_context_cannot_satisfy_local_read_ticket(self):
+        r = Rig()
+        try:
+            r.prepare()
+            candidate, receipt = r.receipt()
+            other = __import__('contextvars').copy_context()
+            with self.assertRaisesRegex(
+                PUB.SemanticPublicationRejectedError, 'captured_context_fresh_validation_required'
+            ):
+                PUB.require_publication(
+                    r.doc,
+                    uid=r.uid,
+                    conversation_id=r.cid,
+                    candidate=candidate,
+                    receipt_id=receipt,
+                    read_companion_context=lambda uid: other.run(r.read),
+                )
+        finally:
+            r.close()
+
+
+class EarlyPublicationSourceGuard(unittest.TestCase):
+    def test_current_binding_rejects_local_source_status_flags_before_host(self):
+        r = Rig()
+        try:
+            r.prepare()
+            before = r.exchanges
+            original = copy.deepcopy(r.doc)
+            for key, value in [
+                ('uid', 'foreign'),
+                ('status', 'discarded'),
+                ('deleted', True),
+                ('discarded', True),
+                ('is_locked', True),
+                ('active_summary_version_id', 'new'),
+                ('transcript_segments', [{'text': 'edited'}]),
+            ]:
+                r.doc = copy.deepcopy(original)
+                r.doc[key] = value
+                with self.subTest(key=key), self.assertRaises(PUB.SemanticPublicationRejectedError):
+                    PUB.current_binding(r.doc, uid=r.uid, conversation_id=r.cid)
+            self.assertEqual(r.exchanges, before)
+        finally:
+            r.close()

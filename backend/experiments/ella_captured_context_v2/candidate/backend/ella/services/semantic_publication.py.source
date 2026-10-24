@@ -1,0 +1,289 @@
+"""Internal, owner-bound semantic publication ledger. No HTTP issuance surface.
+
+Only the trusted backend runner may record completed runtime operations. Producers
+and callbacks carry opaque IDs; their verdicts are never publication evidence.
+Policy and receipts live in the same owner-scoped conversation transaction.
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import uuid
+from dataclasses import asdict, dataclass
+from typing import Any
+
+from ella.services.canonical_summary_source import canonical_source_from_conversation, canonical_source_sha256
+
+POLICY_FIELD = 'semantic_publication_policy'
+OPERATIONS_FIELD = 'semantic_publication_operations'
+RECEIPTS_FIELD = 'semantic_publication_receipts'
+CONTRACT = 'ella-semantic-publication-v1'
+SUMMARY_FIELDS = ('title', 'overview', 'emoji', 'category')
+
+
+class SemanticPublicationRejectedError(RuntimeError):
+    pass
+
+
+def digest(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode()
+    ).hexdigest()
+
+
+def candidate_sha256(candidate: dict) -> str:
+    return digest({field: candidate.get(field) for field in SUMMARY_FIELDS})
+
+
+@dataclass(frozen=True)
+class PublicationBinding:
+    uid: str
+    conversation_id: str
+    source_sha256: str
+    source_version: str
+    active_summary_version_id: str
+    policy_revision: str
+    companion_context_sha256: str
+    companion_context_revision: str
+    transcript_sha256: str
+
+    def __post_init__(self):
+        if any(not isinstance(value, str) or len(value) > 512 for value in asdict(self).values()):
+            _reject('semantic_binding_invalid')
+        if not self.uid or not self.conversation_id or not self.policy_revision or not self.companion_context_revision:
+            _reject('semantic_binding_invalid')
+        for value in (self.source_sha256, self.companion_context_sha256, self.transcript_sha256):
+            if len(value) != 64 or any(char not in '0123456789abcdef' for char in value):
+                _reject('semantic_binding_invalid')
+
+
+def _reject(reason: str):
+    raise SemanticPublicationRejectedError(reason)
+
+
+def policy_enabled(conversation: dict) -> bool:
+    policy = conversation.get(POLICY_FIELD)
+    # A malformed explicitly present policy fails closed, including enabled=1.
+    return POLICY_FIELD in conversation and (not isinstance(policy, dict) or policy.get('enabled') is not False)
+
+
+def candidate_schema(conversation: dict) -> int:
+    policy = conversation.get(POLICY_FIELD)
+    if not isinstance(policy, dict):
+        _reject('semantic_policy_incomplete')
+    schema = policy.get('contextual_schema_version', 1)
+    if type(schema) is not int or schema not in {1, 2}:
+        _reject('semantic_schema_invalid')
+    return schema
+
+
+def semantic_contract_version(conversation):
+    policy=conversation.get(POLICY_FIELD)
+    if not isinstance(policy,dict):_reject('semantic_policy_incomplete')
+    version=policy.get('semantic_contract_version',1)
+    if type(version) is not int or version not in (1,2):_reject('semantic_contract_version_invalid')
+    if version==2 and candidate_schema(conversation)!=2:_reject('semantic_contract_schema_mismatch')
+    return version
+
+
+def current_binding(conversation: dict, *, uid: str, conversation_id: str) -> PublicationBinding:
+    policy = conversation.get(POLICY_FIELD) or {}
+    if not isinstance(policy, dict):
+        _reject('semantic_policy_incomplete')
+    if policy.get('enabled') is not True or policy.get('admissions_open') is not True:
+        _reject('semantic_admission_closed')
+    if policy.get('uid') != uid or policy.get('conversation_id') != conversation_id:
+        _reject('semantic_policy_owner_mismatch')
+    for field in ('revision', 'companion_context_sha256', 'companion_context_revision'):
+        if not isinstance(policy.get(field), str) or not policy[field]:
+            _reject('semantic_policy_incomplete')
+    from ella.services.semantic_captured_context import require_policy as require_context_policy
+    context_version = require_context_policy(conversation, uid, conversation_id)
+    version = semantic_contract_version(conversation)
+    source = canonical_source_from_conversation(uid=uid, conversation_id=conversation_id, conversation=conversation)
+    from ella.services.summary_title_quality import has_title_quality, TITLE_REVISION_PREFIX
+    revision_payload={'revision': policy['revision'], 'contextual_schema_version': candidate_schema(conversation)}
+    if version==2:revision_payload['semantic_contract_version']=2
+    if context_version == 2:
+        revision_payload.update(context_contract_version=2,
+            captured_context_manifest_sha256=policy['captured_context_manifest_sha256'],
+            captured_context_attempt_sha256=policy['captured_context_attempt_sha256'])
+    bound_revision = digest(revision_payload)
+    if has_title_quality(policy['revision']):
+        bound_revision = TITLE_REVISION_PREFIX + bound_revision
+    return PublicationBinding(
+        uid,
+        conversation_id,
+        canonical_source_sha256(source),
+        str(source.get('finished_at') or source.get('started_at') or ''),
+        str(conversation.get('active_summary_version_id') or ''),
+        # Bind the schema as well as the revision. Changing a private schema
+        # switch can never reinterpret an existing completed operation/receipt.
+        bound_revision,
+        policy['companion_context_sha256'],
+        policy['companion_context_revision'],
+        digest(conversation.get('transcript_segments') or []),
+    )
+
+
+def _check_binding(conversation: dict, binding: PublicationBinding):
+    if binding != current_binding(conversation, uid=binding.uid, conversation_id=binding.conversation_id):
+        _reject('semantic_binding_changed')
+
+
+def record_completed_operation(
+    conversation: dict,
+    *,
+    binding: PublicationBinding,
+    operation_id: str,
+    role: str,
+    candidate: dict,
+    runtime_interaction_id: str,
+    canonical_assistant_event_id: str,
+    verifier_result: dict | None = None,
+) -> tuple[dict, dict]:
+    """INTERNAL trusted execution completion seam, not a callback/verdict API.
+
+    The runner must supply actual server-returned operation provenance and parsed
+    verifier output. Never expose this function through service-auth callbacks.
+    Return updates for update_conversation_with_builder; do not persist separately.
+    """
+    _check_binding(conversation, binding)
+    if role not in {'generator', 'verifier'} or not all(
+        isinstance(value, str) and value
+        for value in (operation_id, runtime_interaction_id, canonical_assistant_event_id)
+    ):
+        _reject('semantic_operation_invalid')
+    record = {
+        'contract': CONTRACT,
+        'binding': asdict(binding),
+        'role': role,
+        'status': 'completed',
+        'candidate_sha256': candidate_sha256(candidate),
+        'runtime_interaction_id': runtime_interaction_id,
+        'canonical_assistant_event_id': canonical_assistant_event_id,
+        'verifier_result': copy.deepcopy(verifier_result) if role == 'verifier' else None,
+    }
+    existing_operations = conversation.get(OPERATIONS_FIELD) or {}
+    if not isinstance(existing_operations, dict):
+        _reject('semantic_operations_invalid')
+    operations = copy.deepcopy(existing_operations)
+    if operation_id in operations:
+        if operations[operation_id] != record:
+            _reject('semantic_operation_reused')
+        return {}, {'operation_id': operation_id}
+    if len(operations) >= 16:
+        _reject('semantic_operation_capacity')
+    operations[operation_id] = record
+    return {OPERATIONS_FIELD: operations}, {'operation_id': operation_id}
+
+
+def issue_receipt(
+    conversation: dict,
+    *,
+    binding: PublicationBinding,
+    candidate: dict,
+    generator_operation_id: str,
+    verifier_operation_id: str,
+) -> tuple[dict, dict]:
+    """Internal transaction builder: load durable completed operations, not a verdict."""
+    _check_binding(conversation, binding)
+    operations = conversation.get(OPERATIONS_FIELD) or {}
+    if not isinstance(operations, dict):
+        _reject('semantic_operations_invalid')
+    generator = operations.get(generator_operation_id) or {}
+    verifier = operations.get(verifier_operation_id) or {}
+    if not generator_operation_id or generator_operation_id == verifier_operation_id:
+        _reject('semantic_operations_not_distinct')
+    candidate_hash = candidate_sha256(candidate)
+    if not isinstance(generator, dict) or not isinstance(verifier, dict):
+        _reject('semantic_operation_unverified')
+    for operation, role in ((generator, 'generator'), (verifier, 'verifier')):
+        if (
+            operation.get('contract') != CONTRACT
+            or operation.get('status') != 'completed'
+            or operation.get('role') != role
+            or operation.get('binding') != asdict(binding)
+            or operation.get('candidate_sha256') != candidate_hash
+        ):
+            _reject('semantic_operation_unverified')
+    if any(
+        not generator.get(field) or generator.get(field) == verifier.get(field)
+        for field in ('runtime_interaction_id', 'canonical_assistant_event_id')
+    ):
+        _reject('semantic_operations_not_distinct')
+    verdict = verifier.get('verifier_result') or {}
+    if not isinstance(verdict, dict):
+        _reject('semantic_verification_rejected')
+    if (
+        verdict.get('accepted') is not True
+        or verdict.get('source_grounded') is not True
+        or verdict.get('semantic_summary') is not True
+        or verdict.get('context_owner_verified') is not True
+    ):
+        _reject('semantic_verification_rejected')
+    receipt = {
+        'contract': CONTRACT,
+        'binding': asdict(binding),
+        'candidate_sha256': candidate_hash,
+        'generator_operation_id': generator_operation_id,
+        'verifier_operation_id': verifier_operation_id,
+    }
+    receipts = copy.deepcopy(conversation.get(RECEIPTS_FIELD) or {})
+    if not isinstance(receipts, dict):
+        _reject('semantic_receipts_invalid')
+    for receipt_id, existing in receipts.items():
+        if existing == receipt:
+            return {}, {'receipt_id': receipt_id}
+    if len(receipts) >= 16:
+        _reject('semantic_receipt_capacity')
+    receipt_id = uuid.uuid4().hex
+    receipts[receipt_id] = receipt
+    return {RECEIPTS_FIELD: receipts}, {'receipt_id': receipt_id}
+
+
+def require_publication(
+    conversation: dict, *, uid: str, conversation_id: str, candidate: dict, receipt_id: str | None,
+    read_companion_context=None,
+) -> None:
+    """Must run on the same transaction snapshot as every NEW summary mutation."""
+    if not policy_enabled(conversation):
+        return
+    binding = current_binding(conversation, uid=uid, conversation_id=conversation_id)
+    def fresh_context():
+        if candidate_schema(conversation) != 2:
+            return
+        # This callable is an INTERNAL server dependency, never HTTP input.
+        # Schema-v2 new publication holds if no trusted hydration path is wired.
+        if not callable(read_companion_context):
+            _reject('semantic_context_publication_guard_required')
+        from ella.services.semantic_captured_context import validation_ticket, require_validated_read
+        ticket = validation_ticket(conversation, uid, conversation_id)
+        snapshot = read_companion_context(uid)
+        require_validated_read(ticket, snapshot, conversation, uid, conversation_id)
+        if (not isinstance(snapshot, dict) or snapshot.get('owner_uid') != uid
+                or snapshot.get('revision') != binding.companion_context_revision
+                or digest(snapshot) != binding.companion_context_sha256):
+            _reject('semantic_context_publication_changed')
+    fresh_context()
+    receipts = conversation.get(RECEIPTS_FIELD) or {}
+    if not isinstance(receipts, dict):
+        _reject('semantic_receipts_invalid')
+    receipt = receipts.get(receipt_id) if receipt_id else None
+    if not isinstance(receipt, dict) or receipt.get('contract') != CONTRACT:
+        _reject('semantic_receipt_required')
+    if receipt.get('binding') != asdict(binding) or receipt.get('candidate_sha256') != candidate_sha256(candidate):
+        _reject('semantic_receipt_stale')
+    # Revalidate the durable operation chain, so fabricated receipt rows alone do not suffice.
+    _, result = issue_receipt(
+        conversation,
+        binding=binding,
+        candidate=candidate,
+        generator_operation_id=receipt.get('generator_operation_id'),
+        verifier_operation_id=receipt.get('verifier_operation_id'),
+    )
+    if result['receipt_id'] != receipt_id:
+        _reject('semantic_receipt_invalid')
+    fresh_context()

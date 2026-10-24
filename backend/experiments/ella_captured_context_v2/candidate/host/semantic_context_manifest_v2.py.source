@@ -1,0 +1,351 @@
+"""Internal captured context sidecar; no authority grants or provider calls.
+New opt-in only. Legacy snapshot remains owner_uid/revision/documents exactly.
+Batch adapter and normal materializer provenance MUST be server-owned dependencies.
+"""
+
+from __future__ import annotations
+from copy import deepcopy
+from dataclasses import dataclass
+import asyncio, hashlib, json, re
+from semantic_context_snapshot import SOURCES, _hydrate_with_raw
+
+MAX_ROWS = 80
+HEX = re.compile(r'[0-9a-f]{64}')
+CID = re.compile(r'[A-Za-z0-9_.:-]{1,200}')
+META_KEYS = {
+    'conversation_id',
+    'owner_sha256',
+    'canonical_source_sha256',
+    'transcript_sha256',
+    'active_summary_version_id',
+    'deleted',
+    'render_projection_sha256',
+}
+PROJECTION_KEYS = {'stamp', 'title', 'emoji', 'category', 'segments', 'overview'}
+RAW_KEYS = {name for names in SOURCES.values() for name in names}
+INDEX_RAW = set(SOURCES['recentOMIindex'])
+SIDECAR_KEYS = {
+    'contract',
+    'owner_sha256',
+    'target_conversation_id',
+    'target_source_sha256',
+    'runtime_authority_sha256',
+    'runtime_binding_id_sha256',
+    'runtime_revision_sha256',
+    'profile_sha256',
+    'registry_revision_sha256',
+    'attempt_scope_sha256',
+    'snapshot_sha256',
+    'raw_files',
+    'recent_index_records',
+}
+
+
+class ManifestHold(ValueError):
+    pass
+
+
+def encoded(v):
+    return json.dumps(v, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+
+
+def digest(v):
+    return hashlib.sha256(encoded(v)).hexdigest()
+
+
+def textsha(v):
+    return hashlib.sha256(v.encode()).hexdigest()
+
+
+def require(value, code):
+    if not value:
+        raise ManifestHold(code)
+
+
+def hexsha(v):
+    return type(v) is str and bool(HEX.fullmatch(v))
+
+
+def raw_manifest(raw):
+    require(type(raw) is dict and set(raw) == RAW_KEYS, 'raw_manifest_shape')
+    require(all(v is None or type(v) is str for v in raw.values()), 'raw_manifest_value')
+    return {
+        k: {
+            'present': v is not None,
+            'sha256': None if v is None else textsha(v),
+            'utf8_bytes': 0 if v is None else len(v.encode()),
+        }
+        for k, v in raw.items()
+    }
+
+
+def render_row(p):
+    require(
+        type(p) is dict
+        and set(p) == PROJECTION_KEYS
+        and all(type(v) is str and len(v.encode()) <= 8192 for v in p.values()),
+        'projection_shape',
+    )
+    require(all('\n' not in v and '\r' not in v for v in p.values()), 'projection_newline')
+    # Existing normal index row format; record link is appended by RecentRow.
+    return f"- [{p['stamp']}] **{p['emoji']} 🪽 {p['title']}** — {p['category']} — {p['segments']} segments — "
+
+
+@dataclass(frozen=True)
+class RecentRow:
+    """Created at normal owned materialization, never parsed from markdown UID."""
+
+    conversation_id: str
+    projection: dict
+
+    def text(self):
+        require(
+            type(self.conversation_id) is str
+            and bool(CID.fullmatch(self.conversation_id))
+            and '..' not in self.conversation_id,
+            'row_cid',
+        )
+        prefix = render_row(self.projection)
+        tail = f"[details](conversations/omi-{self.conversation_id}.md)"
+        return prefix + tail + (f" — summary: {self.projection['overview']}" if self.projection['overview'] else '')
+
+
+def index_text(rows):
+    return (
+        '# Recent Conversations\n\nPacific-local time is listed first; UTC is reference only.\n\n'
+        + ('\n'.join(r.text() for r in rows) if rows else 'No recent OMI conversations are materialized.')
+        + '\n'
+    )
+
+
+def validate_batch(response, *, owner, target_cid, target_source, runtime_sha, cids):
+    require(
+        type(response) is dict
+        and set(response)
+        == {
+            'contract',
+            'owner_sha256',
+            'target_conversation_id',
+            'target_source_sha256',
+            'runtime_authority_sha256',
+            'attempt_scope_sha256',
+            'records',
+        },
+        'batch_shape',
+    )
+    require(
+        response['contract'] == 'ella-context-records-v2'
+        and response['owner_sha256'] == textsha(owner)
+        and response['target_conversation_id'] == target_cid
+        and response['target_source_sha256'] == target_source
+        and response['runtime_authority_sha256'] == runtime_sha,
+        'batch_scope',
+    )
+    require(hexsha(response['attempt_scope_sha256']), 'attempt_scope')
+    records = response['records']
+    require(type(records) is dict and set(records) == set(cids) and len(records) <= MAX_ROWS, 'batch_count')
+    result = {}
+    for key, row in records.items():
+        require(type(row) is dict and set(row) == META_KEYS, 'record_shape')
+        cid = row['conversation_id']
+        require(key == cid, 'record_key_mismatch')
+        require(type(cid) is str and cid in cids and cid not in result, 'record_cid')
+        require(row['owner_sha256'] == textsha(owner) and row['deleted'] is False, 'record_owner_or_deleted')
+        require(
+            all(hexsha(row[k]) for k in ['canonical_source_sha256', 'transcript_sha256', 'render_projection_sha256']),
+            'record_digest',
+        )
+        require(
+            type(row['active_summary_version_id']) is str and 0 < len(row['active_summary_version_id']) <= 128,
+            'record_version',
+        )
+        result[cid] = deepcopy(row)
+    require(set(result) == set(cids), 'record_missing')
+    return result, response['attempt_scope_sha256']
+
+
+class CapturedContextHostV2:
+    """One batch metadata RPC per capture/validation; bounded current authority reads.
+    sync_operation is actual SyncOnlyOperation. It keeps its original owner/source
+    callbacks; this class cannot manufacture Authority, consent or source identity.
+    """
+
+    def __init__(self, *, sync_operation, read_materialized_rows, read_record_batch):
+        self.operation = sync_operation
+        self.materialized = read_materialized_rows
+        self.batch = read_record_batch
+
+    async def _start(self, uid, cid, source):
+        authority, actual = await self.operation._fresh(uid, cid)
+        require(actual == source, 'target_source_changed')
+        key = digest({'domain': 'ella-sync-only-v1', 'uid': uid, 'conversation_id': cid})
+        binding = {
+            'uid': uid,
+            'conversation_id': cid,
+            'source_sha256': source,
+            'runtime_authority_sha256': authority.identity.digest,
+            'registry_revision': authority.registry_revision,
+        }
+        start = self.operation.journal.read(key, 'start')
+        complete = self.operation.journal.read(key, 'completed')
+        require(start == {'status': 'started', 'binding': binding}, 'sync_start_required')
+        require(
+            type(complete) is dict
+            and set(complete) == {'status', 'binding', 'context_sha256', 'context_revision'}
+            and complete['status'] == 'completed'
+            and complete['binding'] == binding,
+            'sync_complete_required',
+        )
+        return authority
+
+    async def _records(self, uid, cid, source, authority, cids):
+        require(len(cids) <= MAX_ROWS and len(set(cids)) == len(cids), 'record_limit')
+        response = await self.batch(
+            uid=uid,
+            target_conversation_id=cid,
+            expected_target_source_sha256=source,
+            runtime_authority_sha256=authority.identity.digest,
+            conversation_ids=list(cids),
+        )
+        return validate_batch(
+            response, owner=uid, target_cid=cid, target_source=source, runtime_sha=authority.identity.digest, cids=cids
+        )
+
+    async def capture(self, *, uid, conversation_id, expected_source_sha256):
+        async with asyncio.timeout(50):
+            return await self._capture(
+                uid=uid, conversation_id=conversation_id, expected_source_sha256=expected_source_sha256
+            )
+
+    async def _capture(self, *, uid, conversation_id, expected_source_sha256):
+        a = await self._start(uid, conversation_id, expected_source_sha256)
+        snapshot, raw = await asyncio.to_thread(_hydrate_with_raw, a.runtime, uid=uid, runtime_identity=a.identity)
+        rows = self.materialized(uid=uid, runtime=a.runtime)
+        require(
+            type(rows) is list and len(rows) <= MAX_ROWS and all(type(r) is RecentRow for r in rows),
+            'materialized_rows',
+        )
+        # Rows are structured normal materialization inputs. Render equality binds
+        # exact on-disk selected index without parsing text for owner/provenance.
+        require(raw['recent-conversations.md'] == index_text(rows), 'materialized_index_mismatch')
+        ids = [r.conversation_id for r in rows]
+        records, attempt_scope = await self._records(uid, conversation_id, expected_source_sha256, a, ids)
+        entries = []
+        for row in rows:
+            record = records[row.conversation_id]
+            require(record['render_projection_sha256'] == digest(row.projection), 'materialized_projection_stale')
+            entries.append({**record, 'row_sha256': textsha(row.text())})
+        after, source = await self.operation._fresh(uid, conversation_id)
+        require(after == a and source == expected_source_sha256, 'capture_authority_changed')
+        sidecar = {
+            'contract': 'ella-captured-context-sidecar-v2',
+            'owner_sha256': textsha(uid),
+            'target_conversation_id': conversation_id,
+            'target_source_sha256': expected_source_sha256,
+            'runtime_authority_sha256': a.identity.digest,
+            'runtime_binding_id_sha256': textsha(a.runtime.binding_id),
+            'runtime_revision_sha256': digest(a.runtime.revision),
+            'profile_sha256': textsha(a.runtime.profile_name),
+            'registry_revision_sha256': textsha(a.registry_revision),
+            'attempt_scope_sha256': attempt_scope,
+            'snapshot_sha256': digest(snapshot),
+            'raw_files': raw_manifest(raw),
+            'recent_index_records': entries,
+        }
+        return {'version': 2, 'snapshot': snapshot, 'sidecar': sidecar, 'sidecar_sha256': digest(sidecar)}
+
+    async def require_compatible(self, *, uid, conversation_id, expected_source_sha256, captured):
+        async with asyncio.timeout(50):
+            return await self._require_compatible(
+                uid=uid,
+                conversation_id=conversation_id,
+                expected_source_sha256=expected_source_sha256,
+                captured=captured,
+            )
+
+    async def _require_compatible(self, *, uid, conversation_id, expected_source_sha256, captured):
+        require(
+            type(captured) is dict
+            and len(encoded(captured)) <= 262144
+            and set(captured) == {'version', 'snapshot', 'sidecar', 'sidecar_sha256'}
+            and type(captured['version']) is int
+            and captured['version'] == 2,
+            'capture_envelope',
+        )
+        require(
+            type(captured['sidecar']) is dict
+            and captured['snapshot']['owner_uid'] == uid
+            and digest(captured['snapshot']) == captured['sidecar'].get('snapshot_sha256'),
+            'capture_snapshot_digest',
+        )
+        await self._validate_metadata(
+            uid=uid,
+            conversation_id=conversation_id,
+            expected_source_sha256=expected_source_sha256,
+            sidecar=captured['sidecar'],
+            sidecar_sha256=captured['sidecar_sha256'],
+        )
+        return deepcopy(captured['snapshot'])
+
+    async def validate_sidecar(self, *, uid, conversation_id, expected_source_sha256, sidecar, sidecar_sha256):
+        async with asyncio.timeout(50):
+            return await self._validate_metadata(
+                uid=uid,
+                conversation_id=conversation_id,
+                expected_source_sha256=expected_source_sha256,
+                sidecar=sidecar,
+                sidecar_sha256=sidecar_sha256,
+            )
+
+    async def _validate_metadata(self, *, uid, conversation_id, expected_source_sha256, sidecar, sidecar_sha256):
+        s = sidecar
+        require(
+            type(s) is dict
+            and len(encoded(s)) <= 131072
+            and set(s) == SIDECAR_KEYS
+            and s['contract'] == 'ella-captured-context-sidecar-v2'
+            and hexsha(sidecar_sha256)
+            and digest(s) == sidecar_sha256,
+            'capture_digest',
+        )
+        require(
+            s['owner_sha256'] == textsha(uid)
+            and s['target_conversation_id'] == conversation_id
+            and s['target_source_sha256'] == expected_source_sha256
+            and hexsha(s['snapshot_sha256']),
+            'capture_scope',
+        )
+        a = await self._start(uid, conversation_id, expected_source_sha256)
+        require(
+            s['runtime_authority_sha256'] == a.identity.digest
+            and s['runtime_binding_id_sha256'] == textsha(a.runtime.binding_id)
+            and s['runtime_revision_sha256'] == digest(a.runtime.revision)
+            and s['profile_sha256'] == textsha(a.runtime.profile_name)
+            and s['registry_revision_sha256'] == textsha(a.registry_revision),
+            'capture_runtime_changed',
+        )
+        _current, raw = await asyncio.to_thread(_hydrate_with_raw, a.runtime, uid=uid, runtime_identity=a.identity)
+        current = raw_manifest(raw)
+        require(set(s['raw_files']) == RAW_KEYS, 'capture_raw_shape')
+        require(all(current[k] == s['raw_files'][k] for k in RAW_KEYS - INDEX_RAW), 'protected_file_changed')
+        entries = s['recent_index_records']
+        require(type(entries) is list and len(entries) <= MAX_ROWS, 'capture_records_shape')
+        ids = [row['conversation_id'] for row in entries]
+        records, attempt_scope = await self._records(uid, conversation_id, expected_source_sha256, a, ids)
+        require(attempt_scope == s['attempt_scope_sha256'], 'capture_attempt_changed')
+        for old in entries:
+            require(set(old) == META_KEYS | {'row_sha256'} and hexsha(old['row_sha256']), 'capture_record_shape')
+            require(records[old['conversation_id']] == {k: old[k] for k in META_KEYS}, 'captured_record_changed')
+        after, source = await self.operation._fresh(uid, conversation_id)
+        require(after == a and source == expected_source_sha256, 'validation_authority_changed')
+        return {
+            'contract': 'ella-captured-context-validation-v2',
+            'compatible': True,
+            'owner_sha256': s['owner_sha256'],
+            'target_conversation_id': conversation_id,
+            'target_source_sha256': expected_source_sha256,
+            'runtime_authority_sha256': a.identity.digest,
+            'attempt_scope_sha256': attempt_scope,
+            'sidecar_sha256': sidecar_sha256,
+            'snapshot_sha256': s['snapshot_sha256'],
+        }

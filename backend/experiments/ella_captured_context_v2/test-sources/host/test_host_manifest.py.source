@@ -1,0 +1,889 @@
+"""Real host hydration and real SyncOnlyOperation authority/source checks.
+Synthetic temporary workspace and server-owned backend/registry/journal leaves.
+No live HTTP/DB/provider/credentials or real receipt/workspace content.
+"""
+
+import asyncio, copy, importlib.util, sys, tempfile, unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'candidate'))
+import semantic_context_snapshot as snapshot
+import semantic_context_manifest_v2 as v2
+
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    m = importlib.util.module_from_spec(spec)
+    sys.modules[name] = m
+    spec.loader.exec_module(m)
+    return m
+
+
+sync = load('actual_sync_operation_v2_test', ROOT / 'baseline/semantic_sync_operation.py')
+legacy = load('actual_legacy_hydrate_v2_test', ROOT / 'baseline/semantic_context_snapshot.py')
+
+
+class Rig:
+    def __init__(self):
+        self.tmp = tempfile.TemporaryDirectory(dir=ROOT, prefix='synthetic-')
+        self.path = Path(self.tmp.name).resolve()
+        self.path.chmod(0o700)
+        self.uid = 'synthetic-owner'
+        self.cid = 'target-cid'
+        self.source = {'uid': self.uid, 'conversation_id': self.cid, 'transcript': 'synthetic-target'}
+        self.source_sha = sync.digest(self.source)
+        self.runtime = SimpleNamespace(
+            uid=self.uid,
+            provider='hermes',
+            status='active',
+            agent_id='synthetic-agent',
+            binding_id='binding',
+            profile_name='profile',
+            workspace_root=str(self.path),
+            revision=1,
+        )
+        self.identity = SimpleNamespace(uid=self.uid, target_mode='hermes-cloud-transcript', digest='a' * 64)
+        self.authority = sync.Authority(self.runtime, self.identity, 'registry-v1', self.source_sha)
+        self.resolve_calls = 0
+        self.batch_calls = 0
+        self.batch_ids = []
+        self.journal_reads = []
+        self.attempt = 'b' * 64
+        self.reject = False
+        self.rows = [
+            v2.RecentRow(
+                'context-a',
+                {
+                    'stamp': 'fixed UTC',
+                    'title': 'synthetic title',
+                    'emoji': 'x',
+                    'category': 'other',
+                    'segments': '2',
+                    'overview': 'synthetic overview',
+                },
+            )
+        ]
+        self.metadata = {
+            r.conversation_id: {
+                'conversation_id': r.conversation_id,
+                'owner_sha256': v2.textsha(self.uid),
+                'canonical_source_sha256': 'c' * 64,
+                'transcript_sha256': 'd' * 64,
+                'active_summary_version_id': 'stock-v1',
+                'deleted': False,
+                'render_projection_sha256': v2.digest(r.projection),
+            }
+            for r in self.rows
+        }
+        self.write_index()
+        binding = {
+            'uid': self.uid,
+            'conversation_id': self.cid,
+            'source_sha256': self.source_sha,
+            'runtime_authority_sha256': self.identity.digest,
+            'registry_revision': self.authority.registry_revision,
+        }
+        self.receipts = {
+            'start': {'status': 'started', 'binding': binding},
+            'completed': {
+                'status': 'completed',
+                'binding': binding,
+                'context_sha256': 'e' * 64,
+                'context_revision': 'original-sync-revision',
+            },
+        }
+
+        def read(key, suffix):
+            assert key == sync.digest({'domain': 'ella-sync-only-v1', 'uid': self.uid, 'conversation_id': self.cid})
+            self.journal_reads.append(suffix)
+            return copy.deepcopy(self.receipts.get(suffix))
+
+        async def resolve(uid, cid):
+            self.resolve_calls += 1
+            if self.reject:
+                raise sync.SyncHold('closed_attempt')
+            assert (uid, cid) == (self.uid, self.cid)
+            return self.authority
+
+        async def read_source(uid, cid):
+            return copy.deepcopy(self.source)
+
+        async def batch(**kwargs):
+            self.batch_calls += 1
+            self.batch_ids.append(kwargs['conversation_ids'])
+            assert kwargs['uid'] == self.uid and kwargs['target_conversation_id'] == self.cid
+            return {
+                'contract': 'ella-context-records-v2',
+                'owner_sha256': v2.textsha(self.uid),
+                'target_conversation_id': self.cid,
+                'target_source_sha256': self.source_sha,
+                'runtime_authority_sha256': self.identity.digest,
+                'attempt_scope_sha256': self.attempt,
+                'records': {
+                    cid: copy.deepcopy(self.metadata[cid]) for cid in kwargs['conversation_ids'] if cid in self.metadata
+                },
+            }
+
+        operation = sync.SyncOnlyOperation(
+            journal=SimpleNamespace(read=read), resolve=resolve, read_source=read_source, sync=None
+        )
+        self.service = v2.CapturedContextHostV2(
+            sync_operation=operation,
+            read_materialized_rows=lambda **k: copy.deepcopy(self.rows),
+            read_record_batch=batch,
+        )
+
+    def write_index(self):
+        (self.path / 'recent-conversations.md').write_text(v2.index_text(self.rows))
+
+    def close(self):
+        self.tmp.cleanup()
+
+    async def capture(self):
+        return await self.service.capture(
+            uid=self.uid, conversation_id=self.cid, expected_source_sha256=self.source_sha
+        )
+
+    async def validate(self, captured):
+        return await self.service.require_compatible(
+            uid=self.uid, conversation_id=self.cid, expected_source_sha256=self.source_sha, captured=captured
+        )
+
+
+class Tests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.r = Rig()
+
+    def tearDown(self):
+        self.r.close()
+
+    async def test_actual_legacy_snapshot_unchanged_v2_sidecar_outside_model(self):
+        old = legacy.hydrate_owned_workspace(self.r.runtime, uid=self.r.uid, runtime_identity=self.r.identity)
+        self.assertEqual(
+            snapshot.hydrate_owned_workspace(self.r.runtime, uid=self.r.uid, runtime_identity=self.r.identity), old
+        )
+        cap = await self.r.capture()
+        self.assertEqual(cap['snapshot'], old)
+        self.assertEqual(set(cap['snapshot']), {'owner_uid', 'revision', 'documents'})
+        self.assertEqual(cap['sidecar']['snapshot_sha256'], v2.digest(old))
+        self.assertEqual(self.r.batch_calls, 1)
+
+    async def test_append_and_rolling_eviction_return_identical_original_snapshot(self):
+        cap = await self.r.capture()
+        self.r.rows = []
+        self.r.write_index()
+        returned = await self.r.validate(cap)
+        self.assertEqual(returned, cap['snapshot'])
+        self.assertEqual(self.r.batch_ids, [['context-a'], ['context-a']])
+        self.assertEqual(self.r.batch_calls, 2)
+        self.r.rows = [
+            v2.RecentRow(
+                'new-unrelated', dict(stamp='new', title='new', emoji='', category='other', segments='1', overview='')
+            )
+        ]
+        self.r.write_index()
+        self.assertEqual(await self.r.validate(cap), cap['snapshot'])
+
+    async def test_captured_record_edit_delete_owner_version_rejected(self):
+        cap = await self.r.capture()
+        original = copy.deepcopy(self.r.metadata['context-a'])
+        for key, value in [
+            ('canonical_source_sha256', 'f' * 64),
+            ('transcript_sha256', 'f' * 64),
+            ('active_summary_version_id', 'v2'),
+            ('render_projection_sha256', 'f' * 64),
+            ('owner_sha256', 'f' * 64),
+            ('deleted', True),
+        ]:
+            with self.subTest(key=key):
+                self.r.metadata['context-a'] = copy.deepcopy(original)
+                self.r.metadata['context-a'][key] = value
+                with self.assertRaises(v2.ManifestHold):
+                    await self.r.validate(cap)
+        self.r.metadata = {}
+        with self.assertRaises(v2.ManifestHold):
+            await self.r.validate(cap)
+
+    async def test_protected_raw_missing_to_empty_and_content_reject(self):
+        cap = await self.r.capture()
+        for name in sorted(v2.RAW_KEYS - v2.INDEX_RAW):
+            with self.subTest(name=name):
+                p = self.r.path / name
+                p.write_text('')
+                with self.assertRaises(v2.ManifestHold):
+                    await self.r.validate(cap)
+                p.unlink()
+        (self.r.path / 'MEMORY.md').write_text('changed')
+        with self.assertRaises(v2.ManifestHold):
+            await self.r.validate(cap)
+
+    async def test_mtime_and_unselected_metadata_do_not_poison_snapshot(self):
+        import os
+
+        p = self.r.path / 'MEMORY.md'
+        p.write_text('stable')
+        cap = await self.r.capture()
+        os.utime(p, ns=(1000000000, 2000000000))
+        (self.r.path / 'synthetic-attempt.json').write_text('metadata')
+        self.assertEqual(await self.r.validate(cap), cap['snapshot'])
+
+    async def test_runtime_profile_registry_and_attempt_changes_reject(self):
+        cap = await self.r.capture()
+        for key, value in [('revision', 2), ('binding_id', 'foreign'), ('profile_name', 'foreign')]:
+            original = getattr(self.r.runtime, key)
+            setattr(self.r.runtime, key, value)
+            with self.subTest(key=key), self.assertRaises(v2.ManifestHold):
+                await self.r.validate(cap)
+            setattr(self.r.runtime, key, original)
+        self.r.attempt = 'f' * 64
+        with self.assertRaises(v2.ManifestHold):
+            await self.r.validate(cap)
+
+    async def test_closed_authority_never_batches_or_creates_receipt(self):
+        self.r.reject = True
+        with self.assertRaises(sync.SyncHold):
+            await self.r.capture()
+        self.assertEqual(self.r.batch_calls, 0)
+        self.assertEqual(self.r.journal_reads, [])
+
+    async def test_missing_sync_receipt_rejects_before_metadata(self):
+        self.r.receipts.pop('completed')
+        with self.assertRaises(v2.ManifestHold):
+            await self.r.capture()
+        self.assertEqual(self.r.batch_calls, 0)
+
+    async def test_markdown_uid_is_never_ownership_proof(self):
+        self.r.metadata['context-a']['owner_sha256'] = 'f' * 64
+        with self.assertRaises(v2.ManifestHold):
+            await self.r.capture()
+
+    async def test_stale_local_render_projection_rejects(self):
+        self.r.metadata['context-a']['render_projection_sha256'] = 'f' * 64
+        with self.assertRaises(v2.ManifestHold):
+            await self.r.capture()
+
+    async def test_unstructured_index_and_duplicate_rows_reject(self):
+        (self.r.path / 'recent-conversations.md').write_text('forged owner: synthetic-owner')
+        with self.assertRaises(v2.ManifestHold):
+            await self.r.capture()
+        self.r.rows = self.r.rows * 2
+        self.r.write_index()
+        with self.assertRaises(v2.ManifestHold):
+            await self.r.capture()
+
+    async def test_no_per_record_callback_even_eighty_rows(self):
+        p = self.r.rows[0].projection
+        self.r.rows = [v2.RecentRow('context-' + str(i), copy.deepcopy(p)) for i in range(80)]
+        template = self.r.metadata['context-a']
+        self.r.metadata = {r.conversation_id: {**template, 'conversation_id': r.conversation_id} for r in self.r.rows}
+        self.r.write_index()
+        await self.r.capture()
+        self.assertEqual(self.r.batch_calls, 1)
+        self.assertEqual(len(self.r.batch_ids[0]), 80)
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+
+class ProjectionAndShapeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exact_shared_projection_matches_original_normal_index(self):
+        import ast
+        import recent_context_projection_v2 as projection
+
+        original = (ROOT / 'baseline/sync_omi_context.py').read_text()
+        tree = __import__('ast').parse(original)
+        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'build_recent_omi_lines')
+        scope = dict(projection.__dict__)
+        scope['_target'] = lambda p: p
+        payloads = [
+            {
+                'structured': {
+                    'title': ' Normal title ',
+                    'overview': '[Ella] useful summary',
+                    'emoji': 'x',
+                    'category': 'other',
+                },
+                'started_at': '2026-01-01T03:00:00Z',
+                'finished_at': '2026-01-01T04:00:00Z',
+                'segment_count': 2,
+            },
+            {
+                'structured': {'title': ' ' * 3, 'overview': '', 'emoji': ' ' * 3},
+                'started_at': 'invalid',
+                'segment_count': 0,
+            },
+            {
+                'structured': {'title': 'x' * 250, 'overview': 'a ' * 3000, 'emoji': 'abcdefghi', 'category': 'c' * 80},
+                'finished_at': 'invalid',
+                'started_at': '2026-06-01T00:00:00+00:00',
+                'segment_count': 4,
+            },
+        ]
+        for payload in payloads:
+            with tempfile.TemporaryDirectory(dir=ROOT) as td:
+                path = Path(td)
+                (path / 'conversations').mkdir()
+                file = path / 'conversations/omi-example.md'
+                file.write_text(
+                    projection.render_conversation(
+                        payload={**payload, 'transcript': 'fictional text only'},
+                        owner_uid='owner',
+                        agent_id='agent',
+                        conversation_id='example',
+                    )
+                )
+                scope['_read_managed_file'] = lambda p: (p.read_text(), p.stat())
+                exec(
+                    compile(
+                        ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])),
+                        'actual_normal_recent_builder',
+                        'exec',
+                    ),
+                    scope,
+                )
+                actual = scope['build_recent_omi_lines']({'conversations/omi-example.md'}, target_workspace=path)
+                row = v2.RecentRow(
+                    'example', projection.projection_from_payload(conversation_id='example', payload=payload)
+                )
+                self.assertEqual(actual, [row.text()])
+
+    async def test_tampered_capture_envelope_rejects_without_backend_batch(self):
+        r = Rig()
+        try:
+            cap = await r.capture()
+            before = r.batch_calls
+            for key in ['snapshot', 'sidecar_sha256', 'version']:
+                changed = copy.deepcopy(cap)
+                if key == 'snapshot':
+                    changed[key]['documents']['MEMORY.md'] = 'tampered'
+                elif key == 'version':
+                    changed[key] = True
+                else:
+                    changed[key] = 'f' * 64
+                with self.subTest(key=key), self.assertRaises(v2.ManifestHold):
+                    await r.validate(changed)
+            self.assertEqual(r.batch_calls, before)
+        finally:
+            r.close()
+
+    async def test_caller_cannot_expand_batch_above_eighty(self):
+        r = Rig()
+        try:
+            r.rows = r.rows * 81
+            with self.assertRaises(v2.ManifestHold):
+                await r.capture()
+            self.assertEqual(r.batch_calls, 0)
+        finally:
+            r.close()
+
+
+class ActualMaterializedAdapter(unittest.IsolatedAsyncioTestCase):
+    async def test_real_local_adapter_and_owned_batch_compose(self):
+        from semantic_context_materialized_rows_v2 import read_materialized_recent_rows
+        from recent_context_projection_v2 import render_conversation, projection_from_payload
+
+        r = Rig()
+        try:
+            payload = {
+                'structured': {'title': 'normal owned materialization', 'overview': 'fictional summary'},
+                'started_at': '2026-01-01T03:00:00Z',
+                'segment_count': 2,
+            }
+            directory = r.path / 'conversations'
+            directory.mkdir(mode=0o700)
+            (directory / 'omi-context-a.md').write_text(
+                render_conversation(
+                    payload=payload,
+                    owner_uid='ignored-frontmatter-not-authority',
+                    agent_id='ignored',
+                    conversation_id='context-a',
+                )
+            )
+            r.rows = [v2.RecentRow('context-a', projection_from_payload(conversation_id='context-a', payload=payload))]
+            r.metadata['context-a']['render_projection_sha256'] = v2.digest(r.rows[0].projection)
+            r.write_index()
+            r.service.materialized = read_materialized_recent_rows
+            captured = await r.capture()
+            self.assertEqual(r.batch_calls, 1)
+            self.assertEqual(await r.validate(captured), captured['snapshot'])
+            # Foreign record claim in frontmatter was never used; current same-owner
+            # backend proof, exact projection and raw-index rendering authorize the row.
+            r.metadata['context-a']['owner_sha256'] = 'f' * 64
+            with self.assertRaises(v2.ManifestHold):
+                await r.capture()
+        finally:
+            r.close()
+
+    async def test_symlink_source_is_not_followed(self):
+        from semantic_context_materialized_rows_v2 import read_materialized_recent_rows
+
+        r = Rig()
+        try:
+            (r.path / 'conversations').mkdir(mode=0o700)
+            (r.path / 'conversations/omi-context-a.md').symlink_to(r.path / 'recent-conversations.md')
+            r.service.materialized = read_materialized_recent_rows
+            with self.assertRaises(v2.ManifestHold):
+                await r.capture()
+            self.assertEqual(r.batch_calls, 0)
+        finally:
+            r.close()
+
+
+class ActualHttpAdapter(unittest.IsolatedAsyncioTestCase):
+    async def test_exact_existing_auth_batch_route_body_once(self):
+        sys.path.append(str(ROOT / 'baseline'))
+        from semantic_context_snapshot_host_v2 import BackendContextRecordsAdapter
+
+        calls = []
+
+        class Response:
+            status_code = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                pass
+
+            async def aiter_bytes(self):
+                yield b'{"records":{}}'
+
+        class Client:
+            def __init__(self, **kw):
+                self.options = kw
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                pass
+
+            def stream(self, method, url, **kw):
+                calls.append((method, url, kw, self.options))
+                return Response()
+
+        authority = SimpleNamespace(origin='http://127.0.0.1:8000', key='synthetic-existing-key', client_factory=Client)
+        read = BackendContextRecordsAdapter(authority)
+        value = await read(
+            uid='synthetic-owner',
+            target_conversation_id='native-uuid',
+            expected_target_source_sha256='a' * 64,
+            runtime_authority_sha256='b' * 64,
+            conversation_ids=['old-evicted-id'],
+        )
+        self.assertEqual(value, {'records': {}})
+        self.assertEqual(len(calls), 1)
+        method, url, kw, options = calls[0]
+        self.assertEqual(method, 'POST')
+        self.assertEqual(url, 'http://127.0.0.1:8000/v1/ella/conversation/native-uuid/context-records-v2')
+        self.assertEqual(
+            kw['json'],
+            {
+                'expected_target_source_sha256': 'a' * 64,
+                'expected_runtime_authority_sha256': 'b' * 64,
+                'conversation_ids': ['old-evicted-id'],
+            },
+        )
+        self.assertEqual(kw['headers']['X-Ella-Subject-Uid'], 'synthetic-owner')
+        self.assertFalse(options['follow_redirects'])
+        self.assertFalse(options['trust_env'])
+
+    async def test_transport_does_not_retry_rejected_batch(self):
+        sys.path.append(str(ROOT / 'baseline'))
+        from semantic_context_snapshot_host_v2 import BackendContextRecordsAdapter
+
+        calls = []
+
+        class Response:
+            status_code = 409
+            headers = {}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                pass
+
+        class Client:
+            def __init__(self, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                pass
+
+            def stream(self, *a, **kw):
+                calls.append(1)
+                return Response()
+
+        read = BackendContextRecordsAdapter(
+            SimpleNamespace(origin='http://127.0.0.1:8000', key='synthetic', client_factory=Client)
+        )
+        from semantic_context_snapshot_host_v2 import SyncHold as ActualTransportHold
+
+        with self.assertRaises(ActualTransportHold):
+            await read(
+                uid='synthetic-owner',
+                target_conversation_id='id',
+                expected_target_source_sha256='a' * 64,
+                runtime_authority_sha256='b' * 64,
+                conversation_ids=[],
+            )
+        self.assertEqual(calls, [1])
+
+
+class FullPrivateServiceClosure(unittest.IsolatedAsyncioTestCase):
+    async def test_actual_handler_authority_parser_journal_and_local_rows(self):
+        import json
+
+        sys.path.append(str(ROOT / 'baseline'))
+        from semantic_context_snapshot_host_v2 import captured_context_request
+        from semantic_sync_host import parse_authority
+        from semantic_sync_operation import Journal as ActualJournal
+        from recent_context_projection_v2 import render_conversation, projection_from_payload
+
+        r = Rig()
+        try:
+            payload = {
+                'structured': {'title': 'full closure fictional', 'overview': 'fictional'},
+                'started_at': '2026-01-01T03:00:00Z',
+                'segment_count': 1,
+            }
+            (r.path / 'conversations').mkdir(mode=0o700)
+            (r.path / 'conversations/omi-context-a.md').write_text(
+                render_conversation(
+                    payload=payload, owner_uid=r.uid, agent_id=r.runtime.agent_id, conversation_id='context-a'
+                )
+            )
+            r.rows = [v2.RecentRow('context-a', projection_from_payload(conversation_id='context-a', payload=payload))]
+            r.metadata['context-a']['render_projection_sha256'] = v2.digest(r.rows[0].projection)
+            r.write_index()
+            rr = {**vars(r.runtime), 'account_user_id': 'account', 'profile_user_id': 'account'}
+            registry = {
+                'agent_owners': {rr['agent_id']: r.uid, rr['profile_name']: r.uid},
+                'agent_workspaces': {rr['agent_id']: str(r.path), rr['profile_name']: str(r.path)},
+                'users': {
+                    'account': {
+                        'omiUid': r.uid,
+                        'userId': 'account',
+                        'hermes': {
+                            'userProfile': rr['profile_name'],
+                            'userAgentId': rr['agent_id'],
+                            'userWorkspace': str(r.path),
+                        },
+                    }
+                },
+            }
+            authority_value = {
+                'contract': 'ella-semantic-context-authority-v1',
+                'uid': r.uid,
+                'conversation_id': r.cid,
+                'canonical_source': r.source,
+                'source_sha256': r.source_sha,
+                'transcript_sha256': 'd' * 64,
+                'source_version': 'fixed',
+                'active_summary_version_id': 'stock',
+                'runtime': rr,
+                'runtime_identity': vars(r.identity),
+            }
+            actual = parse_authority(authority_value, r.uid, r.cid, rr['agent_id'], registry)
+            binding = {
+                'uid': r.uid,
+                'conversation_id': r.cid,
+                'source_sha256': r.source_sha,
+                'runtime_authority_sha256': r.identity.digest,
+                'registry_revision': actual.registry_revision,
+            }
+            state = r.path / 'synthetic-journal'
+            state.mkdir(mode=0o700)
+            journal = ActualJournal(state)
+            key = sync.digest({'domain': 'ella-sync-only-v1', 'uid': r.uid, 'conversation_id': r.cid})
+            try:
+                journal.publish(key, 'start', {'status': 'started', 'binding': binding})
+                journal.publish(
+                    key,
+                    'completed',
+                    {
+                        'status': 'completed',
+                        'binding': binding,
+                        'context_sha256': 'e' * 64,
+                        'context_revision': 'fixed-sync',
+                    },
+                )
+            finally:
+                journal.close()
+            calls = []
+
+            class Response:
+                status_code = 200
+
+                def __init__(self, value):
+                    self.value = value
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *a):
+                    pass
+
+                async def aiter_bytes(self):
+                    yield json.dumps(self.value).encode()
+
+            class Client:
+                def __init__(self, **kw):
+                    pass
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *a):
+                    pass
+
+                def stream(self, method, url, **kw):
+                    calls.append((method, url))
+                    if method == 'GET':
+                        return Response(authority_value)
+                    return Response(
+                        {
+                            'contract': 'ella-context-records-v2',
+                            'owner_sha256': v2.textsha(r.uid),
+                            'target_conversation_id': r.cid,
+                            'target_source_sha256': r.source_sha,
+                            'runtime_authority_sha256': r.identity.digest,
+                            'attempt_scope_sha256': r.attempt,
+                            'records': copy.deepcopy(r.metadata),
+                        }
+                    )
+
+            cap = await captured_context_request(
+                body={
+                    'uid': r.uid,
+                    'agent_id': rr['agent_id'],
+                    'conversation_id': r.cid,
+                    'expected_source_sha256': r.source_sha,
+                },
+                request_owner_uid=r.uid,
+                agent_id=rr['agent_id'],
+                workspace_for_agent=lambda agent, owner: r.path,
+                load_registry=lambda: copy.deepcopy(registry),
+                state_root=state,
+                backend_url='http://127.0.0.1:8000',
+                callback_key='synthetic-existing-key',
+                client_factory=Client,
+            )
+            self.assertEqual(cap['version'], 2)
+            self.assertEqual(
+                cap['snapshot'], legacy.hydrate_owned_workspace(r.runtime, uid=r.uid, runtime_identity=r.identity)
+            )
+            self.assertEqual([method for method, _ in calls], ['GET', 'GET', 'POST', 'GET', 'GET'])
+            calls.clear()
+            metadata_body = {
+                'uid': r.uid,
+                'agent_id': rr['agent_id'],
+                'conversation_id': r.cid,
+                'expected_source_sha256': r.source_sha,
+                'sidecar': cap['sidecar'],
+                'sidecar_sha256': cap['sidecar_sha256'],
+            }
+            ack = await captured_context_request(
+                body=metadata_body,
+                request_owner_uid=r.uid,
+                agent_id=rr['agent_id'],
+                workspace_for_agent=lambda agent, owner: r.path,
+                load_registry=lambda: copy.deepcopy(registry),
+                state_root=state,
+                backend_url='http://127.0.0.1:8000',
+                callback_key='synthetic-existing-key',
+                client_factory=Client,
+                validate=True,
+            )
+            self.assertEqual(
+                ack,
+                {
+                    'contract': 'ella-captured-context-validation-v2',
+                    'compatible': True,
+                    'owner_sha256': v2.textsha(r.uid),
+                    'target_conversation_id': r.cid,
+                    'target_source_sha256': r.source_sha,
+                    'runtime_authority_sha256': r.identity.digest,
+                    'attempt_scope_sha256': r.attempt,
+                    'sidecar_sha256': cap['sidecar_sha256'],
+                    'snapshot_sha256': v2.digest(cap['snapshot']),
+                },
+            )
+            self.assertNotIn('snapshot', ack)
+            self.assertNotIn('documents', json.dumps(ack))
+            self.assertEqual([method for method, _ in calls], ['GET', 'GET', 'POST', 'GET', 'GET'])
+        finally:
+            r.close()
+
+
+class OptInRoutes(unittest.IsolatedAsyncioTestCase):
+    async def test_existing_auth_dependency_and_default_v1_untouched(self):
+        import httpx
+        from fastapi import FastAPI, Request, HTTPException
+        from unittest.mock import patch
+        import semantic_context_snapshot_routes_v2 as routes
+
+        app = FastAPI()
+        calls = []
+
+        @app.post('/workspace/{agent_id}/semantic-context/snapshot')
+        async def legacy_route(agent_id: str):
+            return {'legacy': True}
+
+        async def auth(request: Request):
+            if request.headers.get('authorization') != 'Bearer synthetic-existing-key':
+                raise HTTPException(status_code=401)
+
+        async def fake_request(**kw):
+            calls.append(kw['validate'])
+            return {'synthetic': True}
+
+        routes.install_captured_context_routes(
+            app,
+            verify_token=auth,
+            validate_agent_id=lambda a: None,
+            request_owner_uid=lambda r: 'owner',
+            workspace_for_agent=lambda *a: ROOT,
+            load_registry=lambda: {},
+            state_root=ROOT,
+            backend_url='http://127.0.0.1:8000',
+            callback_key='synthetic-existing-key',
+        )
+        with patch.object(routes, 'captured_context_request', fake_request):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://inprocess') as client:
+                self.assertEqual(
+                    (await client.post('/workspace/agent/semantic-context/snapshot')).json(), {'legacy': True}
+                )
+                self.assertEqual(
+                    (await client.post('/workspace/agent/semantic-context/snapshot-v2', json={})).status_code, 401
+                )
+                self.assertEqual(calls, [])
+                response = await client.post(
+                    '/workspace/agent/semantic-context/snapshot-v2',
+                    json={},
+                    headers={'Authorization': 'Bearer synthetic-existing-key'},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers['cache-control'], 'no-store')
+                self.assertEqual(calls, [False])
+                self.assertEqual(
+                    (
+                        await client.post(
+                            '/workspace/agent/semantic-context/validate-v2',
+                            json={},
+                            headers={'Authorization': 'Bearer synthetic-existing-key'},
+                        )
+                    ).status_code,
+                    200,
+                )
+                self.assertEqual(calls, [False, True])
+
+
+class AdditionalTargetGuard(unittest.IsolatedAsyncioTestCase):
+    async def test_target_source_edit_rejected_by_actual_sync_fresh(self):
+        r = Rig()
+        try:
+            captured = await r.capture()
+            before = r.batch_calls
+            r.source['transcript'] = 'changed synthetic target'
+            with self.assertRaises(sync.SyncHold):
+                await r.validate(captured)
+            self.assertEqual(r.batch_calls, before)
+        finally:
+            r.close()
+
+
+class ClosedDiagnosticCodes(unittest.IsolatedAsyncioTestCase):
+    async def test_route_never_exports_hostile_error_content(self):
+        import httpx
+        from fastapi import FastAPI
+        from unittest.mock import patch
+        import semantic_context_snapshot_routes_v2 as routes
+
+        app = FastAPI()
+
+        async def auth():
+            pass
+
+        routes.install_captured_context_routes(
+            app,
+            verify_token=auth,
+            validate_agent_id=lambda a: None,
+            request_owner_uid=lambda r: 'owner',
+            workspace_for_agent=lambda *a: ROOT,
+            load_registry=lambda: {},
+            state_root=ROOT,
+            backend_url='http://127.0.0.1:8000',
+            callback_key='synthetic',
+        )
+        for value, expected in [
+            ('protected_file_changed', 'protected_file_changed'),
+            ('PRIVATE_SECRET\r\nInjected:value', 'unknown'),
+            ('not_an_allowed_code', 'unknown'),
+        ]:
+
+            async def fail(**kwargs):
+                raise routes.ManifestHold(value)
+
+            with patch.object(routes, 'captured_context_request', fail):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url='http://inprocess'
+                ) as client:
+                    response = await client.post('/workspace/a/semantic-context/snapshot-v2', json={})
+                    self.assertEqual(response.status_code, 409)
+                    self.assertEqual(response.json(), {'detail': {'code': 'semantic_context_v2_hold'}})
+                    self.assertEqual(response.headers['x-ella-captured-context-hold-code'], expected)
+                    self.assertNotIn('PRIVATE_SECRET', str(response.headers) + response.text)
+
+    async def test_batch_rejection_only_propagates_frozen_backend_code(self):
+        sys.path.append(str(ROOT / 'baseline'))
+        from semantic_context_snapshot_host_v2 import BackendContextRecordsAdapter, SyncHold as ActualHold
+
+        class Response:
+            status_code = 409
+            headers = {}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                pass
+
+        response = Response()
+
+        class Client:
+            def __init__(self, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                pass
+
+            def stream(self, *a, **k):
+                return response
+
+        read = BackendContextRecordsAdapter(
+            SimpleNamespace(origin='http://127.0.0.1:8000', key='synthetic', client_factory=Client)
+        )
+        for value, expected in [
+            ('context_record_owner_changed', 'context_record_owner_changed'),
+            ('PRIVATE_SECRET\r\nInjected:value', 'host_context_records_rejected'),
+        ]:
+            response.headers = {'X-Ella-Context-Records-Hold-Code': value}
+            with self.assertRaisesRegex(ActualHold, '^' + expected + '$'):
+                await read(
+                    uid='owner',
+                    target_conversation_id='target',
+                    expected_target_source_sha256='a' * 64,
+                    runtime_authority_sha256='b' * 64,
+                    conversation_ids=[],
+                )

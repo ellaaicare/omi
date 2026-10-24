@@ -1,0 +1,76 @@
+"""Actual host controller file primitives in disposable directories; unit/import/auth/health doubled."""
+import ast,copy,hashlib,json,os,tempfile,unittest
+from pathlib import Path
+from types import SimpleNamespace
+from urllib.error import HTTPError
+ROOT=Path(__file__).resolve().parents[1]
+CONTROLLER=ROOT/'control/deploy_once.py'
+class Rig:
+ def __init__(self):
+  self.tmp=tempfile.TemporaryDirectory(prefix='host-controller-review-',dir=ROOT)
+  self.root=Path(self.tmp.name);self.service=self.root/'bin';self.service.mkdir();self.evidence=self.root/'evidence';self.evidence.mkdir()
+  tree=ast.parse(CONTROLLER.read_text());tree.body=[n for n in tree.body if not (isinstance(n,ast.If) and isinstance(n.test,ast.Compare) and ast.unparse(n.test).startswith("__name__ =="))]
+  self.ns={'__file__':str(CONTROLLER),'__name__':'host_controller_fixture'}
+  exec(compile(ast.fix_missing_locations(tree),str(CONTROLLER),'exec'),self.ns)
+  self.pins=self.ns['PINS'];self.before={}
+  for name,meta in self.pins.items():
+   if meta['baseline_sha256'] is not None:
+    original=(ROOT/'baseline'/name)
+    if not original.exists():original=Path('/Users/ellaai/.hermes/profiles/plato-eval/bin')/name
+    data=original.read_bytes();assert hashlib.sha256(data).hexdigest()==meta['baseline_sha256']
+    path=self.service/name;path.write_bytes(data);path.chmod(0o640);self.before[name]=data
+   else:self.before[name]=None
+  self.ns.update(ROOT=self.service,EVIDENCE=self.evidence,RECEIPT=self.evidence/'receipt.json')
+  self.calls={'restart':0,'health':0};self.on_restart=None;self.on_wait=None
+  def restart():
+   self.calls['restart']+=1
+   if self.on_restart:self.on_restart(self.calls['restart'])
+  def wait():
+   if self.on_wait:return self.on_wait(self.calls['restart'])
+   return 200
+  self.ns.update(pid=lambda:99093 if self.calls['restart']==0 else 999999,health=lambda:200,restart=restart,wait=wait,subprocess=SimpleNamespace(run=lambda *a,**kw:SimpleNamespace(stdout=json.dumps({'state':'PASS_HOST_HELPER_IMPORTS_NETWORK_BLOCKED'}),returncode=0)),OPENER=SimpleNamespace(open=lambda request,**kw:(_ for _ in ()).throw(HTTPError(request.full_url,401,'synthetic',{},None))))
+ def close(self):self.tmp.cleanup()
+ def run(self):return self.ns['run']()
+ def record(self):return json.loads(self.ns['RECEIPT'].read_text())
+ def foreign_replace(self,p,data):
+  tmp=p.with_suffix('.foreign');tmp.write_bytes(data);os.replace(tmp,p)
+class Tests(unittest.TestCase):
+ def setUp(self):self.r=Rig()
+ def tearDown(self):self.r.close()
+ def test_success_new_helpers_auth_reject_and_held_old_state(self):
+  r=self.r;result=r.run();self.assertEqual(result['state'],'DEPLOYED_HEALTHY_NEW_ROUTES_AUTH_REJECT');self.assertEqual(r.calls['restart'],1)
+  for name,pin in r.pins.items():self.assertEqual(hashlib.sha256((r.service/name).read_bytes()).hexdigest(),pin['candidate_sha256']);self.assertEqual((r.service/name).stat().st_nlink,1)
+ def test_health_failure_restores_owned_originals_and_removes_only_owned_helpers(self):
+  r=self.r
+  def wait(n):
+   if n==1:raise RuntimeError('health')
+   return 200
+  r.on_wait=wait
+  with self.assertRaises(RuntimeError):r.run()
+  self.assertEqual(r.record()['state'],'ROLLED_BACK_HEALTHY')
+  for name,before in r.before.items():
+   p=r.service/name
+   if before is None:self.assertFalse(p.exists())
+   else:self.assertEqual(p.read_bytes(),before)
+ def test_receipt_hardlink_blocks_update(self):
+  r=self.r
+  def changed(n):os.link(r.ns['RECEIPT'],r.root/'receipt.alias')
+  r.on_restart=changed
+  with self.assertRaises(AssertionError):r.run()
+  self.assertEqual(r.calls['restart'],1)
+ def test_foreign_installed_file_blocks_rollback(self):
+  r=self.r;p=r.service/'semantic_context_snapshot.py'
+  def wait(n):
+   r.foreign_replace(p,p.read_bytes());raise RuntimeError('health')
+  r.on_wait=wait
+  with self.assertRaises(RuntimeError):r.run()
+  self.assertEqual(r.record()['state'],'ROLLBACK_UNCONFIRMED');self.assertEqual(r.calls['restart'],1)
+ def test_atomic_add_only_leaves_regular_single_link(self):
+  r=self.r;target=r.service/'new.py';mode=(r.service/'semantic_context_snapshot.py').stat()
+  value=r.ns['atomic'](target,b'# new\n',mode)
+  self.assertEqual(value.st_nlink,1);self.assertEqual(target.read_bytes(),b'# new\n')
+ def test_atomic_add_only_eexist_does_not_overwrite(self):
+  r=self.r;target=r.service/'new.py';target.write_bytes(b'foreign');mode=(r.service/'semantic_context_snapshot.py').stat()
+  with self.assertRaises(FileExistsError):r.ns['atomic'](target,b'# new\n',mode)
+  self.assertEqual(target.read_bytes(),b'foreign')
+if __name__=='__main__':unittest.main()

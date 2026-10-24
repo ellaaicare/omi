@@ -1,0 +1,98 @@
+"""Disposable deployment fault fixtures: actual controller/files, doubled DB/unit/import leaves."""
+import ast, base64, copy, hashlib, json, os, tempfile, unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+ROOT=Path(__file__).resolve().parents[1]
+CONTROLLER=ROOT/'control/deploy_once.py'
+class Rig:
+ def __init__(self):
+  self.tmp=tempfile.TemporaryDirectory(prefix='controller-review-',dir=ROOT)
+  self.root=Path(self.tmp.name);self.service=self.root/'service';self.stage=self.root/'stage';self.stage.mkdir(mode=0o700)
+  tree=ast.parse(CONTROLLER.read_text());tree.body=[n for n in tree.body if not isinstance(n,ast.ImportFrom) or not (n.module or '').startswith(('google.','database','ella.'))]
+  self.ns={'__name__':'controller_fixture','FieldFilter':lambda *a:None}
+  exec(compile(ast.fix_missing_locations(tree),str(CONTROLLER),'exec'),self.ns)
+  self.before={};self.payload={}
+  for name,digest in self.ns['FILES'].items():
+   path=self.service/name;path.parent.mkdir(parents=True,exist_ok=True)
+   data=(ROOT/'candidate'/name).read_bytes();assert hashlib.sha256(data).hexdigest()==digest
+   self.payload[name]=base64.b64encode(data).decode()
+   if self.ns['BASELINES'][name] is not None:
+    original=(ROOT/'serving-baseline'/name).read_bytes();assert hashlib.sha256(original).hexdigest()==self.ns['BASELINES'][name]
+    path.write_bytes(original);path.chmod(0o640);self.before[name]=original
+   else:self.before[name]=None
+  self.ns.update(ROOT=self.service,STAGE=self.stage,RECEIPT=self.stage/'receipt.json')
+  self.calls={'stop':0,'start':0,'health':0};self.on_stop=None;self.on_health=None
+  self.state={'MainPID':self.ns['EXPECTED_PID'],'ActiveState':'active','ControlPID':'0','KillMode':'control-group'}
+  self.smoke={'state':'PASS_REAL_SERVICE_IMPORTS_NETWORK_BLOCKED','network_attempts':0,'source_pins':self.ns['FILES'],'typed_publication_identity':True,'policy_field_match':True,'context_records_route_registered':True,'credential_reference_unchanged':True,'modules':{k[:-3].replace('/','.'): {'sha256':v} for k,v in self.ns['FILES'].items()}}
+  pre=self.stage/self.ns['IMPORT_STAGE'];pre.mkdir();(pre/'IMPORT.RESULT.safe.json').write_text(json.dumps(self.smoke))
+  import_text=(ROOT/'control/stage_import.py').read_text();itree=ast.parse(import_text);self.importbytes=next(ast.literal_eval(n.value) for n in itree.body if isinstance(n,ast.Assign) and any(isinstance(v,ast.Name) and v.id=='child' for v in n.targets)).encode()
+  assert hashlib.sha256(self.importbytes).hexdigest()==self.ns['IMPORT_SHA']
+  def stop():
+   self.calls['stop']+=1;self.state['MainPID']='0'
+   if self.on_stop:self.on_stop(self.calls['stop'])
+  def start():self.calls['start']+=1;self.state['MainPID']='999999'
+  def health():
+   self.calls['health']+=1
+   if self.on_health:return self.on_health(self.calls['health'])
+   return [{'route':'/v1/health','http':200},{'route':'/v1/ella/health','http':200}]
+  self.ns.update(stop=stop,start=start,health=health,unit=lambda key:self.state[key],critical=lambda db:copy.deepcopy(self.ns['EXPECTED']),subprocess=SimpleNamespace(run=lambda *a,**kw:SimpleNamespace(stdout=json.dumps(self.smoke),returncode=0)))
+ def run(self):return self.ns['run'](object(),self.payload,base64.b64encode(self.importbytes).decode())
+ def close(self):self.tmp.cleanup()
+ def record(self):return json.loads(self.ns['RECEIPT'].read_text())
+ def foreign_replace(self,path,data):
+  tmp=path.with_suffix('.foreign');tmp.write_bytes(data);os.replace(tmp,path)
+class Tests(unittest.TestCase):
+ def setUp(self):self.r=Rig()
+ def tearDown(self):self.r.close()
+ def test_success_exact_files_and_hold(self):
+  r=self.r;result=r.run();self.assertEqual(result['state'],'DEPLOYED_HEALTHY_EXACT_HOLD_PRESERVED');self.assertEqual((r.calls['stop'],r.calls['start']),(1,1));self.assertEqual(result['protected_hashes_before'],result['protected_hashes_after'])
+ def test_health_failure_restores_all_baseline(self):
+  r=self.r
+  def health(n):
+   if n==1:raise RuntimeError('synthetic-health')
+   return []
+  r.on_health=health
+  with self.assertRaises(RuntimeError):r.run()
+  for name,before in r.before.items():
+   p=r.service/name
+   if before is None:self.assertFalse(p.exists())
+   else:self.assertEqual(p.read_bytes(),before)
+  self.assertEqual(r.record()['state'],'ROLLED_BACK_HEALTHY_EXACT_HOLD_PRESERVED')
+ def test_uninstalled_foreign_original_prevents_restart(self):
+  r=self.r;name='ella/services/semantic_host_context.py';path=r.service/name
+  r.on_stop=lambda n:r.foreign_replace(path,r.before[name]) if n==1 else None
+  with self.assertRaises(AssertionError):r.run()
+  self.assertEqual(r.calls['start'],0,'foreign uninstalled target must not restart as reviewed rollback')
+  self.assertEqual(r.record()['state'],'ROLLBACK_UNCONFIRMED_NO_STATE_REWRITE')
+if __name__=='__main__':unittest.main()
+
+class AdditionalTests(unittest.TestCase):
+ def setUp(self):self.r=Rig()
+ def tearDown(self):self.r.close()
+ def test_preexisting_receipt_no_effects(self):
+  r=self.r;r.ns['RECEIPT'].write_text('foreign')
+  with self.assertRaises(AssertionError):r.run()
+  self.assertEqual(r.calls['stop'],0);self.assertEqual(r.ns['RECEIPT'].read_text(),'foreign')
+ def test_import_receipt_rejected_before_stop(self):
+  r=self.r;p=r.stage/r.ns['IMPORT_STAGE']/'IMPORT.RESULT.safe.json';data=json.loads(p.read_text());data['typed_publication_identity']=False;p.write_text(json.dumps(data))
+  with self.assertRaises(AssertionError):r.run()
+  self.assertEqual(r.calls['stop'],0)
+ def test_new_foreign_source_race_is_preserved_without_restart(self):
+  r=self.r;path=r.service/'ella/services/semantic_captured_context.py'
+  r.on_stop=lambda n:path.write_text('foreign') if n==1 else None
+  with self.assertRaises(FileExistsError):r.run()
+  self.assertEqual(path.read_text(),'foreign');self.assertEqual(r.calls['start'],0);self.assertEqual(r.record()['state'],'ROLLBACK_UNCONFIRMED_NO_STATE_REWRITE')
+ def test_foreign_installed_inode_blocks_rollback(self):
+  r=self.r;path=r.service/'ella/routers/callbacks.py'
+  def health(n):
+   if n==1:
+    r.foreign_replace(path,path.read_bytes());raise RuntimeError('health')
+   return []
+  r.on_health=health
+  with self.assertRaises(RuntimeError):r.run()
+  self.assertEqual(r.calls['start'],1);self.assertEqual(r.record()['state'],'ROLLBACK_UNCONFIRMED_NO_STATE_REWRITE')
+ def test_receipt_symlink_rejects_before_stop(self):
+  r=self.r;foreign=r.root/'foreign';r.ns['RECEIPT'].symlink_to(foreign)
+  with self.assertRaises(AssertionError):r.run()
+  self.assertFalse(foreign.exists());self.assertEqual(r.calls['stop'],0)

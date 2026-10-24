@@ -1,0 +1,123 @@
+"""Exact current normal materializer projection, no auth/provenance inference.
+Functions below copied as source from sync_omi_context.py; no data/secret access.
+This shared helper must be used by host materialization AND backend metadata.
+"""
+
+from __future__ import annotations
+import re
+from pathlib import Path
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+LOCAL_TZ = ZoneInfo("America/Los_Angeles")
+FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
+OVERVIEW_RE = re.compile(r"^\*\*Overview:\*\*\s*(.+?)\s*$", re.MULTILINE)
+TITLE_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
+
+
+def parse_event_time(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def compact_text(value: str, max_chars: int = 700) -> str:
+    text = re.sub(r"\s+", " ", value or "").strip()
+    return text if len(text) <= max_chars else text[: max_chars - 1].rstrip() + "…"
+
+
+def parse_frontmatter(text: str) -> dict[str, str]:
+    match = FRONTMATTER_RE.match(text)
+    if not match:
+        return {}
+    values: dict[str, str] = {}
+    for line in match.group(1).splitlines():
+        if ":" in line:
+            key, value = line.split(":", 1)
+            values[key.strip()] = value.strip()
+    return values
+
+
+def extract_title(path: Path, text: str | None = None) -> str:
+    if text is None:
+        text, _opened = _read_managed_file(path)
+    match = TITLE_RE.search(text)
+    return match.group(1).strip() if match else path.stem
+
+
+def extract_overview(text: str, max_chars: int = 260) -> str:
+    match = OVERVIEW_RE.search(text)
+    return compact_text(match.group(1).removeprefix("[Ella]").strip(), max_chars) if match else ""
+
+
+def event_datetime(path: Path, text: str | None = None) -> datetime | None:
+    if text is None:
+        text, _opened = _read_managed_file(path)
+    frontmatter = parse_frontmatter(text)
+    for key in ("finished_at", "started_at", "created_at", "date"):
+        parsed = parse_event_time(frontmatter.get(key))
+        if parsed:
+            return parsed
+    return None
+
+
+def format_local_utc_stamp(value: datetime | None) -> str:
+    if value is None:
+        return "unknown local / unknown UTC"
+    return (
+        f"{value.astimezone(LOCAL_TZ).strftime('%Y-%m-%d %H:%M %Z')} / "
+        f"{value.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+    )
+
+
+def render_conversation(*, payload: dict[str, Any], owner_uid: str, agent_id: str, conversation_id: str) -> str:
+    structured = payload.get("structured") if isinstance(payload.get("structured"), dict) else {}
+    title = compact_text(str(structured.get("title") or payload.get("title") or "OMI conversation"), 180)
+    overview = compact_text(str(structured.get("overview") or payload.get("overview") or ""), 4000)
+    emoji = compact_text(str(structured.get("emoji") or payload.get("emoji") or "🪽"), 8)
+    category = compact_text(str(structured.get("category") or payload.get("category") or "other"), 64)
+    transcript = str(payload.get("transcript") or "").strip()
+    started_at = str(payload.get("started_at") or "")
+    finished_at = str(payload.get("finished_at") or "")
+    segment_count = int(payload.get("segment_count") or 0)
+    return (
+        "---\n"
+        "type: omi-conversation\n"
+        f"conversation_id: {conversation_id}\n"
+        f"uid: {owner_uid}\n"
+        f"agent_id: {agent_id}\n"
+        f"started_at: {started_at}\n"
+        f"finished_at: {finished_at}\n"
+        f"title: {title}\n"
+        f"emoji: {emoji}\n"
+        f"category: {category}\n"
+        f"segments: {segment_count}\n"
+        "---\n\n"
+        f"# {emoji} {title}\n\n"
+        f"**Overview:** {overview}\n\n"
+        "## Transcript\n\n"
+        f"{transcript}\n"
+    )
+
+
+def projection_from_payload(*, conversation_id, payload):
+    # Transcript content is deliberately excluded: index rendering uses only
+    # structured presentation, timestamps and segment count. Identity strings
+    # here are rendering-only placeholders; provenance comes from batch guards.
+    rendered = render_conversation(
+        payload={**payload, 'transcript': ''}, owner_uid='', agent_id='', conversation_id=conversation_id
+    )
+    path = Path('omi-' + conversation_id + '.md')
+    frontmatter = parse_frontmatter(rendered)
+    when = event_datetime(path, rendered)
+    return {
+        'stamp': format_local_utc_stamp(when),
+        'title': frontmatter.get('title') or extract_title(path, rendered),
+        'emoji': frontmatter.get('emoji') or '',
+        'category': frontmatter.get('category') or 'other',
+        'segments': frontmatter.get('segments') or '?',
+        'overview': extract_overview(rendered),
+    }
