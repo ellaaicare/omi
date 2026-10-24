@@ -160,3 +160,13 @@ This source publication closes the missing-reviewable-code gap for the captured 
 5. Does measured upstream divergence justify a preserved minimal rebaseline, or are bounded repairs demonstrably safer and faster?
 
 Please distinguish source proof, retained receipt proof, user reports and hypotheses. Do not propose replay of uncertain jobs, account remapping, disabled owner checks or removal of preserved data as a recovery shortcut.
+
+### Actual backend rollout and first saved-memory verification, October 24 UTC
+
+At 09:52:41, the 14-file reviewed queue-isolation overlay was installed on the existing Ella backend; serving hashes and both health endpoints passed. The selected source successor is commit `89f7148995213c8a5817988993f876a562af1df5` (54 offline checks, 165 selected backend tests passed; 10 PostgreSQL tests skipped). Source publication and service health are not enrichment acceptance.
+
+At 10:26:44, an independently reviewed exact migration entered policy v4 with claims closed. Twelve historical quarantines remained UNKNOWN and unreplayable. Execution detachment was established separately using owned sync receipts, exact producer-operation metadata, stateless child/process cutoffs, original routing, and server timestamps of unchanged quarantined images. No transcript, stock version, account or agent mapping was changed by the migration. Claims reopened at 10:28:26 with the existing concurrency and rate limits.
+
+One explicitly authorized, previously undispatched saved generic memory was prepared at 10:30:06. Its single attempt reached canonical-user confirmation and a no-learning decision, then ended in `retained_completion_rejected` without a producer START or enhanced canonical writeback. Its transcript and original stock version were verified unchanged. The remaining 18 eligible saved records were not submitted. The new failure is individually quarantined rather than incorporated into account authority, but its execution-resource hold still requires exact reconciliation.
+
+This is **not** a working-enrichment release claim. The next verified defect in observability is that the known provisioning-error path hides the inner pre-model rejection; the existing generic diagnostic path does not preserve it. The historical cause of this new rejection is not established. Investigate the reservation/authority/context stage, preserve the failed attempt, and do not infer a timeout fix or admit the remainder merely from health, admission, or a generic summary. Physical app display, background/reconnect, chat, voice and illustrations remain separate acceptance obligations.
