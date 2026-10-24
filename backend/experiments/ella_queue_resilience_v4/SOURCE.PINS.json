@@ -1,0 +1,129 @@
+{
+  "contract": "ella-queue-v4-review-package-v1",
+  "state": "INTEGRATED_AND_PRIVATE_CONTROLS_AND_BACKLOG_CALLER_SOURCE_PASS_ROLLOUT_HELD",
+  "serving_snapshot_commit": "ec0247ead8ef19a4419cdaac0cc807eb795ab7bc",
+  "test_count": 53,
+  "files": [
+    {
+      "path": "BACKLOG.CALLER.REVIEW.json",
+      "sha256": "c66da0f092824ee6ca83290cef2bb924608c4ad2be701030ca968375aee84832",
+      "bytes": 3484
+    },
+    {
+      "path": "CONTROL.REVIEW.json",
+      "sha256": "e34e3ade1019bc3e1a75724a88dd024a60993f2ca12130304fcf89afb0082ba8",
+      "bytes": 5372
+    },
+    {
+      "path": "INTEGRATED.REVIEW.json",
+      "sha256": "bc414a5063ca76976104ecc3a2109adaacb3eac3f068be69b16916587a03a85b",
+      "bytes": 6628
+    },
+    {
+      "path": "README.md",
+      "sha256": "d98955cab7758d071ad5f0a35648d350f13c6ac89e7cd6823d10ad42c03acfc5",
+      "bytes": 4454
+    },
+    {
+      "path": "baseline/ella/services/transcript_processing_hold.py",
+      "sha256": "712541c7bae61f1502a8664b5198f33a7fa2732a5246e04752fa6b1a2bef62e2",
+      "bytes": 2806
+    },
+    {
+      "path": "candidate/database/conversations.py",
+      "sha256": "25aa6d9d0820e0b541a7898f9df3e760d5a4a1c9cf57ab6f7777a2da5bc0bb6a",
+      "bytes": 163761
+    },
+    {
+      "path": "candidate/database/enrichment_attempt_fence.py",
+      "sha256": "a19fd65e690f8742c52d136bc65cd03d429ae7b521a2b501fbb7ebc33f4a867c",
+      "bytes": 9567
+    },
+    {
+      "path": "candidate/database/enrichment_graph_guard.py",
+      "sha256": "f4cd9cd4c7b37d242c246240cc3b104034168208c3d6ceeaeffb70e533678ba7",
+      "bytes": 4224
+    },
+    {
+      "path": "candidate/database/enrichment_job_isolation.py",
+      "sha256": "110d87053ee16f1b45452cc0776b6a30d7e8686999a2924b47d16408c94934a6",
+      "bytes": 9130
+    },
+    {
+      "path": "candidate/database/explicit_saved_backlog_repair.py",
+      "sha256": "bbaebd327ea240425894563cf3a12a50bdfde2eef61ae4fb98ddb425f72dea8d",
+      "bytes": 15010
+    },
+    {
+      "path": "candidate/database/hermes_cloud_enrichment_outbox.py",
+      "sha256": "98d8f39cf313a011b3a4f72d67cc7e5d5941046ea3637bf4860ac23336359118",
+      "bytes": 16058
+    },
+    {
+      "path": "candidate/database/normal_account_lifecycle.py",
+      "sha256": "6749c201af87d8bfecd0eaad30f78a10b9d7ce9441b8ab10b8a7dd251930c831",
+      "bytes": 32656
+    },
+    {
+      "path": "candidate/database/normal_enrichment_activation.py",
+      "sha256": "866ecc3e16043b110065abb62e6b78d669502ed9d07631a6b21f2445d9884bc5",
+      "bytes": 28963
+    },
+    {
+      "path": "candidate/ella/services/hermes_cloud_enrichment_outbox.py",
+      "sha256": "d013c91a518a19dbe254f3cef90bd8bc11fba3dd63a85fa9fe0a24ed5e99ea4f",
+      "bytes": 22076
+    },
+    {
+      "path": "candidate/ella/services/normal_account_routing.py",
+      "sha256": "55c64b97e63d007abf719fde5f741fb462415b3dcade034300a8cc3028f7f1c2",
+      "bytes": 19010
+    },
+    {
+      "path": "candidate/ella/services/semantic_host_context.py",
+      "sha256": "4da36796cabc076692a4f5873ed06ad7de86e049f89afd2510252c3283164d23",
+      "bytes": 14680
+    },
+    {
+      "path": "candidate/ella/services/semantic_learning_host_client.py",
+      "sha256": "b4220368b3252d2d9e96163bf34958587a37cd5d558c2ff485ea34f59e4e92ac",
+      "bytes": 3637
+    },
+    {
+      "path": "candidate/ella/services/semantic_self_hosted_runtime.py",
+      "sha256": "0693ee6ccb5216264d8f535e54edf10fb07ec73005b37eea513537b4596ae5ab",
+      "bytes": 16837
+    },
+    {
+      "path": "candidate/ella/services/summary_writeback.py",
+      "sha256": "2810214c628079912aebb5d049f0547fc2850bbb69a557a03a05b62801f73cc8",
+      "bytes": 102658
+    },
+    {
+      "path": "control/queue_policy_transition.py",
+      "sha256": "da515ebefebf1dd9d220a8f2e40b8be0e3eacfcc6611cb797f59698ebf023101",
+      "bytes": 15570
+    },
+    {
+      "path": "tests/test_attempt_fence.py",
+      "sha256": "a8ffd631b6c446a2099cd51fe2bdc79a4d9b10b35b0f00cd1a36c259e5ac7cb7",
+      "bytes": 9092
+    },
+    {
+      "path": "tests/test_integrated_queue.py",
+      "sha256": "6d3db47b5be8cffe79457e25ee2f5341344eead94fdcaa61c9b2007317be82b2",
+      "bytes": 69650
+    }
+  ],
+  "reviews": {
+    "core": "bc414a5063ca76976104ecc3a2109adaacb3eac3f068be69b16916587a03a85b",
+    "control": "e34e3ade1019bc3e1a75724a88dd024a60993f2ca12130304fcf89afb0082ba8",
+    "backlog_caller": "c66da0f092824ee6ca83290cef2bb924608c4ad2be701030ca968375aee84832"
+  },
+  "limits": [
+    "Review overlay only; not production imported",
+    "Synthetic Firestore/source/native/sanitizer/canonical boundaries",
+    "Actual terminal-resource receipt provenance and current original route require verified live writer",
+    "No live deployment, provider run, backlog admission or device acceptance"
+  ]
+}

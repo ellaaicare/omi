@@ -24,7 +24,7 @@ The current source observations below came from a read-only copy of 16 serving P
 
 Publication base is `ellaaicare/omi` fork main `b43b164828137dfdbb4d2bc0a315b11c7bd7bb3b` (September 27). Backend review branch is `review/ella-backend-resilience-20261024`. It uses an independent Git directory and index on the external SSD; existing dirty checkouts are preserved.
 
-The serving overlay is **not fully represented by that Git base**. The deployed release directory is not itself a Git checkout. Reconciliation must explicitly record source hashes and import dependencies; copying a subset into Git and calling the repo current would be misleading.
+The serving overlay is **not represented by fork main**. It is now preserved in a separate [immutable serving snapshot](../../backend/serving_snapshots/unified-canonical-memory-4235154f/README.md), commit `ec0247ead8ef19a4419cdaac0cc807eb795ab7bc`: 441 runtime Python files, 6,414,728 bytes, exact file hashes and a static import inventory. All touched candidate baseline hashes match. The observed service interpreter distribution inventory is included without credentials/direct URLs. Tests/scripts/configuration/data are excluded; full imports, dynamic configuration and physical runtime behavior are not qualified by this source snapshot.
 
 Retained repository history identifies these original add-on commits:
 
@@ -69,7 +69,11 @@ Unknown provider outcomes still must not be retried blindly. The correction is t
 
 ## Isolated correction under development
 
-The first implemented component is a pure attempt-fence transition core, outside serving code. Seventeen synthetic tests currently pass. Independent review found and then verified correction of persisted-state validation defects; its final verdict is **pure-core source PASS, not integrated**. Transaction adapters, remote acknowledgement validation, canonical completion, resource fences and migration remain unqualified. It is **not deployed or a complete queue fix**.
+The [integrated review overlay](../../backend/experiments/ella_queue_resilience_v4/README.md) now contains 14 mapped backend files plus private policy-transition/settlement controls. Independent review returned **integrated source PASS** and **private control source PASS, rollout held**. The packaged offline suite has **53 passing tests**. The fork's `backend/test.sh` also exited 0; 10 PostgreSQL canary tests skipped without a configured test database. No CI or live-backend success is implied.
+
+Actual candidate functions cover lifecycle authority/admission/eligibility, claim/begin/finish, bounded cursor scanning, maintenance CAS, graph-effect entry, source-summary CAS and accepted canonical continuation. Tests use a synthetic serializable store and explicit boundary doubles for SDK/decoding/native/source helpers, sanitizer/canonical projection and the canonical writer. They do not establish real Firestore transaction retry semantics or complete application import parity.
+
+Review found and corrected malformed persisted effect handling, retry predecessor-fence validation, incomplete resource-hold consistency, unknown-version fallthrough, maintenance status leaking into the privacy hold, and new pending-publication invocation after graph closure. The final source review is narrower than handset/production acceptance.
 
 Required integrated behavior:
 
@@ -85,7 +89,9 @@ Required integrated behavior:
 - Use a claims-only maintenance revision: block new claim/begin, allow already-started exact attempts to finish, preserve source admission and capture, and resume polling without a login/setup reset.
 - Bound scans with progress so old ineligible rows cannot starve healthy work.
 
-Transaction adapters, strict remote receipt validation, all effect-producing call sites and migration are still required. A pure state-machine test must not be represented as proof of those integrations.
+The coarse reservation covers the entire awaited service graph. Individual entry guards check its exact phase before new host/model effects. Initial source CAS reads that same job in its own transaction. Unknown outcomes retain a resource reservation rather than assuming a remote request stopped. Only the already-owned accepted token/source/payload/current-version publication may finish canonical reconciliation after timeout; new writer invocation or changed-image repair after closure is rejected. Canonical success metadata is checked before releasing graph capacity.
+
+Private controls now implement exact v3-to-v4 CAS while worker attempts are drained (capture may remain active), never-opened rollback, and resource-only settlement with unchanged quarantined jobs. Actual terminal-receipt authenticity and current original-route evidence remain external inputs; a hash or dataclass does not prove either. No control has executed against the backend. The saved-backlog helper now explicitly passes the current policy to `read_account`; an independent AST comparison confirmed that is its only semantic change. Fixed approved-record scope, original-agent proof, source/stock/transcript pins, attempt-zero restriction and unknown-outcome/no-retry remain. Its selected-active-source exclusion is retained while a different active capture may continue.
 
 ## Maintenance and rollback
 
@@ -117,11 +123,11 @@ Whispers and audio audibility remain separate qualification. No current evidence
 
 ## iOS and infrastructure appendices
 
-The iOS owner is preparing [the iOS evidence appendix](ella-ios-regression-evidence-2026-10-24.md) on a separate branch. Until joined, that link is a reserved destination, not evidence the file exists on this branch.
+The iOS owner published [the iOS evidence appendix](https://github.com/ellaaicare/omi/blob/707cc985cb556059736edd26b0fc8e9650077972/docs/engineering/ella-ios-regression-evidence-2026-10-24.md) on a separate branch, including reconciliation of Claude's review. This immutable link avoids implying it has been merged into this branch.
 
-Its current physical-snapshot evidence: Main966→967 differs in exactly seven lib paths (setup gate, capture Stop escape/dock/runtime, presentation lease, controller and coordinator). Thin29→30 differs only in `lib/src/test_device_picker.dart`. These are file-hash deltas, not Git commits or proof of installed behavior. Snapshot-to-fork lib comparison is 454 identical, 328 added, 213 modified and one removed; 69 changed/added localization files. Do not infer a fault count from this drift.
+Its current physical-snapshot evidence: Main966→967 differs in exactly seven lib paths (setup gate, capture Stop escape/dock/runtime, presentation lease, controller and coordinator). Thin29→30 differs only in `lib/src/test_device_picker.dart`. These are file-hash deltas, not Git commits or proof of installed behavior. The independently reviewed [artifact/source reconciliation bundle](https://github.com/ellaaicare/omi/tree/b25896a6a61532566ccbc66cf8c11815acfb46bc/docs/engineering/reconciliation/main967) and [recovered Main966 baseline proposal](https://github.com/ellaaicare/omi/blob/55c24ba1012c12d368768881750f37f96ff8e930/docs/engineering/reconciliation/main967/recovered-main966-baseline-proposal.json) are published. They do not close the uncommitted baseline/assets/configuration prerequisites or make the delta apply-ready to fork main. No app build/upload is claimed by this backend branch. Snapshot-to-fork lib comparison is 454 identical, 328 added, 213 modified and one removed; 69 changed/added localization files. Do not infer a fault count from this drift.
 
-Atlas owns the infrastructure repository appendix and live deployment receipts. Its verified remote/path will be linked here once published. This backend branch does not mutate the infrastructure repository or claim an unverified publication.
+The [infrastructure appendix](https://github.com/ellaaicare/ella-ai/blob/0034f2ca2fcd5da33541d6d6e79f1fee654b03e5/docs/engineering/ella-infrastructure-regression-evidence-2026-10-24.md) is published in the separate infrastructure repository. Codex infrastructure coordination is not the external Telegram Atlas live writer; only the verified live writer may deploy. This backend branch does not mutate the infrastructure repository.
 
 ## Serving-source pins for causal claims
 
@@ -134,6 +140,16 @@ Atlas owns the infrastructure repository appendix and live deployment receipts. 
 | `ella/services/summary_writeback.py` | `a3f09400b2a52fcc44cd735c121aa1b9fc8f668f46702ef6acf2cf9e7b4eb4dd` |
 
 Key source locations in the pinned files: lifecycle `read_account` lines 192–209; activation `claim` capacity line 323 and `finish` quarantine updates around 454; worker `run_forever` around 542–547. Line numbers refer to the retained serving snapshot, not necessarily this branch's tree.
+
+## External Claude review reconciliation
+
+Claude's final 16,940-byte review was independently read at SHA-256 `f4b09f5cf2b5d53485ad87e92a96128fb1fe0f78fdfd4debbdafed8c8b18071a`. It recommends repair in place after source capture, deferring a minimal current-upstream integration and rejecting a rewrite for now. Its six blockers map to this analysis: baseline drift; mutable authority; historical/uncertain capacity; maintenance; attempt/effect fencing; and silent result/UX paths.
+
+Its proposed 13 regressions were review suggestions, not tests it executed. Several now have queue-focused offline coverage in the 53-test package; cross-repo UI contracts, manual Finish versus automatic finalization, real SDK/import behavior and physical background/reconnect remain separately unqualified.
+
+Do not promote its Git measurements beyond their scope: lack of common ancestry does not make content re-port or unrelated-history integration impossible, and history rewrite is an inference. Drift measured against a cached September 30 tip is neither current drift nor a valid monotonic lower bound. Its effort estimates are low-confidence opinions, not schedule commitments. No large upstream fetch was performed under the storage hold.
+
+This source publication closes the missing-reviewable-code gap for the captured runtime Python and candidate overlay. It does not claim the entire historical fork, protected configuration, every installed artifact or all transitive non-Python assets are reconciled. Deployment and one original-agent saved-memory proof remain necessary before backlog processing.
 
 ## Questions for Claude
 

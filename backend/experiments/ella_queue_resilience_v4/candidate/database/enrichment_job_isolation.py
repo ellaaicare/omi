@@ -1,0 +1,226 @@
+"""Opt-in v4 queue isolation, used only inside existing account transactions.
+
+No startup activation, credentials, public endpoint, capture lookup or I/O at
+import. Unknown whole-service effects retain a per-owner resource reservation;
+historical job tombstones do not consume unrelated owners' concurrency.
+"""
+
+import hashlib
+import json
+
+from database import enrichment_attempt_fence as fence
+
+CONTRACT = 'ella-per-job-isolation-v1'
+TOMBSTONES = 'ella_enrichment_job_quarantines_v1'
+FENCE_FIELD = 'queue_attempt_fence_v1'
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), default=str).encode()).hexdigest()
+
+
+def enabled(policy):
+    return type(policy) is dict and type(policy.get('version')) is int and policy['version'] == 4
+
+
+def shape(policy):
+    control = policy.get('queue_isolation')
+    return (
+        enabled(policy)
+        and type(control) is dict
+        and set(control) == {'contract', 'maintenance_revision', 'claims_open'}
+        and control['contract'] == CONTRACT
+        and type(control['maintenance_revision']) is int
+        and control['maintenance_revision'] >= 0
+        and type(control['claims_open']) is bool
+        and type(policy.get('queue_unresolved_resources')) is list
+        and len(policy['queue_unresolved_resources']) <= 4
+        and all(
+            type(item) is dict
+            and set(item) == {'uid', 'job_id', 'lease_sha256', 'route_sha256'}
+            and all(type(item.get(k)) is str and bool(item[k]) for k in item)
+            and fence._sha(item['lease_sha256'])
+            and fence._sha(item['route_sha256'])
+            for item in policy['queue_unresolved_resources']
+        )
+        and len({item['job_id'] for item in policy['queue_unresolved_resources']})
+        == len(policy['queue_unresolved_resources'])
+    )
+
+
+def claims_open(policy):
+    return shape(policy) and policy['queue_isolation']['claims_open'] is True
+
+
+def occupied_capacity(policy):
+    if not shape(policy):
+        raise fence.FenceRejected('queue_control_invalid')
+    return len(policy['active']) + len(policy['queue_unresolved_resources'])
+
+
+def attempt(job):
+    tag = job.get('normal_account_lifecycle_admission', {})
+    return fence.Attempt(
+        **{key: job.get(key) for key in fence.IDENTITY if key != 'route_sha256'},
+        route_sha256=tag.get('route_sha256'),
+        attempt=job.get('attempt_count'),
+        lease_token=job.get('lease_token')
+    )
+
+
+def tombstone_ref(db, job):
+    return db.collection(TOMBSTONES).document(digest({'uid': job['uid'], 'job_id': job['job_id']}))
+
+
+def replay_forbidden(transaction, db, job, account, tenant):
+    if job.get('uid') != account.get('uid') or (tenant and tenant.get('uid') != job.get('uid')):
+        return True
+    held = account.get('held_preimages')
+    other = tenant.get('additional_quarantined_job_ids', [])
+    if type(held) is not dict or type(other) is not list:
+        return True
+    if job['job_id'] in held or job['job_id'] == tenant.get('quarantined_job_id') or job['job_id'] in other:
+        return True
+    # Any existing tombstone, even malformed or foreign, fails closed for this
+    # exact key. It cannot be downgraded by resetting a job status/marker.
+    return tombstone_ref(db, job).get(transaction=transaction, timeout=5, retry=None).exists
+
+
+def reserve(job, policy):
+    return fence.reserve(attempt(job), claims_open=claims_open(policy), previously_quarantined=False)
+
+
+def verified_retry(job, marker):
+    """Validate the entire closed predecessor before a new lease may replace it."""
+    try:
+        operation = job.get('operation')
+        if type(operation) is not dict or any(
+            operation.get(k) != job.get(k)
+            for k in ('uid', 'job_id', 'conversation_id', 'client_interaction_id', 'transcript_sha256')
+        ):
+            return False
+        previous = attempt({**job, 'lease_token': operation.get('lease_token')})
+        closed = job[FENCE_FIELD]
+        fence._require(closed, previous)
+        return (
+            closed['phase'] == 'closed'
+            and closed['outcome'] == 'verified_no_dispatch'
+            and not closed['effects']
+            and marker.get('retry_from_attempt') == job['attempt_count']
+            and marker.get('retry_from_lease_sha256') == closed['key']['lease_sha256']
+        )
+    except (fence.FenceRejected, KeyError, TypeError):
+        return False
+
+
+def begin(job, policy):
+    a = attempt(job)
+    document = fence.begin(job[FENCE_FIELD], a, claims_open=claims_open(policy))
+    # One reservation covers the ENTIRE awaited service graph, including host
+    # sync and learning. No claim is made that cancellation stops a remote call.
+    return fence.start_effect(
+        document, a, operation_id='enrichment-graph', kind='enrichment_graph', request_sha256=digest(document['key'])
+    )
+
+
+def finished(job, *, outcome, error_code, receipt):
+    a = attempt(job)
+    document = job[FENCE_FIELD]
+    if outcome == 'success':
+        # Existing trusted worker must validate canonical completion before
+        # passing this receipt. No raw caller-authored success is exposed.
+        if (
+            type(receipt) is not dict
+            or receipt.get('content_free') is not True
+            or any(
+                type(receipt.get(k)) is not str or not receipt[k]
+                for k in ('runtime_interaction_id', 'active_summary_version_id')
+            )
+        ):
+            raise fence.FenceRejected('canonical_completion_receipt_required')
+        document = fence.complete_effect(
+            document,
+            a,
+            operation_id='enrichment-graph',
+            request_sha256=digest(document['key']),
+            receipt_sha256=digest(receipt),
+        )
+        return fence.finish(document, a, outcome='completed')
+    if outcome == 'preflight' and document['phase'] == 'reserved' and error_code in fence.SAFE_PREFLIGHT_CODES:
+        return fence.finish(document, a, outcome='verified_no_dispatch', preflight_code=error_code)
+    if outcome == 'preflight' and document['phase'] == 'reserved':
+        return fence.finish(document, a, outcome='blocked_no_dispatch')
+    return fence.finish(document, a, outcome='unknown_quarantined')
+
+
+def tombstone(job, closed, now):
+    return {
+        'contract': CONTRACT,
+        'identity': closed['key'],
+        'created_at': now,
+        'outcome': 'unknown_quarantined',
+        'effects': closed['effects'],
+    }
+
+
+def retry_marker(marker, job, closed):
+    """The caller reads marker before any writes and commits with job close."""
+    if (
+        marker.get('state') != 'consumed'
+        or marker.get('lease_token') != job.get('lease_token')
+        or marker.get('job_id') != job['job_id']
+        or any(
+            marker.get(k) != job.get(k)
+            for k in ('uid', 'conversation_id', 'client_interaction_id', 'transcript_sha256')
+        )
+        or closed.get('outcome') != 'verified_no_dispatch'
+    ):
+        raise fence.FenceRejected('preflight_marker_changed')
+    return {
+        'state': 'prepared',
+        'lease_token': None,
+        'retry_from_attempt': job['attempt_count'],
+        'retry_from_lease_sha256': closed['key']['lease_sha256'],
+    }
+
+
+def canonical_completed(transaction, db, job, worker_receipt):
+    """Read actual source publication metadata before releasing graph capacity."""
+    if type(worker_receipt) is not dict:
+        return False
+    snapshot = (
+        db.collection('users')
+        .document(job['uid'])
+        .collection('conversations')
+        .document(job['conversation_id'])
+        .get(
+            transaction=transaction,
+            timeout=5,
+            retry=None,
+            field_paths=['id', 'uid', 'active_summary_version_id', 'summary_writeback_receipt', 'enrichment_state'],
+        )
+    )
+    source = snapshot.to_dict() if snapshot.exists else {}
+    accepted = source.get('summary_writeback_receipt')
+    state = source.get('enrichment_state')
+    binding = job.get('normal_account_lifecycle_admission', {}).get('source_binding', {})
+    return (
+        source.get('uid') == job['uid']
+        and source.get('id') == job['conversation_id']
+        and type(accepted) is dict
+        and type(state) is dict
+        and accepted.get('status') == 'completed'
+        and accepted.get('canonical_status') == 'completed'
+        and accepted.get('summary_source') == 'hermes'
+        and accepted.get('summary_kind') == 'hermes_enriched'
+        and fence._sha(binding.get('source_sha256'))
+        and accepted.get('source_sha256') == binding['source_sha256']
+        and type(binding.get('source_version')) is str
+        and bool(binding['source_version'])
+        and accepted.get('source_version') == binding['source_version']
+        and source.get('active_summary_version_id') == accepted.get('active_summary_version_id')
+        and source.get('active_summary_version_id') == worker_receipt.get('active_summary_version_id')
+        and state.get('status') == 'writeback_applied'
+        and state.get('canonical_status') == 'completed'
+        and state.get('pending') is False
+    )

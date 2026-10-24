@@ -1,0 +1,71 @@
+{
+  "contract": "ella-resilient-queue-integrated-independent-review-v3",
+  "reviewed_at": "2026-10-24T08:05:00.313311+00:00",
+  "verdict": "INTEGRATED_SOURCE_PASS_ROLLOUT_HELD",
+  "frozen_manifest": {
+    "path": "evidence/INTEGRATED.CANDIDATE.V3.PINS.safe.json",
+    "sha256": "ecfc8bd8276372d9c18b85d1cf856526021b701de0e0248762848bd8c62147ef",
+    "candidate_files": 13,
+    "pins_verified": true
+  },
+  "independent_tests": {
+    "passed": 42,
+    "elapsed_seconds": 0.186,
+    "log": "review/INTEGRATED.V3.TESTS.actual.log",
+    "log_sha256": "58d9ba2dec1931b5457fbb08a3b038d20760199405b9a9fb9304594a4dc6629f",
+    "boundary_doubles": [
+      "Firestore SDK, serializable in-memory store",
+      "transcript decoder",
+      "native pin/uuid/nonempty helpers",
+      "product source_native and binding",
+      "TerminalTransition",
+      "sanitizer and canonical source projection in accepted-continuation tests",
+      "canonical writer instrumented fake; no provider/model/network"
+    ],
+    "actual_functions": [
+      "lifecycle policy/read/admission/eligibility/status",
+      "activation claim/begin/finish/maintenanceCAS",
+      "repository bounded scan",
+      "graph guard",
+      "source CAS helper",
+      "model entry NoSend",
+      "summary CAS and exact request/postimage receipt checks, continuation/finalize/repair guard"
+    ]
+  },
+  "blocking_source_findings": [],
+  "resolved_findings": [
+    "Temporarymaintenance no longer becomes accountauth/processinghold: valididentity retains available/processing with separatequeue_state; actualbaseline transcript_processing_hold test allowsinflight callbacks whileclaimsclosed. Repositoryv4 status delegates lifecycle rather than historicaltenantquarantine.",
+    "Actualeligible/claim validates entire priorclosed/noeffects verified_no_dispatch fence against preservedoperationidentity+priorlease and markerattempt/hash before replacement. Corruptprior fence cannot be overwritten; attempt0 cannot silentlycarryexistingfence.",
+    "Currentowner reservation in globalunresolved list independently prevents sameownerclaim/graphentry evenif tenantresourceflag missing; unknownresources count finite globalmaxconcurrency.",
+    "Unknown/malformedlifecyclepolicy and V4context versiondrift failclosed at finalgraphguard, without permissively falling back tolegacy.",
+    "InitialsourceCAS transaction guard now executes even for no-update/replay result. Queuefence rejection is explicitly rethrown, preventing genericuncertaincommit fallback from bypassing it. Sharedjob read conflicts with concurrentjob closure.",
+    "Canonicalcontinuation has an explicit boundedcontract: only original alreadyowned writer acceptedbeforeclosure may finish same token/payload/source/currentpostimage. Newpending invocation, alteredtoken/payload/source/currentversion and new supersessionrepairafterclosure reject. Jobquarantine and resourcehold remainunchanged by lateacceptedcompletion.",
+    "V4finishsuccess reads actualcanonical source metadata in same transaction; missing/mismatched completedcanonical/currentversion evidence becomes unknownquarantine rather than releasinggraphcapacity."
+  ],
+  "verified_source_properties": [
+    "V4 is explicitpolicyoptin; V3 baselinehistoryhold behavior remains in tested cases. No automaticmigration, credential/grant/destination or accountbinding changes.",
+    "Originalconsent/resolver/owner/route/epoch/cutover/exclusion/nativeprovenance/sourcehash checks remain authoritative; perjobsealed/legacy/tombstone replay blocks replace mutablewholeaccounthistory equality underV4.",
+    "Claim/begin reserve whole awaited servicegraph before service invocation. Timeout/cancel/expiredSTART remain perjob quarantine and unresolvedowner resource; no unknowneffect retry or expirybasedrelease.",
+    "Only proved reserved preflightfailure can reset exactconsumedmarker. Errorretries use boundedcount; maintenanceparking has freshmonotonicattempt/newlease and separateerrorretryaccounting. Oldattempt finish/begin cannot consume/reset successor.",
+    "ClaimsmaintenanceCAS is versioned, keeps policy/sourceadmissions/capture authorization active, permits existingownedcallbacks/finish and resumesworkerpolling. No captureterminal/clientStop precondition is introduced by queuecode.",
+    "Boundedpagedrepository scan can progress past permanentlyineligible firstpages; unrelatedowners progress when actual/unresolvedglobalcapacity and unchangedrates permit.",
+    "New effect-entry readguards cover sync/model/learning append; summary sourceCAS shares livejob attempt read in actual source transaction. Alreadyadmitted operations becoming uncertain are resourcefenced, not declaredcancelled."
+  ],
+  "remaining_rollout_gates": [
+    "Run fullrealapplication import/dependency and affected existingbackend suites against exactoverlays; testsuse a serializable fake store/SDK decorator and several provenance/source boundaries, not actualFirestore retries/unknownRPC behavior.",
+    "Implement and independently review explicit V3\u2192V4 migration/rollback. Preserve originalbindings, cutover/exclusions, oldjobs/quarantines/source/stockversions. Do not autoactivate or reseal at startup.",
+    "Reconcile historical potentiallylive effects with trusted existingreadback/ownedcleanup evidence before classifying them as settledhistory. No jobreplay or expiryassumption; no inventoryhelper application inferred from this review.",
+    "Implement/qualify authenticated exactwholegraph completion or ownedcleanup settlement before clearing currentunresolvedresource reservations. This candidate intentionally leaves genuineuncertainty held; no automaticresourceclear is qualified.",
+    "Atlas solewriter must verify servingpreimages, deploymentcontents/health and action-time authority/resourceconstraints. Backend restartpermission doesnot prove losslesscapture; actualacceptedframe durability/serverdrain/reconnect/ownergeneration behavior remainunqualified.",
+    "Only then run separatelyauthorized fresh or exacteligible neverdispatched source to prove realownagent model/provenance, canonicalwriteback/currentversion and appvisibility. SourcePASS is not userenhancement or handsetsuccess."
+  ],
+  "outcome_scope": "No deployment/activation, provider send, oldquarantine replay, remainingbacklog admission, consentchange, remapping or newcredential is authorized by this review alone. Existing userauthority remains for root/Atlas to apply through remainingguards.",
+  "review_effects": {
+    "live_reads": 0,
+    "live_mutations": 0,
+    "provider_calls": 0,
+    "network_calls": 0,
+    "git_actions": 0,
+    "candidate_edits": 0
+  }
+}

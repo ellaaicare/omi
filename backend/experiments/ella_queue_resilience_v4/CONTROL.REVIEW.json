@@ -1,0 +1,59 @@
+{
+  "contract": "ella-queue-policy-control-independent-review-v2",
+  "reviewed_at": "2026-10-24T08:23:31.702928+00:00",
+  "verdict": "PRIVATE_CONTROL_SOURCE_PASS_ACTUAL_PROVENANCE_AND_ROLLOUT_HELD",
+  "frozen_manifest": {
+    "path": "evidence/POLICY.TRANSITION.CONTROL.V2.PINS.safe.json",
+    "sha256": "57f6aac2bca2d562cc197c39c0839e9fef862512496b95e6516554ccc5a75249",
+    "pins_verified": true,
+    "pins": {
+      "control/queue_policy_transition.py": "da515ebefebf1dd9d220a8f2e40b8be0e3eacfcc6611cb797f59698ebf023101",
+      "tests/test_integrated_queue.py": "1fbd53baa762216d334df5435a39f6bb2276a71ea0c7c2f58504fe42af70b349"
+    }
+  },
+  "core_v3_unchanged": true,
+  "core_v3_verdict_sha256": "bc414a5063ca76976104ecc3a2109adaacb3eac3f068be69b16916587a03a85b",
+  "independent_tests": {
+    "passed": 51,
+    "elapsed_seconds": 0.276,
+    "log": "review/CONTROL.V2.TESTS.actual.log",
+    "sha256": "947b995590dbebe93c1a534abc02c06abbf0b897dd89cf7fb8553f2f75eaad1c",
+    "standalone_legacy_progress_check": {
+      "path": "review/CONTROL.V2.LEGACY.PROGRESS.RECHECK.safe.json",
+      "sha256": "f12776153cb0ea29396524bcfe3e182b664eb3a03a7b23b5644034e34565519a"
+    },
+    "scope": "Synthetic serializableFirestore boundary and prior source/provenance doubles; actual candidate/control functions, not realRPC/provider/hostcleanup."
+  },
+  "prior_hold": {
+    "receipt": "review/POLICY.CONTROL.V1.INDEPENDENT.VERDICT.safe.json",
+    "sha256": "fbb3b63f3d7feb7912277ebad6d115bc623d0caced132d9062030cc22c4ee725",
+    "status": "Both controlfindings resolved by exactsuccessor."
+  },
+  "blocking_source_findings": [],
+  "resolved_findings": [
+    "Nativev4 settlement now requires fullcurrentaccount and job preimage SHA, currenttenant/policy/tombstone exactmatches, and a strictclosedunknown attempt reconstructed from operationlease. Tombstoneidentity must equal strictfencekey; changedattempt/lease/fence cannot settle under oldproof.",
+    "Legacycarried resources have a distinct migrationarchive-anchored settlement: exactarchive contains carriedresource and originalfulljobpreimage; currentjob/account/tenant/route match; legacyquarantineanchor persists and no fabricatedv4tombstone or newtenantmarker is introduced.",
+    "Independent standalonecheck: migrateuncertainlegacy\u2192reviewedsettlement\u2192explicitclaimsopen allows genuinelynewjob; oldjob staysquarantined and originaltenantanchor remains."
+  ],
+  "verified_control_scope": [
+    "Upgrade requires exactvalidv3policy and authorizationref CAS, emptyworkeractive list, exactgloballegacyowner inventory+typedoriginalroutes/account/tenant/heldjobmetadata; concurrentclaim conflicts onpolicy read. Writes only archive plus v4policyclaimsCLOSED revision0, sameepoch/cutover. Quotas preserved except explicitreviewed safe-preflight max_attempts1\u21923. No captureterminal requirement or capture/source/job/account/tenant mutation.",
+    "Unsettledlegacy resources are carried conservatively; only independentlyverifiedterminalreceipts omit resource entries. Schema/capacity overflow failsclosed rather than losingunknown work.",
+    "Pristinerollback requires unchangedarchivedafterSHA, neveropenedrevision0, noactiveworker and validoldpolicy; anyopen/control/resourcechange rejects. Existingrecords retained.",
+    "Settlement audit and exactglobalresource removal do not reopen/retry/rewrite job or quarantine. Nativev4 clears only matchingtenant resourcehold; legacysettlement leaveslegacytenant record unchanged. Duplicate settlementaudit and anyCASdrift reject."
+  ],
+  "mandatory_external_provenance_gates": [
+    "Reviewed dataclass and correctlyshaped terminalreceipt hash are NOT proof of remotecompletion, hostcleanup or identity. Existingwholegraph terminalreceipt/ownedcleanup evidence must be independently verified, exactly bound to originalowner/route/job/attempt/lease/request/resource before operator constructs proof. No elapsedtime, HTTP200, coroutineexit, leaseexpiry or hash-only humanassertion substitutes.",
+    "Fresh realresolver/account/tenant/job/policy/tombstone/archive readback and originalauthorizedUID/route checks remain required at actualexecution. No newcredentials/grants or accountremapping; no publiccaller-controlled proof/launcher endpoint is reviewed.",
+    "Authoritative completeness of legacycurrenteffectowner/quarantine inventory must be established by actualboundedcontent-free metadata; helper compares suppliedowners to storedpolicy.quarantined_tenants but doesnot independently discover missinghistoricalindexentries.",
+    "Atlas solewriter and existingaction-time authorization must govern deployment/transition/settlement. Anyuncertaintransaction outcome requires readonlyaudit/currentstate reconciliation, not blindreinvoke. RealFirestore behavior/fullimports/servingpreimage/health and existingcaptureserverdrain/reconnect safety remain unqualified here.",
+    "Claimsremainclosed until actualcodeversions, migrationresult and currentresourceproofs satisfy gates. Correctagent freshsaved-memory model/provenance/currentcanonicalwriteback/appvisibility still need actualacceptance. No firstjobquarantinereplay or otherbacklog admission follows from sourcePASS alone."
+  ],
+  "review_effects": {
+    "live_reads": 0,
+    "live_mutations": 0,
+    "provider_calls": 0,
+    "network_calls": 0,
+    "git_actions": 0,
+    "candidate_control_edits": 0
+  }
+}

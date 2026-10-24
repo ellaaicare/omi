@@ -1,0 +1,40 @@
+{
+  "contract": "ella-backlog-v4-caller-independent-review-v1",
+  "reviewed_at": "2026-10-24T08:33:23.309633+00:00",
+  "verdict": "NARROW_SOURCE_PASS_ACTUAL_PROVENANCE_AND_ROLLOUT_HELD",
+  "manifest_sha256": "4bf646ccb21143457efe48d897cd9645d7b6d400902210ef82077a0b76131267",
+  "candidate_sha256": "bbaebd327ea240425894563cf3a12a50bdfde2eef61ae4fb98ddb425f72dea8d",
+  "baseline_sha256": "be052c56650b172dae9021b77614bc71e2e01fd92574ed43afa25b3832895632",
+  "test_sha256": "6d3db47b5be8cffe79457e25ee2f5341344eead94fdcaa61c9b2007317be82b2",
+  "ast_adjudication": "Entiremodule AST equals originalservingbaseline after adding only policy=policy keyword to lifecycle.read_account in _body. Source retrieves policy in the same transaction before this call; no caller-authored policy bypass.",
+  "independent_tests": {
+    "passed": 53,
+    "elapsed_seconds": 0.196,
+    "log": "review/BACKLOG.V4.CALLER.TESTS.actual.log",
+    "sha256": "acff6b68edd17944782c9e595d7b02364004ce8db633074fbfe853e152b66feb",
+    "newcoverage": "Actualhelper _body+plan with synthetic specification and serializablefake: v4authority accepts selected savedCID while unrelatedcapture remainsactive, exactly4stagedwrites, UIDonlysourcepatch, stockpreserved, repeat/selectedactiveCID/foreignownerreject."
+  },
+  "blocking_source_findings": [],
+  "preservation_findings": [
+    "SidecarSHA constant and all existing source/owner/route/epoch/stock/transcript/attempt0/idempotency guards unchanged by AST. The reviewer didnot read or alter private sidecar. Tests substitute synthetic specification; no private sidecarread.",
+    "Actualcurrentpolicy keyword selects explicitv4read_account semantics, avoiding unintended fallback to defaultv3sealedinventorygate. V3 passedpolicy still follows originalv3read_account semantics.",
+    "SelectedCID cannot be currentactivecapture; anothercapture is neither stopped nor modified. This is an exactsaved-source preparation, not a captureterminal precondition.",
+    "Originalblocked0 exactpinnedjob only; priorattempt/receipt/uncertainty/quarantine state drift stillrejects by unchanged helper guards. Workerperjobtombstone and resource gates remain independent; no provider call by preparationhelper.",
+    "Core13reviewedV3 sourcefiles and privatepolicycontrolsource unchanged; previousrollout/provenance limitations stillapply."
+  ],
+  "actual_execution_limits": [
+    "Private helper remains bounded to existing independentlyapproved sidecar/scope; this review doesnot repin, expandrecords, grantaccess, changeagent, provisioncredentials or replay firstfailedquarantine.",
+    "Currentoriginalowner/route/consent/epoch/source/job/policy and selectedCID exclusion must be freshlyverified. SameexistingDB consentbootstrap remains required; immutableprivate sidecarmust independentlymatch at executor without being exported.",
+    "Atlas solewriter/action-timeauthority and exactoverlay checks required; prepareoneonly then actualcorrectagent generation/provenance/canonicalcurrentversion writeback proof before furtheradmission. No uncertaincommit/providerretry.",
+    "Resource-terminal authenticity, migration/fullimports/realFirestore/serving health/capturedrain and actualUIqualification remain externalgates. Passing53offlinechecks is not successfulenhancement."
+  ],
+  "review_effects": {
+    "live_reads": 0,
+    "live_mutations": 0,
+    "provider_calls": 0,
+    "network_calls": 0,
+    "git_actions": 0,
+    "private_sidecar_reads": 0,
+    "source_edits": 0
+  }
+}
