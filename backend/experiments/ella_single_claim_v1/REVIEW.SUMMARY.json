@@ -1,0 +1,31 @@
+{
+  "state": "PASS_ISOLATED_SOURCE_NOT_DEPLOYMENT",
+  "candidate_sha256": "3d5c3022edf3aa74bd63965f38615e5c86eb9eb32b77129140ce15bba563c7f9",
+  "baseline_sha256": "ab69ebdb514ecaaad4a2ea14c7584a85445e47dafb896c49ff6ee0cafad7a5be",
+  "test_sha256": "a5a9055fcbfa8d6ff4e21f31796f9eb68f23fa4c9ed66d7549c42a0fccb1a1f0",
+  "independent_tests": {
+    "count": 49,
+    "pass": true,
+    "seconds": 0.232,
+    "scope": "Actual candidate transactional functions with serialized fake Firestore SDK/DB and explicitly inherited external source/provenance adapter doubles. Not real DB/provider."
+  },
+  "findings": [
+    "Issue requires exact closedv4policy hash, noactive/noresource, exact pending neverstarted attempt0 job image and authorizedowner; does not itself grantsource/runtime authority.",
+    "Optional permit exact job/UID/CID/client/transcript/admissionepoch/account epoch/route binding; valid duration<=10min, issuedphase nolease.",
+    "Claim and permit issued\u2192reserved with exact leasehash happen same policy+job transaction, so only one claim can consume permit, including unknown commit. Other jobs blocked.",
+    "Begin runs all existing source/account/route/lease/attempt/replay guards, consumes reserved\u2192started and closes claims atomically with job START; duplicatebegin and otherjobs fail.",
+    "New writes occur after actual source/tenant/account reads. isolation.begin is pure; fake Reference enforces Firestore read-before-write.",
+    "Alreadybegun graph fence passes whileclaimsclosed; nopermit path preservesbaselinebehavior. Unknownresources/quarantines never cleared or retried."
+  ],
+  "rollout_gates": [
+    "No permit issuance until every live dispatch executor runs exact newcode; oldworkers do not understand optionalrestriction and would ignoreit.",
+    "Real interpreter/import and realSDKqualification/sourcepreimages remain deployer obligations; reviewer made no liveactions.",
+    "One-shot controller must reconcile unknown issuance/claim/begin read-only, neverissue replacementpermit or resetconsumption.",
+    "Used/expired/reserved permit deliberately continues restrictingqueue; resumeordinaryoperation needs separate exact guarded retirement control preservingresources/quarantines and closingclaims, not expiry-based auto-clear.",
+    "No actual model/JSON/enhancement success qualified; this permits only one authorized exposure after reviewed rollout."
+  ],
+  "limitations": [
+    "Existing source validators remain authority; permit is additionalrestriction, not ownergrant.",
+    "No directprovider/model/DB/sourcefixture/config/credential/Git/live change by reviewer."
+  ]
+}
