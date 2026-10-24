@@ -1,3 +1,4 @@
+import 'package:omi/ella/upstream_capture/transcript_presentation_lease.dart';
 import 'package:omi/ella/upstream_capture/ella_native_capture_authorization.dart';
 import 'package:flutter/widgets.dart';
 import 'package:omi/upstream_capture/services/devices/transports/native_ble_transport.dart';
@@ -58,6 +59,21 @@ String ellaCaptureFinishMessage(EllaCaptureFinishOutcome? outcome) => switch (ou
   EllaCaptureFinishOutcome.processing => 'Memory is processing. Check Journal for the result.',
   null => 'Memory requested. Check Journal for the result.',
 };
+
+/// Capability for stopping one existing committed producer, never starting one.
+/// This process-local handle is not serialized or adopted after an owner change.
+class EllaExistingCaptureStopTarget {
+  const EllaExistingCaptureStopTarget._(this.uid, this.epoch, this.provider,
+      this.identity, this.source);
+  final String uid;
+  final int epoch;
+  final CaptureProvider provider;
+  final ({String sessionKey, String mode, int deviceRevision}) identity;
+  final String source;
+  bool _matches(EllaExistingCaptureStopTarget? other) => other != null &&
+      uid == other.uid && epoch == other.epoch && identical(provider, other.provider) &&
+      identity == other.identity && source == other.source;
+}
 
 /// Content-free identity for a current capture's presentation and Finish action.
 /// Socket readiness is deliberately absent: retained words survive recovery.
@@ -830,6 +846,84 @@ class EllaUpstreamCaptureRuntime with WidgetsBindingObserver implements necklace
   }
 
   bool isCurrentCaptureSession(EllaCaptureSessionView session) => session.matches(captureSession);
+
+  // Stop does not grant capture or require a new setup/consent decision. It must
+  // still match the authenticated owner, original binding and committed producer.
+  EllaExistingCaptureStopTarget? existingCaptureStopTarget(String uid) {
+    final capture = provider;
+    if (_disposed || uid.isEmpty || capture == null || authority.boundUid != uid ||
+        !authority.isCurrentOwner(uid)) return null;
+    final identity = capture.transcriptPresentationIdentity;
+    final source = capture.liveCaptureSource;
+    if (identity == null || source == null) return null;
+    return EllaExistingCaptureStopTarget._(uid, authority.bindingEpoch, capture, identity, source);
+  }
+
+  bool isCurrentExistingCaptureStop(EllaExistingCaptureStopTarget target) =>
+      target._matches(existingCaptureStopTarget(target.uid));
+
+  Future<bool>? _existingStopFuture;
+  EllaExistingCaptureStopTarget? _existingStopTarget;
+  Future<bool> stopExistingCapture(EllaExistingCaptureStopTarget target) {
+    final pending = _existingStopFuture;
+    if (pending != null) return target._matches(_existingStopTarget) ? pending : Future.value(false);
+    if (!isCurrentExistingCaptureStop(target)) return Future.value(false);
+    final completion = Completer<bool>();
+    _existingStopFuture = completion.future;
+    _existingStopTarget = target;
+    _retireDefaultNecklaceRecording();
+    cancelPendingCaptureChange();
+    bool current() => isCurrentExistingCaptureStop(target);
+    () async {
+      try {
+        if (!current()) { completion.complete(false); return; }
+        if (target.source == 'phone') {
+          final applied = await target.provider.stopStreamRecording(
+              resumeHandedOffPendant: false, isCurrent: current);
+          if (!applied) { completion.complete(false); return; }
+        } else {
+          await target.provider.stopStreamDeviceRecording(cleanDevice: false, isCurrent: current);
+        }
+        completion.complete(!_disposed && identical(provider, target.provider) &&
+            authority.boundUid == target.uid && authority.bindingEpoch == target.epoch &&
+            authority.isCurrentOwner(target.uid) && target.provider.liveCaptureSource == null);
+      } catch (error, stack) {
+        completion.completeError(error, stack);
+      } finally {
+        if (identical(_existingStopFuture, completion.future)) {
+          _existingStopFuture = null;
+          _existingStopTarget = null;
+        }
+      }
+    }();
+    return completion.future;
+  }
+
+
+  TranscriptPresentationScope? get _transcriptPresentationScope {
+    if (_disposed || !authority.hasCurrentAuthority) return null;
+    final uid = authority.boundUid;
+    final currentProvider = provider;
+    if (uid == null || currentProvider == null) return null;
+    final identity = currentProvider.transcriptPresentationIdentity;
+    final source = currentProvider.liveCaptureSource;
+    if (identity == null || source == null) return null;
+    return TranscriptPresentationScope(
+      uid: uid, bindingEpoch: authority.bindingEpoch, providerIdentity: currentProvider,
+      producerSessionKey: identity.sessionKey, mode: identity.mode,
+      source: source, deviceRevision: identity.deviceRevision,
+    );
+  }
+
+  TranscriptPresentationLease? transcriptPresentationFor(EllaCaptureSessionView session) {
+    if (!isCurrentCaptureSession(session)) return null;
+    final scope = _transcriptPresentationScope;
+    return scope == null ? null : TranscriptPresentationLease(scope);
+  }
+
+  bool isCurrentTranscriptPresentation(TranscriptPresentationLease lease) =>
+      lease.observe(_transcriptPresentationScope);
+
 
   bool _pauseChangePending = false;
   CaptureOperationCancellation? _resumeCancellation;

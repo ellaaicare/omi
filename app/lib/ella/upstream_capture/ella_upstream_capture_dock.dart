@@ -1,3 +1,4 @@
+import 'package:omi/ella/upstream_capture/ella_existing_capture_stop.dart';
 import 'package:omi/ella/widgets/ella_v7_surfaces.dart';
 import 'package:omi/ella/widgets/quiet_memory_preview.dart';
 import 'dart:async';
@@ -716,7 +717,9 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
   }
 
   Future<void> _openTranscript(CaptureProvider provider, EllaCaptureSessionView session) async {
-    bool isCurrent() => mounted && _uid == session.uid && _runtime.isCurrentCaptureSession(session);
+    final presentation = _runtime.transcriptPresentationFor(session);
+    bool isCurrent() => mounted && _uid == session.uid && presentation != null &&
+        _runtime.isCurrentTranscriptPresentation(presentation);
     if (!isCurrent() || _transcriptOpen) return;
     _transcriptOpen = true;
     final originUid = _uid;
@@ -1051,6 +1054,7 @@ class _EllaUpstreamCaptureDockState extends State<EllaUpstreamCaptureDock> {
                               ),
                             ],
                           ),
+                          EllaExistingCaptureStop(runtime: _runtime, authenticatedUid: () => _uid),
                           if (isCurrent()) ...[
                             Text(
                               _operation == _DockOperation.pausing || _operation == _DockOperation.resuming

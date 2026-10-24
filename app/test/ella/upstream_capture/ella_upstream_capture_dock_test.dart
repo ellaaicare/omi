@@ -105,6 +105,21 @@ class _DockSessionAuthority extends EllaCaptureAuthority {
 /// directly; real sessions get these identities from the capture coordinator.
 class _DockCaptureProvider extends CaptureProvider {
   _DockCaptureProvider({super.connectivity, super.bleListeners, super.preferences});
+  // Explicit committed presentation seam for this widget-only fixture. Real
+  // coordinator ownership is tested by transcript_rollover_runtime_test.dart.
+  String presentationProducer = 'fixture-producer-1';
+  String presentationMode = 'live';
+  int presentationDeviceRevision = 0;
+  int presentationStarts = 1;
+  @override
+  ({String sessionKey, String mode, int deviceRevision})? get transcriptPresentationIdentity =>
+      liveCaptureSource == null ? null : (sessionKey:presentationProducer,
+        mode:presentationMode, deviceRevision:presentationDeviceRevision);
+  @override
+  void clearUserData() {
+    presentationProducer='fixture-producer-${++presentationStarts}';
+    super.clearUserData();
+  }
   String recordingIdentity = 'recording-1';
   String? windowIdentity = 'window-1';
   bool captureReady = true;
@@ -2271,7 +2286,7 @@ void main() {
     expect(find.text('Compass'), findsOneWidget);
   });
 
-  testWidgets('real conversation replacement retires sheet despite identical recording and WAL timestamp',
+  testWidgets('rollover integration: real conversation replacement updates the same open dock sheet',
       (tester) async {
     final fixture = await _DockFixture.create(tester);
     await fixture.pump(tester);
@@ -2298,8 +2313,12 @@ void main() {
     expect(fixture.provider.activeCaptureSessionId, 'window-1');
     expect(fixture.runtime.isCurrentCaptureSession(original), isFalse);
     expect(find.text('Synthetic same-window revision'), findsNothing);
-    expect(find.text('Synthetic replacement words'), findsNothing);
-    expect(find.text('Recording is unavailable right now.'), findsOneWidget);
+    expect(find.text('Synthetic replacement words'), findsOneWidget);
+    expect(find.text('Recording is unavailable right now.'), findsNothing);
+    var finishCalls=0;
+    fixture.runtime.finishOverride=() async { finishCalls++; };
+    await fixture.runtime.finishCaptureSession(original);
+    expect(finishCalls,0,reason:'read continuity cannot authorize a stale exact Finish');
   });
 
   testWidgets('real reset changes presentation generation even when timestamp and recording are reused',
@@ -3609,4 +3628,48 @@ void main() {
       expect(fixture.provider.recordingState, RecordingState.stop);
     });
   }
+  for(final boundary in ['producer','epoch','device','provider']) {
+    testWidgets('rollover integration: $boundary retirement clears the open dock and cannot revive', (tester) async {
+      final fixture=await _DockFixture.create(tester);
+      await fixture.pump(tester);
+      fixture.makeNecklaceLive(segments:[_segment('old-visible','Synthetic old producer words')]);
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('upstream-capture-view-transcript')));
+      await tester.pump();await tester.pump(const Duration(milliseconds:400));
+      expect(find.text('Synthetic old producer words'),findsOneWidget);
+      final authority=fixture.authority as _DockSessionAuthority;
+      _DockCaptureProvider? replacement;
+      if(boundary=='producer') fixture.provider.presentationProducer='fixture-producer-2';
+      if(boundary=='epoch') authority.epoch++;
+      if(boundary=='device') fixture.provider.presentationDeviceRevision++;
+      if(boundary=='provider') {
+        replacement=_DockCaptureProvider(preferences:upstream.SharedPreferencesUtil(),
+          bleListeners:_NoBleListeners(),connectivity:CaptureConnectivityBoundary(
+            initiallyConnected:true,changes:fixture.connectivity.stream,isConnected:()=>true));
+        replacement.updateRecordingState(RecordingState.deviceRecord);
+        replacement.segments.add(_segment('foreign','Synthetic replacement provider words'));
+        fixture.runtime.replacementCapture=replacement;
+        addTearDown(replacement.dispose);
+      }
+      fixture.provider.updateRecordingState(RecordingState.deviceRecord);
+      await tester.pump();
+      expect(find.text('Recording is unavailable right now.'),findsOneWidget);
+      expect(find.text('Synthetic old producer words'),findsNothing);
+      expect(find.text('Synthetic replacement provider words'),findsNothing);
+      fixture.provider.presentationProducer='fixture-producer-1';
+      authority.epoch=0;fixture.provider.presentationDeviceRevision=0;
+      fixture.runtime.replacementCapture=null;
+      fixture.provider.updateRecordingState(RecordingState.deviceRecord);
+      await tester.pump();
+      expect(find.text('Synthetic old producer words'),findsNothing);
+      await tester.tap(find.byKey(const Key('upstream-capture-transcript-close')));
+      await tester.pump();await tester.pump(const Duration(milliseconds:400));
+      await tester.tap(find.byKey(const Key('upstream-capture-view-transcript')));
+      await tester.pump();await tester.pump(const Duration(milliseconds:400));
+      expect(find.text('Synthetic old producer words'),findsOneWidget,
+        reason:'an explicit reopen obtains a fresh authorized read lease');
+      expect(tester.takeException(),isNull);
+    });
+  }
+
 }

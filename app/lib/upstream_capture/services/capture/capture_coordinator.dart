@@ -595,10 +595,12 @@ class PhoneStopRequested extends CaptureEvent {
     required this.reason,
     required this.userStop,
     this.resumeSuspendedPendant = true,
+    this.isCurrent,
   });
   final String reason;
   final bool userStop;
   final bool resumeSuspendedPendant;
+  final bool Function()? isCurrent;
 }
 
 /// `finishCapture`: stop and process the phone conversation before a pendant
@@ -1432,7 +1434,7 @@ class CaptureCoordinator {
   Future<CaptureDispatchOutcome> _run(CaptureEvent event) async {
     final quarantined = _retirementFence.pending;
     if (quarantined && event is PhoneStopRequested) {
-      event = PhoneStopRequested(reason: event.reason, userStop: false, resumeSuspendedPendant: false);
+      event = PhoneStopRequested(reason: event.reason, userStop: false, resumeSuspendedPendant: false, isCurrent: event.isCurrent);
     }
     if (quarantined &&
         event is! PhoneStopRequested &&
@@ -1457,6 +1459,13 @@ class CaptureCoordinator {
             ? _state.phase == CapturePhase.phoneLive || _state.phase == CapturePhase.pendantLive
             : _state.phase == CapturePhase.phonePaused || _state.phase == CapturePhase.pendantPaused;
         if (!eligible) return CaptureDispatchOutcome.denied(_state);
+      } catch (_) {
+        return CaptureDispatchOutcome.denied(_state);
+      }
+    }
+    if (event is PhoneStopRequested && event.isCurrent != null) {
+      try {
+        if (!event.isCurrent!()) return CaptureDispatchOutcome.denied(_state);
       } catch (_) {
         return CaptureDispatchOutcome.denied(_state);
       }

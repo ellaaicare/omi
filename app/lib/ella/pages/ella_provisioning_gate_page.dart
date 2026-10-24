@@ -1,3 +1,5 @@
+import 'package:omi/ella/upstream_capture/ella_existing_capture_stop.dart';
+import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -28,6 +30,7 @@ class EllaProvisioningGatePage extends StatefulWidget {
     this.appVersionProvider,
     this.consentAuthorityRefresher,
     this.timezoneProvider,
+    this.captureRuntime,
   });
 
   final Widget readyChild;
@@ -37,6 +40,7 @@ class EllaProvisioningGatePage extends StatefulWidget {
   final String Function()? appVersionProvider;
   final Future<bool> Function(String uid)? consentAuthorityRefresher;
   final Future<String> Function()? timezoneProvider;
+  final EllaUpstreamCaptureRuntime? captureRuntime;
 
   @override
   State<EllaProvisioningGatePage> createState() => _EllaProvisioningGatePageState();
@@ -218,6 +222,7 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
                           child: Text(context.l10n.aiConsentReviewAction),
                         ),
                       ),
+                      EllaExistingCaptureStop(runtime: widget.captureRuntime, authenticatedUid: _authenticatedUid),
                       TextButton(onPressed: _signOut, child: Text(context.l10n.signOut)),
                     ],
                   ),
@@ -394,6 +399,7 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
                           ),
                         ],
                         const SizedBox(height: 12),
+                        EllaExistingCaptureStop(runtime: widget.captureRuntime, authenticatedUid: _authenticatedUid),
                         TextButton(
                           onPressed: _signOut,
                           child: Text(

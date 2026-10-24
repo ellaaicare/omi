@@ -786,6 +786,16 @@ class CaptureController extends ChangeNotifier
         _ => null,
       };
 
+  /// Read-only presentation identity for one committed capture producer.
+  /// Conversation/window rollover does not replace this coordinator session.
+  /// This identity cannot authorize Finish, transport writes or a new producer.
+  ({String sessionKey, String mode, int deviceRevision})? get transcriptPresentationIdentity {
+    final model = _capture.readModel;
+    final active = model.state.active;
+    if (model.liveOwnerName == null || active == null) return null;
+    return (sessionKey: active.sessionKey, mode: active.mode.name, deviceRevision: _deviceIdentityRevision);
+  }
+
   /// When the live recording started (it keeps counting through a pause), or null.
   DateTime? get liveCaptureStartedAt => _recordingTelemetry.startedAt;
 
@@ -2581,12 +2591,13 @@ class CaptureController extends ChangeNotifier
   /// it took over from resumes (unless [resumeHandedOffPendant] is false, when the caller resumes
   /// it after processing), and otherwise the capture policy returns to its value at start.
   /// Returns false when a newer capture intent superseded this stop before it tore anything down.
-  Future<bool> stopStreamRecording({String reason = 'user_stopped', bool resumeHandedOffPendant = true}) async {
+  Future<bool> stopStreamRecording({String reason = 'user_stopped', bool resumeHandedOffPendant = true, bool Function()? isCurrent}) async {
     final outcome = await _capture.dispatch(
       PhoneStopRequested(
         reason: reason,
         userStop: reason == 'user_stopped',
         resumeSuspendedPendant: resumeHandedOffPendant,
+        isCurrent: isCurrent,
       ),
     );
     outcome.throwIfFailed();
